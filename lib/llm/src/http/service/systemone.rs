@@ -41,6 +41,8 @@ use crate::{
     },
 };
 
+#[path = "systemone/abort.rs"]
+mod abort;
 #[path = "systemone/response.rs"]
 mod response;
 use response::{attach_request_ids, decision_error, error};
@@ -723,12 +725,13 @@ async fn read_branch(
                 DispatchError::malformed("invalid native scoring stream")
             }
         })?;
-        if frame
+        let finish = frame
             .get("meta_info")
-            .and_then(|meta| meta.get("finish_reason"))
-            .is_some_and(|finish| !finish.is_null())
-            && terminal.replace(frame).is_some()
-        {
+            .and_then(|meta| meta.get("finish_reason"));
+        if let Some(cause) = finish.and_then(abort::classify) {
+            return Err(cause);
+        }
+        if finish.is_some_and(|finish| !finish.is_null()) && terminal.replace(frame).is_some() {
             return Err(DispatchError::malformed(
                 "multiple terminal SGLang scoring frames",
             ));

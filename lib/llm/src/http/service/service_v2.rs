@@ -98,16 +98,51 @@ fn path_within_namespace(path: &str, namespace: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+struct InferenceReadinessState {
+    state: Arc<State>,
+    decision_dialects: HashMap<String, dynamo_decisions::Dialect>,
+}
+
+impl InferenceReadinessState {
+    fn rejection(&self, request: &axum::extract::Request) -> axum::response::Response {
+        let unavailable = super::openai::ErrorMessage::_service_unavailable();
+        let dialect = request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .filter(|_| request.method() == axum::http::Method::POST)
+            .and_then(|path| self.decision_dialects.get(path.as_str()));
+        let Some(&dialect) = dialect else {
+            return unavailable.into_response();
+        };
+        let error = dynamo_decisions::DecisionError::new(
+            dialect,
+            unavailable.0.as_u16(),
+            "server_error",
+            unavailable.1.0.message(),
+        );
+        let mut response = (unavailable.0, axum::Json(error.response_body())).into_response();
+        let request_id = super::openai::get_or_create_request_id(request.headers());
+        let value = axum::http::HeaderValue::from_str(&request_id)
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid"));
+        response.headers_mut().insert("x-request-id", value.clone());
+        response
+            .headers_mut()
+            .insert("x-typesafe-request-id", value);
+        response
+    }
+}
+
 async fn track_inflight_inference(
-    axum::extract::State(state): axum::extract::State<Arc<State>>,
+    axum::extract::State(readiness): axum::extract::State<Arc<InferenceReadinessState>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use futures::StreamExt;
+    let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return readiness.rejection(&request);
     }
 
     let permit = state.acquire_inflight();
@@ -115,7 +150,7 @@ async fn track_inflight_inference(
     // before this request is counted as inflight.
     if !state.is_ready() {
         drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return readiness.rejection(&request);
     }
 
     let response = next.run(request).await;
@@ -1542,8 +1577,21 @@ impl HttpServiceConfigBuilder {
             systemone_enabled,
             config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
+        let decision_dialects = endpoint_routes
+            .iter()
+            .filter(|(endpoint, _, _)| *endpoint == EndpointType::SystemOne)
+            .flat_map(|(_, docs, _)| docs)
+            .map(|doc| {
+                let dialect = if doc.path() == super::systemone::DECISIONS_PATH {
+                    dynamo_decisions::Dialect::OpenAi
+                } else {
+                    dynamo_decisions::Dialect::Jev
+                };
+                (doc.path().to_owned(), dialect)
+            })
+            .collect();
         let mut inference_router = axum::Router::new();
-        for (route_docs, route) in endpoint_routes {
+        for (_, route_docs, route) in endpoint_routes {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
@@ -1553,7 +1601,10 @@ impl HttpServiceConfigBuilder {
                 .on_response(on_response),
         );
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            Arc::new(InferenceReadinessState {
+                state: state.clone(),
+                decision_dialects,
+            }),
             track_inflight_inference,
         ));
 
@@ -1698,7 +1749,7 @@ impl HttpServiceConfigBuilder {
         sglang_generate_enabled: bool,
         systemone_enabled: bool,
         enable_batch_endpoints: bool,
-    ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
+    ) -> Result<Vec<(EndpointType, Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
@@ -1821,7 +1872,7 @@ impl HttpServiceConfigBuilder {
                     }
                 },
             ));
-            routes.push((docs, route));
+            routes.push((endpoint_type, docs, route));
         }
         Ok(routes)
     }
@@ -3814,6 +3865,87 @@ mod tests {
             let result = HttpService::builder().frontend_api_config(api).build();
             assert!(result.is_err());
         });
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn decision_readiness_rejections_preserve_mounted_protocol_and_request_ids() {
+        use tower::ServiceExt;
+
+        for configured_path in [None, Some("/custom/decide")] {
+            temp_env::async_with_vars(
+                [(HTTP_SVC_SYSTEMONE_PATH_ENV, configured_path)],
+                async move {
+                    let mut api = FrontendApiConfig::default();
+                    api.set_systemone_enabled(true);
+                    let service = HttpService::builder()
+                        .frontend_api_config(api)
+                        .build()
+                        .unwrap();
+                    service.state().start_draining();
+                    let systemone_path = configured_path.unwrap_or("/v1/systemone");
+                    for (path, client_id) in [
+                        (systemone_path, Some("readiness-request")),
+                        ("/v1/decisions", Some("readiness-request")),
+                        ("/v1/responses", Some("readiness-request")),
+                        (systemone_path, None),
+                        ("/v1/decisions", None),
+                    ] {
+                        let mut request = axum::http::Request::post(path)
+                            .header("content-type", "application/json");
+                        if let Some(client_id) = client_id {
+                            request = request.header("x-request-id", client_id);
+                        }
+                        let response = service
+                            .router
+                            .clone()
+                            .oneshot(request.body(Body::from("{}")).unwrap())
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            response.status(),
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        );
+                        if path != "/v1/responses" {
+                            let canonical_id = &response.headers()["x-typesafe-request-id"];
+                            assert!(uuid::Uuid::parse_str(canonical_id.to_str().unwrap()).is_ok());
+                            if let Some(client_id) = client_id {
+                                assert_eq!(response.headers()["x-request-id"], client_id);
+                            } else {
+                                assert_eq!(&response.headers()["x-request-id"], canonical_id);
+                            }
+                        }
+                        let body = axum::body::to_bytes(response.into_body(), 4096)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        if path == systemone_path {
+                            assert_eq!(body["detail"], "Service is not ready");
+                            assert_eq!(body["code"], "server_error");
+                            assert!(body.get("error").is_none());
+                        } else if path == "/v1/decisions" {
+                            assert_eq!(body["error"]["message"], "Service is not ready");
+                            assert_eq!(body["error"]["code"], "server_error");
+                        } else {
+                            assert_eq!(body["code"], 503);
+                        }
+                    }
+                    let unmatched = service
+                        .router
+                        .clone()
+                        .oneshot(
+                            axum::http::Request::post(format!("{systemone_path}/not-registered"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(unmatched.status(), axum::http::StatusCode::NOT_FOUND);
+                    assert_eq!(service.state().inflight_count(), 0);
+                },
+            )
+            .await;
+        }
     }
 
     #[test]
