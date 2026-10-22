@@ -14,16 +14,19 @@ import threading
 import time
 import types
 import unittest
-import pytest
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.gpu_0,
 ]
+
 
 def load_adapter():
     stubs = {}
