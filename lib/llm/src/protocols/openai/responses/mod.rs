@@ -845,6 +845,10 @@ fn convert_tools_and_choice(
     }
 
     let converted_choice = match tool_choice {
+        // vLLM rejects explicit auto without tools; use the backend default.
+        Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto)) if converted_tools.is_empty() => {
+            None
+        }
         Some(ToolChoiceParam::AllowedTools(choice)) => {
             let allowed = allowed_function_names(choice, names)?;
             let available: HashSet<&str> = converted_tools
@@ -870,6 +874,9 @@ fn convert_tools_and_choice(
         Some(choice) => Some(convert_tool_choice(choice, names)?),
         None => None,
     };
+
+    super::tools::validate_openai_tool_choice(converted_choice.as_ref(), Some(&converted_tools))
+        .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
 
     Ok((
         (!converted_tools.is_empty()).then_some(converted_tools),
@@ -2952,6 +2959,84 @@ mod tests {
                 }
             }
             _ => panic!("expected assistant message carrying folded refusal"),
+        }
+    }
+
+    #[test]
+    fn test_tool_choice_without_function_tools() {
+        for tools in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([{
+                "type": "namespace", "name": "empty", "description": "Empty", "tools": []
+            }]),
+        ] {
+            for choice in [
+                serde_json::Value::Null,
+                serde_json::json!("auto"),
+                serde_json::json!("none"),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model", "input": "Say hello", "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
+                let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+                assert!(chat.inner.tools.is_none());
+                if choice == "none" {
+                    assert_eq!(
+                        chat.inner.tool_choice,
+                        Some(ChatCompletionToolChoiceOption::None)
+                    );
+                } else {
+                    assert_eq!(
+                        chat.inner.tool_choice, None,
+                        "tools={tools}, choice={choice}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_forced_tool_choice_without_function_tools_is_invalid() {
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            for choice in [
+                serde_json::json!("required"),
+                serde_json::json!({"type": "function", "name": "missing"}),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model", "input": "Say hello", "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
+                let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+                assert!(matches!(
+                    error.downcast_ref::<ResponsesConversionError>(),
+                    Some(ResponsesConversionError::InvalidArgument(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_choice_with_function_tools_is_preserved() {
+        for choice in ["auto", "none", "required"] {
+            let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
+                "model": "test-model", "input": "Say hello", "tool_choice": choice,
+                "tools": [{"type": "function", "name": "hello"}]
+            }))
+            .unwrap();
+            let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+            assert_eq!(chat.inner.tools.as_ref().unwrap()[0].function.name, "hello");
+            assert_eq!(
+                serde_json::to_value(chat.inner.tool_choice).unwrap(),
+                choice
+            );
         }
     }
 
