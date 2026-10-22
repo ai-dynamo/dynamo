@@ -641,13 +641,15 @@ func TestSGLangMultinodeSidecarLaunchForms(t *testing.T) {
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeWorker,
 				Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main", Image: "engine:custom", Command: tt.command, Args: tt.args}},
-					InitContainers: []corev1.Container{
-						{Name: "setup", Image: "setup:latest"},
-						{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
-					},
-				}},
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "engine:custom", Command: tt.command, Args: tt.args}},
+						InitContainers: []corev1.Container{
+							{Name: "setup", Image: "setup:latest"},
+							{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+						},
+					}},
 			}
 			original := component.DeepCopy()
 

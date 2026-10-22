@@ -1846,7 +1846,7 @@ func TestAddMultinodeTopologyEnvVars(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("inject topology aliases into the rendered main container")
 			container := &corev1.Container{Env: tt.initialEnv}
-			addMultinodeTopologyEnvVars(container, tt.numberOfNodes, "Engine", tt.deployer, tt.annotations, false)
+			addMultinodeTopologyEnvVars(container, tt.numberOfNodes, "Engine", tt.deployer, tt.annotations)
 
 			t.Log("verify aliases are present only for eligible multinode deployments")
 			leader := findEnvVar(container.Env, commonconsts.DynamoLeaderAddressEnvVar)
