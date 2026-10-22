@@ -40,8 +40,8 @@ pub use extra_keys::{
 pub use filter::KvCacheSpecKind;
 pub use mm_labels::EngineMmStats;
 pub use types::{
-    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
-    WIDE_TOKEN_SENTINEL,
+    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality,
+    MmRoutingSpanWire, RawKvEvent, WIDE_TOKEN_SENTINEL,
 };
 
 use filter::KvCacheEventMetadata;
@@ -159,19 +159,26 @@ impl ZmqEventNormalizer {
     }
 
     /// Mark this source as deriving multimodal pad values from engine
-    /// identities (sgl-project/sglang#43043): every event token at or above
-    /// `MM_PAD_SHIFT_VALUE` is excluded with the blocks chained after it.
-    /// Unflagged sources exclude only values that did not fit in `u32`.
+    /// identities (sgl-project/sglang#43043): labeled spans are mapped to
+    /// Dynamo routing pads and multimodal chains get Dynamo-owned ids. Every
+    /// other event token at or above `MM_PAD_SHIFT_VALUE` is excluded with the
+    /// blocks chained after it. Unflagged sources exclude only values that did
+    /// not fit in `u32`.
     pub fn with_engine_owned_mm_identity(mut self, enabled: bool) -> Self {
         self.engine_mm = mm_labels::EngineMmState::new(enabled);
         self
     }
 
     #[cfg(test)]
-    pub(crate) fn with_engine_mm_excluded_capacity(mut self, excluded_capacity: usize) -> Self {
-        self.engine_mm = mm_labels::EngineMmState::with_excluded_capacity(
+    pub(crate) fn with_engine_mm_capacities(
+        mut self,
+        excluded_capacity: usize,
+        id_capacity: usize,
+    ) -> Self {
+        self.engine_mm = mm_labels::EngineMmState::with_capacities(
             self.engine_mm.engine_owned(),
             excluded_capacity,
+            id_capacity,
         );
         self
     }
@@ -319,14 +326,21 @@ impl ZmqEventNormalizer {
             RawKvEvent::BlockStored { .. } => {
                 // An excluded store still yields an event so the event id is
                 // not mistaken for an engine-side drop.
-                if !self.engine_mm.prepare_store(&mut raw, worker, tier) {
+                let Some(prepared) = self.engine_mm.prepare_store(&mut raw, worker, tier) else {
+                    return Some(empty_removal(event_id, worker, tier));
+                };
+                let mut event = convert(raw)?;
+                if !self
+                    .engine_mm
+                    .translate_store(&mut event, &prepared, worker, tier)
+                {
                     return Some(empty_removal(event_id, worker, tier));
                 }
-                convert(raw)
+                Some(event)
             }
             RawKvEvent::BlockRemoved { .. } => {
                 let mut event = convert(raw)?;
-                self.engine_mm.filter_remove(&mut event, worker, tier);
+                self.engine_mm.translate_remove(&mut event, worker, tier);
                 Some(event)
             }
             RawKvEvent::AllBlocksCleared { .. } => {
@@ -345,6 +359,11 @@ impl ZmqEventNormalizer {
     ) -> Option<PlacementEvent> {
         let raw = self.preprocess(raw, worker)?;
         self.normalize_preprocessed(raw, event_id, worker)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn engine_mm_tracked_ids(&self) -> usize {
+        self.engine_mm.tracked_ids()
     }
 
     fn learn_metadata(&mut self, metadata: KvCacheEventMetadata, dp_rank: DpRank) {
