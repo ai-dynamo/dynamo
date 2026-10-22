@@ -247,15 +247,29 @@ impl ToolProcessingRoute {
 fn tool_content_part_as_user(
     part: &ChatCompletionRequestToolMessageContentPart,
 ) -> Cow<'_, ChatCompletionRequestUserMessageContentPart> {
-    Cow::Borrowed(part)
+    Cow::Owned(match part {
+        ChatCompletionRequestToolMessageContentPart::Custom(part) => {
+            ChatCompletionRequestUserMessageContentPart::Custom(part.clone())
+        }
+        ChatCompletionRequestToolMessageContentPart::Text(part) => {
+            ChatCompletionRequestUserMessageContentPart::Text(part.clone())
+        }
+        ChatCompletionRequestToolMessageContentPart::ImageUrl(part) => {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(part.clone())
+        }
+        ChatCompletionRequestToolMessageContentPart::VideoUrl(part) => {
+            ChatCompletionRequestUserMessageContentPart::VideoUrl(part.clone())
+        }
+        ChatCompletionRequestToolMessageContentPart::AudioUrl(part) => {
+            ChatCompletionRequestUserMessageContentPart::AudioUrl(part.clone())
+        }
+    })
 }
 
 enum MultimodalContentPart<'a> {
     User(&'a ChatCompletionRequestUserMessageContentPart),
     Tool(&'a ChatCompletionRequestToolMessageContentPart),
 }
-
-type MediaInfo = (&'static str, Option<url::Url>, Option<String>);
 
 impl<'a> MultimodalContentPart<'a> {
     fn as_user(&self) -> Cow<'a, ChatCompletionRequestUserMessageContentPart> {
@@ -265,50 +279,53 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
-    fn generic_part(&self) -> Option<&dynamo_protocols::types::MultimodalContentPart> {
+    fn custom_part(&self) -> Option<&dynamo_protocols::types::CustomModalityPart> {
         match self {
-            Self::User(ChatCompletionRequestUserMessageContentPart::Multimodal(part))
-            | Self::Tool(ChatCompletionRequestToolMessageContentPart::Multimodal(part)) => {
-                Some(part)
-            }
+            Self::User(ChatCompletionRequestUserMessageContentPart::Custom(part))
+            | Self::Tool(ChatCompletionRequestToolMessageContentPart::Custom(part)) => Some(part),
             _ => None,
         }
     }
 
-    fn media_info(&self) -> Result<Option<MediaInfo>> {
-        let Some(part) = self.generic_part() else {
-            return Ok(None);
-        };
-        let result = match part.kind.as_str() {
-            "image_url" => {
-                let image: dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage =
-                    part.deserialize()?;
-                (
+    fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
+        match self {
+            Self::User(part) => match *part {
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => Some((
                     "image_url",
-                    image.image_url.map(|media| media.url),
-                    image.uuid,
-                )
-            }
-            "video_url" => {
-                let video: dynamo_protocols::types::ChatCompletionRequestMessageContentPartVideo =
-                    part.deserialize()?;
-                (
+                    part.image_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => Some((
                     "video_url",
-                    video.video_url.map(|media| media.url),
-                    video.uuid,
-                )
-            }
-            "audio_url" => {
-                let audio: dynamo_protocols::types::ChatCompletionRequestMessageContentPartAudioUrl = part.deserialize()?;
-                (
+                    part.video_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => Some((
                     "audio_url",
-                    audio.audio_url.map(|media| media.url),
-                    audio.uuid,
-                )
-            }
-            _ => return Ok(None),
-        };
-        Ok(Some(result))
+                    part.audio_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                _ => None,
+            },
+            Self::Tool(part) => match *part {
+                ChatCompletionRequestToolMessageContentPart::ImageUrl(part) => Some((
+                    "image_url",
+                    part.image_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                ChatCompletionRequestToolMessageContentPart::VideoUrl(part) => Some((
+                    "video_url",
+                    part.video_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                ChatCompletionRequestToolMessageContentPart::AudioUrl(part) => Some((
+                    "audio_url",
+                    part.audio_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                _ => None,
+            },
+        }
     }
 }
 
@@ -336,12 +353,10 @@ fn multimodal_content_parts(
 fn image_content_part_url(
     content_part: &ChatCompletionRequestUserMessageContentPart,
 ) -> Option<&str> {
-    let ChatCompletionRequestUserMessageContentPart::Multimodal(part) = content_part else {
+    let ChatCompletionRequestUserMessageContentPart::ImageUrl(part) = content_part else {
         return None;
     };
-    (part.kind == "image_url")
-        .then(|| part.fields.get("image_url")?.get("url")?.as_str())
-        .flatten()
+    part.image_url.as_ref().map(|image| image.url.as_str())
 }
 
 /// Decode a base64-encoded little-endian f32 byte string back into a float
@@ -1596,47 +1611,110 @@ fn attach_request_context_metadata(
     attach_image_cache_scope_from_context(request, context);
 }
 
+fn custom_transport_error(message: &'static str) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .public_details(PublicDetails::Message {
+            message: message.into(),
+        })
+        .build()
+        .into()
+}
+
+/// Validate transport routing separately from plugin-owned modality semantics.
+fn validate_custom_tensor_routing(
+    value: &serde_json::Value,
+    worker_id: Option<u64>,
+    supports_shm: bool,
+) -> Result<()> {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                validate_custom_tensor_routing(item, worker_id, supports_shm)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            if let Some(tensor) = fields.get("$dynamo_tensor") {
+                if fields.len() != 1 {
+                    return Err(custom_transport_error(
+                        "tensor envelope cannot have sibling fields",
+                    ));
+                }
+                match tensor.get("transport").and_then(serde_json::Value::as_str) {
+                    Some("inline") => {}
+                    Some("shm") => {
+                        if !supports_shm {
+                            return Err(custom_transport_error(
+                                "Selected workers do not support custom shared-memory tensors",
+                            ));
+                        }
+                        let target = tensor.get("worker_id").and_then(serde_json::Value::as_u64);
+                        if target.is_none() || target != worker_id {
+                            return Err(custom_transport_error(
+                                "Shared-memory tensor requires nvext.decode_worker_id matching its worker_id",
+                            ));
+                        }
+                        if tensor.get("data_base64").is_some() {
+                            return Err(custom_transport_error(
+                                "reference tensor must not contain inline bytes",
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(custom_transport_error(
+                            "Unsupported custom tensor transport",
+                        ));
+                    }
+                }
+            } else {
+                for item in fields.values() {
+                    validate_custom_tensor_routing(item, worker_id, supports_shm)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
     request
         .typed_messages()
         .unwrap_or_default()
         .iter()
         .any(|message| {
-            multimodal_content_parts(message).is_some_and(|mut parts| {
-                parts.any(|part| {
-                    part.generic_part().is_some_and(|part| {
-                        !dynamo_protocols::types::MultimodalContentPart::is_builtin_kind(&part.kind)
-                    })
-                })
-            })
+            multimodal_content_parts(message)
+                .is_some_and(|mut parts| parts.any(|part| part.custom_part().is_some()))
         })
 }
 
-fn omit_custom_content_from_template(messages: &mut serde_json::Value) {
-    let Some(messages) = messages.as_array_mut() else {
-        return;
+/// Project before serialization so bulk custom payloads are never copied into
+/// templates or auxiliary messages. Keep each role's established metadata.
+fn template_messages(request: &impl OAIChatLikeRequest) -> Result<serde_json::Value> {
+    let Some(messages) = request.typed_messages() else {
+        return Ok(serde_json::to_value(request.messages())?);
     };
-    for message in messages {
-        if !matches!(
-            message.get("role").and_then(serde_json::Value::as_str),
-            Some("user" | "tool")
-        ) {
-            continue;
+    messages.iter().map(|message| {
+        match message {
+            ChatCompletionRequestMessage::User(user) => {
+                if let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content {
+                    let parts: Vec<_> = parts.iter().filter(|part| !matches!(part, ChatCompletionRequestUserMessageContentPart::Custom(_))).collect();
+                    let mut value = serde_json::json!({"role":"user", "content":parts});
+                    if let Some(name) = &user.name { value["name"] = name.clone().into(); }
+                    return Ok(value);
+                }
+            }
+            ChatCompletionRequestMessage::Tool(tool) => {
+                if let ChatCompletionRequestToolMessageContent::Array(parts) = &tool.content {
+                    let parts: Vec<_> = parts.iter().filter(|part| !matches!(part, ChatCompletionRequestToolMessageContentPart::Custom(_))).collect();
+                    return Ok(serde_json::json!({"role":"tool", "tool_call_id":tool.tool_call_id, "content":parts}));
+                }
+            }
+            _ => {}
         }
-        if let Some(parts) = message
-            .get_mut("content")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            parts.retain(|part| {
-                part.get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|kind| {
-                        kind == "text"
-                            || dynamo_protocols::types::MultimodalContentPart::is_builtin_kind(kind)
-                    })
-            });
-        }
-    }
+        Ok(serde_json::to_value(message)?)
+    }).collect::<Result<Vec<_>>>().map(serde_json::Value::Array)
 }
 
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
@@ -1658,9 +1736,7 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
-            .unwrap_or_default();
-        omit_custom_content_from_template(&mut json);
+        let mut json = template_messages(self.inner).unwrap_or_default();
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -3544,15 +3620,16 @@ impl OpenAIPreprocessor {
                 "Cannot continue the final message because the prompt formatter moves it before other messages",
             ));
         }
-        let formatted_prompt = if self.normalize_tool_call_args || continue_final || has_custom_content(request) {
-            self.apply_template_inner(&NormalizedArgsRequest {
-                inner: request,
-                normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
-            })?
-        } else {
-            self.apply_template_inner(request)?
-        };
+        let formatted_prompt =
+            if self.normalize_tool_call_args || continue_final || has_custom_content(request) {
+                self.apply_template_inner(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: self.normalize_tool_call_args,
+                    continue_final_message: continue_final,
+                })?
+            } else {
+                self.apply_template_inner(request)?
+            };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
         };
@@ -3766,19 +3843,28 @@ impl OpenAIPreprocessor {
                 continue;
             };
             for content_part in content_parts {
-                let Some((type_str, url, uuid)) = content_part.media_info()? else {
-                    if let Some(part) = content_part.generic_part()
-                        && !dynamo_protocols::types::MultimodalContentPart::is_builtin_kind(
-                            &part.kind,
-                        )
-                    {
-                        let payload = part.fields.get(&part.kind).ok_or_else(|| {
-                            invalid_argument_error("custom content is missing its payload")
-                        })?;
+                let Some((type_str, url, uuid)) = content_part.media_info() else {
+                    if let Some(part) = content_part.custom_part() {
+                        let payload = serde_json::Value::Object(part.fields.clone());
+                        let nvext = request.nvext();
+                        if nvext.is_some_and(|ext| {
+                            ext.backend_instance_id.is_some() || ext.prefill_worker_id.is_some()
+                        }) {
+                            return Err(custom_transport_error(
+                                "Custom content does not support backend_instance_id or prefill_worker_id routing overrides",
+                            ));
+                        }
+                        validate_custom_tensor_routing(
+                            &payload,
+                            nvext.and_then(|ext| ext.decode_worker_id),
+                            self.runtime_config.runtime_flag_enabled(
+                                crate::local_model::runtime_config::CUSTOM_SHM_CAPABILITY,
+                            ),
+                        )?;
                         media_map
                             .entry(part.kind.clone())
                             .or_default()
-                            .push(MultimodalData::Json(payload.clone()));
+                            .push(MultimodalData::Json(payload));
                         #[cfg(feature = "mm-routing")]
                         {
                             exact_mm_routing_eligible = false;
@@ -4127,11 +4213,10 @@ impl OpenAIPreprocessor {
             // Preserve original messages and formatted prompt in extra_args for multimodal
             // workers (e.g., TRT-LLM needs message structure and the template-rendered
             // prompt with <image> placeholders for embedding-path / NIXL flows).
-            let messages_json = serde_json::to_value(request.messages())?;
+            let messages_json = template_messages(request)?;
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
-            omit_custom_content_from_template(&mut extra_args["messages"]);
 
             // `multi_modal_data` already carries the media (decoded descriptors or
             // original URLs, including inline `data:`). Duplicating those payloads
@@ -11342,15 +11427,15 @@ mod tests {
         let parts: Vec<_> = multimodal_content_parts(&message).unwrap().collect();
         assert!(matches!(
             parts[0].as_user().as_ref(),
-            ChatCompletionRequestUserMessageContentPart::Multimodal(part) if part.kind == "image_url"
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
         ));
         assert!(matches!(
             parts[1].as_user().as_ref(),
-            ChatCompletionRequestUserMessageContentPart::Multimodal(part) if part.kind == "video_url"
+            ChatCompletionRequestUserMessageContentPart::VideoUrl(_)
         ));
         assert!(matches!(
             parts[2].as_user().as_ref(),
-            ChatCompletionRequestUserMessageContentPart::Multimodal(part) if part.kind == "audio_url"
+            ChatCompletionRequestUserMessageContentPart::AudioUrl(_)
         ));
     }
 
@@ -17348,7 +17433,7 @@ mod custom_content_template_tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model":"test", "messages":[{"role":"user", "content":[
                 {"type":"text", "text":"Predict <chemistry>"},
-                {"type":"chemistry", "chemistry":{"data_base64":"must-not-be-tokenized"}},
+                {"type":"custom", "kind":"chemistry", "fields":{"chemistry":{"data_base64":"must-not-be-tokenized"}}},
                 {"type":"image_url", "image_url":{"url":"https://example.com/image.png"}}
             ]}]
         }))
@@ -17367,8 +17452,24 @@ mod custom_content_template_tests {
         assert!(!messages.to_string().contains("must-not-be-tokenized"));
         let original = serde_json::to_value(&request).unwrap();
         assert_eq!(
-            original["messages"][0]["content"][1]["chemistry"]["data_base64"],
+            original["messages"][0]["content"][1]["fields"]["chemistry"]["data_base64"],
             "must-not-be-tokenized"
         );
+    }
+    #[test]
+    fn custom_tensor_routing_is_explicit_and_capability_gated() {
+        let reference = serde_json::json!({"nested":[{"$dynamo_tensor":{
+            "transport":"shm", "worker_id":7
+        }}]});
+        assert!(validate_custom_tensor_routing(&reference, Some(7), true).is_ok());
+        assert!(validate_custom_tensor_routing(&reference, None, true).is_err());
+        assert!(validate_custom_tensor_routing(&reference, Some(8), true).is_err());
+        assert!(validate_custom_tensor_routing(&reference, Some(7), false).is_err());
+        let inline = serde_json::json!({"$dynamo_tensor":{"transport":"inline"}});
+        assert!(validate_custom_tensor_routing(&inline, None, false).is_ok());
+        let nixl = serde_json::json!({"$dynamo_tensor":{"transport":"nixl"}});
+        assert!(validate_custom_tensor_routing(&nixl, Some(7), true).is_err());
+        let duplicated = serde_json::json!({"$dynamo_tensor":{"transport":"shm", "worker_id":7, "data_base64":"bulk"}});
+        assert!(validate_custom_tensor_routing(&duplicated, Some(7), true).is_err());
     }
 }

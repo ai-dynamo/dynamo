@@ -460,7 +460,7 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
                     ChatCompletionRequestUserMessageContentPart::Text(text) => {
                         Some(text.text.as_str())
                     }
-                    ChatCompletionRequestUserMessageContentPart::Multimodal(_) => None,
+                    _ => None,
                 })
                 .collect(),
         })
@@ -2295,7 +2295,7 @@ mod raw_chat_prompt_tests {
                 "model":"test", "nvext":{"use_raw_prompt":true}, "messages":[
                     {"role":"user", "content":[
                         {"type":"text","text":"Predict "},
-                        {"type":"chemistry","chemistry":{"data_base64":"opaque"}},
+                        {"type":"custom","kind":"chemistry","fields":{"chemistry":{"data_base64":"opaque"}}},
                         {"type":"text","text":"<chemistry>"}
                     ]}
                 ]

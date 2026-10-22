@@ -8,8 +8,10 @@ from __future__ import annotations
 import asyncio
 import json
 
+import torch
 import uvloop
 
+from dynamo.common.multimodal.custom_tensor import resolve_custom_tensors
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -49,7 +51,23 @@ def _mismatch(reason: str, received: object) -> _StatusLikeError:
 
 async def generate(request, context):
     received = request.get("multi_modal_data")
-    expected = {kind: [{"Json": value}] for kind, value in EXPECTED_PAYLOAD.items()}
+    if request.get("token_ids") == [1, 2, 5]:
+        if "data_base64" in json.dumps(request):
+            raise _mismatch("inline bytes present in reference request", None)
+        resolved = resolve_custom_tensors(
+            received["chemistry"][0]["Json"],
+            worker_id=(request.get("routing") or {}).get("decode_worker_id"),
+        )
+        if not torch.equal(resolved["input"], torch.arange(6).reshape(2, 3)):
+            raise _mismatch("resolved tensor mismatch", None)
+        if resolved["metadata"] != {"units": "angstrom"}:
+            raise _mismatch("custom metadata lost", None)
+        yield {"token_ids": list(RESPONSE_TOKEN_IDS), "finish_reason": "stop"}
+        return
+    expected = {
+        kind: [{"Json": {kind: value, "metadata": {"revision": 1}}}]
+        for kind, value in EXPECTED_PAYLOAD.items()
+    }
     if request.get("token_ids") == [1, 2, 4]:
         expected["image_url"] = [{"Url": IMAGE_URL}]
     if received != expected:
@@ -85,7 +103,8 @@ async def main():
 
     endpoint = runtime.endpoint(ENDPOINT_PATH)
     runtime_config = ModelRuntimeConfig()
-    runtime_config.set_engine_specific("json_multimodal", json.dumps(True))
+    runtime_config.set_engine_specific("custom_json_v1", json.dumps(True))
+    runtime_config.set_engine_specific("custom_tensor_shm_v1", json.dumps(True))
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,
@@ -93,6 +112,7 @@ async def main():
         QWEN,
         model_name=MODEL_NAME,
         worker_type=WorkerType.Aggregated,
+        ignore_weights=True,
         runtime_config=runtime_config,
     )
 
@@ -104,6 +124,7 @@ async def main():
         QWEN,
         model_name=PLAIN_MODEL_NAME,
         worker_type=WorkerType.Aggregated,
+        ignore_weights=True,
     )
 
     await asyncio.gather(

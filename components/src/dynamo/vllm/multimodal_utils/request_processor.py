@@ -22,6 +22,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.audio_loader import AudioLoader
+from dynamo.common.multimodal.custom_tensor import resolve_custom_tensors
 from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     UUID_ONLY_VARIANT_KEY,
@@ -962,6 +963,13 @@ class VllmMultimodalRequestProcessor:
                 "disaggregated payload cache identity is not supported"
             )
         backend_data, _ = _split_multimodal_data(request)
+        try:
+            backend_data = resolve_custom_tensors(
+                backend_data,
+                worker_id=(request.get("routing") or {}).get("decode_worker_id"),
+            )
+        except ValueError as exc:
+            raise InvalidArgument(str(exc)) from exc
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
         request_for_prompt.pop("multi_modal_data")
@@ -990,6 +998,7 @@ class VllmMultimodalRequestProcessor:
         json_data, media_data = _split_multimodal_data(request)
         if json_data:
             opaque = self._prepare_backend_multimodal_input(request, mode)
+            json_data = opaque.multi_modal_data
             if not media_data:
                 return opaque
             media_request = dict(request, multi_modal_data=media_data)

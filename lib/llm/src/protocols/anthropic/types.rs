@@ -2013,11 +2013,9 @@ mod tests {
             ChatCompletionRequestToolMessageContentPart::Text(text)
                 if text.text == "Screenshot captured"
         ));
-        let ChatCompletionRequestToolMessageContentPart::Multimodal(image) = &parts[1] else {
+        let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[1] else {
             panic!("expected image_url part");
         };
-        let image: dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage =
-            image.deserialize().unwrap();
         assert_eq!(
             image.image_url.as_ref().unwrap().url.as_str(),
             "data:image/png;base64,aGVsbG8="
@@ -2601,11 +2599,7 @@ mod tests {
                     }
                     // Second part: image with data URI
                     match &parts[1] {
-                        ChatCompletionRequestUserMessageContentPart::Multimodal(img)
-                            if img.kind == "image_url" =>
-                        {
-                            let img: dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage =
-                                img.deserialize().unwrap();
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
                             let url_str = img
                                 .image_url
                                 .as_ref()
@@ -2752,7 +2746,7 @@ mod tests {
                     assert_eq!(parts.len(), 1);
                     assert!(matches!(
                         &parts[0],
-                        ChatCompletionRequestUserMessageContentPart::Multimodal(part) if part.kind == "image_url"
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
                     ));
                 }
                 other => panic!("expected Array content for image, got {other:?}"),

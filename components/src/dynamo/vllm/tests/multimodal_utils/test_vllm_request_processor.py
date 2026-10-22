@@ -7,10 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher, inline_tensor
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.vllm.multimodal_utils import request_processor as mod
@@ -2535,3 +2537,61 @@ async def test_json_and_media_engine_key_collision_is_rejected():
         await processor.prepare_input(
             request, "request-1", None, DisaggregationMode.AGGREGATED
         )
+
+
+@pytest.mark.asyncio
+async def test_custom_tensor_modes_are_identical_at_model_boundary():
+    processor = _processor()
+    tensor = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    with ShmTensorPublisher(tensor, worker_id=7) as producer:
+        prompts = []
+        for envelope in [inline_tensor(tensor), producer.envelope()]:
+            result = await _prepare_prompt(
+                processor,
+                {
+                    "token_ids": [1, 2, 3],
+                    "routing": {"decode_worker_id": 7},
+                    "multi_modal_data": {
+                        "chemistry": [
+                            {"Json": {"input": envelope, "meta": [None, True]}}
+                        ]
+                    },
+                },
+                "request-raw-tensor",
+                None,
+                DisaggregationMode.AGGREGATED,
+            )
+            prompts.append(result.prompt)
+        for prompt in prompts:
+            assert prompt["prompt_token_ids"] == [1, 2, 3]
+            assert torch.equal(prompt["multi_modal_data"]["chemistry"]["input"], tensor)
+            assert prompt["multi_modal_data"]["chemistry"]["meta"] == [None, True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change,message",
+    [
+        ({"expires_at": 0.0}, "expired"),
+        ({"placement": "remote-host"}, "placement mismatch"),
+        ({"worker_id": 8}, "pinned worker"),
+    ],
+)
+async def test_custom_reference_failures_are_client_errors(change, message):
+    processor = _processor()
+    with ShmTensorPublisher(torch.ones(1), worker_id=7) as producer:
+        envelope = producer.envelope()
+        envelope["$dynamo_tensor"].update(change)
+        request = {
+            "token_ids": [1, 2, 3],
+            "routing": {"decode_worker_id": 7},
+            "multi_modal_data": {"chemistry": [{"Json": {"input": envelope}}]},
+        }
+        with pytest.raises(mod.InvalidArgument, match=message):
+            await _prepare_prompt(
+                processor,
+                request,
+                "invalid-reference",
+                None,
+                DisaggregationMode.AGGREGATED,
+            )

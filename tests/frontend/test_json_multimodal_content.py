@@ -9,7 +9,9 @@ from typing import Generator
 
 import pytest
 import requests
+import torch
 
+from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
 
@@ -125,7 +127,12 @@ def test_custom_modality_payload_reaches_the_worker_unchanged(
 ) -> None:
     content = [{"type": "text", "text": "Predict this"}]
     content.extend(
-        {"type": kind, kind: value} for kind, value in EXPECTED_PAYLOAD.items()
+        {
+            "type": "custom",
+            "kind": kind,
+            "fields": {kind: value, "metadata": {"revision": 1}},
+        }
+        for kind, value in EXPECTED_PAYLOAD.items()
     )
     messages = [{"role": role, "content": content}]
     if role == "tool":
@@ -182,7 +189,11 @@ def test_worker_without_json_capability_rejects_custom_content(services: int) ->
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Predict this"},
-                        {"type": "chemistry", "chemistry": {"data_base64": "..."}},
+                        {
+                            "type": "custom",
+                            "kind": "chemistry",
+                            "fields": {"chemistry": {"data_base64": "..."}},
+                        },
                     ],
                 }
             ],
@@ -199,7 +210,12 @@ def test_json_and_url_media_reach_the_same_worker_field(services: int) -> None:
         {"type": "image_url", "image_url": {"url": IMAGE_URL}},
     ]
     content.extend(
-        {"type": kind, kind: value} for kind, value in EXPECTED_PAYLOAD.items()
+        {
+            "type": "custom",
+            "kind": kind,
+            "fields": {kind: value, "metadata": {"revision": 1}},
+        }
+        for kind, value in EXPECTED_PAYLOAD.items()
     )
     response = _chat(
         services,
@@ -216,7 +232,12 @@ def test_json_and_url_media_reach_the_same_worker_field(services: int) -> None:
 def test_custom_json_uses_the_normal_chat_template(services: int) -> None:
     content = [{"type": "text", "text": "Predict this <custom_input>"}]
     content.extend(
-        {"type": kind, kind: value} for kind, value in EXPECTED_PAYLOAD.items()
+        {
+            "type": "custom",
+            "kind": kind,
+            "fields": {kind: value, "metadata": {"revision": 1}},
+        }
+        for kind, value in EXPECTED_PAYLOAD.items()
     )
     response = _chat(
         services,
@@ -227,3 +248,46 @@ def test_custom_json_uses_the_normal_chat_template(services: int) -> None:
         },
     )
     _assert_stub_answered(response)
+
+
+def test_reference_resolves_after_frontend_routing_without_bulk_bytes(services: int):
+    # Discover the worker using the existing worker-id response contract.
+    content = [
+        {
+            "type": "custom",
+            "kind": kind,
+            "fields": {kind: value, "metadata": {"revision": 1}},
+        }
+        for kind, value in EXPECTED_PAYLOAD.items()
+    ]
+    probe = _chat(
+        services,
+        {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": content}],
+            "nvext": {"token_data": [1, 2, 3], "extra_fields": ["worker_id"]},
+            "max_tokens": 4,
+        },
+    )
+    _assert_stub_answered(probe)
+    worker_id = probe.json()["nvext"]["worker_id"]["decode_worker_id"]
+    with ShmTensorPublisher(
+        torch.arange(6).reshape(2, 3), worker_id=worker_id
+    ) as producer:
+        part = {
+            "type": "custom",
+            "kind": "chemistry",
+            "fields": {"input": producer.envelope(), "metadata": {"units": "angstrom"}},
+        }
+        body = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": [part]}],
+            "nvext": {"token_data": [1, 2, 5], "decode_worker_id": worker_id},
+            "max_tokens": 4,
+        }
+        _assert_stub_answered(_chat(services, body))
+        # A reference is never sent to an arbitrary worker if the pin is absent.
+        body["nvext"].pop("decode_worker_id")
+        rejected = _chat(services, body)
+        assert rejected.status_code == 400, rejected.text
+        assert "requires nvext.decode_worker_id" in rejected.text

@@ -452,6 +452,7 @@ def test_json_capability_is_opt_in_and_aggregated_only(enabled, worker_kind, pub
     )
     assert runtime_config.set_engine_specific.called is published
     if published:
-        runtime_config.set_engine_specific.assert_called_once_with(
-            "json_multimodal", "true"
+        runtime_config.set_engine_specific.assert_any_call("custom_json_v1", "true")
+        runtime_config.set_engine_specific.assert_any_call(
+            "custom_tensor_shm_v1", "true"
         )
