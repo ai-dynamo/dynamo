@@ -16,7 +16,8 @@ import (
 func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const longLPXComponentName = "abcdefghijklmnopqrstuvwxyzabcd"
 	const conductorRoleErr = `spec.components: Forbidden: LPX components must each declare a conductor role or an agent "runtime" sidecar, or form a shared draft and target pair`
-	const sidecarRoleErr = "Forbidden: Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
+	const sidecarRoleErr = "Forbidden: Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role; beside a conductor that declares it, the agent role may declare it to publish a hybrid build's topology"
+	const topologyModeErr = `Invalid value: "container": must be "pod" when an LPX component's agent and conductor roles declare the "runtime" sidecar for topology discovery`
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 	const lpxGateErr = "spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"
 	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
@@ -536,6 +537,75 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				}}
 			}),
 			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: " + sidecarRoleErr},
+		},
+		// Beside a conductor that declares it, the agent's sidecar publishes the hybrid build's topology.
+		{
+			name: "LPX admits agent and conductor runtime sidecars as topology roles",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				for index := range dgd.Spec.Components[0].Roles {
+					dgd.Spec.Components[0].Roles[index].PodTemplate.Spec.InitContainers = []corev1.Container{{
+						Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+					}}
+				}
+			}),
+		},
+		{
+			name: "LPX topology roles require restartPolicy Always on the agent sidecar",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: consts.RuntimeContainerName, Image: "sidecar"}}
+				dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[0].roles[0].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for the LPX runtime init container`,
+			},
+		},
+		{
+			name: "LPX rejects topology roles under container discovery mode",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				for index := range dgd.Spec.Components[0].Roles {
+					dgd.Spec.Components[0].Roles[index].PodTemplate.Spec.InitContainers = []corev1.Container{{
+						Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+					}}
+				}
+			}),
+			wantWebhookErrs: []string{"metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: " + topologyModeErr},
+		},
+		{
+			name: "LPX rejects a topology role template that selects container discovery mode",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				for index := range dgd.Spec.Components[0].Roles {
+					dgd.Spec.Components[0].Roles[index].PodTemplate.Spec.InitContainers = []corev1.Container{{
+						Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+					}}
+				}
+				dgd.Spec.Components[0].Roles[1].PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].roles[1].podTemplate.metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: " + topologyModeErr},
+		},
+		{
+			name: "LPX admits topology roles whose templates override container discovery with pod mode",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				for index := range dgd.Spec.Components[0].Roles {
+					template := dgd.Spec.Components[0].Roles[index].PodTemplate
+					template.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "pod"}
+					template.Spec.InitContainers = []corev1.Container{{
+						Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+					}}
+				}
+			}),
+		},
+		{
+			name: "LPX keeps container discovery mode for a conductor sidecar without an agent publisher",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}),
 		},
 		{
 			name: "LPX admits an agent runtime sidecar without a conductor role, with its own availability",
