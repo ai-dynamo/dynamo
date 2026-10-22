@@ -306,7 +306,7 @@ podTemplate:
 
 For SGLang multinode deployments, set `backendFramework: sglang` and choose one template form:
 
-- **Component `podTemplate`:** use an explicit `python3 -m sglang.launch_server` command. The operator adds `--nnodes`, `--node-rank`, and `--dist-init-addr`. It keeps `runtime` on the leader for TP and on every Pod when `--enable-dp-attention` is present. Config files and other launchers require role templates because they can hide the engine topology.
+- **Component `podTemplate`:** use `python3 -m sglang.launch_server` directly or as a single `sh -c` or `bash -c` command, optionally prefixed by `exec`. The operator adds `--nnodes`, `--node-rank`, and `--dist-init-addr`. It keeps `runtime` on the leader for TP and on every Pod when `--enable-dp-attention` is present. Model-path values can use Kubernetes variable references such as `$(MODEL_PATH)`; quote shell variable values such as `"$MODEL_PATH"`. Config files are supported when `--enable-dp-attention` is explicit. If the topology depends on a config file, expanded flags, or a custom launcher, use role templates.
 - **Complete role templates:** define both launches and sidecar placement yourself. The operator injects `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` for use in commands and arguments. Dynamo defaults apply only to declared `runtime` containers; engine images are not interpreted as Dynamo runtime versions.
 
 Shared memory, compilation cache, provider startup ordering, and group management follow the existing multinode behavior. Worker `main` probes are removed; a worker's `runtime` keeps its independent sidecar probes. Prefill and decode components each render their own engine group.
