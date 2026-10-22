@@ -98,7 +98,8 @@ class NvCreateImageRequest(BaseModel):
     """
     Request for image generation (/v1/images/generations and /v1/images/edits).
 
-    The OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`.
+    The OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`;
+    the module documentation says why they are declared here and not wrapped.
     `model` and `size` are free text, because the OpenAI type accepts any
     string there.
     """

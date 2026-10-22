@@ -213,7 +213,7 @@
       },
       "NvCreateImageRequest": {
         "type": "object",
-        "description": "Request for image generation (/v1/images/generations and /v1/images/edits).\n\nThe OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`.\n`model` and `size` are free text, because the OpenAI type accepts any\nstring there.",
+        "description": "Request for image generation (/v1/images/generations and /v1/images/edits).\n\nThe OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`;\nthe module documentation says why they are declared here and not wrapped.\n`model` and `size` are free text, because the OpenAI type accepts any\nstring there.",
         "required": [
           "prompt"
         ],
