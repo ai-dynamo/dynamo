@@ -343,6 +343,7 @@ def test_child_attaches_without_launching_engine(monkeypatch):
     assert attach.call_args.kwargs["output_address"] == "out1"
 
 
+@pytest.mark.timeout(180)
 def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
     if not hasattr(engine_utils, "bind_engine_zmq_listeners"):
         pytest.skip("requires the inherited-listener API")
