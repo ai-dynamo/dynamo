@@ -16,8 +16,8 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 def pytest_collection_modifyitems(config, items):
     """Collect decision qualification only for explicitly provisioned services.
 
-    This is not an automated qualification lane: the default CI runtime is not
-    the pinned SGLang profile. Deselect before any service or model fixture runs.
+    This lane requires explicit provisioning and opt-in, even for a supported
+    version. Deselect before any service or model fixture runs.
     """
     gates = {
         Path(__file__).with_name("test_systemone_sglang.py"): (
