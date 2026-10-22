@@ -45,11 +45,10 @@ spec:
         - bash
         - /bench/bench.sh
         env:
-        # aiperf loads the tokenizer from the shared model cache.
+        # aiperf downloads the session corpus and the tokenizer from Hugging
+        # Face into a scratch volume.
         - name: HF_HOME
-          value: /opt/models
-        - name: HF_HUB_OFFLINE
-          value: "1"
+          value: /hf-cache
         - name: PYTHONUNBUFFERED
           value: "1"
         resources:
@@ -62,10 +61,6 @@ spec:
           readOnly: true
         - name: results
           mountPath: /results
-        - name: model-cache
-          mountPath: /opt/models
-        # WORKLOAD=agentx downloads its session corpus here: aiperf's user
-        # cannot write to the model cache.
         - name: hf-cache
           mountPath: /hf-cache
       volumes:
@@ -76,6 +71,3 @@ spec:
         emptyDir: {}
       - name: hf-cache
         emptyDir: {}
-      - name: model-cache
-        persistentVolumeClaim:
-          claimName: model-cache

@@ -92,7 +92,7 @@ def render_arm(
 def render_job(
     objects: list[dict[str, Any]], args: argparse.Namespace
 ) -> list[dict[str, Any]]:
-    """Name the aiperf Job and set its image, ConfigMap and model cache."""
+    """Name the aiperf Job and set its image and ConfigMap."""
     (job,) = objects
     job["metadata"]["name"] = args.name
     spec = job["spec"]["template"]["spec"]
@@ -101,7 +101,6 @@ def render_job(
     for volume in spec["volumes"]:
         if "configMap" in volume:
             volume["configMap"]["name"] = args.configmap
-    set_model_cache(spec, args.model_cache_pvc)
     set_pull_secret(spec, args.image_pull_secret)
     return objects
 
@@ -212,7 +211,6 @@ def main(argv: list[str] | None = None) -> None:
     job.add_argument("--name", required=True)
     job.add_argument("--configmap", required=True)
     job.add_argument("--image", required=True)
-    job.add_argument("--model-cache-pvc", required=True)
     job.add_argument("--image-pull-secret", default="")
 
     targets = commands.add_parser("targets", help="the /metrics endpoints of an arm")

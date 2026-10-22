@@ -9,11 +9,10 @@
 #   server-metrics.txt  the endpoints aiperf scrapes during each run
 #
 # It sends one smoke request through the Gateway, snapshots every /metrics
-# endpoint, then runs aiperf once per round and load point, with a snapshot
-# after each run. A load point is a request rate or a concurrency of synthetic
-# prompts, or a number of live agentic sessions (WORKLOAD=agentx). When it is
-# done it writes /results/DONE and waits until run.sh has copied /results and
-# written /results/COLLECTED.
+# endpoint, then runs aiperf's InferenceX AgentX scenario once per round and
+# number of live sessions, with a snapshot after each run. When it is done it
+# writes /results/DONE and waits until run.sh has copied /results and written
+# /results/COLLECTED.
 
 set -euo pipefail
 
@@ -119,18 +118,9 @@ EOF
 
 python3 -c 'import aiperf; print(aiperf.__version__)' > "$out/aiperf-version.txt" || true
 
-points=()
-if [[ $WORKLOAD == agentx ]]; then
-  IFS=, read -ra sessions <<< "$AGENTX_CONCURRENCIES"
-  for concurrency in "${sessions[@]}"; do points+=("agentx$concurrency"); done
-else
-  IFS=, read -ra rates <<< "$REQUEST_RATES"
-  IFS=, read -ra concurrencies <<< "$CONCURRENCIES"
-  for rate in "${rates[@]}"; do points+=("rps$rate"); done
-  for concurrency in "${concurrencies[@]}"; do points+=("c$concurrency"); done
-fi
+IFS=, read -ra points <<< "$SESSIONS"
 if ((${#points[@]} == 0)); then
-  echo "bench.sh: set REQUEST_RATES or CONCURRENCIES, or AGENTX_CONCURRENCIES" >&2
+  echo "bench.sh: set SESSIONS" >&2
   exit 2
 fi
 
@@ -140,92 +130,40 @@ if ((${#server_metrics_urls[@]} > 0)); then
   # shellcheck disable=SC2206  # the formats are a space-separated list
   server_metrics=(--server-metrics "${server_metrics_urls[@]}" --server-metrics-formats $SERVER_METRICS_FORMATS)
 fi
-prefix=()
-if ((PREFIX_LENGTH > 0 && NUM_PREFIXES > 0)); then
-  prefix=(--prefix-prompt-length "$PREFIX_LENGTH" --num-prefix-prompts "$NUM_PREFIXES")
-fi
 
-if [[ $WORKLOAD == agentx ]]; then
-  # aiperf opens at most 2500 connections by default, and subagents take the
-  # requests in flight above --concurrency.
-  connections=2500
-  for concurrency in "${sessions[@]}"; do
-    if ((2 * concurrency > connections)); then connections=$((2 * concurrency)); fi
-  done
-  if ((connections > 65000)); then connections=65000; fi
-  agentx_env=(
-    # aiperf downloads the corpus and the tokenizer from Hugging Face into a
-    # scratch volume, because its user cannot write to the model cache. The
-    # variable is unset, not 0: aiperf takes any value as offline.
-    -u HF_HUB_OFFLINE
-    HF_HOME=/hf-cache
-    AIPERF_HTTP_CONNECTION_LIMIT=$connections
-    # Downloading the corpus and rebuilding its sessions takes minutes when cold.
-    AIPERF_DATASET_CONFIGURATION_TIMEOUT=1800
-    AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=1800
-  )
-  agentx_args=(--public-dataset "$AGENTX_DATASET" --max-context-length "$AGENTX_MAX_CONTEXT")
-  if [[ -n $AGENTX_TRACES ]]; then agentx_args+=(--num-dataset-entries "$AGENTX_TRACES"); fi
-  # The scenario rejects runs shorter than 900 s unless overridden. aiperf then
-  # marks the run submission_valid: false, which this A/B does not use.
-  if ((AGENTX_DURATION_S < 900)); then agentx_args+=(--unsafe-override); fi
-fi
+# aiperf opens at most 2500 connections by default, and subagents take the
+# requests in flight above --concurrency.
+connections=2500
+for sessions in "${points[@]}"; do
+  if ((2 * sessions > connections)); then connections=$((2 * sessions)); fi
+done
+if ((connections > 65000)); then connections=65000; fi
+aiperf_env=(
+  AIPERF_HTTP_CONNECTION_LIMIT=$connections
+  # Downloading the corpus and rebuilding its sessions takes minutes when cold.
+  AIPERF_DATASET_CONFIGURATION_TIMEOUT=1800
+  AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=1800
+)
+corpus=(--public-dataset "$DATASET" --max-context-length "$MAX_CONTEXT")
+if [[ -n $TRACES ]]; then corpus+=(--num-dataset-entries "$TRACES"); fi
+# The scenario rejects runs shorter than 900 s unless overridden. aiperf then
+# marks the run submission_valid: false, which this A/B does not use.
+override=()
+if ((DURATION_S < 900)); then override=(--unsafe-override); fi
 
 snapshot "$out/prometheus/000_baseline.tar.gz"
 seq=0
 for ((round = 0; round < ROUNDS; round++)); do
   for i in "${!points[@]}"; do
-    point=${points[i]}
-    # Both arms use the same seed for a round and point, so they send the same
-    # prompts on the same schedule. Each run gets a new seed, so no run replays
-    # prompts that an earlier run left in the prefix caches.
+    sessions=${points[i]}
+    # Both arms use the same seed for a round and point, so they replay the
+    # same sessions from the same turns.
     seed=$((SEED + round * ${#points[@]} + i))
-    case $point in
-      agentx*)
-        # Live sessions, each replaying a recorded coding-agent session with
-        # its subagents and think time. The scenario warms each session up.
-        workload=(
-          --scenario inferencex-agentx-mvp
-          "${agentx_args[@]}"
-          --concurrency "${point#agentx}"
-          --benchmark-duration "$AGENTX_DURATION_S"
-        )
-        ;;
-      rps*)
-        # DURATION_S and WARMUP_S seconds of arrivals at this rate.
-        rate=${point#rps}
-        requests=$(python3 -c "print(max(1, round($rate * $DURATION_S)))")
-        warmup=$(python3 -c "print(round($rate * $WARMUP_S))")
-        workload=(--request-rate "$rate" --arrival-pattern poisson)
-        ;;
-      *)
-        # 10 requests per client, at least 500, after 2 warmup requests per client.
-        concurrency=${point#c}
-        requests=$((concurrency * 10 > 500 ? concurrency * 10 : 500))
-        warmup=$((concurrency * 2))
-        workload=(--concurrency "$concurrency")
-        ;;
-    esac
-    if [[ $point != agentx* ]]; then
-      workload+=(--request-count "$requests")
-      if ((warmup > 0)); then workload+=(--warmup-request-count "$warmup"); fi
-      workload+=(
-        # One dataset entry per request: aiperf reuses entries, and a reused
-        # prompt would hit the prefix cache as a whole.
-        --num-dataset-entries $((requests + warmup))
-        --synthetic-input-tokens-mean $((ISL - (${#prefix[@]} > 0 ? PREFIX_LENGTH : 0)))
-        --synthetic-input-tokens-stddev 0
-        "${prefix[@]}"
-        --output-tokens-mean "$OSL"
-        --output-tokens-stddev 0
-      )
-    fi
-    run=${point}_r${round}
+    run=sessions${sessions}_r${round}
     dir=$out/$run
     mkdir -p "$dir"
-    cmd=()
-    if [[ $point == agentx* ]]; then cmd=(env "${agentx_env[@]}"); fi
-    cmd+=(
+    cmd=(
+      env "${aiperf_env[@]}"
       aiperf profile
       --model "$MODEL"
       --tokenizer "$MODEL"
@@ -234,7 +172,13 @@ for ((round = 0; round < ROUNDS; round++)); do
       --streaming
       --header "X-Gateway-Model-Name:$MODEL"
       --header "X-Dynamo-AB-Arm:$ARM_HEADER"
-      "${workload[@]}"
+      # Live sessions, each replaying a recorded coding-agent session with its
+      # subagents and think time. The scenario warms each session up first.
+      --scenario inferencex-agentx-mvp
+      "${corpus[@]}"
+      --concurrency "$sessions"
+      --benchmark-duration "$DURATION_S"
+      "${override[@]}"
       --extra-inputs ignore_eos:true
       # The mocker emits random token ids, which do not survive re-tokenizing.
       --use-server-token-count
