@@ -122,7 +122,7 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		role,
 		serviceName,
 		multinodeDeployer,
-		GetDynamoSidecar(component) != nil || usesMultinodeTopologyAliases(GetPodTemplateAnnotations(component)),
+		usesMultinodeTopologyAliases(GetPodTemplateAnnotations(component)),
 	)
 	if flags == "" {
 		return nil

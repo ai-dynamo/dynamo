@@ -1614,9 +1614,8 @@ func addMultinodeTopologyEnvVars(
 	serviceName string,
 	multinodeDeployer MultinodeDeployer,
 	annotations map[string]string,
-	sidecarMode bool,
 ) {
-	if numberOfNodes <= 1 || (!sidecarMode && !usesMultinodeTopologyAliases(annotations)) {
+	if numberOfNodes <= 1 || !usesMultinodeTopologyAliases(annotations) {
 		return
 	}
 
@@ -1870,7 +1869,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 		}
 	}
-	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations, nativeSidecar)
+	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
 
 	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership)
 	if backend == nil {
@@ -1946,7 +1945,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 				if err := mergeDynamoSidecarDefaults(&podSpec, componentContext); err != nil {
 					return nil, err
 				}
-				addMultinodeTopologyEnvVars(&podSpec.InitContainers[i], numberOfNodes, serviceName, multinodeDeployer, annotations, nativeSidecar)
+				addMultinodeTopologyEnvVars(&podSpec.InitContainers[i], numberOfNodes, serviceName, multinodeDeployer, annotations)
 				break
 			}
 		}
