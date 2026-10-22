@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -25,14 +26,22 @@ import (
 )
 
 const (
-	fieldManager      = "dynamo-crd-apply"
-	versionAnnotation = "dynamo.nvidia.com/operator-version"
+	fieldManager       = "dynamo-crd-apply"
+	versionAnnotation  = "dynamo.nvidia.com/operator-version"
+	dgdrV1Beta2Flag    = "dgdr-v1beta2-enabled"
+	apiV1Alpha1Version = "v1alpha1"
+	dgdrV1Beta2Version = "v1beta2"
+
+	dgdrCRDName      = "dynamographdeploymentrequests.nvidia.com"
+	dgdrRunCRDName   = "dynamographdeploymentruns.nvidia.com"
+	dgdrCandidateCRD = "dynamographdeploymentcandidates.nvidia.com"
 )
 
 func main() {
 	crdsDir := flag.String("crds-dir", "/opt/dynamo-operator/crds/", "Directory containing CRD YAML files")
 	version := flag.String("version", "", "Operator version to stamp on CRDs")
 	lpxEnabled := flag.Bool("lpx-enabled", false, "Install the experimental LPXGraphDeployment CRD")
+	dgdrV1Beta2Enabled := flag.Bool(dgdrV1Beta2Flag, false, "Install the experimental DGDR v1beta2 API schemas")
 	conversionWebhookServiceName := flag.String(
 		"conversion-webhook-service-name",
 		"",
@@ -47,6 +56,14 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("crd-apply")
+	if *dgdrV1Beta2Enabled {
+		log.Info(
+			"WARNING: enabled experimental DGDR v1beta2 API schemas; use only on development clusters. "+
+				"DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects are persisted in etcd, "+
+				"and incompatible schema changes may block future CRD upgrades",
+			"flag", dgdrV1Beta2Flag,
+		)
+	}
 
 	config, err := ctrl.GetConfig()
 	if err != nil {
@@ -87,6 +104,10 @@ func main() {
 			os.Exit(1)
 		}
 		if crd.Name == "lpxgraphdeployments.nvidia.com" && !*lpxEnabled {
+			continue
+		}
+		if !*dgdrV1Beta2Enabled && !configureDGDRV1Beta2CRD(crd) {
+			log.Info("Skipped disabled experimental CRD", "crd", crd.Name, "flag", dgdrV1Beta2Flag)
 			continue
 		}
 
@@ -137,6 +158,73 @@ func main() {
 	}
 
 	log.Info("CRD apply complete", "applied", applied)
+}
+
+// configureDGDRV1Beta2CRD projects generated CRDs to the disabled API shape.
+func configureDGDRV1Beta2CRD(crd *apiextensionsv1.CustomResourceDefinition) bool {
+	switch crd.Name {
+	case dgdrRunCRDName, dgdrCandidateCRD:
+		return false
+	case dgdrCRDName:
+		crd.Spec.Versions = slices.DeleteFunc(
+			crd.Spec.Versions,
+			func(version apiextensionsv1.CustomResourceDefinitionVersion) bool {
+				return version.Name == dgdrV1Beta2Version
+			},
+		)
+		for i := range crd.Spec.Versions {
+			removeDGDRV1Beta2Envelope(&crd.Spec.Versions[i])
+		}
+	}
+	return true
+}
+
+func removeDGDRV1Beta2Envelope(version *apiextensionsv1.CustomResourceDefinitionVersion) {
+	if version.Schema == nil || version.Schema.OpenAPIV3Schema == nil {
+		return
+	}
+
+	root := version.Schema.OpenAPIV3Schema
+	root.XValidations = slices.DeleteFunc(
+		root.XValidations,
+		func(rule apiextensionsv1.ValidationRule) bool {
+			return strings.Contains(rule.Rule, dgdrV1Beta2Version)
+		},
+	)
+	spec := root.Properties["spec"]
+	delete(spec.Properties, dgdrV1Beta2Version)
+	spec.XValidations = slices.DeleteFunc(
+		spec.XValidations,
+		func(rule apiextensionsv1.ValidationRule) bool {
+			return strings.Contains(rule.Rule, dgdrV1Beta2Version)
+		},
+	)
+	switch version.Name {
+	case apiV1Alpha1Version:
+		spec.Required = appendRequired(spec.Required, "model", "backend", "profilingConfig")
+	case "v1beta1":
+		spec.Required = appendRequired(spec.Required, "model")
+	}
+	root.Properties["spec"] = spec
+
+	status := root.Properties["status"]
+	delete(status.Properties, dgdrV1Beta2Version)
+	status.XValidations = slices.DeleteFunc(
+		status.XValidations,
+		func(rule apiextensionsv1.ValidationRule) bool {
+			return strings.Contains(rule.Rule, dgdrV1Beta2Version)
+		},
+	)
+	root.Properties["status"] = status
+}
+
+func appendRequired(required []string, fields ...string) []string {
+	for _, field := range fields {
+		if !slices.Contains(required, field) {
+			required = append(required, field)
+		}
+	}
+	return required
 }
 
 func configureConversionWebhookService(

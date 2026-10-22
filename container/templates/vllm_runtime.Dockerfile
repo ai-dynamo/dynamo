@@ -16,7 +16,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG PYTHON_VERSION
-ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
@@ -182,7 +181,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_link = "${VIRTUAL_ENV}/bin/vllm-rs" %}
 {# vLLM <0.31 rejects the extra output fields added by Omni. #}
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
-{% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
+{% set vllm_rs_plugins = "modelexpress,dynamo_nixl_telemetry" if context.vllm.enable_modelexpress == "true" else "dynamo_nixl_telemetry" %}
 {% endif %}
 
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
@@ -222,17 +221,13 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
 
-# Install Dynamo runtime wheels and optional KVBM/GMS wheels.
-# Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
+# Install Dynamo runtime wheels and the optional GMS wheel.
+# Use --no-deps to prevent dependency conflicts with the upstream solve.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
-    if [ "${ENABLE_KVBM}" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$KVBM_WHEEL"; fi; \
-    fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
@@ -261,6 +256,7 @@ RUN set -eux; \
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
+    --mount=type=bind,source=./container/deps/vllm/protected_overrides.txt,target=/tmp/vllm_omni_protected_overrides.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
@@ -360,7 +356,8 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
 # libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
-# IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
+# IMAGEIO_FFMPEG_EXE, plus the LGPL ffprobe that `vllm-rs` video decode needs (the
+# codec purge removed the distro one). This remains ungated by enable_media_ffmpeg so the
 # media-enabled runtime wheel and the omni video-export path always have their
 # required shared libraries and CLI available.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
@@ -370,6 +367,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -nL /tmp/usr/local/bin/ffprobe /usr/local/bin/ffprobe && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
@@ -386,7 +384,14 @@ RUN set -eu; \
          | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
-    fi
+    fi; \
+    # vllm-rs decodes video with `ffprobe` plus `ffmpeg -f image2pipe -vcodec ppm`.
+    "$ff" -hide_banner -muxers 2>/dev/null | grep -qE '^ *E +image2pipe ' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no image2pipe muxer" >&2; exit 1; }; \
+    "$ff" -hide_banner -encoders 2>/dev/null | grep -qE '^ *V[^ ]* +ppm ' \
+      || { echo "ERROR: shipped ffmpeg ($ff) has no ppm encoder" >&2; exit 1; }; \
+    /usr/local/bin/ffprobe -hide_banner -version >/dev/null \
+      || { echo "ERROR: shipped ffprobe is missing or cannot start" >&2; exit 1; }
 
 {% if device == "cuda" %}
 # Delete the base image's PyNvVideoCodec before the install below replaces it.
@@ -473,6 +478,8 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # mooncake goes the same way, for two reasons. The floor names the CUDA 13
 # distribution, and the XPU and CPU bases carry no mooncake at all, so under
 # --no-deps it would arrive here without msgpack, which vLLM does not pull in.
+# lmcache is filtered too: its floor refreshes the CUDA base's bundled copy,
+# and installing it --no-deps on a base without it would ship it unresolved.
 # The check asserts the distribution is absent rather than the `mooncake` module,
 # so it tests the filter without assuming what a future base may ship. It is
 # written as a positive test with no `!` and no stderr redirect: a broken
@@ -485,7 +492,7 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' \
+    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' -e '^lmcache' \
         /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
@@ -637,6 +644,7 @@ COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/artifacts /workspace/components/src/dynamo/artifacts
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
 COPY --chown=dynamo:0 lib /workspace/lib
 
@@ -667,6 +675,10 @@ ENTRYPOINT []
 
 
 FROM pre_runtime AS runtime
+{% if target not in ("dev", "local-dev") %}
+# Verify artifact capture and delivery imports in the shipped runtime, not only the test image.
+RUN python3 -c 'import dynamo.artifacts.vllm.capture; import dynamo.artifacts.runtime'
+{% endif %}
 {% if target not in ("dev", "local-dev") and device != "cpu" %}
 COPY --from=licenses /legal /legal
 {% endif %}

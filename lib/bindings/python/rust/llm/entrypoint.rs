@@ -20,6 +20,7 @@ use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
     apply_deprecated_overlap_score_weight_override,
 };
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
@@ -822,11 +823,14 @@ async fn select_engine(
             let engine =
                 make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
 
+            // This config is the mocker worker: every endpoint serving it, or a
+            // clone of it, admits through this one gate.
             RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
                 is_decode: args.is_decode,
+                admission_gate: WorkerAdmissionGate::default(),
             }
         }
     };

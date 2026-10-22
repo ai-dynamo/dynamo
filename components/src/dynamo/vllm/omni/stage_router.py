@@ -101,6 +101,7 @@ class OmniStageRouter:
             media_fs=media_fs,
             media_http_url=config.media_output_http_url,
             default_fps=config.default_video_fps,
+            image_png_compression_level=config.image_png_compression_level,
         )
 
     def set_stage_client(self, model_stage: str, client: Any) -> None:

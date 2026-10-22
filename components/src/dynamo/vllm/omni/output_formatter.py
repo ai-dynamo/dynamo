@@ -251,6 +251,7 @@ class DiffusionFormatter:
         media_fs: Any,
         media_http_url: Optional[str],
         default_fps: int = 16,
+        image_png_compression_level: int = 6,
     ) -> None:
         """Initialize a diffusion formatter.
 
@@ -259,6 +260,7 @@ class DiffusionFormatter:
             media_fs: Storage backend used for URL responses.
             media_http_url: Public base URL for stored media.
             default_fps: Frame rate used when output metadata omits one.
+            image_png_compression_level: Lossless PNG compression level (0-9).
 
         Returns:
             None.
@@ -267,6 +269,7 @@ class DiffusionFormatter:
         self._media_fs = media_fs
         self._media_http_url = media_http_url
         self._default_fps = default_fps
+        self._image_png_compression_level = image_png_compression_level
 
     async def format(
         self, stage_output: Any, request_id: str, *, request_type: Any, **ctx: Any
@@ -848,6 +851,11 @@ class DiffusionFormatter:
         """
         output_format = _normalize_image_output_options(output_format, response_format)
         image_encoder, file_extension, mime_type = _IMAGE_OUTPUT_FORMATS[output_format]
+        save_kwargs = (
+            {"compress_level": self._image_png_compression_level}
+            if image_encoder == "PNG"
+            else {}
+        )
         outlist = []
         for img in images:
             buf = BytesIO()
@@ -861,7 +869,7 @@ class DiffusionFormatter:
                         encoded_image.paste(rgba, mask=rgba.getchannel("A"))
                     else:
                         encoded_image = img.convert("RGB")
-            encoded_image.save(buf, format=image_encoder)
+            encoded_image.save(buf, format=image_encoder, **save_kwargs)
             image_bytes = buf.getvalue()
             if response_format == "url":
                 url = await upload_to_fs(
@@ -1533,6 +1541,7 @@ class OutputFormatter:
         media_fs: Any = None,
         media_http_url: Optional[str] = None,
         default_fps: int = 16,
+        image_png_compression_level: int = 6,
     ) -> None:
         """Initialize modality-specific output formatters.
 
@@ -1541,12 +1550,17 @@ class OutputFormatter:
             media_fs: Storage backend used for URL responses.
             media_http_url: Public base URL for stored media.
             default_fps: Frame rate used when video metadata omits one.
+            image_png_compression_level: Lossless PNG compression level (0-9).
 
         Returns:
             None.
         """
         diffusion_formatter = DiffusionFormatter(
-            model_name, media_fs, media_http_url, default_fps
+            model_name,
+            media_fs,
+            media_http_url,
+            default_fps,
+            image_png_compression_level=image_png_compression_level,
         )
         self._formatters: Dict[str, Any] = {
             "text": TextFormatter(model_name),
