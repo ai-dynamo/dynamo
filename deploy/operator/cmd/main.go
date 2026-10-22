@@ -164,6 +164,7 @@ func main() {
 	var operatorImagePullPolicy string
 	var dgdrDefaultImage string
 	var dgdrAISimulateDefaultImage string
+	var dgdrV1beta2Enabled bool
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -180,6 +181,8 @@ func main() {
 	flag.StringVar(&dgdrAISimulateDefaultImage, "dgdr-aisimulate-default-image", "",
 		"AISimulate runner image, put into v1beta2 DGDR spec.aisimulate.image when unset; "+
 			"empty derives dynamo-planner:<operator-version>")
+	flag.BoolVar(&dgdrV1beta2Enabled, "dgdr-v1beta2-enabled", false,
+		"Reconcile native v1beta2 DGDRs; requires the v1beta2 Request and Run CRDs to be installed")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -506,6 +509,7 @@ func main() {
 		mgr, operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
 		operatorImage, pullPolicy,
+		dgdrV1beta2Enabled,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
 		os.Exit(1)
@@ -555,6 +559,7 @@ func registerControllers(
 	sshKeyManager *secret.SSHKeyManager,
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
+	dgdrV1beta2Enabled bool,
 ) error {
 	if operatorCfg.Namespace.Restricted == "" {
 		// The cluster-wide manager cache covers all namespaces. ExcludedNamespaces only filters
@@ -618,6 +623,11 @@ func registerControllers(
 		OperatorImagePullPolicy: operatorPullPolicy,
 	}); err != nil {
 		return err
+	}
+	if dgdrV1beta2Enabled {
+		if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
+			return err
+		}
 	}
 	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
 		SetupOptions: setupOptions,
