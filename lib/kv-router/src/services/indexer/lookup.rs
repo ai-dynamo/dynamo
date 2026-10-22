@@ -12,6 +12,7 @@ use crate::protocols::{LocalBlockHash, OverlapScores};
 use crate::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 
 use super::backend::{Indexer, RemotePrimary, SideIndexer};
+use super::mamba_checkpoints::MambaCheckpointIndex;
 
 /// Block hashes for one lookup, borrowed when the caller keeps them and owned
 /// when it does not, so a borrowed query is copied only at the one boundary
@@ -46,6 +47,8 @@ pub(super) struct LookupPipeline<'a> {
     primary: PrimaryLookup<'a>,
     lower_tier: Option<&'a LowerTierIndexers>,
     side: Option<&'a SideIndexer>,
+    /// Set only for local primaries; remote and absent primaries are never capped.
+    mamba: Option<&'a MambaCheckpointIndex>,
 }
 
 #[derive(Clone, Copy)]
@@ -63,21 +66,25 @@ impl Indexer {
                 primary,
                 lower_tier,
                 approx,
+                mamba_checkpoints,
                 ..
             } => LookupPipeline {
                 primary: PrimaryLookup::KvIndexer(primary),
                 lower_tier: Some(lower_tier),
                 side: approx.as_ref(),
+                mamba: mamba_checkpoints.as_deref(),
             },
             Self::Concurrent {
                 primary,
                 lower_tier,
                 approx,
+                mamba_checkpoints,
                 ..
             } => LookupPipeline {
                 primary: PrimaryLookup::Concurrent(primary.as_ref()),
                 lower_tier: Some(lower_tier),
                 side: approx.as_ref(),
+                mamba: mamba_checkpoints.as_deref(),
             },
             Self::Remote {
                 primary, approx, ..
@@ -85,11 +92,13 @@ impl Indexer {
                 primary: PrimaryLookup::Remote(primary.as_ref()),
                 lower_tier: None,
                 side: approx.as_ref(),
+                mamba: None,
             },
             Self::None => LookupPipeline {
                 primary: PrimaryLookup::None,
                 lower_tier: None,
                 side: None,
+                mamba: None,
             },
         }
     }
@@ -174,7 +183,10 @@ impl<'a> LookupPipeline<'a> {
             return self.find_primary_match_details(sequence).await;
         }
 
-        let primary_details = self.primary.find_match_details_retained(&sequence).await?;
+        let mut primary_details = self.primary.find_match_details_retained(&sequence).await?;
+        if let Some(mamba) = self.mamba {
+            mamba.cap_match_details(&mut primary_details);
+        }
         Ok(merge_side_or_warn(self.side, primary_details, sequence).await)
     }
 
@@ -182,7 +194,11 @@ impl<'a> LookupPipeline<'a> {
         &self,
         sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
-        self.primary.find_match_details(sequence).await
+        let mut primary_details = self.primary.find_match_details(sequence).await?;
+        if let Some(mamba) = self.mamba {
+            mamba.cap_match_details(&mut primary_details);
+        }
+        Ok(primary_details)
     }
 
     async fn find_matches_by_tier(
@@ -207,6 +223,10 @@ impl<'a> LookupPipeline<'a> {
                         lower_tier_options.retain_kv_transfer_chain,
                     )
                     .await?;
+                let mut primary_device = primary_device;
+                if let Some(mamba) = self.mamba {
+                    mamba.cap_match_details(&mut primary_device);
+                }
                 let lt = query_lower_tiers_with_options(
                     lower_tier,
                     sequence.as_slice(),
@@ -258,7 +278,10 @@ impl<'a> LookupPipeline<'a> {
                 let Some(lower_tier) = self.lower_tier else {
                     return Ok(TieredMatchDetails::default());
                 };
-                let device = self.primary.find_match_details_retained(&sequence).await?;
+                let mut device = self.primary.find_match_details_retained(&sequence).await?;
+                if let Some(mamba) = self.mamba {
+                    mamba.cap_match_details(&mut device);
+                }
                 let lt = query_lower_tiers_with_options(
                     lower_tier,
                     sequence.as_slice(),
@@ -449,6 +472,7 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: false,
             session_updates: None,
+            mamba_checkpoints: None,
         }
     }
 
@@ -463,6 +487,7 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: false,
             session_updates: None,
+            mamba_checkpoints: None,
         }
     }
 
@@ -480,6 +505,7 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: true,
             session_updates: None,
+            mamba_checkpoints: None,
         }
     }
 
@@ -902,6 +928,7 @@ mod tests {
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
             session_updates: None,
+            mamba_checkpoints: None,
         };
         assert!(indexer.records_routing_decisions());
 
@@ -1037,6 +1064,7 @@ mod tests {
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
             session_updates: None,
+            mamba_checkpoints: None,
         };
 
         let primary_worker = WorkerWithDpRank::new(10, 0);

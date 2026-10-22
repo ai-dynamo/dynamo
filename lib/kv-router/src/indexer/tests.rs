@@ -2453,6 +2453,7 @@ mod local_indexer_tests {
 
     fn make_local_clear_event(event_id: u64) -> RouterEvent {
         RouterEvent {
+            cache_group: None,
             worker_id: 0,
             state_source: None,
             session_id: None,

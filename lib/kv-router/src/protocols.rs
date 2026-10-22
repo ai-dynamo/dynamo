@@ -948,6 +948,15 @@ impl Placement {
     }
 }
 
+/// Non-attention cache group a KV event belongs to. `None` on an event means the
+/// main attention group, which is the only group routers index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheGroup {
+    /// Mamba / GDN / KDA recurrent-state checkpoints.
+    Mamba,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlacementEvent {
     pub placement: Placement,
@@ -955,6 +964,9 @@ pub struct PlacementEvent {
     /// Session that triggered this store or reuse report, if provided by the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Cache group of the event when it is not the main attention group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_group: Option<CacheGroup>,
 }
 
 impl PlacementEvent {
@@ -963,11 +975,17 @@ impl PlacementEvent {
             placement,
             event,
             session_id: None,
+            cache_group: None,
         }
     }
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_cache_group(mut self, cache_group: CacheGroup) -> Self {
+        self.cache_group = Some(cache_group);
         self
     }
 
@@ -986,6 +1004,7 @@ impl PlacementEvent {
             self.placement.residency_domain,
         );
         event.session_id = self.session_id;
+        event.cache_group = self.cache_group;
         Some(event)
     }
 }
@@ -1602,6 +1621,9 @@ pub struct RouterEvent {
     /// Session that triggered this store or reuse report, if provided by the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Cache group of the event when it is not the main attention group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_group: Option<CacheGroup>,
 }
 
 impl RouterEvent {
@@ -1639,6 +1661,7 @@ impl RouterEvent {
             worker_id,
             state_source: None,
             session_id: None,
+            cache_group: None,
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
@@ -1664,6 +1687,11 @@ impl RouterEvent {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_cache_group(mut self, cache_group: CacheGroup) -> Self {
+        self.cache_group = Some(cache_group);
         self
     }
 
@@ -3004,5 +3032,41 @@ mod tests {
                 "missing {required} must not become a valid zero-load report"
             );
         }
+    }
+
+    #[test]
+    fn cache_group_defaults_to_none_and_is_skipped_on_the_wire() {
+        let event = RouterEvent::new(
+            7,
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Cleared,
+                dp_rank: 0,
+            },
+        );
+        assert_eq!(event.cache_group, None);
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json.get("cache_group").is_none());
+        let decoded: RouterEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.cache_group, None);
+    }
+
+    #[test]
+    fn cache_group_round_trips_and_survives_into_router_event() {
+        let placement = PlacementEvent::local_gpu(
+            7,
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Cleared,
+                dp_rank: 0,
+            },
+        )
+        .with_cache_group(CacheGroup::Mamba);
+        let router_event = placement.into_router_event().unwrap();
+        assert_eq!(router_event.cache_group, Some(CacheGroup::Mamba));
+
+        let bytes = rmp_serde::to_vec_named(&router_event).unwrap();
+        let decoded: RouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.cache_group, Some(CacheGroup::Mamba));
     }
 }

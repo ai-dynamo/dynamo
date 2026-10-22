@@ -2641,6 +2641,91 @@ mod event_processor_tests {
     }
 
     #[tokio::test]
+    async fn test_mamba_tag_survives_publisher_pipeline() {
+        use dynamo_kv_router::protocols::CacheGroup;
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        let publisher = MockPublisher::new();
+        let handle = tokio::spawn(run_event_processor_loop(
+            publisher.clone(),
+            1,
+            CancellationToken::new(),
+            rx,
+            None,
+            None,
+            DEFAULT_MAX_BATCH_BLOCKS,
+        ));
+
+        tx.send(
+            vec![
+                PlacementEvent::local_gpu(1, stored_event(0, None, 10, 0))
+                    .with_cache_group(CacheGroup::Mamba),
+            ]
+            .into(),
+        )
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].cache_group, Some(CacheGroup::Mamba));
+    }
+
+    #[tokio::test]
+    async fn test_mamba_events_bypass_dedup_and_never_coalesce_with_attention() {
+        use dynamo_kv_router::protocols::CacheGroup;
+        let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
+        let publisher = MockPublisher::new();
+        let handle = tokio::spawn(run_event_processor_loop(
+            publisher.clone(),
+            1,
+            CancellationToken::new(),
+            rx,
+            None,
+            None,
+            DEFAULT_MAX_BATCH_BLOCKS,
+        ));
+
+        // A Mamba checkpoint hash equals the attention block hash at the same boundary.
+        tx.send(
+            vec![
+                PlacementEvent::local_gpu(1, stored_event(0, None, 10, 0)),
+                PlacementEvent::local_gpu(1, stored_event(1, None, 10, 0))
+                    .with_cache_group(CacheGroup::Mamba),
+                PlacementEvent::local_gpu(1, removed_event(2, 10, 0)),
+                PlacementEvent::local_gpu(1, removed_event(3, 10, 0))
+                    .with_cache_group(CacheGroup::Mamba),
+            ]
+            .into(),
+        )
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        let shape = events
+            .iter()
+            .map(|event| {
+                let kind = match &event.event.data {
+                    KvCacheEventData::Stored(data) => ("stored", data.blocks.len()),
+                    KvCacheEventData::Removed(data) => ("removed", data.block_hashes.len()),
+                    KvCacheEventData::Cleared => ("cleared", 0),
+                };
+                (kind, event.cache_group)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![
+                (("stored", 1), None),
+                (("stored", 1), Some(CacheGroup::Mamba)),
+                (("removed", 1), None),
+                (("removed", 1), Some(CacheGroup::Mamba)),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn test_native_list_merges_removals_and_preserves_type_order() {
         let (tx, rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = MockPublisher::new();
@@ -4467,4 +4552,38 @@ mod event_plane_batch_tests {
         )
         .await;
     }
+}
+
+#[test]
+fn worker_normalizer_forwards_mamba_only_when_enabled() {
+    use super::zmq_listener::worker_normalizer;
+    use dynamo_kv_router::zmq_wire::{BlockHashValue, KvCacheSpecKind, RawKvEvent};
+    let worker = WorkerWithDpRank::new(1, 0);
+    let event = || RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(10)],
+        parent_block_hash: None,
+        token_ids: vec![],
+        block_size: 16,
+        medium: None,
+        lora_name: None,
+        cache_namespace: None,
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: Some(1),
+        kv_cache_spec_kind: Some(KvCacheSpecKind::Mamba),
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    };
+    assert!(
+        worker_normalizer(16, None, None, false, false)
+            .normalize(event(), 1, worker)
+            .is_none()
+    );
+    assert!(
+        worker_normalizer(16, None, None, false, true)
+            .normalize(event(), 1, worker)
+            .is_some()
+    );
 }

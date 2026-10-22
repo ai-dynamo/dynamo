@@ -33,6 +33,7 @@ pub mod backend;
 pub mod listener;
 pub mod logging;
 pub mod lookup;
+pub mod mamba_checkpoints;
 pub mod metrics;
 pub mod recording;
 pub mod recovery;

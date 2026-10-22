@@ -24,6 +24,7 @@ use crate::protocols::{
 };
 
 use super::lookup::{HashInput, merge_side_or_warn};
+use super::mamba_checkpoints::MambaCheckpointIndex;
 use super::session_updates::{SessionMutation, SessionUpdateSender};
 
 /// How the device-tier primary is populated.
@@ -254,6 +255,7 @@ pub enum Indexer {
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
         session_updates: Option<SessionUpdateSender>,
+        mamba_checkpoints: Option<Arc<MambaCheckpointIndex>>,
     },
     Concurrent {
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
@@ -261,6 +263,7 @@ pub enum Indexer {
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
         session_updates: Option<SessionUpdateSender>,
+        mamba_checkpoints: Option<Arc<MambaCheckpointIndex>>,
     },
     /// Primary served by another process. Lower tiers are that process's
     /// concern and arrive in its tiered response; only the side indexer is
@@ -282,6 +285,30 @@ impl Indexer {
             | Self::Remote { approx, .. } => approx.as_ref(),
             Self::None => None,
         }
+    }
+
+    /// Route an event to the Mamba checkpoint index. Returns true when the event is
+    /// Mamba-tagged and must not reach the primary or lower-tier indexers.
+    fn apply_to_checkpoints(&self, event: &RouterEvent, targets_primary: bool) -> bool {
+        let index = match self {
+            Self::Single {
+                mamba_checkpoints, ..
+            }
+            | Self::Concurrent {
+                mamba_checkpoints, ..
+            } => mamba_checkpoints.as_deref(),
+            Self::Remote { .. } | Self::None => None,
+        };
+        if event.cache_group.is_some() {
+            if let Some(index) = index {
+                index.apply_event(event);
+            }
+            return true;
+        }
+        if targets_primary && let Some(index) = index {
+            index.apply_event(event);
+        }
+        false
     }
 
     pub fn supports_overlap_refresh(&self) -> bool {
@@ -326,6 +353,9 @@ impl Indexer {
     /// already determined this is a device-tier event. Most callers should
     /// use [`Self::apply_event_routed`].
     pub async fn apply_event(&self, event: RouterEvent) {
+        if self.apply_to_checkpoints(&event, true) {
+            return;
+        }
         match self {
             Indexer::Single { primary, .. } => primary.apply_event(event).await,
             Indexer::Concurrent { primary, .. } => primary.apply_event(event).await,
@@ -353,6 +383,9 @@ impl Indexer {
                 return Ok(());
             }
         };
+        if self.apply_to_checkpoints(&event, targets_primary) {
+            return Ok(());
+        }
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
             Indexer::Single {
@@ -444,6 +477,9 @@ impl Indexer {
                 return Ok(());
             }
         };
+        if self.apply_to_checkpoints(&event, targets_primary) {
+            return Ok(());
+        }
         let session_update = match self {
             Self::Single {
                 session_updates, ..
@@ -648,6 +684,17 @@ impl Indexer {
             }
             Self::None => {}
         }
+        if let Self::Single {
+            mamba_checkpoints: Some(index),
+            ..
+        }
+        | Self::Concurrent {
+            mamba_checkpoints: Some(index),
+            ..
+        } = self
+        {
+            index.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+        }
         self.enqueue_session_update_and_wait(SessionMutation::Cleared {
             worker: WorkerWithDpRank::new(worker_id, dp_rank),
         })
@@ -681,6 +728,17 @@ impl Indexer {
                 primary.remove_worker(worker_id).await;
             }
             Indexer::Remote { .. } | Indexer::None => {}
+        }
+        if let Self::Single {
+            mamba_checkpoints: Some(index),
+            ..
+        }
+        | Self::Concurrent {
+            mamba_checkpoints: Some(index),
+            ..
+        } = self
+        {
+            index.remove_worker(worker_id);
         }
         if let Err(error) = self
             .enqueue_session_update_and_wait(SessionMutation::WorkerRemoved { worker_id })
@@ -716,6 +774,17 @@ impl Indexer {
                 primary.remove_worker_dp_rank(worker_id, dp_rank).await;
             }
             Indexer::Remote { .. } | Indexer::None => {}
+        }
+        if let Self::Single {
+            mamba_checkpoints: Some(index),
+            ..
+        }
+        | Self::Concurrent {
+            mamba_checkpoints: Some(index),
+            ..
+        } = self
+        {
+            index.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
         if let Err(error) = self
             .enqueue_session_update_and_wait(SessionMutation::Cleared {
@@ -1673,6 +1742,7 @@ pub fn create_indexer_with_policy(
             approx,
             primary_records_routing_decisions,
             session_updates: None,
+            mamba_checkpoints: None,
         }
     } else {
         Indexer::Single {
@@ -1686,6 +1756,7 @@ pub fn create_indexer_with_policy(
             approx,
             primary_records_routing_decisions,
             session_updates: None,
+            mamba_checkpoints: None,
         }
     }
 }
@@ -1715,6 +1786,7 @@ mod session_tests {
                 primary,
                 lower_tier,
             )),
+            mamba_checkpoints: None,
         };
         (indexer, session_prefix_index)
     }
@@ -1737,6 +1809,7 @@ mod session_tests {
                 primary,
                 lower_tier,
             )),
+            mamba_checkpoints: None,
         };
         (indexer, session_prefix_index)
     }
@@ -2372,5 +2445,163 @@ mod session_tests {
             vec![worker],
             "host residency was reported before the host index applied the store"
         );
+    }
+}
+
+#[cfg(test)]
+mod mamba_tests {
+    use super::*;
+    use crate::indexer::KvIndexer;
+    use crate::protocols::{CacheGroup, LocalBlockHash};
+    use crate::test_utils::make_store_event;
+
+    fn indexer_with_mamba() -> (Indexer, KvIndexer, Arc<MambaCheckpointIndex>) {
+        let checkpoints = Arc::new(MambaCheckpointIndex::new());
+        let primary = KvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        let indexer = Indexer::Single {
+            primary: primary.clone(),
+            lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: None,
+            mamba_checkpoints: Some(Arc::clone(&checkpoints)),
+        };
+        (indexer, primary, checkpoints)
+    }
+
+    fn tagged_checkpoint(worker_id: u64, hash: u64, parent: Option<u64>) -> RouterEvent {
+        use crate::protocols::{
+            ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+            KvCacheStoredBlockData,
+        };
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id: 100,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent.map(ExternalSequenceBlockHash),
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(hash),
+                        tokens_hash: LocalBlockHash(0),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        )
+        .with_cache_group(CacheGroup::Mamba)
+    }
+
+    #[tokio::test]
+    async fn mamba_event_never_reaches_the_primary_tree() {
+        let (indexer, primary, _) = indexer_with_mamba();
+        indexer
+            .apply_event_routed(tagged_checkpoint(1, 777, None))
+            .await
+            .unwrap();
+        let _ = primary.flush().await;
+        let tiered = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(0)])
+            .await
+            .unwrap();
+        assert!(tiered.device.overlap_scores.scores.is_empty());
+
+        // Control: the same event without the cache-group tag must be found.
+        let mut untagged = tagged_checkpoint(2, 778, None);
+        untagged.cache_group = None;
+        indexer.apply_event_routed(untagged).await.unwrap();
+        let _ = primary.flush().await;
+        let tiered = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(0)])
+            .await
+            .unwrap();
+        assert!(
+            !tiered.device.overlap_scores.scores.is_empty(),
+            "untagged control event should reach the primary tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlap_is_capped_at_the_deepest_checkpoint() {
+        let (indexer, primary, _) = indexer_with_mamba();
+        // Three attention blocks for worker 1: local hashes 1, 2, 3.
+        let store = make_store_event(1, &[1, 2, 3]);
+        let seq_hashes: Vec<u64> = match &store.event.data {
+            crate::protocols::KvCacheEventData::Stored(s) => {
+                s.blocks.iter().map(|b| b.block_hash.0).collect()
+            }
+            _ => unreachable!(),
+        };
+        indexer.apply_event_routed(store).await.unwrap();
+        // Checkpoint only at the first block.
+        indexer
+            .apply_event_routed(tagged_checkpoint(1, seq_hashes[0], None))
+            .await
+            .unwrap();
+        // Wait for the asynchronous primary to apply the store.
+        let _ = primary.flush().await;
+
+        let query: Vec<LocalBlockHash> = [1u64, 2, 3].iter().map(|&h| LocalBlockHash(h)).collect();
+        let tiered = indexer.find_matches_by_tier(query).await.unwrap();
+        let worker = WorkerWithDpRank::new(1, 0);
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&worker).copied(),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_without_mamba_events_keeps_its_full_overlap() {
+        let (indexer, primary, _) = indexer_with_mamba();
+        indexer
+            .apply_event_routed(make_store_event(2, &[1, 2, 3]))
+            .await
+            .unwrap();
+        let _ = primary.flush().await;
+        let query: Vec<LocalBlockHash> = [1u64, 2, 3].iter().map(|&h| LocalBlockHash(h)).collect();
+        let tiered = indexer.find_matches_by_tier(query).await.unwrap();
+        let worker = WorkerWithDpRank::new(2, 0);
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&worker).copied(),
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_index_drops_mamba_events_and_changes_nothing() {
+        let (mut indexer, primary, _) = indexer_with_mamba();
+        if let Indexer::Single {
+            mamba_checkpoints, ..
+        } = &mut indexer
+        {
+            *mamba_checkpoints = None;
+        }
+        indexer
+            .apply_event_routed(make_store_event(1, &[1, 2, 3]))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_routed(tagged_checkpoint(1, 1, None))
+            .await
+            .unwrap();
+        let _ = primary.flush().await;
+        let query: Vec<LocalBlockHash> = [1u64, 2, 3].iter().map(|&h| LocalBlockHash(h)).collect();
+        let tiered = indexer.find_matches_by_tier(query).await.unwrap();
+        let worker = WorkerWithDpRank::new(1, 0);
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&worker).copied(),
+            Some(3)
+        );
+        // The tagged checkpoint (tokens_hash 0) must have been dropped, not applied.
+        let leaked = indexer
+            .find_matches_by_tier(vec![LocalBlockHash(0)])
+            .await
+            .unwrap();
+        assert!(leaked.device.overlap_scores.scores.is_empty());
     }
 }

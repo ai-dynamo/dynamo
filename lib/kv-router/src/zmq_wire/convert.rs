@@ -6,11 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, Placement, PlacementEvent,
-    StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockExtraInfo, BlockHashOptions, CacheGroup, ExternalSequenceBlockHash, KvCacheEvent,
+    KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
+    Placement, PlacementEvent, StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
+use super::filter::KvCacheSpecKind;
 use super::types::{BlockHashValue, Locality, RawKvEvent};
 
 pub(super) fn has_duplicate_block_hashes(
@@ -75,6 +76,25 @@ pub fn convert_event(
             }
         },
     };
+
+    let cache_group = match &raw {
+        RawKvEvent::BlockStored {
+            kv_cache_spec_kind, ..
+        }
+        | RawKvEvent::BlockRemoved {
+            kv_cache_spec_kind, ..
+        } => kv_cache_spec_kind.and_then(KvCacheSpecKind::cache_group),
+        _ => None,
+    };
+    if let Some(cache_group) = cache_group {
+        return Some(convert_group_event(
+            raw,
+            event_id,
+            worker,
+            storage_tier,
+            cache_group,
+        ));
+    }
 
     let dp_rank = worker.dp_rank;
     let event = match raw {
@@ -485,6 +505,58 @@ pub fn create_stored_blocks(
     }
 
     blocks
+}
+
+/// Convert a non-attention cache-group event. Only hashes matter: the router never
+/// matches on these blocks, it only asks whether a hash is a checkpoint.
+fn convert_group_event(
+    raw: RawKvEvent,
+    event_id: u64,
+    worker: WorkerWithDpRank,
+    storage_tier: StorageTier,
+    cache_group: CacheGroup,
+) -> PlacementEvent {
+    let dp_rank = worker.dp_rank;
+    let data = match raw {
+        RawKvEvent::BlockStored {
+            block_hashes,
+            parent_block_hash,
+            ..
+        } => KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: parent_block_hash
+                .map(BlockHashValue::into_u64)
+                .map(ExternalSequenceBlockHash::from),
+            start_position: None,
+            blocks: block_hashes
+                .into_iter()
+                .map(BlockHashValue::into_u64)
+                .map(|hash| KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash::from(hash),
+                    tokens_hash: LocalBlockHash(0),
+                    mm_extra_info: None,
+                })
+                .collect(),
+        }),
+        RawKvEvent::BlockRemoved { block_hashes, .. } => {
+            KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: block_hashes
+                    .into_iter()
+                    .map(BlockHashValue::into_u64)
+                    .map(ExternalSequenceBlockHash::from)
+                    .collect(),
+            })
+        }
+        _ => unreachable!("only store and remove events carry a cache group"),
+    };
+    PlacementEvent::new(
+        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+        KvCacheEvent {
+            event_id,
+            data,
+            dp_rank,
+        },
+    )
+    .with_cache_group(cache_group)
 }
 
 #[cfg(test)]
