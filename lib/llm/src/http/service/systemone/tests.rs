@@ -161,6 +161,7 @@ fn derives_only_a_proven_single_data_parallel_rank() {
 #[test]
 fn cumulative_input_limit_is_checked_without_overflow() {
     assert_eq!(add_input_tokens(7, 5, 12), Ok(12));
+    assert_eq!(add_input_tokens(65_536, 1, 131_072), Ok(65_537));
     assert!(add_input_tokens(7, 6, 12).is_err());
     assert!(add_input_tokens(usize::MAX, 1, usize::MAX).is_err());
 }

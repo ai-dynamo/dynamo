@@ -702,7 +702,7 @@ impl SystemOneMetrics {
     fn new(prefix: &str) -> Self {
         let work_histogram = |name: &str, help: &str, max: f64| {
             HistogramVec::new(
-                HistogramOpts::new(format!("{prefix}_systemone_{name}"), help)
+                HistogramOpts::new(format!("{prefix}_{name}"), help)
                     .buckets(generate_log_buckets(1.0, max, 12)),
                 &["model"],
             )
@@ -710,28 +710,31 @@ impl SystemOneMetrics {
         };
         Self {
             questions: work_histogram(
-                "questions",
+                frontend_service::SYSTEMONE_QUESTIONS,
                 "Questions per admitted System One request",
                 128.0,
             ),
             input_tokens: work_histogram(
-                "input_tokens",
+                frontend_service::SYSTEMONE_INPUT_TOKENS,
                 "Expanded prompt tokens per admitted System One request",
                 65_536.0,
             ),
             candidate_ids: work_histogram(
-                "candidate_ids",
+                frontend_service::SYSTEMONE_CANDIDATE_IDS,
                 "Requested candidate token IDs per admitted System One request",
                 32_640.0,
             ),
             cached_tokens: work_histogram(
-                "cached_tokens",
+                frontend_service::SYSTEMONE_CACHED_TOKENS,
                 "Cached prompt tokens reported by a completed System One branch",
                 65_536.0,
             ),
             admitted_branches: IntCounterVec::new(
                 Opts::new(
-                    format!("{prefix}_systemone_admitted_branches_total"),
+                    format!(
+                        "{prefix}_{}",
+                        frontend_service::SYSTEMONE_ADMITTED_BRANCHES_TOTAL
+                    ),
                     "Total question branches admitted for System One dispatch",
                 ),
                 &["model"],
@@ -739,7 +742,7 @@ impl SystemOneMetrics {
             .expect("fixed System One branch metric is valid"),
             phase_seconds: HistogramVec::new(
                 HistogramOpts::new(
-                    format!("{prefix}_systemone_phase_seconds"),
+                    format!("{prefix}_{}", frontend_service::SYSTEMONE_PHASE_SECONDS),
                     "Duration of a System One execution phase in seconds",
                 )
                 .buckets(generate_log_buckets(0.001, 120.0, 15)),
