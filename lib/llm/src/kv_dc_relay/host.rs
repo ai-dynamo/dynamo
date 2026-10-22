@@ -1007,6 +1007,7 @@ async fn run_host_supervisor(
     let outcome = 'supervisor: loop {
         let mut view = membership_rx.borrow_and_update().clone();
         reject_duplicate_live_pools(&mut view, ckf_dc_id);
+        retire_departed_endpoint_slots(&view, &mut slots, &mut retired_slots, &pools);
         {
             topology.replace_membership(view.clone());
             topology.replace_catalog(&catalog_rx.borrow_and_update());
@@ -1015,7 +1016,7 @@ async fn run_host_supervisor(
             let slot = match slots.entry(endpoint.clone()) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let (metadata, metadata_rx) = watch::channel(None);
+                    let (metadata, metadata_rx) = watch::channel(Some(membership.clone()));
                     let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
                     let slot_cancel = cancel.child_token();
                     let slot_incarnation =
@@ -1053,10 +1054,16 @@ async fn run_host_supervisor(
             };
             publish_endpoint_metadata_if_changed(&slot.metadata, membership);
         }
-        retire_departed_endpoint_slots(&view, &mut slots, &mut retired_slots);
         *statuses.write().await = slots
             .iter()
-            .map(|(endpoint, slot)| (endpoint.clone(), slot.status.clone()))
+            .map(|(endpoint, slot)| {
+                let public_endpoint = slot
+                    .metadata
+                    .borrow()
+                    .as_ref()
+                    .map_or_else(|| endpoint.clone(), EndpointMembership::public_endpoint);
+                (public_endpoint, slot.status.clone())
+            })
             .collect();
 
         loop {
@@ -1280,17 +1287,26 @@ fn retire_departed_endpoint_slots(
     view: &DcMembershipView,
     slots: &mut HashMap<EndpointId, EndpointSlotTask>,
     retired_slots: &mut JoinSet<(EndpointId, Result<(), tokio::task::JoinError>)>,
+    pools: &PoolRegistry,
 ) {
     let departed: Vec<_> = slots
-        .keys()
-        .filter(|endpoint| !view.endpoints.contains_key(*endpoint))
-        .cloned()
+        .iter()
+        .filter(|(endpoint, slot)| {
+            view.endpoints.get(*endpoint).is_none_or(|next| {
+                slot.metadata
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|old| old.namespace != next.namespace)
+            })
+        })
+        .map(|(endpoint, _)| endpoint.clone())
         .collect();
     for endpoint in departed {
         let Some(slot) = slots.remove(&endpoint) else {
             continue;
         };
         slot.cancel.cancel();
+        pools.retire_endpoint(&endpoint);
         drop(slot.metadata);
         retired_slots.spawn(async move {
             let result = slot.task.await;
@@ -1624,6 +1640,7 @@ async fn run_endpoint_slot(
                 component.clone(),
                 ckf_dc_id,
                 endpoint.clone(),
+                membership.public_endpoint(),
                 binding.clone(),
                 membership.registrations.clone(),
                 membership.roles.clone(),
@@ -1922,6 +1939,7 @@ async fn start_endpoint_pool(
     component: Component,
     ckf_dc_id: dynamo_kv_router::DcId,
     endpoint: EndpointId,
+    public_endpoint: EndpointId,
     binding: ActorBinding,
     registrations: Vec<CanonicalModelRegistration>,
     roles: Vec<WorkerRole>,
@@ -1936,6 +1954,8 @@ async fn start_endpoint_pool(
     let attachment = pools
         .attach(PoolAttachRequest {
             pool_id: PoolId::new(binding.domain.id, ckf_dc_id),
+            public_endpoint,
+            owner_cancel: cancel.clone(),
             endpoint: endpoint.clone(),
             registrations: registrations.clone(),
             query_semantics: binding.domain.query_semantics,
@@ -2857,12 +2877,53 @@ mod tests {
             &DcMembershipView::default(),
             &mut slots,
             &mut retired_slots,
+            &registry(),
         );
 
         assert!(slots.is_empty());
         assert!(cancel.is_cancelled());
         let (retired_slot, result) = retired_slots.join_next().await.unwrap().unwrap();
         assert_eq!(retired_slot, endpoint);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn logical_namespace_reassignment_restarts_the_physical_slot() {
+        let mut member = membership("physical.backend.generate", domain(1, "meta/llama"));
+        member.namespace = "logical-a".into();
+        let endpoint = member.endpoint.clone();
+        let (metadata, _metadata_rx) = watch::channel(Some(member.clone()));
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move { task_cancel.cancelled().await });
+        let mut slots = HashMap::from([(
+            endpoint.clone(),
+            EndpointSlotTask {
+                metadata,
+                status: Arc::new(RwLock::new(EndpointSlotStatus::default())),
+                cancel: cancel.clone(),
+                task,
+            },
+        )]);
+        let mut retired_slots = JoinSet::new();
+        let pools = registry();
+        let unchanged = DcMembershipView {
+            endpoints: Arc::new(HashMap::from([(endpoint.clone(), member.clone())])),
+        };
+        retire_departed_endpoint_slots(&unchanged, &mut slots, &mut retired_slots, &pools);
+        assert_eq!(slots.len(), 1);
+        assert!(!cancel.is_cancelled());
+
+        // An alias-only change must retire the old public lifetime before reusing the endpoint.
+        member.namespace = "logical-b".into();
+        let changed = DcMembershipView {
+            endpoints: Arc::new(HashMap::from([(endpoint.clone(), member)])),
+        };
+        retire_departed_endpoint_slots(&changed, &mut slots, &mut retired_slots, &pools);
+        assert!(slots.is_empty());
+        assert!(cancel.is_cancelled());
+        let (retired_endpoint, result) = retired_slots.join_next().await.unwrap().unwrap();
+        assert_eq!(retired_endpoint, endpoint);
         result.unwrap();
     }
 
@@ -3316,6 +3377,8 @@ mod tests {
         let mut old_attachment = registry
             .attach(PoolAttachRequest {
                 pool_id: PoolId::new(old_domain.id, DcId::new(7)),
+                public_endpoint: EndpointId::from("prod.backend.generate"),
+                owner_cancel: CancellationToken::new(),
                 endpoint: EndpointId::from("prod.backend.generate"),
                 registrations: vec![CanonicalModelRegistration::new(
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),
@@ -3364,6 +3427,8 @@ mod tests {
         let new_attachment = registry
             .attach(PoolAttachRequest {
                 pool_id: PoolId::new(desired_binding.domain.id, DcId::new(7)),
+                public_endpoint: EndpointId::from("prod.backend.generate"),
+                owner_cancel: CancellationToken::new(),
                 endpoint: EndpointId::from("prod.backend.generate"),
                 registrations: new_registrations,
                 query_semantics: query_semantics(),
@@ -3831,6 +3896,8 @@ mod tests {
         let attachment = registry
             .attach(PoolAttachRequest {
                 pool_id: PoolId::new(domain(1, "meta/llama").id, DcId::new(7)),
+                public_endpoint: EndpointId::from("prod.backend.generate"),
+                owner_cancel: CancellationToken::new(),
                 endpoint: EndpointId::from("prod.backend.generate"),
                 registrations: vec![CanonicalModelRegistration::new(
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),
@@ -4010,6 +4077,8 @@ mod tests {
         let attachment = registry
             .attach(PoolAttachRequest {
                 pool_id: PoolId::new(domain.id, DcId::new(7)),
+                public_endpoint: EndpointId::from("prod.backend.generate"),
+                owner_cancel: CancellationToken::new(),
                 endpoint: EndpointId::from("prod.backend.generate"),
                 registrations: vec![CanonicalModelRegistration::new(
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),

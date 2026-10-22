@@ -41,7 +41,10 @@ pub(super) struct PoolActorConfig {
 #[derive(Debug)]
 pub(super) struct PoolAttachRequest {
     pub(super) pool_id: PoolId,
+    /// Physical discovery identity, used for pool ownership and KV state.
     pub(super) endpoint: EndpointId,
+    pub(super) public_endpoint: EndpointId,
+    pub(super) owner_cancel: CancellationToken,
     pub(super) registrations: Vec<CanonicalModelRegistration>,
     pub(super) query_semantics: KvQuerySemantics,
     pub(super) roles: Vec<WorkerRole>,
@@ -68,6 +71,7 @@ enum PoolEntryState {
 
 struct PoolEntry {
     endpoint: EndpointId,
+    public_endpoint: EndpointId,
     handle: KvDcRelayHandle,
     identity: ProducerIdentity,
     layout_generation: u64,
@@ -720,8 +724,8 @@ impl PoolRegistry {
         let layout_generation = {
             let mut state = self.state.lock();
             anyhow::ensure!(
-                state.accepting,
-                "KV DC Relay pool registry is shutting down"
+                state.accepting && !request.owner_cancel.is_cancelled(),
+                "KV DC Relay pool registry or endpoint owner is shutting down"
             );
             if let Some(endpoint) = pool_owner(&state, request.pool_id) {
                 anyhow::bail!(
@@ -778,7 +782,7 @@ impl PoolRegistry {
             .get(&request.pool_id)
             .is_some_and(|reservation| reservation.layout_generation == layout_generation);
         anyhow::ensure!(
-            state.accepting && reservation_matches,
+            state.accepting && reservation_matches && !request.owner_cancel.is_cancelled(),
             "pool {} generation {} reservation was retired before commit",
             request.pool_id,
             layout_generation
@@ -795,7 +799,7 @@ impl PoolRegistry {
         let identity = handle.identity();
         let descriptor = DcPoolDescriptor::new(
             identity,
-            request.endpoint.clone(),
+            request.public_endpoint.clone(),
             registrations.clone(),
             request.query_semantics,
             roles.clone(),
@@ -806,6 +810,7 @@ impl PoolRegistry {
             request.pool_id,
             PoolEntry {
                 endpoint: request.endpoint.clone(),
+                public_endpoint: request.public_endpoint.clone(),
                 handle: handle.clone(),
                 identity,
                 layout_generation,
@@ -881,7 +886,7 @@ impl PoolRegistry {
         entry.registrations = registrations.clone();
         let descriptor = DcPoolDescriptor::new(
             entry.identity,
-            entry.endpoint.clone(),
+            entry.public_endpoint.clone(),
             registrations.clone(),
             entry.query_semantics,
             entry.roles.clone(),
@@ -917,7 +922,7 @@ impl PoolRegistry {
         entry.roles = roles.clone();
         let descriptor = DcPoolDescriptor::new(
             entry.identity,
-            entry.endpoint.clone(),
+            entry.public_endpoint.clone(),
             entry.registrations.clone(),
             entry.query_semantics,
             roles.clone(),
@@ -1004,6 +1009,36 @@ impl PoolRegistry {
             publish_load_if_changed(&state, &self.load_tx, pool_id);
         }
         true
+    }
+
+    /// Withdraw immediately on physical source removal or public identity reassignment.
+    /// The owner's token must be cancelled first; attach checks it under this same lock,
+    /// including after a slow CKF allocation, so a retired slot cannot publish late.
+    pub(super) fn retire_endpoint(&self, endpoint: &EndpointId) {
+        let mut state = self.state.lock();
+        state
+            .reservations
+            .retain(|_, reservation| &reservation.endpoint != endpoint);
+        let retired = state
+            .pools
+            .iter_mut()
+            .filter_map(|(&id, entry)| {
+                if &entry.endpoint != endpoint || entry.state != PoolEntryState::Active {
+                    return None;
+                }
+                entry.state = PoolEntryState::Withdrawn;
+                entry.cancel.cancel();
+                Some((id, entry.hub.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (id, _) in &retired {
+            publish_catalog_remove(&mut state, &self.catalog_tx, *id);
+            publish_load_if_changed(&state, &self.load_tx, *id);
+        }
+        drop(state);
+        for (_, hub) in retired {
+            hub.retire();
+        }
     }
 
     pub(super) async fn withdraw(
@@ -1565,6 +1600,8 @@ mod tests {
     fn request(pool_id: PoolId, endpoint: &str, model: &str) -> PoolAttachRequest {
         PoolAttachRequest {
             pool_id,
+            public_endpoint: EndpointId::from(endpoint),
+            owner_cancel: CancellationToken::new(),
             endpoint: EndpointId::from(endpoint),
             registrations: vec![registration(model)],
             query_semantics: query_semantics(),
@@ -1950,6 +1987,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logical_cutover_withdraws_physical_pool_and_fences_late_allocation() {
+        let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
+        let logical = EndpointId::from("logical.worker.generate");
+        let physical_a = EndpointId::from("physical-a.worker.generate");
+        let mut first = request(pool(1), "physical-a.worker.generate", "llama");
+        first.public_endpoint = logical.clone();
+        let first_cancel = first.owner_cancel.clone();
+        let mut first = registry.attach(first).await.unwrap();
+        let old_identity = first.handle.identity();
+        assert_eq!(
+            descriptor(&registry.catalog(), pool(1)).serving_endpoint(),
+            &logical
+        );
+        assert_eq!(registry.state.lock().pools[&pool(1)].endpoint, physical_a);
+        first_cancel.cancel();
+        registry.retire_endpoint(&physical_a);
+        assert!(registry.catalog().pools().is_empty());
+        assert!(first.pool_cancel.is_cancelled());
+        assert!(
+            registry
+                .replace_roles(&mut first, vec![WorkerRole::Decode])
+                .is_err()
+        );
+
+        let mut second = request(pool(2), "physical-b.worker.generate", "llama");
+        second.public_endpoint = logical.clone();
+        let second = registry.attach(second).await.unwrap();
+        assert_ne!(old_identity, second.handle.identity());
+        assert_eq!(registry.catalog().pools().len(), 1);
+        assert_eq!(
+            descriptor(&registry.catalog(), pool(2)).serving_endpoint(),
+            &logical
+        );
+        // Old completion cannot remove the replacement's descriptor.
+        registry.detach(first).await.unwrap();
+        assert_eq!(registry.catalog().pools().len(), 1);
+        registry.detach(second).await.unwrap();
+
+        let mut pending = request(pool(3), "physical-a.worker.generate", "llama");
+        pending.public_endpoint = logical;
+        let pending_cancel = pending.owner_cancel.clone();
+        let GatedBuilder {
+            builder,
+            started,
+            release,
+            finished,
+        } = gated_builder();
+        let task_registry = registry.clone();
+        let task =
+            tokio::spawn(async move { task_registry.attach_with_builder(pending, builder).await });
+        started.await.unwrap();
+        pending_cancel.cancel();
+        registry.retire_endpoint(&physical_a);
+        release.send(()).unwrap();
+        finished.await.unwrap();
+        assert!(task.await.unwrap().is_err());
+        assert!(registry.catalog().pools().is_empty());
+        assert!(registry.state.lock().reservations.is_empty());
+
+        // A retired slot cannot start another allocation after withdrawal either.
+        let retired = request(pool(3), "physical-a.worker.generate", "llama");
+        retired.owner_cancel.cancel();
+        assert!(registry.attach(retired).await.is_err());
+        assert!(registry.catalog().pools().is_empty());
+        assert!(registry.state.lock().reservations.is_empty());
+    }
+
+    #[tokio::test]
     async fn cancelled_allocation_rolls_back_and_allows_reattach() {
         let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
         let pool_id = pool(1);
@@ -2224,6 +2329,8 @@ mod tests {
         let first = registry
             .attach(PoolAttachRequest {
                 pool_id: pool(1),
+                public_endpoint: EndpointId::from("fast.router.generate"),
+                owner_cancel: CancellationToken::new(),
                 endpoint: EndpointId::from("fast.router.generate"),
                 registrations: registrations(),
                 query_semantics: query_semantics(),
@@ -2237,6 +2344,8 @@ mod tests {
         let second = registry
             .attach(PoolAttachRequest {
                 pool_id: pool(2),
+                public_endpoint: EndpointId::from("slow.router.generate"),
+                owner_cancel: CancellationToken::new(),
                 endpoint: EndpointId::from("slow.router.generate"),
                 registrations: registrations(),
                 query_semantics: query_semantics(),
@@ -2285,6 +2394,8 @@ mod tests {
         let without_alias = registry
             .attach(PoolAttachRequest {
                 pool_id: pool(2),
+                public_endpoint: EndpointId::from("slow.router.generate"),
+                owner_cancel: CancellationToken::new(),
                 endpoint: EndpointId::from("slow.router.generate"),
                 registrations: vec![CanonicalModelRegistration::new(
                     CanonicalModelId::new("llama").unwrap(),
@@ -3165,6 +3276,8 @@ mod tests {
         let attachment = registry
             .attach(PoolAttachRequest {
                 pool_id: pool(1),
+                public_endpoint: EndpointId::from("fast.router.generate"),
+                owner_cancel: CancellationToken::new(),
                 endpoint: EndpointId::from("fast.router.generate"),
                 registrations: vec![registration("llama")],
                 query_semantics: query_semantics(),

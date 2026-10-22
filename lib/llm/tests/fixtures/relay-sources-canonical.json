@@ -50,5 +50,39 @@
     },
     "canonical": "{\"version\":1,\"connectionRevision\":\"\u00e9\\u003c\\u003e\\u0026\\u2028\\u2029\",\"sources\":[{\"namespace\":\"a\"},{\"namespace\":\"b\"}]}",
     "revision": "4ce3e1557cb7ca5fee3c2633a4d4f6ad9171b34a147d8760a095933e22cd3ceb"
+  },
+  {
+    "document": {
+      "version": 1,
+      "sources": [
+        {
+          "namespace": "workers-model-hash",
+          "logicalNamespace": "workers-model"
+        }
+      ]
+    },
+    "canonical": "{\"version\":1,\"sources\":[{\"namespace\":\"workers-model-hash\",\"logicalNamespace\":\"workers-model\"}]}",
+    "revision": "74e790f3a813058c03cd2d123784e6051173e47c3e1e9ec63bb2582b2889cc76"
+  },
+  {
+    "document": {
+      "version": 1,
+      "connectionRevision": "connection",
+      "sources": [
+        {
+          "namespace": "workers-model-oldhash",
+          "logicalNamespace": "workers-model"
+        },
+        {
+          "namespace": "workers-legacy"
+        },
+        {
+          "namespace": "workers-model-newhash",
+          "logicalNamespace": "workers-model"
+        }
+      ]
+    },
+    "canonical": "{\"version\":1,\"connectionRevision\":\"connection\",\"sources\":[{\"namespace\":\"workers-legacy\"},{\"namespace\":\"workers-model-newhash\",\"logicalNamespace\":\"workers-model\"},{\"namespace\":\"workers-model-oldhash\",\"logicalNamespace\":\"workers-model\"}]}",
+    "revision": "f3ac143f35b283dd531d0621c324add6d983a667771160da19bc7bd5d98ccadb"
   }
 ]

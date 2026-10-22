@@ -21,9 +21,13 @@ pub struct KvDcRelaySourcesFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RelaySource {
+    /// Actual discovery namespace advertised by the worker cards.
     pub namespace: String,
+    /// Stable outward identity. Discovery and KV routing always use `namespace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_namespace: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -54,6 +58,12 @@ impl SourcesDocument {
                     && source.namespace.trim() == source.namespace,
                 "invalid source namespace"
             );
+            if let Some(logical) = &source.logical_namespace {
+                ensure!(
+                    !logical.is_empty() && logical.len() <= 512 && logical.trim() == logical,
+                    "invalid logical source namespace"
+                );
+            }
             ensure!(
                 namespaces.insert(&source.namespace),
                 "duplicate source namespace"
@@ -97,6 +107,16 @@ impl KvDcRelaySourcesFile {
 impl From<SourcesDocument> for NamespaceSelection {
     fn from(document: SourcesDocument) -> Self {
         Self {
+            logical_namespaces: document
+                .sources
+                .iter()
+                .filter_map(|source| {
+                    source
+                        .logical_namespace
+                        .as_ref()
+                        .map(|logical| (source.namespace.clone(), logical.clone()))
+                })
+                .collect(),
             scope: NamespaceScope::Namespaces(
                 document
                     .sources
@@ -137,6 +157,39 @@ impl NamespaceSource for KvDcRelaySourcesFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logical_namespace_validation_and_explicit_self_alias_revision() {
+        let parse = |logical: &str| {
+            serde_json::from_value::<SourcesDocument>(serde_json::json!({
+                "version": 1, "sources": [{"namespace": "physical", "logicalNamespace": logical}]
+            }))
+            .unwrap()
+        };
+        for invalid in ["", " logical", "logical "] {
+            assert!(parse(invalid).canonicalize(None).is_err());
+        }
+        assert!(parse(&"a".repeat(513)).canonicalize(None).is_err());
+        let mut redundant = parse("physical");
+        redundant.canonicalize(None).unwrap();
+        assert_eq!(
+            redundant.sources[0].logical_namespace.as_deref(),
+            Some("physical")
+        );
+        let mut legacy: SourcesDocument =
+            serde_json::from_str(r#"{"version":1,"sources":[{"namespace":"physical"}]}"#).unwrap();
+        legacy.canonicalize(None).unwrap();
+        assert_ne!(legacy.revision, redundant.revision);
+        let mut aliased = parse("stable");
+        aliased.canonicalize(None).unwrap();
+        assert_ne!(legacy.revision, aliased.revision);
+        let selection = NamespaceSelection::from(aliased);
+        assert_eq!(selection.logical_namespaces["physical"], "stable");
+        assert_eq!(
+            selection.scope,
+            NamespaceScope::Namespaces(vec!["physical".into()])
+        );
+    }
 
     #[test]
     fn shared_canonical_revisions() {
