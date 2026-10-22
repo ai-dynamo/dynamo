@@ -33,11 +33,20 @@ anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+# Not a workspace dependency; the version lib/llm uses.
+base64 = { version = "0.22" }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 prost = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+# Not a workspace dependency; the version lib/runtime uses. The topology
+# socket probes whether a process still serves it without blocking.
+socket2 = { version = "0.5.8" }
 tokio = { workspace = true }
+# `net`: the topology consumer serves its local API on a Unix socket.
+tokio-stream = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -49,5 +58,4 @@ tonic-build = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 prost-types = { workspace = true }
 tempfile = { workspace = true }
-tokio-stream = { workspace = true, features = ["net"] }
 tracing-subscriber = { workspace = true }

@@ -8,7 +8,10 @@ use super::proto::{
     partition::Placement,
 };
 
+mod agent;
 mod protocol;
+mod relay;
+mod resolution;
 
 const CONTROL: Protocol = Protocol::HydraControl;
 const STATE: Protocol = Protocol::HydraState;
