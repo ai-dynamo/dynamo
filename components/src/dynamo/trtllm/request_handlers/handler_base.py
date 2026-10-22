@@ -46,6 +46,7 @@ from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.output_token_limit import cap_output_tokens
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.health_check import HEALTH_CHECK_KEY
@@ -299,6 +300,7 @@ class RequestHandlerConfig:
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
     # Force conversation-affinity ADP routing regardless of engine config detection.
     conversation_affinity: bool = False
@@ -319,9 +321,12 @@ class HandlerBase(BaseGenerativeHandler):
     across all generative handlers (LLM, video, image).
     """
 
+    max_output_tokens: Optional[int] = None
+
     def __init__(self, config: RequestHandlerConfig):
         self.engine = config.engine
         self.default_sampling_params = config.default_sampling_params
+        self.max_output_tokens = config.max_output_tokens
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
@@ -1217,6 +1222,14 @@ class HandlerBase(BaseGenerativeHandler):
                 request["stop_conditions"],
                 no_stop_trim=(output_options or {}).get("no_stop_trim", False),
             )
+
+        sampling_params.max_tokens = cap_output_tokens(
+            sampling_params.max_tokens,
+            self.max_output_tokens,
+            sampling_params.min_tokens
+            if self.disaggregation_mode != DisaggregationMode.PREFILL
+            else None,
+        )
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.

@@ -423,6 +423,7 @@ class TestDeferredAbortGuard:
 
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.max_output_tokens = None
         config.shutdown_event = None
         config.conversation_affinity = False
         return _ConcreteHandler(config)
@@ -632,6 +633,7 @@ class TestMultimodalGuard:
 
     def _make_handler(self, multimodal_processor=None) -> HandlerBase:
         config = MagicMock()
+        config.max_output_tokens = None
         config.multimodal_processor = multimodal_processor
         config.shutdown_event = None
         config.conversation_affinity = False
@@ -714,6 +716,7 @@ class TestPrefillPromptMetadata:
 
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.max_output_tokens = None
         config.multimodal_processor = MagicMock()
         config.shutdown_event = None
         config.conversation_affinity = False
@@ -785,6 +788,7 @@ class TestDisaggRequestId:
 
     def _make_prefill_handler(self, machine_id: int = 42) -> HandlerBase:
         config = MagicMock()
+        config.max_output_tokens = None
         config.shutdown_event = None
         config.disagg_machine_id = machine_id
         config.conversation_affinity = False
@@ -794,6 +798,7 @@ class TestDisaggRequestId:
 
     def _make_decode_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.max_output_tokens = None
         config.shutdown_event = None
         handler = _ConcreteHandler(config)
         handler.disaggregation_mode = DisaggregationMode.DECODE
@@ -886,8 +891,50 @@ class TestGenerateLocally:
     priority field) must fall back to DEFAULT_REQUEST_PRIORITY (0.5).
     """
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested", [None, 512, 131072, 131073, 1000000])
+    async def test_output_ceiling_reaches_engine(self, requested):
+        handler = self._make_handler()
+        handler.max_output_tokens = 131072
+        handler.default_sampling_params = SamplingParams(max_tokens=131072)
+        result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=result)
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": requested, "ignore_eos": True},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+        params = handler.engine.llm.generate_async.call_args.kwargs["sampling_params"]
+        assert params.max_tokens == (
+            131072 if requested is None else min(requested, 131072)
+        )
+        assert params.ignore_eos is True
+
+    @pytest.mark.asyncio
+    async def test_output_ceiling_rejects_floor_before_engine_submission(self):
+        from dynamo.llm.exceptions import InvalidArgument
+
+        handler = self._make_handler()
+        handler.max_output_tokens = 131072
+        handler.default_sampling_params = SamplingParams(max_tokens=131072)
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 1000000, "min_tokens": 131073},
+            "sampling_options": {},
+        }
+        with pytest.raises(InvalidArgument):
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+        handler.engine.llm.generate_async.assert_not_called()
+
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.max_output_tokens = None
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.conversation_affinity = False
@@ -1665,6 +1712,7 @@ class TestConversationAffinity:
         dp_rank_source: str = "engine",
     ) -> HandlerBase:
         config = MagicMock()
+        config.max_output_tokens = None
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.conversation_affinity = False
@@ -1957,6 +2005,7 @@ class TestEngineIdMapLogging:
 
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
+        config.max_output_tokens = None
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.conversation_affinity = False

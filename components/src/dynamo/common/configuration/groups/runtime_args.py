@@ -93,6 +93,7 @@ class DynamoRuntimeConfig(ConfigBase):
     # default; when set, these surface env vars that the Rust runtime reads
     # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
     engine_request_limit: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
     tcp_tls_ca_cert_path: Optional[str] = None
@@ -135,6 +136,9 @@ class DynamoRuntimeConfig(ConfigBase):
             os.environ["DYN_FPM_TRACE"] = "1" if self.fpm_trace else "0"
 
         self._validate_output_modalities()
+
+        if self.max_output_tokens is not None and self.max_output_tokens <= 0:
+            raise ValueError("--max-output-tokens must be a positive integer")
 
         if self.engine_request_limit is not None and self.engine_request_limit <= 0:
             raise ValueError(
@@ -454,6 +458,17 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Max requests handled concurrently by the engine (worker-pool "
             "semaphore size). Enables worker-side request rejection when set. "
             "Disabled by default.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--max-output-tokens",
+            env_var="DYN_OUTPUT_TOKEN_LIMIT",
+            default=None,
+            arg_type=int,
+            help="Worker-side output token ceiling for vLLM, SGLang, and "
+            "TensorRT-LLM. Smaller client budgets are honored; larger budgets "
+            "are clamped. Disabled by default.",
         )
 
         add_argument(

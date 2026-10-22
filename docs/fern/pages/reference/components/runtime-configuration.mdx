@@ -378,6 +378,22 @@ address.
   Environment variable: `DYN_ENGINE_REQUEST_LIMIT`
 </ParamField>
 
+<ParamField path="--max-output-tokens" type="integer" default="null">
+  Worker-side ceiling for text generation in vLLM, SGLang, and TensorRT-LLM. Set
+  `--max-output-tokens 131072` on every aggregated/decode worker to bound each
+  generated completion. The value must be positive. Smaller client budgets are
+  honored; larger budgets are clamped after request translation. An omitted budget
+  retains the backend default, bounded by this ceiling. A minimum-token budget
+  above the effective maximum is rejected with HTTP 400. This control covers
+  OpenAI/token input, native Generate, and multimodal text-generation paths.
+  Image/video diffusion and multi-stage vLLM-Omni pipelines use separate controls.
+  It does not set an elapsed-time timeout or a combined budget across `n` choices.
+
+  Environment variable: `DYN_OUTPUT_TOKEN_LIMIT`. Disabled when unset. Frontend-only
+  `DYN_MAX_OUTPUT_TOKENS` model metadata does not enforce this worker limit. For
+  vLLM, an explicit generation-config ceiling also applies; the smaller ceiling wins.
+</ParamField>
+
 <ParamField path="DYN_DYNAMO_REQUEST_QUEUE_LIMIT" type="integer" default="16">
   Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies only
   when `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` is set. Must be at least `2`; the

@@ -1691,6 +1691,53 @@ def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
     assert sp.max_tokens == remaining
 
 
+@pytest.mark.parametrize("token_input", [False, True])
+@pytest.mark.parametrize("requested", [None, 512, 131072, 131073, 1000000])
+def test_worker_ceiling_after_client_sampling_overrides(token_input, requested):
+    from dynamo.vllm.handlers import (
+        DecodeWorkerHandler,
+        build_sampling_params,
+        build_sampling_params_openai,
+    )
+
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.max_output_tokens = 131072
+    defaults = {"max_tokens": 131072}
+    if token_input:
+        params = build_sampling_params(
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_options": {},
+                "stop_conditions": {"max_tokens": requested, "ignore_eos": True},
+                "output_options": {},
+            },
+            defaults,
+            model_max_len=2000000,
+        )
+    else:
+        params = build_sampling_params_openai(
+            {"max_tokens": requested, "ignore_eos": True}, defaults
+        )
+    handler._cap_sampling_params(params)
+    assert params.max_tokens == (
+        131072 if requested is None else min(requested, 131072)
+    )
+    assert params.ignore_eos is True
+
+
+def test_worker_ceiling_rejects_incompatible_minimum():
+    from vllm import SamplingParams
+
+    from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.max_output_tokens = 131072
+    params = SamplingParams(max_tokens=1000000, min_tokens=131073)
+    with pytest.raises(InvalidArgument):
+        handler._cap_sampling_params(params)
+
+
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {
@@ -2354,7 +2401,8 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
     async def abort_monitor(*args, **kwargs):
         yield
 
-    handler = SimpleNamespace(
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.__dict__.update(
         input_param_manager=InputParams(),
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
@@ -2434,7 +2482,8 @@ async def test_generate_text_mode_notifies_for_empty_decoded_token():
     async def abort_monitor(*args, **kwargs):
         yield
 
-    handler = SimpleNamespace(
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.__dict__.update(
         input_param_manager=InputParams(),
         default_sampling_params={},
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),

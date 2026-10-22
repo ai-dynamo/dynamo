@@ -13,6 +13,7 @@ import torch
 from dynamo._core import Client, Context
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
+from dynamo.common.output_token_limit import cap_sglang_output_tokens
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm.exceptions import InvalidArgument
@@ -86,6 +87,7 @@ class SglangUtils:
         request: SglangMultimodalRequest,
         server_args: Any | None = None,
         engine: Any | None = None,
+        max_output_tokens: int | None = None,
     ) -> dict:
         """Build sampling parameters for SGLang engine (generic functionality)"""
         sampling_params = {}
@@ -117,7 +119,7 @@ class SglangUtils:
         )
 
         logger.debug(f"Sampling params: {sampling_params}")
-        return sampling_params
+        return cap_sglang_output_tokens(sampling_params, max_output_tokens)
 
 
 class EmbeddingsProcessor:
@@ -597,7 +599,10 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             {"sampling_params": {"n": request.request.sampling_options.n}}
         )
         sampling_params = SglangUtils.build_sampling_params(
-            request, self.config.server_args, self.engine
+            request,
+            self.config.server_args,
+            self.engine,
+            self.max_output_tokens,
         )
 
         # Request bootstrap info from prefill worker
@@ -656,7 +661,10 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         request_data = request.request.model_dump()
         try:
             sampling_params = SglangUtils.build_sampling_params(
-                request, self.config.server_args, self.engine
+                request,
+                self.config.server_args,
+                self.engine,
+                self.max_output_tokens,
             )
             with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
                 (
@@ -970,6 +978,9 @@ class MultimodalPrefillWorkerHandler(
             disagg_request.sampling_params,
             self.config.server_args,
             engine=self.engine,
+        )
+        sampling_params = cap_sglang_output_tokens(
+            sampling_params, self.max_output_tokens
         )
         tensor_id: int | None = None
 

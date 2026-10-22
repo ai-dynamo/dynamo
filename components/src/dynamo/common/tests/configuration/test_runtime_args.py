@@ -31,6 +31,30 @@ def _parse_runtime_args(argv: list[str]) -> tuple[DynamoRuntimeConfig, str]:
     return config, parser.format_help()
 
 
+def test_output_ceiling_cli_overrides_environment(monkeypatch):
+    monkeypatch.setenv("DYN_OUTPUT_TOKEN_LIMIT", "65536")
+    config, _ = _parse_runtime_args(["--max-output-tokens", "131072"])
+    assert config.max_output_tokens == 131072
+
+
+def test_output_ceiling_environment(monkeypatch):
+    monkeypatch.setenv("DYN_OUTPUT_TOKEN_LIMIT", "131072")
+    config, _ = _parse_runtime_args([])
+    assert config.max_output_tokens == 131072
+
+
+def test_output_ceiling_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("DYN_OUTPUT_TOKEN_LIMIT", raising=False)
+    config, _ = _parse_runtime_args([])
+    assert config.max_output_tokens is None
+
+
+@pytest.mark.parametrize("limit", ["0", "-1"])
+def test_output_ceiling_rejects_nonpositive_configuration(limit):
+    with pytest.raises(ValueError, match="positive integer"):
+        _parse_runtime_args(["--max-output-tokens", limit])
+
+
 def test_structural_tags_default_on_for_supported_parsers(monkeypatch):
     _clear_structural_tag_env(monkeypatch)
 

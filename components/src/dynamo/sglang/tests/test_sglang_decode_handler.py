@@ -1621,6 +1621,48 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     assert sampling_params["ignore_eos"] is True
 
 
+@pytest.mark.parametrize("use_sglang_tokenizer", [False, True])
+@pytest.mark.parametrize("requested", [None, 512, 131072, 131073, 1000000])
+def test_worker_output_ceiling(use_sglang_tokenizer, requested):
+    handler = _new_decode_handler(use_sglang_tokenizer=use_sglang_tokenizer)
+    handler.max_output_tokens = 131072
+    stop = {"max_tokens": requested, "ignore_eos": True}
+    request = (
+        {"max_tokens": requested} if use_sglang_tokenizer else {"stop_conditions": stop}
+    )
+    params = handler._build_sampling_params(request)
+    assert params["max_new_tokens"] == (
+        131072 if requested is None else min(requested, 131072)
+    )
+    if not use_sglang_tokenizer:
+        assert params["ignore_eos"] is True
+
+
+def test_worker_ceiling_checks_floor_with_tokenizer_skipped():
+    handler = _new_decode_handler(skip_tokenizer_init=True)
+    handler.max_output_tokens = 131072
+    with pytest.raises(InvalidArgument):
+        handler._build_sampling_params(
+            {"stop_conditions": {"max_tokens": 1000000, "min_tokens": 131073}}
+        )
+
+
+@pytest.mark.parametrize("requested", [None, 512, 131072, 131073, 1000000])
+def test_multimodal_output_ceiling(requested):
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=requested, ignore_eos=True),
+            sampling_options=SamplingOptions(),
+        )
+    )
+    params = SglangUtils.build_sampling_params(request, max_output_tokens=131072)
+    assert params["max_new_tokens"] == (
+        131072 if requested is None else min(requested, 131072)
+    )
+    assert params["ignore_eos"] is True
+
+
 @pytest.mark.parametrize("value", [True, "32", 1.0, -1, 2**32])
 def test_multimodal_stop_conditions_reject_invalid_thinking_budget(value):
     with pytest.raises(ValidationError):

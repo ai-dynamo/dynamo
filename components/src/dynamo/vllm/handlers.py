@@ -61,6 +61,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
 )
+from dynamo.common.output_token_limit import cap_output_tokens
 from dynamo.common.rl import (
     RLAdminValidationError,
     RLRouteRegistry,
@@ -1256,6 +1257,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
 
     _benchmark_results: Optional[dict] = None
+    max_output_tokens: int | None = None
     _scale_ep_in_progress: bool = False
     # get_ep_capacity single-flight state; see the comment at its call site.
     # run_in_executor hands back an asyncio Future, not a concurrent.futures one.
@@ -1297,6 +1299,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.model_config = model_config
+        self.max_output_tokens = config.max_output_tokens
+        if model_config is not None:
+            # Match vLLM's OpenAI server: automatic HF defaults are overridable,
+            # but an explicit max_new_tokens override/custom config is a ceiling.
+            generation_limit = (
+                default_sampling_params.get("max_tokens")
+                if model_config.generation_config not in ("auto", "vllm")
+                else model_config.override_generation_config.get("max_new_tokens")
+            )
+            if generation_limit is not None:
+                self.max_output_tokens = cap_output_tokens(
+                    self.max_output_tokens, generation_limit
+                )
         # Default names used by base _resolve_lora_request(); specialized
         # handlers can override these fields after super().__init__.
         self._served_model_name = config.served_model_name or config.model
@@ -3487,6 +3502,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         else:
             logger.debug(formatted_message)
 
+    def _cap_sampling_params(self, sampling_params: SamplingParams) -> None:
+        sampling_params.max_tokens = cap_output_tokens(
+            sampling_params.max_tokens,
+            self.max_output_tokens,
+            sampling_params.min_tokens,
+        )
+
     async def generate_tokens(
         self,
         prompt,
@@ -3505,6 +3527,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         artifact_session=None,
         emit_routed_experts=True,
     ):
+        self._cap_sampling_params(sampling_params)
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
             self._log_with_lora_context(
@@ -4358,6 +4381,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = build_sampling_params_openai(
             request, self.default_sampling_params
         )
+        self._cap_sampling_params(sampling_params)
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
@@ -4607,6 +4631,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             self.model_max_len,
             enable_rl=self.config.enable_rl,
         )
+        self._cap_sampling_params(sampling_params)
 
         kv_protocol = self._prefill_kv_protocol(is_local_probe, sampling_params)
 

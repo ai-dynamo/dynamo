@@ -926,6 +926,7 @@ async def init_llm_worker(
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
+            max_output_tokens=config.max_output_tokens,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
             conversation_affinity=config.conversation_affinity,
             conversation_affinity_dp_rank_source=(

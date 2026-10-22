@@ -21,6 +21,7 @@ from dynamo.common.multimodal.image_loader import (
     image_cache_scope_from_request,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.output_token_limit import cap_sglang_output_tokens
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
@@ -591,11 +592,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = {
             k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
         }
-        return apply_thinking_budget(
+        sampling_params = apply_thinking_budget(
             request,
             sampling_params,
             self.config.server_args,
             engine=getattr(self, "engine", None),
+        )
+        return cap_sglang_output_tokens(
+            sampling_params,
+            self.max_output_tokens,
+            min_tokens=(request.get("stop_conditions") or {}).get("min_tokens")
+            if not self.use_sglang_tokenizer
+            else request.get("min_tokens"),
         )
 
     @staticmethod
@@ -656,6 +664,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_dp_rank=routing.get("prefill_dp_rank"),
             lora_path=self._resolve_lora(request),
             cache_salt=request_cache_salt(request),
+        )
+        native_request.sampling_params = cap_sglang_output_tokens(
+            native_request.sampling_params,
+            self.max_output_tokens,
         )
         return native_generate_stream(self.engine, native_request)
 
