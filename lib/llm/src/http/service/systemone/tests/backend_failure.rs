@@ -3,6 +3,13 @@
 
 use super::*;
 
+#[test]
+fn derives_only_a_proven_single_data_parallel_rank() {
+    assert_eq!(resolve_dp_rank(None, 7, 1), Some(7));
+    assert_eq!(resolve_dp_rank(None, 7, 2), None);
+    assert_eq!(resolve_dp_rank(Some(9), 7, 2), Some(9));
+}
+
 #[tokio::test]
 async fn backend_overload_preserves_retry_status_and_releases_admission() {
     for behavior in [EngineBehavior::RejectGenerate, EngineBehavior::RejectStream] {
@@ -13,6 +20,12 @@ async fn backend_overload_preserves_retry_status_and_releases_admission() {
             super::super::super::error::overload_status_code()
         );
         assert_eq!(response.headers()["retry-after"], "1");
+        assert!(
+            response
+                .extensions()
+                .get::<super::super::DecisionCapacityRejection>()
+                .is_some()
+        );
         let body = response_body(response).await;
         assert!(body.get("answers").is_none());
         assert!(!body.to_string().contains("private worker detail"));

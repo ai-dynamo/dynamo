@@ -23,6 +23,13 @@ async fn native_abort_preserves_retry_status_and_cancels_pending_peer() {
         };
         assert_eq!(response.status(), expected);
         assert_eq!(response.headers()["retry-after"], "1");
+        assert_eq!(
+            response
+                .extensions()
+                .get::<super::super::DecisionCapacityRejection>()
+                .is_some(),
+            status == 429
+        );
         let body = response_body(response).await;
         assert!(body.get("answers").is_none());
         assert!(!body.to_string().contains("private worker detail"));
@@ -47,6 +54,12 @@ async fn unknown_native_abort_is_unavailable_not_client_error_or_cancellation() 
         .expect("native abort must fail without waiting for stream closure");
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers()["retry-after"], "1");
+        assert!(
+            response
+                .extensions()
+                .get::<super::super::DecisionCapacityRejection>()
+                .is_none()
+        );
         let body = response_body(response).await;
         assert_eq!(body["detail"], "SGLang scoring worker is unavailable");
         assert!(body.get("answers").is_none());
