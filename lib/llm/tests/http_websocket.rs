@@ -749,7 +749,7 @@ async fn realtime_shutdown_closes_upgrades_before_and_after_engine_selection() {
                 token.cancel();
                 tokio::time::timeout(Duration::from_secs(3), handle).await.unwrap().unwrap().unwrap();
                 let closed = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.unwrap();
-                assert!(matches!(closed, None | Some(Err(_)) | Some(Ok(Message::Close(_)))), "upgrade survived shutdown: {closed:?}");
+                assert!(matches!(closed, Some(Ok(Message::Close(Some(ref frame)))) if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart), "expected service-restart close: {closed:?}");
                 let _ = ws.close(None).await;
             }
         },
