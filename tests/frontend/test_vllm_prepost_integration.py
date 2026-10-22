@@ -189,6 +189,7 @@ class _PrepostServiceGroup:
     """
 
     def __init__(self, request, config: _ServiceConfig, capture_dir: Path) -> None:
+        """Start a group and release acquired resources if startup fails."""
         self.config = config
         self.capture_path = capture_dir / "captured_request.json"
         self.frontend_port = 0
@@ -204,6 +205,7 @@ class _PrepostServiceGroup:
             raise
 
     def _start(self, request) -> None:
+        """Start runtime services and children with temporary environment overrides."""
         discovery_backend, request_plane, event_plane = self.config
         # Mirrors the branch logic of runtime_services_dynamic_ports in tests/conftest.py.
         nats_required = request_plane == "nats" or event_plane == "nats"
@@ -271,9 +273,11 @@ class _PrepostServiceGroup:
             logger.info("vLLM pre/post test worker registered model %s", TEST_MODEL)
 
     def is_healthy(self) -> bool:
+        """Return whether every managed process is still running."""
         return all(process.is_running() for process in self._processes)
 
     def close(self) -> None:
+        """Stop the group and release its ports in reverse startup order."""
         # Worker, frontend, the frontend port reservation, then etcd and NATS.
         self._stack.close()
 
@@ -288,11 +292,13 @@ class _PrepostServiceManager:
     """
 
     def __init__(self, request, tmp_path_factory: pytest.TempPathFactory) -> None:
+        """Keep module-scoped inputs for starting groups on demand."""
         self._request = request
         self._tmp_path_factory = tmp_path_factory
         self._group: Optional[_PrepostServiceGroup] = None
 
     def get(self, config: _ServiceConfig) -> _PrepostServiceGroup:
+        """Reuse a healthy matching group, or replace the current group."""
         group = self._group
         if group is not None and group.config == config and group.is_healthy():
             logger.info("Reusing vLLM pre/post services for config %s", config)
@@ -309,6 +315,7 @@ class _PrepostServiceManager:
         return self._group
 
     def close(self) -> None:
+        """Release the current group, if any, and forget it."""
         group, self._group = self._group, None
         if group is not None:
             group.close()
@@ -318,6 +325,7 @@ class _PrepostServiceManager:
 def prepost_service_manager(
     request, tmp_path_factory: pytest.TempPathFactory
 ) -> Generator[_PrepostServiceManager, None, None]:
+    """Share one manager across cases and close its group at module teardown."""
     manager = _PrepostServiceManager(request, tmp_path_factory)
     try:
         yield manager
@@ -333,6 +341,7 @@ def start_services(
     monkeypatch,
     prepost_service_manager: _PrepostServiceManager,
 ) -> Generator[tuple[int, Path], None, None]:
+    """Provide reusable services with cleared captures and per-case environment."""
     # event_plane has already set DYN_EVENT_PLANE through this case's monkeypatch,
     # so a newly started group inherits it.
     group = prepost_service_manager.get((discovery_backend, request_plane, event_plane))
