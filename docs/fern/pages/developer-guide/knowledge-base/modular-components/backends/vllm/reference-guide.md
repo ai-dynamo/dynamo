@@ -108,21 +108,21 @@ For more details, see [Graceful Shutdown](../../../../../kubernetes/fault-tolera
 
 ## Health Checks
 
-Each worker type registers a health check with the Dynamo runtime:
+Each worker type registers a health check with the Dynamo runtime. Set
+`DYN_HEALTH_CHECK_ENABLED=true` to enable active checks.
 
 | Worker Type | Health Check Strategy |
 |------------|----------------------|
 | Decode / Aggregated | Short generation request (`max_tokens=1`) using the model's BOS token |
 | Prefill | Same payload structure as decode, adapted for prefill request format |
-| vLLM-Omni (aggregated) | Native `AsyncOmni.check_health()` checks the orchestrator and stage replicas; a custom payload opts into inference |
-| vLLM-Omni (stage worker) | Short generation request using the model's BOS token |
+| [vLLM-Omni](../../../../../reference/backends/vllm-omni-configuration.mdx) (aggregated) | Native engine health check; see [vLLM-Omni Health Checks](../../../../../reference/observability/health-checks.mdx#vllm-omni-health-checks) for defaults and custom inference checks |
+| vLLM-Omni ([stage worker](vllm-omni-disaggregated-serving.md)) | Short generation request using the model's BOS token |
 
-The runtime runs these checks when enabled, and its HTTP health endpoints expose the resulting
-status to Kubernetes probes. Override the payload with `DYN_HEALTH_CHECK_PAYLOAD`. For aggregated
-Omni workers, use a request verified with the exact model and allow enough time for queueing and
-inference with `DYN_HEALTH_CHECK_REQUEST_TIMEOUT`. Native-only checks do not prove inference
-completion. Custom checks require a completed protocol result and reject empty media output;
-malformed overrides fail initialization instead of falling back to native-only checks. See the
+An aggregated Omni worker serves the complete model pipeline through one Dynamo endpoint. A stage
+worker runs a single stage in a disaggregated pipeline.
+
+The runtime's HTTP health endpoints expose the resulting status to Kubernetes probes. Override the
+payload with `DYN_HEALTH_CHECK_PAYLOAD`. See the
 [Health Check Reference](../../../../../reference/observability/health-checks.mdx#active-canary-configuration)
 for configuration and [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks)
 for the active health-check design.
