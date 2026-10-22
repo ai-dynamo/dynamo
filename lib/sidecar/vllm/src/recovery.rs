@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use dynamo_backend_common::{BackendError, EngineConfig, EngineRecovery, ErrorType};
 use dynamo_llm::kv_router::publisher::{KvStreamCommand, KvStreamStatus, ZmqRecoveryConfig};
@@ -249,11 +249,7 @@ impl VllmSidecarEngine {
         let deadline = self.recovery_deadline()?;
         let ranks = state.ranks.lock().clone();
         let result = timeout_at(deadline, async {
-            let gate = try_join_all(
-                ranks
-                    .into_iter()
-                    .map(|rank| self.wait_for_rank(&state, rank, deadline)),
-            );
+            let gate = try_join_all(ranks.into_iter().map(Self::wait_for_rank));
             tokio::select! {
                 biased;
                 error = unhealthy(state.health.clone()) => Err(error),
@@ -288,7 +284,7 @@ impl VllmSidecarEngine {
                 .ranks
                 .lock()
                 .iter()
-                .any(|rank| !matches!(*rank.status.borrow(), KvStreamStatus::Ready))
+                .any(|rank| !matches!(*rank.status.borrow(), KvStreamStatus::Success))
         {
             return Err(client::engine_shutdown(
                 "vLLM health or KV continuity changed before registration",
@@ -313,46 +309,22 @@ impl VllmSidecarEngine {
         })?
     }
 
-    async fn wait_for_rank(
-        &self,
-        state: &Connection,
-        mut rank: RankRecovery,
-        deadline: Instant,
-    ) -> Result<(), DynamoError> {
-        let mut probes = 0;
+    async fn wait_for_rank(mut rank: RankRecovery) -> Result<(), DynamoError> {
         loop {
             let status = rank.status.borrow_and_update().clone();
             match status {
-                KvStreamStatus::Ready => return Ok(()),
+                KvStreamStatus::Success => return Ok(()),
                 KvStreamStatus::MissingHistory { expected, got } => {
                     return Err(client::engine_shutdown(format!(
                         "rank {} is missing KV sequence {expected}; next retained sequence {got}",
                         rank.rank
                     )));
                 }
-                KvStreamStatus::Uncertain { reason, .. } => {
+                KvStreamStatus::Failed { reason } => {
                     return Err(client::engine_shutdown(format!(
-                        "rank {} KV recovery uncertain: {reason}",
+                        "rank {} KV recovery failed: {reason}",
                         rank.rank
                     )));
-                }
-                KvStreamStatus::ProbeRequired => {
-                    if probes >= 3 {
-                        return Err(client::engine_shutdown(format!(
-                            "rank {} did not produce a verifiable KV stream after three probes",
-                            rank.rank
-                        )));
-                    }
-                    probes += 1;
-                    self.probe(state, rank.rank, deadline).await?;
-                    let (accepted, response) = oneshot::channel();
-                    rank.commands
-                        .send(KvStreamCommand::RetryReplay(accepted))
-                        .await
-                        .map_err(|_| client::engine_shutdown("KV listener stopped during probe"))?;
-                    response.await.map_err(|_| {
-                        client::engine_shutdown("KV listener ended before replay retry")
-                    })?;
                 }
                 KvStreamStatus::Recovering => {}
             }
@@ -363,76 +335,6 @@ impl VllmSidecarEngine {
         }
     }
 
-    async fn probe(
-        &self,
-        state: &Connection,
-        rank: u32,
-        deadline: Instant,
-    ) -> Result<(), DynamoError> {
-        let block_size = state.model.kv_cache_block_size()?.ok_or_else(|| {
-            client::protocol_error("KV probe requires a reported cache block size")
-        })?;
-        let prompt_len = block_size
-            .checked_add(1)
-            .filter(|len| *len < state.model.max_model_len())
-            .ok_or_else(|| {
-                client::protocol_error("model context is too short for a full-block KV probe")
-            })?;
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let id = format!("dynamo-kv-probe-{rank}-{nonce}");
-        let request = pb::GenerateRequest {
-            request_id: id.clone(),
-            model: state.model.served_name.clone(),
-            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-                ids: vec![0; prompt_len as usize],
-            })),
-            temperature: Some(0.0),
-            stopping: Some(pb::StoppingCriteria {
-                max_new_tokens: 1,
-                min_new_tokens: 1,
-                ignore_eos: true,
-                ..Default::default()
-            }),
-            kv: Some(pb::KvCacheParameters {
-                cache_salt: id,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        tracing::info!(rank, "Probing vLLM to establish KV replay/live continuity");
-        timeout_at(
-            deadline.min(Instant::now() + Duration::from_secs(30)),
-            async {
-                let mut stream = state.client.generate_stream(request, Some(rank)).await?;
-                while let Some(response) = stream
-                    .message()
-                    .await
-                    .map_err(|status| client::status_to_dynamo("KV probe", status))?
-                {
-                    if response
-                        .outputs
-                        .as_ref()
-                        .is_some_and(|output| output.finish_info.is_some())
-                    {
-                        return Ok(());
-                    }
-                }
-                Err(client::protocol_error(
-                    "KV probe ended without a terminal response",
-                ))
-            },
-        )
-        .await
-        .map_err(|_| {
-            client::engine_shutdown(
-                "KV inference probe timed out; history availability remains unknown",
-            )
-        })?
-    }
-
     pub(super) async fn monitor_availability(&self) -> Result<(), DynamoError> {
         let state = self.started_state()?;
         let ranks = state.ranks.lock().clone();
@@ -441,7 +343,7 @@ impl VllmSidecarEngine {
             futures::future::select_all(ranks.into_iter().map(|mut rank| {
                 Box::pin(async move {
                     loop {
-                        if !matches!(*rank.status.borrow_and_update(), KvStreamStatus::Ready) {
+                        if !matches!(*rank.status.borrow_and_update(), KvStreamStatus::Success) {
                             return;
                         }
                         if rank.status.changed().await.is_err() {
@@ -486,18 +388,6 @@ impl VllmSidecarEngine {
                 .map_err(|_| {
                     client::engine_shutdown("vLLM did not resume before the recovery deadline")
                 })??;
-            let ranks = state.ranks.lock().clone();
-            for rank in ranks {
-                if matches!(
-                    *rank.status.borrow(),
-                    KvStreamStatus::Uncertain {
-                        is_terminal: false,
-                        ..
-                    }
-                ) {
-                    reconnect_rank(&rank).await?;
-                }
-            }
             let error = match self.wait_for_recovery().await {
                 Ok(()) => return Ok(()),
                 Err(error) => error,
@@ -507,11 +397,7 @@ impl VllmSidecarEngine {
                 && !state.ranks.lock().iter().any(|rank| {
                     matches!(
                         *rank.status.borrow(),
-                        KvStreamStatus::MissingHistory { .. }
-                            | KvStreamStatus::Uncertain {
-                                is_terminal: true,
-                                ..
-                            }
+                        KvStreamStatus::MissingHistory { .. } | KvStreamStatus::Failed { .. }
                     )
                 });
             if !is_retryable {
@@ -543,17 +429,12 @@ impl VllmSidecarEngine {
         for rank in &ranks {
             let _ = rank.commands.try_send(KvStreamCommand::Suspend);
         }
-        if ranks.iter().any(|rank| {
-            matches!(
-                *rank.status.borrow(),
-                KvStreamStatus::Uncertain {
-                    is_terminal: true,
-                    ..
-                }
-            )
-        }) {
+        if ranks
+            .iter()
+            .any(|rank| matches!(*rank.status.borrow(), KvStreamStatus::Failed { .. }))
+        {
             return Err(client::protocol_error(
-                "KV recovery failed decoding or applying events; engine shutdown is not justified",
+                "KV recovery failed; engine shutdown is not justified",
             ));
         }
         timeout_at(
@@ -609,15 +490,10 @@ impl VllmSidecarEngine {
                 Err(error) => error,
             };
             self.started_state()?.cancel.cancel();
-            if ranks.iter().any(|rank| {
-                matches!(
-                    *rank.status.borrow(),
-                    KvStreamStatus::Uncertain {
-                        is_terminal: true,
-                        ..
-                    }
-                )
-            }) {
+            if ranks
+                .iter()
+                .any(|rank| matches!(*rank.status.borrow(), KvStreamStatus::Failed { .. }))
+            {
                 return Err(error);
             }
             for rank in &ranks {
@@ -632,7 +508,7 @@ impl VllmSidecarEngine {
 async fn reconnect_rank(rank: &RankRecovery) -> Result<(), DynamoError> {
     let (accepted, response) = oneshot::channel();
     rank.commands
-        .send(KvStreamCommand::ReconnectSameInstance(accepted))
+        .send(KvStreamCommand::Resume(accepted))
         .await
         .map_err(|_| client::engine_shutdown("KV listener ended; retained state cannot resume"))?;
     response

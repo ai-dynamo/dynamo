@@ -3,7 +3,7 @@
 
 use super::*;
 use dynamo_backend_common::{EngineRecovery, KvEventSource};
-use dynamo_llm::kv_router::publisher::{KvStreamCommand, KvStreamStatus, ZmqRecoveryConfig};
+use dynamo_llm::kv_router::publisher::{KvStreamStatus, ZmqRecoveryConfig};
 use tokio::time::{Duration, timeout};
 
 async fn started(server: &FakeServer) -> (Arc<VllmSidecarEngine>, Vec<ZmqRecoveryConfig>) {
@@ -34,76 +34,22 @@ async fn started(server: &FakeServer) -> (Arc<VllmSidecarEngine>, Vec<ZmqRecover
 }
 
 #[tokio::test]
-async fn empty_replay_probes_each_rank_but_inference_success_does_not_open_readiness() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let (engine, mut controls) = started(&server).await;
-    let waiter = tokio::spawn({
-        let engine = engine.clone();
-        async move { engine.wait_for_startup().await }
-    });
-    for control in &controls {
-        control.status.send_replace(KvStreamStatus::ProbeRequired);
-    }
-    for control in &mut controls {
-        let Some(KvStreamCommand::RetryReplay(accepted)) =
-            timeout(Duration::from_secs(2), control.commands.recv())
-                .await
-                .unwrap()
-        else {
-            panic!("replay retry")
-        };
-        control.status.send_replace(KvStreamStatus::Recovering);
-        accepted.send(()).unwrap();
-    }
-    assert!(!waiter.is_finished());
-    let requests = server.service.requests.lock().await;
-    assert_eq!(requests.len(), 2);
-    for request in requests.iter() {
-        assert!(
-            matches!(&request.prompt, Some(pb::generate_request::Prompt::TokenIds(tokens)) if tokens.ids.len() > 16)
-        );
-        assert_eq!(request.stopping.as_ref().unwrap().max_new_tokens, 1);
-        assert!(request.kv.as_ref().unwrap().kv_transfer_params.is_none());
-        assert!(!request.kv.as_ref().unwrap().cache_salt.is_empty());
-    }
-    drop(requests);
-    let mut ranks = server
-        .service
-        .data_parallel_rank_metadata
-        .lock()
-        .await
-        .clone();
-    ranks.sort();
-    assert_eq!(ranks, vec![Some("0".into()), Some("1".into())]);
-    controls[0].status.send_replace(KvStreamStatus::Ready);
-    assert!(!waiter.is_finished());
-    controls[1].status.send_replace(KvStreamStatus::Ready);
-    timeout(Duration::from_secs(2), waiter)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(server.service.control_calls.lock().await.is_empty());
-    engine.cleanup().await.unwrap();
-}
-
-#[tokio::test]
 async fn rank_that_loses_continuity_while_another_recovers_cannot_register() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let (engine, controls) = started(&server).await;
-    controls[0].status.send_replace(KvStreamStatus::Ready);
+    controls[0].status.send_replace(KvStreamStatus::Success);
     let gate = engine.wait_for_startup();
     tokio::pin!(gate);
     assert!(futures::poll!(&mut gate).is_pending());
     controls[0].status.send_replace(KvStreamStatus::Recovering);
-    controls[1].status.send_replace(KvStreamStatus::Ready);
+    controls[1].status.send_replace(KvStreamStatus::Success);
     assert!(
         timeout(Duration::from_secs(2), &mut gate)
             .await
             .unwrap()
             .is_err()
     );
-    controls[0].status.send_replace(KvStreamStatus::Ready);
+    controls[0].status.send_replace(KvStreamStatus::Success);
     engine.wait_for_startup().await.unwrap();
     engine.cleanup().await.unwrap();
 }
@@ -118,7 +64,7 @@ async fn missing_history_waits_for_a_replacement_engine() {
             expected: 0,
             got: 10,
         });
-    controls[1].status.send_replace(KvStreamStatus::Ready);
+    controls[1].status.send_replace(KvStreamStatus::Success);
     assert!(engine.wait_for_startup().await.is_err());
     let recovered = tokio::spawn({
         let engine = engine.clone();
@@ -149,7 +95,7 @@ async fn changed_instance_fails_startup_and_recovers_as_replacement() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let (engine, controls) = started(&server).await;
     for control in &controls {
-        control.status.send_replace(KvStreamStatus::Ready);
+        control.status.send_replace(KvStreamStatus::Success);
     }
     server
         .service
@@ -178,7 +124,7 @@ async fn paused_engine_keeps_in_flight_requests_and_kv_ingestion() {
     let server = FakeServer::start(service).await;
     let (engine, mut controls) = started(&server).await;
     for control in &controls {
-        control.status.send_replace(KvStreamStatus::Ready);
+        control.status.send_replace(KvStreamStatus::Success);
     }
     engine.wait_for_startup().await.unwrap();
     let mut stream = engine
@@ -219,7 +165,7 @@ async fn paused_engine_keeps_in_flight_requests_and_kv_ingestion() {
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!recovered.is_finished());
-    controls[0].status.send_replace(KvStreamStatus::Ready);
+    controls[0].status.send_replace(KvStreamStatus::Success);
     assert!(matches!(
         timeout(Duration::from_secs(2), recovered)
             .await
@@ -244,7 +190,7 @@ async fn kv_gap_rejects_new_requests_without_cancelling_in_flight_streams() {
     let server = FakeServer::start(service).await;
     let (engine, mut controls) = started(&server).await;
     for control in &controls {
-        control.status.send_replace(KvStreamStatus::Ready);
+        control.status.send_replace(KvStreamStatus::Success);
     }
     engine.wait_for_startup().await.unwrap();
     let mut stream = engine
@@ -271,7 +217,7 @@ async fn kv_gap_rejects_new_requests_without_cancelling_in_flight_streams() {
     );
     server.service.release_first_token.notify_one();
     finish(&mut stream).await;
-    controls[0].status.send_replace(KvStreamStatus::Ready);
+    controls[0].status.send_replace(KvStreamStatus::Success);
     assert!(matches!(
         engine.recover_serving().await.unwrap(),
         EngineRecovery::SameInstance
