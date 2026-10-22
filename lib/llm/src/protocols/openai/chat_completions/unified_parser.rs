@@ -12580,15 +12580,18 @@ mod beam_routing_tests {
                     })
                 );
             }
-            let batch = parse_complete_with_eos(
-                BEAM_UNIFIED_FAMILY,
-                &input,
-                &constraint,
-                &tools,
-                UnifiedRequestPolicy::default(),
-                eos && finish == Some(FinishReason::Stop),
-            );
-            assert_eq!(batch.is_ok(), succeeds);
+            // Length and EOF without a suffix duplicate Stop without EOS in unary parsing.
+            if finish == Some(FinishReason::Stop) || !suffix.is_empty() {
+                let batch = parse_complete_with_eos(
+                    BEAM_UNIFIED_FAMILY,
+                    &input,
+                    &constraint,
+                    &tools,
+                    UnifiedRequestPolicy::default(),
+                    eos && finish == Some(FinishReason::Stop),
+                );
+                assert_eq!(batch.is_ok(), succeeds);
+            }
         }
     }
 

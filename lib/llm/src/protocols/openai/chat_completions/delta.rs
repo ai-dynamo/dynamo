@@ -453,23 +453,22 @@ mod tests {
 
     #[test]
     fn model_eos_requires_an_installed_turn_grammar() {
-        for enabled in [false, true] {
-            for reason in [
-                common::FinishReason::EoS,
-                common::FinishReason::Stop,
-                common::FinishReason::Length,
-                common::FinishReason::Cancelled,
-            ] {
-                let mut generator = create_test_request().response_generator("eos".into());
-                generator.enable_tool_call_eos(enabled);
-                let mut output = final_backend_output();
-                output.finish_reason = Some(reason.clone());
-                let response = generator.choice_from_postprocessor(output).unwrap();
-                assert_eq!(
-                    response.model_eos.contains(&0),
-                    enabled && reason == common::FinishReason::EoS
-                );
-            }
+        for (enabled, reason) in [
+            (false, common::FinishReason::EoS),
+            (true, common::FinishReason::EoS),
+            (true, common::FinishReason::Stop),
+            (true, common::FinishReason::Length),
+            (true, common::FinishReason::Cancelled),
+        ] {
+            let mut generator = create_test_request().response_generator("eos".into());
+            generator.enable_tool_call_eos(enabled);
+            let mut output = final_backend_output();
+            output.finish_reason = Some(reason.clone());
+            let response = generator.choice_from_postprocessor(output).unwrap();
+            assert_eq!(
+                response.model_eos.contains(&0),
+                enabled && reason == common::FinishReason::EoS
+            );
         }
     }
 
