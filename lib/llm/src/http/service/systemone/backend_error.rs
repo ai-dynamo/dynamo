@@ -21,6 +21,7 @@ pub(super) fn classify(
             public_message: "SGLang scoring worker capacity is exhausted",
             detail: "backend capacity exhausted".to_string(),
             retry_after: true,
+            is_capacity_exhausted: true,
         };
     }
     if let Some(error) = error::find_canonical_error_in_chain(cause) {
@@ -47,6 +48,7 @@ pub(super) fn classify(
                 public_message,
                 detail: error.reason().as_str().to_string(),
                 retry_after: error.class() == ErrorClass::CapacityExhausted,
+                is_capacity_exhausted: error.class() == ErrorClass::CapacityExhausted,
             };
         }
     }

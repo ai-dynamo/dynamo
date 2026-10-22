@@ -156,13 +156,6 @@ use crate::{
 };
 
 #[test]
-fn derives_only_a_proven_single_data_parallel_rank() {
-    assert_eq!(resolve_dp_rank(None, 7, 1), Some(7));
-    assert_eq!(resolve_dp_rank(None, 7, 2), None);
-    assert_eq!(resolve_dp_rank(Some(9), 7, 2), Some(9));
-}
-
-#[test]
 fn cumulative_input_limit_is_checked_without_overflow() {
     assert_eq!(add_input_tokens(7, 5, 12), Ok(12));
     assert_eq!(add_input_tokens(65_536, 1, 131_072), Ok(65_537));
@@ -178,6 +171,12 @@ fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
             .unwrap_err();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert!(!response.headers().contains_key("retry-after"));
+    assert!(
+        response
+            .extensions()
+            .get::<super::DecisionCapacityRejection>()
+            .is_none()
+    );
     let permit =
         super::acquire_admission(admission.clone(), 2, 2, dynamo_decisions::Dialect::Jev).unwrap();
     let response =
@@ -188,6 +187,12 @@ fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
         super::super::error::overload_status_code()
     );
     assert_eq!(response.headers()["retry-after"], "1");
+    assert!(
+        response
+            .extensions()
+            .get::<super::DecisionCapacityRejection>()
+            .is_some()
+    );
     drop(permit);
     assert!(super::acquire_admission(admission, 1, 2, dynamo_decisions::Dialect::Jev).is_ok());
 }

@@ -54,6 +54,9 @@ const MAX_TOKENIZATION_WORK: usize = 1_048_576 * (255 + 2);
 const MAX_TOKENIZATION_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONCURRENT_SIBLINGS: usize = 4;
 
+#[derive(Clone, Copy)]
+pub(super) struct DecisionCapacityRejection;
+
 fn metric_endpoint(dialect: Dialect) -> Endpoint {
     match dialect {
         Dialect::Jev => Endpoint::SystemOne,
@@ -96,6 +99,7 @@ struct DispatchError {
     public_message: &'static str,
     detail: String,
     retry_after: bool,
+    is_capacity_exhausted: bool,
 }
 
 impl DispatchError {
@@ -105,6 +109,7 @@ impl DispatchError {
             public_message: "request was cancelled",
             detail: "parent request context was cancelled".to_string(),
             retry_after: false,
+            is_capacity_exhausted: false,
         }
     }
 
@@ -114,6 +119,7 @@ impl DispatchError {
             public_message: "SGLang scoring worker is unavailable",
             detail: detail.into(),
             retry_after: false,
+            is_capacity_exhausted: false,
         }
     }
 
@@ -123,6 +129,7 @@ impl DispatchError {
             public_message: "malformed SGLang scoring response",
             detail: detail.into(),
             retry_after: false,
+            is_capacity_exhausted: false,
         }
     }
 }
@@ -148,6 +155,7 @@ fn acquire_admission(
                     super::error::overload_status_code(),
                     "System One request capacity is exhausted",
                 );
+                response.extensions_mut().insert(DecisionCapacityRejection);
                 response.headers_mut().insert(
                     axum::http::header::RETRY_AFTER,
                     HeaderValue::from_static("1"),
@@ -263,6 +271,7 @@ async fn handle_request(
                 super::error::overload_status_code(),
                 "System One preprocessing capacity is exhausted",
             );
+            response.extensions_mut().insert(DecisionCapacityRejection);
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 HeaderValue::from_static("1"),
@@ -574,6 +583,9 @@ fn dispatch_error(
         tracing::error!(%request_id, error = %cause.detail, "System One scoring failed");
     }
     let mut response = error(dialect, cause.status, cause.public_message);
+    if cause.is_capacity_exhausted {
+        response.extensions_mut().insert(DecisionCapacityRejection);
+    }
     if cause.retry_after {
         response.headers_mut().insert(
             axum::http::header::RETRY_AFTER,
