@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
@@ -46,7 +47,7 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	if err != nil {
 		return nil, err
 	}
-	if workload.Pipeline() == PipelineLPX {
+	if workload.Pipeline() == PipelineHybrid {
 		input.Cyborg = pcs.Spec.Template.Cliques[0]
 	}
 	templates, err := RenderNodeLocal(workload, plan, input)
@@ -69,7 +70,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	tests := []struct {
 		name       string
 		pipeline   Pipeline
-		snapshot   *BuildSnapshot
+		snapshot   *Build
 		configPath string
 	}{
 		{
@@ -89,7 +90,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			snapshot: hxSnapshot, configPath: "/custom",
 		},
 		{
-			name: "HX hybrid storage", pipeline: PipelineLPX,
+			name: "HX hybrid storage", pipeline: PipelineHybrid,
 			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "/configs",
 		},
 	}
@@ -98,7 +99,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			t.Log("Seed conflicting runtime annotations and a nondefault mount")
 			projection := projectRenderFixture(t, test.pipeline, test.snapshot)
 			require.NotEqual(t, projection.Digest().String(), projection.CompilerSnapshotDigest())
-			pcs := renderTestPCS(test.pipeline == PipelineLPX)
+			pcs := renderTestPCS(test.pipeline == PipelineHybrid)
 			for _, clique := range pcs.Spec.Template.Cliques {
 				clique.Annotations = map[string]string{
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
@@ -130,7 +131,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
 					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: test.configPath})
 			}
-			if test.pipeline == PipelineLPX {
+			if test.pipeline == PipelineHybrid {
 				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
 				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = "/model-cache"
 			}
@@ -162,7 +163,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.Subset(t, agent.Spec.PodSpec.Volumes, template.Spec.Volumes)
 
 			t.Log("Resolve runtime mounts using the authored storage path")
-			if test.pipeline != PipelineLPX {
+			if test.pipeline != PipelineHybrid {
 				conductor := namedClique(t, rendered, "cond")
 				require.Equal(t, "kept", conductor.Annotations["user"])
 				require.Subset(t, conductor.Spec.PodSpec.Volumes, template.Spec.Volumes)
@@ -315,7 +316,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
-	selected, err := ResolveWorkload(t.Context(), source, singleGroupComponents(t, source), staticBuildSnapshotSource{
+	selected, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), source, singleGroupComponents(t, source), staticModelRegistry{
 		"draft-build": draftSnapshot, "target-build": targetSnapshot,
 	})
 	require.NoError(t, err)
@@ -391,11 +392,11 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	}
 }
 
-func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *BuildSnapshot) *ModelProjection {
+func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *Build) *ModelProjection {
 	t.Helper()
 	intent := ModelProjectionInput{
 		Pipeline: pipeline,
-		Models:   []string{"default"}, RuntimeBuildRef: "model-build", BuildSnapshot: normalizeTestSnapshot(t, snapshot),
+		Models:   []string{"default"}, RuntimeBuildRef: "model-build", Build: snapshot,
 	}
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)

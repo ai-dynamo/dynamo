@@ -792,13 +792,12 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 ##### wheel_builder ##############
 ##################################
 {% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" %}
-# Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
-# consolidates all wheels.
+# Builds NIXL (native + Python wheel), then consolidates all wheels.
 # Runtime templates COPY from this stage.
 # Note: XPU triggers this path even when the framework section lacks nixl_ref,
 # because no upstream XPU runtime image ships pre-built NIXL.
-# Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF and does
-# not install KVBM, so nothing in that image consumes a from-source NIXL build.
+# Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF, so
+# nothing in that image consumes a from-source NIXL build.
 
 FROM wheel_builder_base AS wheel_builder
 
@@ -886,85 +885,14 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 {% endif %}
 
-{% if target not in ("dev", "local-dev") %}
-# Copy source code (order matters for layer caching)
-COPY .cargo/ /opt/dynamo/.cargo/
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
-COPY lib/ /opt/dynamo/lib/
-COPY components/ /opt/dynamo/components/
-
-# Build kvbm wheel (with nixl linkage via auditwheel repair)
-ARG ENABLE_KVBM
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env cmake); \
-    fi && \
-    mkdir -p ${CARGO_TARGET_DIR} && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        cd /opt/dynamo/lib/bindings/kvbm && \
-        KVBM_FEATURES=""; \
-        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
-        maturin build --release ${KVBM_FEATURES} --out target/wheels && \
-        if [ "$DEVICE" = "cuda" ]; then \
-            auditwheel repair \
-                --exclude libnixl.so \
-                --exclude libnixl_build.so \
-                --exclude libnixl_common.so \
-                --exclude 'lib*.so*' \
-                --plat manylinux_2_28_${ARCH_ALT} \
-                --wheel-dir /opt/dynamo/dist \
-                target/wheels/*.whl; \
-        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
-            cp target/wheels/*.whl /opt/dynamo/dist/; \
-        fi; \
-    fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo KVBM"
-{% endif %}
-
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
-
-# Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
-# stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
-# and arrives consolidated above). Harvest kvbm's crate licenses from the cargo
-# registry, then inject into its auditwheel-repaired wheel. Best-effort/non-fatal.
-# Venv python required: compliance.overrides needs pyyaml, absent from the
-# system python3 (see the runtime_wheel_builder bundling step).
-COPY container/compliance /opt/compliance
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    set -u; \
-    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
-        [ -d "$src" ] || continue; \
-        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
-            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
-            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
-                [ -e "$lf" ] || continue; mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
-            done; \
-        done; \
-    done; \
-    for whl in /opt/dynamo/dist/kvbm*.whl; do \
-        [ -e "$whl" ] || continue; \
-        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
-            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
-            || echo "::warning::kvbm wheel NOTICES bundling failed (SBOM retained)"; \
-    done; \
-    echo "kvbm wheel NOTICES step done"
+# Crate license texts for the compliance licenses stage
+COPY --from=runtime_wheel_builder /opt/dynamo/rust-licenses/ /opt/dynamo/rust-licenses/
 
 {% else %}
-# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and the
-# frontend installs it from PyPI; neither builds Dynamo KVBM. Keep this alias so
-# downstream stages can still COPY Dynamo wheels and build tools from a common
-# wheel_builder stage name.
-# SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
-# absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
+# The frontend installs NIXL from PyPI and Triton ships no NIXL. Keep this alias
+# so downstream stages can still COPY Dynamo wheels and build tools from a
+# common wheel_builder stage name.
 FROM runtime_wheel_builder AS wheel_builder
 {% endif %}

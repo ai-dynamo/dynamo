@@ -59,6 +59,11 @@ on:
         required: false
         type: boolean
         default: true
+      minio_service:
+        description: 'Whether the amd64 runner pool starts the `minio` service (its k8s hook template supplies the `minio server` args). The CPU pool prod-tester-amd-v2 does not.'
+        required: false
+        type: boolean
+        default: true
       run_cpu_only_tests:
         description: 'Whether to run CPU-only tests'
         required: false
@@ -193,9 +198,9 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
-        DYN_ARTIFACT_MINIO_ENDPOINT: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'http://localhost:9000' || '' }}
-        DYN_ARTIFACT_MINIO_ACCESS_KEY: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'minioadmin' || '' }}
-        DYN_ARTIFACT_MINIO_SECRET_KEY: ${{ inputs.framework == 'vllm' && matrix.platform == 'amd64' && 'minioadmin' || '' }}
+        DYN_ARTIFACT_MINIO_ENDPOINT: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'http://localhost:9000' || '' }}
+        DYN_ARTIFACT_MINIO_ACCESS_KEY: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'minioadmin' || '' }}
+        DYN_ARTIFACT_MINIO_SECRET_KEY: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'minioadmin' || '' }}
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
@@ -327,7 +332,7 @@ jobs:
           fi
 
       - name: Wait for MinIO before vLLM artifact tests
-        if: ${{ inputs.framework == 'vllm' && inputs.run_cpu_only_tests && matrix.platform == 'amd64' }}
+        if: ${{ inputs.framework == 'vllm' && inputs.minio_service && inputs.run_cpu_only_tests && matrix.platform == 'amd64' }}
         shell: bash
         run: |
           for ((attempt = 0; attempt < 30; attempt++)); do

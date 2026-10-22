@@ -43,6 +43,12 @@
     {"name": "url-as-number", "type": "response", "valid": false, "body": {"created": 0, "data": [{"url": 1}]}},
     {"name": "usage-negative-tokens", "type": "response", "valid": false, "body": {"created": 0, "data": [], "usage": {"input_tokens": -1, "total_tokens": 15, "output_tokens": 10, "input_tokens_details": {"text_tokens": 5, "image_tokens": 0}}}},
     {"name": "usage-tokens-as-string", "type": "response", "valid": false, "body": {"created": 0, "data": [], "usage": {"input_tokens": "5", "total_tokens": 15, "output_tokens": 10, "input_tokens_details": {"text_tokens": 5, "image_tokens": 0}}}},
-    {"name": "usage-missing-total-tokens", "type": "response", "valid": false, "body": {"created": 0, "data": [], "usage": {"input_tokens": 5, "output_tokens": 10, "input_tokens_details": {"text_tokens": 5, "image_tokens": 0}}}}
+    {"name": "usage-missing-total-tokens", "type": "response", "valid": false, "body": {"created": 0, "data": [], "usage": {"input_tokens": 5, "output_tokens": 10, "input_tokens_details": {"text_tokens": 5, "image_tokens": 0}}}},
+    {"name": "with-image-accounting", "type": "response", "valid": true, "body": {"created": 0, "data": [{"b64_json": "YQ=="}], "nvext": {"usage": {"output_images": 1, "input_images": 1, "num_inference_steps": 4}}}},
+    {"name": "accounting-without-steps", "type": "response", "valid": true, "body": {"created": 0, "data": [], "nvext": {"usage": {"output_images": 1}}}},
+    {"name": "accounting-missing-output-images", "type": "response", "valid": false, "body": {"created": 0, "data": [], "nvext": {"usage": {"input_images": 1}}}},
+    {"name": "accounting-output-images-as-string", "type": "response", "valid": false, "body": {"created": 0, "data": [], "nvext": {"usage": {"output_images": "1"}}}},
+    {"name": "accounting-negative-steps", "type": "response", "valid": false, "body": {"created": 0, "data": [], "nvext": {"usage": {"output_images": 1, "num_inference_steps": -1}}}},
+    {"name": "accounting-null-input-images", "type": "response", "valid": false, "body": {"created": 0, "data": [], "nvext": {"usage": {"output_images": 1, "input_images": null}}}}
   ]
 }

@@ -7,6 +7,37 @@
   "paths": {},
   "components": {
     "schemas": {
+      "ImageAccounting": {
+        "type": "object",
+        "description": "Per-request accounting in image units.\n\n`output_images` counts what the response carries, not the requested `n`.\nThe image counts are always present; only `num_inference_steps` can be\nomitted, and an unknown step count is omitted, never written as 0. See\n[`ImageAccounting::merge`] for how a multi-chunk response treats each field.",
+        "required": [
+          "output_images"
+        ],
+        "properties": {
+          "output_images": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Images generated and returned in `data`.",
+            "minimum": 0
+          },
+          "input_images": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Reference images the request consumed: 0 for text-to-image, 1 for an\n`input_reference` or an `/v1/images/edits` request.",
+            "default": 0,
+            "minimum": 0
+          },
+          "num_inference_steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The step count the backend ran. Omitted when the backend does not\nknow it.",
+            "minimum": 0
+          }
+        }
+      },
       "ImageBackground": {
         "type": "string",
         "description": "Requested background of the generated images",
@@ -203,6 +234,23 @@
           }
         }
       },
+      "ImagesResponseNvExt": {
+        "type": "object",
+        "description": "NVIDIA extensions to the OpenAI Images API response. Omitted from the\nwire when the worker reports nothing.",
+        "properties": {
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageAccounting",
+                "description": "Image-based accounting for models that have no token usage."
+              }
+            ]
+          }
+        }
+      },
       "MediaDelivery": {
         "type": "string",
         "description": "Delivery mode of generated media: a URL to the file, or the bytes as\nbase64 text.\n\nThe set has two values. A request with an unknown value fails to parse.",
@@ -366,7 +414,7 @@
       },
       "NvImagesResponse": {
         "type": "object",
-        "description": "Response for image generation.\n\nKeeps the wire format of the OpenAI `ImagesResponse`, which writes every\nabsent optional field as null.",
+        "description": "Response for image generation.\n\nKeeps the wire format of the OpenAI `ImagesResponse`, which writes every\nabsent optional field as null. `nvext` is Dynamo's response extension;\nthe key is omitted when the worker reports nothing.",
         "required": [
           "created",
           "data"
@@ -429,6 +477,17 @@
               {
                 "$ref": "#/components/schemas/ImageUsage",
                 "description": "Token usage of the generation, when the model reports it"
+              }
+            ]
+          },
+          "nvext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImagesResponseNvExt",
+                "description": "Image accounting for models without token usage"
               }
             ]
           }

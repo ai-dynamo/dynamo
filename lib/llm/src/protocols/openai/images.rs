@@ -31,7 +31,7 @@ use crate::engines::ValidateRequest;
 mod aggregator;
 mod nvext;
 
-pub use nvext::NvExt;
+pub use nvext::{ImageAccounting, ImagesResponseNvExt, NvExt};
 
 /// Request for image generation (/v1/images/generations and /v1/images/edits).
 ///
@@ -188,7 +188,8 @@ impl NvCreateImageRequest {
 /// Response for image generation.
 ///
 /// Keeps the wire format of the OpenAI `ImagesResponse`, which writes every
-/// absent optional field as null.
+/// absent optional field as null. `nvext` is Dynamo's response extension;
+/// the key is omitted when the worker reports nothing.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvImagesResponse {
     /// Unix timestamp of creation
@@ -207,6 +208,10 @@ pub struct NvImagesResponse {
 
     /// Token usage of the generation, when the model reports it
     pub usage: Option<ImageUsage>,
+
+    /// Image accounting for models without token usage
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<ImagesResponseNvExt>,
 }
 
 /// Token usage of an image generation. Keeps the wire format of the OpenAI
@@ -270,6 +275,7 @@ impl NvImagesResponse {
             size: None,
             quality: None,
             usage: None,
+            nvext: None,
         }
     }
 }
@@ -630,5 +636,54 @@ mod tests {
                 (result, _) => panic!("unexpected result for {json}: {result:?}"),
             }
         }
+    }
+
+    // --- NvImagesResponse ---
+
+    #[test]
+    fn image_response_wire_shape_with_and_without_accounting() {
+        // What every worker sent before the extension existed: no `nvext`
+        // key on the way out, and `usage` stays null.
+        let legacy: NvImagesResponse =
+            serde_json::from_str(r#"{"created":1,"data":[{"b64_json":"YQ=="}]}"#).unwrap();
+        assert!(legacy.nvext.is_none());
+        let out = serde_json::to_value(&legacy).unwrap();
+        assert!(out.get("nvext").is_none(), "{out}");
+        assert_eq!(out["usage"], serde_json::Value::Null);
+
+        // Only `output_images` is required; an unknown step count is omitted,
+        // not written as 0.
+        let partial: NvImagesResponse = serde_json::from_str(
+            r#"{"created":1,"data":[],"nvext":{"usage":{"output_images":1}}}"#,
+        )
+        .unwrap();
+        let usage = partial.nvext.as_ref().unwrap().usage.unwrap();
+        assert_eq!((usage.output_images, usage.input_images), (1, 0));
+        assert_eq!(usage.num_inference_steps, None);
+        let out = serde_json::to_value(&partial).unwrap();
+        assert_eq!(
+            out["nvext"]["usage"],
+            serde_json::json!({"output_images": 1, "input_images": 0})
+        );
+
+        // The full extension round-trips next to the OpenAI fields.
+        let json = r#"{"created":1,"data":[{"b64_json":"YQ=="},{"b64_json":"Yg=="}],"size":"768x512","output_format":"png","nvext":{"usage":{"output_images":2,"input_images":1,"num_inference_steps":4}}}"#;
+        let full: NvImagesResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            full.nvext.as_ref().unwrap().usage.unwrap(),
+            ImageAccounting {
+                output_images: 2,
+                input_images: 1,
+                num_inference_steps: Some(4),
+            }
+        );
+        let out = serde_json::to_value(&full).unwrap();
+        assert_eq!(
+            out["nvext"],
+            serde_json::json!({"usage": {"output_images": 2, "input_images": 1, "num_inference_steps": 4}})
+        );
+        assert_eq!(out["size"], serde_json::json!("768x512"));
+        assert_eq!(out["output_format"], serde_json::json!("png"));
+        assert_eq!(out["usage"], serde_json::Value::Null);
     }
 }

@@ -125,4 +125,4 @@ spec:
             readOnly: true
       metadata:
         annotations:
-          nvidia.com/cuda-shared-memory-support: enabled
+          nvidia.com/snapshot-multi-gpu: enabled

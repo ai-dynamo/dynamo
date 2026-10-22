@@ -562,6 +562,10 @@ pub mod llm {
     /// not parse or are above 1000000 use the default.
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
+    /// Publish the serving-load streams the KV DC Relay aggregates: frontend
+    /// request load and router scheduler load. Off unless truthy.
+    pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -1166,6 +1170,7 @@ mod tests {
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,

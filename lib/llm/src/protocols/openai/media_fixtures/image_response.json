@@ -25,5 +25,12 @@
       "text_tokens": 10,
       "image_tokens": 0
     }
+  },
+  "nvext": {
+    "usage": {
+      "output_images": 2,
+      "input_images": 1,
+      "num_inference_steps": 4
+    }
   }
 }

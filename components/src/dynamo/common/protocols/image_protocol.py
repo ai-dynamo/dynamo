@@ -11,6 +11,32 @@ from typing import Any, Literal
 from pydantic import BaseModel, StrictBool, StrictFloat, StrictInt, StrictStr, conint
 
 
+class ImageAccounting(BaseModel):
+    """
+    Per-request accounting in image units.
+
+    `output_images` counts what the response carries, not the requested `n`.
+    The image counts are always present; only `num_inference_steps` can be
+    omitted, and an unknown step count is omitted, never written as 0. See
+    [`ImageAccounting::merge`] for how a multi-chunk response treats each field.
+    """
+
+    output_images: conint(ge=0, strict=True)
+    """
+    Images generated and returned in `data`.
+    """
+    input_images: conint(ge=0, strict=True) = 0
+    """
+    Reference images the request consumed: 0 for text-to-image, 1 for an
+    `input_reference` or an `/v1/images/edits` request.
+    """
+    num_inference_steps: conint(ge=0, strict=True) | None = None
+    """
+    The step count the backend ran. Omitted when the backend does not
+    know it.
+    """
+
+
 class ImageData(BaseModel):
     """
     One generated image. The worker sets one of `url` and `b64_json`.
@@ -94,6 +120,15 @@ class ImageUsage(BaseModel):
     """
 
 
+class ImagesResponseNvExt(BaseModel):
+    """
+    NVIDIA extensions to the OpenAI Images API response. Omitted from the
+    wire when the worker reports nothing.
+    """
+
+    usage: ImageAccounting | None = None
+
+
 class NvCreateImageRequest(BaseModel):
     """
     Request for image generation (/v1/images/generations and /v1/images/edits).
@@ -154,7 +189,8 @@ class NvImagesResponse(BaseModel):
     Response for image generation.
 
     Keeps the wire format of the OpenAI `ImagesResponse`, which writes every
-    absent optional field as null.
+    absent optional field as null. `nvext` is Dynamo's response extension;
+    the key is omitted when the worker reports nothing.
     """
 
     created: conint(ge=0, strict=True)
@@ -172,3 +208,4 @@ class NvImagesResponse(BaseModel):
         None
     )
     usage: ImageUsage | None = None
+    nvext: ImagesResponseNvExt | None = None
