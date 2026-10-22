@@ -480,8 +480,11 @@ impl
                     let (finish_reason, stop_reason) = result.stop_trigger.as_ref()
                         .map(|trigger| {
                             let (mut reason, stop) = trigger.reasons();
+                            // A stop string can win over the EOS token's trigger.
+                            // Only the consumed prefix supplies evidence of model EOS.
                             if state.retain_model_stop_token_text
-                                && matches!(trigger, StopTrigger::HiddenStopTokenDetected(id) | StopTrigger::UserStopTokenDetected(id) if decoder.system_stop_ids.contains(id))
+                                && data.token_ids[..result.tokens.len()].last()
+                                    .is_some_and(|id| decoder.system_stop_ids.contains(id))
                             {
                                 reason = FinishReason::EoS;
                             }
@@ -2003,18 +2006,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_stop_preserves_overlapping_model_eos() {
-        for system_eos in [false, true] {
+        for (kind, system_eos) in [
+            ("token", false),
+            ("token", true),
+            ("hidden_string", true),
+            ("visible_string", true),
+            ("earlier_string", true),
+        ] {
+            let stop_string = if kind == "earlier_string" {
+                "Okay"
+            } else {
+                "<|return|>"
+            };
             let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
             let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
             let request = PreprocessedRequest::builder()
                 .model("test-model".to_string())
                 .token_ids(vec![])
                 .stop_conditions(StopConditions {
-                    stop_token_ids: Some(vec![104]),
+                    stop_token_ids: (kind == "token").then_some(vec![104]),
                     stop_token_ids_hidden: system_eos.then_some(vec![104]),
+                    stop: (kind != "token").then(|| vec![stop_string.to_string()]),
                     ..Default::default()
                 })
-                .sampling_options(SamplingOptions::default())
+                .sampling_options(SamplingOptions {
+                    include_stop_str_in_output: Some(kind == "visible_string"),
+                    ..Default::default()
+                })
                 .output_options(OutputOptions {
                     retain_model_stop_token_text: Some(true),
                     ..Default::default()
@@ -2034,13 +2052,28 @@ mod tests {
             let output = stream.next().await.unwrap().data.unwrap();
             assert_eq!(
                 output.finish_reason,
-                Some(if system_eos {
+                Some(if system_eos && kind != "earlier_string" {
                     FinishReason::EoS
                 } else {
                     FinishReason::Stop
                 })
             );
-            assert_eq!(output.stop_reason, Some(StopReason::Int(104)));
+            assert_eq!(
+                output.stop_reason,
+                Some(if kind == "token" {
+                    StopReason::Int(104)
+                } else {
+                    StopReason::String(stop_string.to_string())
+                })
+            );
+            assert_eq!(
+                output.token_ids,
+                if kind == "earlier_string" {
+                    vec![101]
+                } else {
+                    vec![101, 104]
+                }
+            );
         }
     }
 
