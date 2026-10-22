@@ -67,7 +67,7 @@ use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
 
 mod worker_registered;
-use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use dynamo_kv_router::indexer::ApproximateLruStats;
 use dynamo_kv_router::sequences::LocalWorkerLoad;
 use worker_registered::RouterWorkerRegistered;
@@ -1184,8 +1184,11 @@ impl RouterRequestMetrics {
                 Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
             )
             .expect("failed to create router_overlap_blocks_lost");
-        non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
-        overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+        // Aggregated routers emit under the decode label, so initialize both series.
+        for worker_type in [WORKER_TYPE_PREFILL, WORKER_TYPE_DECODE] {
+            non_max_overlap_selections_total.with_label_values(&[worker_type]);
+            overlap_blocks_lost.with_label_values(&[worker_type]);
+        }
         let kv_tokens_counter = |name: &str, help: &str| {
             metrics
                 .create_intcountervec(

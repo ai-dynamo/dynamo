@@ -181,7 +181,17 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             self.decode_active_request_weight
         };
         let logit = if self.prepared.needs_decode_subtraction {
-            (load.decode_cost_blocks() - credit).max(0.0) + request_cost
+            let logit = (load.decode_cost_blocks() - credit).max(0.0) + request_cost;
+            // Load-only decode routing (no overlap credit) ignores the prompt, so it never
+            // charges missing prefix blocks. Cache-aware decode routing (conditional
+            // disaggregation, or aggregated serving without prefill tracking) does: the
+            // credit here only offsets decode load, so it has the same cap as below.
+            if self.prefix_affinity_weight != 0.0 && self.prepared.overlap_credit > 0.0 {
+                let missing = (self.prepared.request_blocks.value - device_blocks).max(0.0);
+                logit + self.prefix_affinity_weight * missing
+            } else {
+                logit
+            }
         } else {
             let raw_tokens = if !context.tracks_prefill_tokens() {
                 0

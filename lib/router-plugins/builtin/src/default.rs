@@ -81,6 +81,7 @@ fn policy_for_role(
             host_cache_hit_weight: 0.0,
             disk_cache_hit_weight: 0.0,
             shared_cache_multiplier: 0.0,
+            prefix_affinity_weight: 0.0,
             ..parameters
         }
     } else {

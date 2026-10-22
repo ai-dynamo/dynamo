@@ -191,6 +191,70 @@ fn prefix_affinity_weight_keeps_resumed_prefix_on_cache_holder() {
     );
 }
 
+/// Cache-aware decode scoring subtracts the overlap credit from decode load instead of
+/// prefill, so the credit has the same cap there. Conditional disaggregation and aggregated
+/// serving without prefill tracking both take that path and must charge missing blocks too.
+/// Plain decode routing stays load-only and never asks for cache inputs.
+#[test]
+fn prefix_affinity_weight_applies_to_cache_aware_decode_scoring() {
+    let (workers, mut request) = fixture(2, 47 * 64);
+    request.track_prefill_tokens = false;
+    for (worker, load) in &mut request.worker_loads {
+        let holder = worker.worker_id == 0;
+        *load = Default::default();
+        load.active_decode_blocks = if holder { 50 } else { 0 };
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if holder { 46 } else { 0 });
+    }
+    for (role, conditional_disagg_enabled) in
+        [(WorkerType::Decode, true), (WorkerType::Aggregated, false)]
+    {
+        let select = |prefix_affinity_weight: f64| {
+            let config = KvRouterConfig {
+                conditional_disagg_enabled,
+                host_cache_hit_weight: 0.0,
+                disk_cache_hit_weight: 0.0,
+                router_temperature: 0.0,
+                prefix_affinity_weight,
+                ..Default::default()
+            };
+            dynamo_custom_policy_builtin::default_factory()(
+                &config,
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            )
+            .select_worker(selection_input(&workers, &request, 64))
+            .unwrap()
+            .worker
+            .worker_id
+        };
+        assert_eq!(select(0.0), 1, "{role:?}: default weights move the session");
+        assert_eq!(select(1.0), 0, "{role:?}: affinity keeps the cache holder");
+    }
+
+    let plain_decode = dynamo_custom_policy_builtin::default_factory()(
+        &KvRouterConfig {
+            prefix_affinity_weight: 1.0,
+            ..Default::default()
+        },
+        WorkerType::Decode,
+        RoutingPartitionRef::new("model", "default"),
+    );
+    assert!(
+        !<WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(
+            &plain_decode
+        )
+        .contains(WorkerInputs::CACHE)
+    );
+    assert_eq!(
+        plain_decode.runtime_config().unwrap().parameters()["prefix_affinity_weight"],
+        0.0
+    );
+}
+
 #[test]
 fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
     use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
@@ -231,6 +295,7 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
             "host_cache_hit_weight",
             "disk_cache_hit_weight",
             "shared_cache_multiplier",
+            "prefix_affinity_weight",
         ] {
             assert_eq!(initial.parameters()[name], 0.0);
             assert!(
@@ -335,52 +400,55 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
 
 #[test]
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
-    for temperature in [0.0, 0.7] {
-        for prompt in [1, 17, 127, 2048] {
-            for mode in 0..64 {
-                let (workers, mut request) = fixture(16, prompt);
-                let config = KvRouterConfig {
-                    router_temperature: temperature,
-                    overlap_score_credit_decay: 0.6,
-                    host_cache_hit_weight: 0.25,
-                    disk_cache_hit_weight: 0.1,
-                    decode_active_request_weight: if mode & 8 == 0 { 0.0 } else { 0.7 },
-                    shared_cache_multiplier: Some(if mode & 16 == 0 { 0.0 } else { 0.6 }),
-                    prefix_affinity_weight: if mode & 32 == 0 { 0.0 } else { 0.9 },
-                    ..Default::default()
-                };
-                if mode % 8 >= 4 {
-                    request.shared_cache_hits =
-                        Some(dynamo_kv_router::SharedCacheHits::from_ranges(vec![
-                            1..3,
-                            5..12,
-                        ]));
-                }
-                match mode % 4 {
-                    1 => request.overlap.tier_overlap_blocks = Default::default(),
-                    2 => request.worker_loads.clear(),
-                    3 => request.track_prefill_tokens = false,
-                    _ => {}
-                }
-                let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
-                    Some(config.clone()),
-                    "test",
-                    42,
-                );
-                let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
-                for _ in 0..64 {
-                    let input = support::selection_input(&workers, &request, 16);
-                    let expected = reference.select_worker(input).unwrap();
-                    let actual = plugin.select_worker(input).unwrap();
-                    assert_eq!(
-                        actual.worker, expected.worker,
-                        "temperature={temperature} prompt={prompt} mode={mode}"
+    // "decode" also covers the cache-aware decode subtraction path when prefill tracking is off.
+    for label in ["test", "decode"] {
+        for temperature in [0.0, 0.7] {
+            for prompt in [1, 17, 127, 2048] {
+                for mode in 0..64 {
+                    let (workers, mut request) = fixture(16, prompt);
+                    let config = KvRouterConfig {
+                        router_temperature: temperature,
+                        overlap_score_credit_decay: 0.6,
+                        host_cache_hit_weight: 0.25,
+                        disk_cache_hit_weight: 0.1,
+                        decode_active_request_weight: if mode & 8 == 0 { 0.0 } else { 0.7 },
+                        shared_cache_multiplier: Some(if mode & 16 == 0 { 0.0 } else { 0.6 }),
+                        prefix_affinity_weight: if mode & 32 == 0 { 0.0 } else { 0.9 },
+                        ..Default::default()
+                    };
+                    if mode % 8 >= 4 {
+                        request.shared_cache_hits =
+                            Some(dynamo_kv_router::SharedCacheHits::from_ranges(vec![
+                                1..3,
+                                5..12,
+                            ]));
+                    }
+                    match mode % 4 {
+                        1 => request.overlap.tier_overlap_blocks = Default::default(),
+                        2 => request.worker_loads.clear(),
+                        3 => request.track_prefill_tokens = false,
+                        _ => {}
+                    }
+                    let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+                        Some(config.clone()),
+                        label,
+                        42,
                     );
-                    assert_eq!(actual.cached_tokens, expected.cached_tokens);
-                    assert_eq!(
-                        actual.potential_decode_blocks,
-                        expected.potential_decode_blocks
-                    );
+                    let plugin = DefaultWorkerSelector::new_seeded(Some(config), label, 42);
+                    for _ in 0..64 {
+                        let input = support::selection_input(&workers, &request, 16);
+                        let expected = reference.select_worker(input).unwrap();
+                        let actual = plugin.select_worker(input).unwrap();
+                        assert_eq!(
+                            actual.worker, expected.worker,
+                            "label={label} temperature={temperature} prompt={prompt} mode={mode}"
+                        );
+                        assert_eq!(actual.cached_tokens, expected.cached_tokens);
+                        assert_eq!(
+                            actual.potential_decode_blocks,
+                            expected.potential_decode_blocks
+                        );
+                    }
                 }
             }
         }
