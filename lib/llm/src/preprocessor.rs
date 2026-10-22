@@ -54,6 +54,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
+use crate::http::service::metrics::RequestMetrics;
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -7839,6 +7840,9 @@ impl
             )
             .instrument(preprocessing.clone())
             .await?;
+        if let Some(tracked) = RequestMetrics::from_context(&context) {
+            tracked.add_input_tokens(common_request.token_ids.len());
+        }
         attach_request_context_metadata(&mut common_request, &context);
 
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
@@ -8068,6 +8072,9 @@ impl
 
         let mut common_request = builder.build()?;
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
+        if let Some(tracked) = RequestMetrics::from_context(&context) {
+            tracked.add_input_tokens(common_request.token_ids.len());
+        }
         attach_request_context_metadata(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -8157,6 +8164,9 @@ impl
         // Preprocess the embedding request
         let (preprocessed_request, annotations) =
             self.preprocess_embedding_request(&request).await?;
+        if let Some(metrics) = RequestMetrics::from_context(&context) {
+            metrics.add_input_tokens(preprocessed_request.token_ids.iter().map(Vec::len).sum());
+        }
 
         // Forward to next stage
         let preprocessed_request = context.map(|_| preprocessed_request);
@@ -13917,6 +13927,128 @@ mod tests {
             .expect("error should preserve the DynamoError type");
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
+    }
+
+    /// Records each dispatched prompt's length, then fails before any output.
+    #[derive(Default)]
+    struct PromptRecordingBackend(std::sync::Mutex<Vec<usize>>);
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for PromptRecordingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            self.0.lock().unwrap().push(request.token_ids.len());
+            anyhow::bail!("stop before any output")
+        }
+    }
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedEmbeddingRequest>,
+            ManyOut<Annotated<EmbeddingsEngineOutput>>,
+            Error,
+        > for PromptRecordingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedEmbeddingRequest>,
+        ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>, Error> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend(request.token_ids.iter().map(Vec::len));
+            anyhow::bail!("stop before any output")
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_operator_reports_batched_input_tokens_before_output() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Embedding;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "input": [[1, 2, 3], [4, 5]],
+        }))
+        .unwrap();
+        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let inflight = metrics.clone().create_inflight_guard(
+            "test-model",
+            crate::http::service::metrics::Endpoint::Embeddings,
+            false,
+            "",
+        );
+        let mut context = PipelineContext::new(request);
+        inflight.request_metrics().attach_to(&mut context);
+        let backend = Arc::new(PromptRecordingBackend::default());
+        let Err(error) = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await
+        else {
+            panic!("the recording backend must stop before producing output");
+        };
+        assert_eq!(error.to_string(), "stop before any output");
+        assert_eq!(*backend.0.lock().unwrap(), [3, 2]);
+        assert_eq!(awaiting_first_token_input_tokens(&metrics), 5);
+        drop(inflight);
+        assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
+    }
+
+    fn awaiting_first_token_input_tokens(metrics: &crate::http::service::metrics::Metrics) -> u64 {
+        let view = crate::discovery::CommittedModelView {
+            name: "test-model".to_string(),
+            is_ready: true,
+            aliases: Vec::new(),
+        };
+        metrics.frontend_load(0, true, vec![view]).models[0]
+            .gauges
+            .awaiting_first_token_input_tokens
+    }
+
+    fn mock_llama_preprocessor() -> Arc<OpenAIPreprocessor> {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    #[tokio::test]
+    async fn chat_operator_reports_prompt_tokens_before_first_output() {
+        let preprocessor = mock_llama_preprocessor();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+        }))
+        .unwrap();
+        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let inflight = metrics.clone().create_inflight_guard(
+            "test-model",
+            crate::http::service::metrics::Endpoint::ChatCompletions,
+            false,
+            "",
+        );
+        let mut context = PipelineContext::new(request);
+        inflight.request_metrics().attach_to(&mut context);
+        let backend = Arc::new(PromptRecordingBackend::default());
+
+        let result = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await;
+
+        assert!(result.is_err());
+        let dispatched = backend.0.lock().unwrap().clone();
+        assert_eq!(dispatched.len(), 1);
+        assert!(dispatched[0] > 0);
+        assert_eq!(
+            awaiting_first_token_input_tokens(&metrics),
+            dispatched[0] as u64
+        );
     }
 
     fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
