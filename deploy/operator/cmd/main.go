@@ -121,8 +121,6 @@ func initCRDSchemes() {
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
 	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
 
-	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
-
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))

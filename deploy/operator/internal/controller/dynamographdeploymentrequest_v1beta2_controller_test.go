@@ -497,12 +497,60 @@ func boolPointerForTest(value bool) *bool { return &value }
 // apiextensionsJSONForTest is a non-empty v1beta1 carrier payload.
 var apiextensionsJSONForTest = apiextensionsv1.JSON{Raw: []byte(`{"model":"carrier"}`)}
 
-func TestV1beta2RequestControllerRejectsANameThatCannotBeDerived(t *testing.T) {
+func TestV1beta2RequestControllerKeepsTheReadableRunNameWhenItFits(t *testing.T) {
+	request := dgdrV1beta2Request(true)
+	request.Name = strings.Repeat("a", 250)
+	request.Generation = 3
+	if got, want := dgdrV1beta2RunName(request), request.Name+"-3"; got != want {
+		t.Fatalf("run name = %q, want %q", got, want)
+	}
+}
+
+func TestV1beta2RequestControllerDerivesDistinctValidNamesForOverlengthRequests(t *testing.T) {
+	a := dgdrV1beta2Request(true)
+	a.Name = strings.Repeat("a", 252)
+	b := dgdrV1beta2Request(true)
+	b.Name = strings.Repeat("a", 251) + "b" // the same retained prefix as a
+	nameA, nameB := dgdrV1beta2RunName(a), dgdrV1beta2RunName(b)
+	for _, name := range []string{nameA, nameB} {
+		if len(name) > dgdrV1beta2MaxRunNameLength || !strings.HasSuffix(name, "-1") {
+			t.Fatalf("run name %q (%d characters) is not a valid name with the generation suffix", name, len(name))
+		}
+	}
+	if nameA == nameB {
+		t.Fatalf("two different Request names produced the same Run name %q", nameA)
+	}
+
+	t.Log("The name maps back to its generation for its own Request only")
+	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{Name: nameA}}
+	if generation, err := dgdrV1beta2RunGeneration(a.Name, run); err != nil || generation != 1 {
+		t.Fatalf("generation = %d, err = %v, want 1", generation, err)
+	}
+	if _, err := dgdrV1beta2RunGeneration(b.Name, run); err == nil {
+		t.Fatal("a Run name derived from another Request was accepted")
+	}
+}
+
+func TestV1beta2RequestControllerReconcilesAnOverlengthRequestToOneRun(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	request.Name = strings.Repeat("a", 252)
 	f := newDGDRV1beta2Fixture(t, request)
-	if _, err := f.reconciler.buildRun(request); err == nil || !strings.Contains(err.Error(), "too long") {
-		t.Fatalf("err = %v, want a name-too-long error", err)
+	key := types.NamespacedName{Namespace: request.Namespace, Name: request.Name}
+	for range 3 {
+		if _, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	want := dgdrV1beta2RunName(request)
+	if names := f.runNames(); len(names) != 1 || names[0] != want {
+		t.Fatalf("runs = %v, want only %q", names, want)
+	}
+	live := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+	if err := f.client.Get(t.Context(), key, live); err != nil {
+		t.Fatalf("get request: %v", err)
+	}
+	if live.Status.ActiveRunRef == nil || live.Status.ActiveRunRef.Name != want || live.Status.ObservedGeneration != 1 {
+		t.Fatalf("status = %+v, want the overlength Run active for generation 1", live.Status)
 	}
 }
 
