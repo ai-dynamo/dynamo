@@ -1863,6 +1863,7 @@ mod tests {
 
     #[test]
     fn bounded_systemone_limit_accepts_operator_increases_and_warns_when_clamped() {
+        let _keep = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         for (configured, effective, warned) in [
             ("128", 128, false),
             ("1024", 1024, false),
