@@ -390,9 +390,9 @@ def sglang_uses_engine_owned_mm_identity() -> bool:
     try:
         # Deferred: schedule_batch imports torch and other SGLang runtime modules.
         from sglang.srt.managers.schedule_batch import MultimodalDataItem
-    except Exception:
+    except ImportError:
         return False
-    return "pad_values" in getattr(MultimodalDataItem, "__struct_fields__", ())
+    return "pad_values" in MultimodalDataItem.__struct_fields__
 
 
 def supports_external_mm_hashes(engine: Any) -> bool:

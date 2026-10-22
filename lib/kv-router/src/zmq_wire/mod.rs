@@ -50,18 +50,6 @@ pub fn decode_event_batch(payload: &[u8]) -> Result<KvEventBatch, rmps::decode::
     rmps::from_slice(payload)
 }
 
-/// Set when an SGLang source derives multimodal pad values from its own
-/// identity (sgl-project/sglang#43043); see
-/// [`ZmqEventNormalizer::with_engine_owned_mm_identity`].
-/// TODO(#17044): carry this in publisher config and standalone indexer
-/// registration instead of the environment.
-pub const ENGINE_OWNED_MM_IDENTITY_ENV: &str = "DYN_KV_EVENTS_ENGINE_OWNED_MM_IDENTITY";
-
-pub fn engine_owned_mm_identity_from_env() -> bool {
-    std::env::var(ENGINE_OWNED_MM_IDENTITY_ENV)
-        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-}
-
 fn storage_tier_of(raw: &RawKvEvent) -> Option<StorageTier> {
     match raw.medium() {
         None => Some(StorageTier::Device),
@@ -97,9 +85,9 @@ pub struct ZmqEventNormalizer {
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
-    /// Set for SGLang sources whose multimodal pad values are engine identities
-    /// (sgl-project/sglang#43043). See `mm_labels`.
-    engine_mm: Option<mm_labels::EngineMmState>,
+    /// Exclusion of multimodal values the request side cannot reproduce. See
+    /// `mm_labels` and [`Self::with_engine_owned_mm_identity`].
+    engine_mm: mm_labels::EngineMmState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,7 +142,7 @@ impl ZmqEventNormalizer {
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
-            engine_mm: None,
+            engine_mm: mm_labels::EngineMmState::new(false),
         }
     }
 
@@ -166,28 +154,30 @@ impl ZmqEventNormalizer {
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
-            engine_mm: None,
+            engine_mm: mm_labels::EngineMmState::new(false),
         }
     }
 
-    /// Treat event tokens at or above `MM_PAD_SHIFT_VALUE` as engine-owned
-    /// multimodal identities: exclude the blocks that hold them and every
-    /// block chained after them.
+    /// Mark this source as deriving multimodal pad values from engine
+    /// identities (sgl-project/sglang#43043): every event token at or above
+    /// `MM_PAD_SHIFT_VALUE` is excluded with the blocks chained after it.
+    /// Unflagged sources exclude only values that did not fit in `u32`.
     pub fn with_engine_owned_mm_identity(mut self, enabled: bool) -> Self {
-        self.engine_mm = enabled.then(mm_labels::EngineMmState::default);
+        self.engine_mm = mm_labels::EngineMmState::new(enabled);
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_engine_mm_excluded_capacity(mut self, excluded_capacity: usize) -> Self {
-        self.engine_mm = Some(mm_labels::EngineMmState::with_excluded_capacity(
+        self.engine_mm = mm_labels::EngineMmState::with_excluded_capacity(
+            self.engine_mm.engine_owned(),
             excluded_capacity,
-        ));
+        );
         self
     }
 
-    pub fn engine_mm_stats(&self) -> Option<&EngineMmStats> {
-        self.engine_mm.as_ref().map(|state| &state.stats)
+    pub fn engine_mm_stats(&self) -> &EngineMmStats {
+        &self.engine_mm.stats
     }
 
     /// Set the model's image placeholder token id so vLLM BlockStored events
@@ -295,10 +285,8 @@ impl ZmqEventNormalizer {
         event_id: u64,
         worker: WorkerWithDpRank,
     ) -> Option<PlacementEvent> {
-        let Some(state) = self.engine_mm.as_mut() else {
-            if !mm_labels::truncate_at_wide_tokens(&mut raw) {
-                return Some(empty_removal(event_id, worker, storage_tier_of(&raw)?));
-            }
+        // Unknown media fail closed in conversion; keep that behavior.
+        let Some(tier) = storage_tier_of(&raw) else {
             return convert_event(
                 raw,
                 event_id,
@@ -309,9 +297,13 @@ impl ZmqEventNormalizer {
                 self.video_token_id,
             );
         };
-
-        // Unknown media fail closed in conversion; keep that behavior.
-        let tier = storage_tier_of(&raw)?;
+        // Engine-owned pads replace the placeholder tokens that vLLM-style
+        // normalization rewrites, so only legacy sources use those ids.
+        let (image_token_id, video_token_id) = if self.engine_mm.engine_owned() {
+            (None, None)
+        } else {
+            (self.image_token_id, self.video_token_id)
+        };
         let convert = |raw| {
             convert_event(
                 raw,
@@ -319,26 +311,26 @@ impl ZmqEventNormalizer {
                 self.kv_block_size,
                 worker,
                 &self.warning_count,
-                None,
-                None,
+                image_token_id,
+                video_token_id,
             )
         };
         match raw {
             RawKvEvent::BlockStored { .. } => {
                 // An excluded store still yields an event so the event id is
                 // not mistaken for an engine-side drop.
-                if !state.prepare_store(&mut raw, worker, tier) {
+                if !self.engine_mm.prepare_store(&mut raw, worker, tier) {
                     return Some(empty_removal(event_id, worker, tier));
                 }
                 convert(raw)
             }
             RawKvEvent::BlockRemoved { .. } => {
                 let mut event = convert(raw)?;
-                state.filter_remove(&mut event, worker, tier);
+                self.engine_mm.filter_remove(&mut event, worker, tier);
                 Some(event)
             }
             RawKvEvent::AllBlocksCleared { .. } => {
-                state.clear(worker);
+                self.engine_mm.clear(worker);
                 convert(raw)
             }
             RawKvEvent::Ignored => None,

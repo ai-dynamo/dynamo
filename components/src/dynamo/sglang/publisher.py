@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from time import monotonic
 from typing import (
     TYPE_CHECKING,
@@ -415,12 +414,9 @@ class DynamoSglangPublisher:
                     "sglang kv_events_config is set but missing 'endpoint'"
                 )
             connect_ip = kv_event_connect_ip(base_ep)
-
-            if sglang_uses_engine_owned_mm_identity():
-                # Event tokens carry SGLang's own multimodal pad values. Tell
-                # the publisher's normalizer to exclude them instead of
-                # indexing them as text.
-                os.environ.setdefault("DYN_KV_EVENTS_ENGINE_OWNED_MM_IDENTITY", "1")
+            # Event tokens carry SGLang's own multimodal pad values on builds
+            # with sgl-project/sglang#43043; the normalizer excludes them.
+            engine_owned_mm_identity = sglang_uses_engine_owned_mm_identity()
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)
@@ -457,6 +453,7 @@ class DynamoSglangPublisher:
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
                     dp_rank=dp_rank,
                     kv_state_endpoint=self.dynamo_args.kv_state_endpoint,
+                    engine_owned_mm_identity=engine_owned_mm_identity,
                 )
                 self.kv_publishers.append(publisher)
 

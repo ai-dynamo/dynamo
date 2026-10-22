@@ -138,6 +138,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_worker_type: None,
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
+        engine_owned_mm_identity: None,
     }
 }
 
@@ -1152,6 +1153,24 @@ async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
     assert!(core.cancel_token.is_cancelled());
     assert!(!parent.is_cancelled());
     assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+}
+
+#[tokio::test]
+async fn upsert_carries_engine_owned_mm_identity_to_the_listener() {
+    let core = local_core_with(test_config(true), 1, CancellationToken::new());
+    core.upsert_worker(WorkerRequest {
+        engine_owned_mm_identity: Some(true),
+        ..worker_with_kv_events(1)
+    })
+    .await
+    .expect("worker upsert");
+
+    let listed = serde_json::to_value(core.indexer_registry.list()).unwrap();
+    assert_eq!(
+        listed[0]["listeners"]["0"]["engine_owned_mm_identity"],
+        true
+    );
+    core.shutdown();
 }
 
 #[rstest::rstest]

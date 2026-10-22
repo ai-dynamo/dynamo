@@ -82,6 +82,11 @@ pub enum KvEventSourceConfig {
         expected_rank: Option<u32>,
         /// Expected source rank and negotiated heartbeat timeout.
         liveness: Option<(u32, std::time::Duration)>,
+        /// The source derives multimodal pad values from engine identities
+        /// (SGLang after sgl-project/sglang#43043), so every event token at or
+        /// above `MM_PAD_SHIFT_VALUE` is excluded from the index. Otherwise only
+        /// values that do not fit in `u32` are excluded.
+        engine_owned_mm_identity: bool,
     },
 }
 
@@ -142,6 +147,7 @@ impl KvEventSource {
                 video_token_id,
                 expected_rank,
                 liveness,
+                engine_owned_mm_identity,
             } => {
                 let listener_handle =
                     component
@@ -160,6 +166,7 @@ impl KvEventSource {
                             video_token_id,
                             expected_rank,
                             liveness,
+                            engine_owned_mm_identity,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =
