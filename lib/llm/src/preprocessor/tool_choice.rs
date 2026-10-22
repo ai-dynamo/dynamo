@@ -89,16 +89,19 @@ impl OpenAIPreprocessor {
             && (matches!(
                 choice,
                 ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
-            ) || tools.iter().any(|tool| {
-                tool.function.strict == Some(true)
-                    && match choice {
-                        ChatCompletionToolChoiceOption::None => false,
-                        ChatCompletionToolChoiceOption::Named(named) => {
-                            tool.function.name == named.function.name
+            ) || (request.inner.parallel_tool_calls == Some(false)
+                && !tools.is_empty()
+                && !matches!(choice, ChatCompletionToolChoiceOption::None))
+                || tools.iter().any(|tool| {
+                    tool.function.strict == Some(true)
+                        && match choice {
+                            ChatCompletionToolChoiceOption::None => false,
+                            ChatCompletionToolChoiceOption::Named(named) => {
+                                tool.function.name == named.function.name
+                            }
+                            _ => true,
                         }
-                        _ => true,
-                    }
-            }));
+                }));
         if requires_enforcement && constraint == GuidedToolConstraint::None {
             return Err(invalid_argument(
                 "Beam cannot enforce the requested tool constraints with this schema and prompt configuration",
@@ -769,6 +772,31 @@ mod tests {
                 if let Err(error) = result {
                     assert!(error.to_string().contains("cannot enforce"));
                 }
+            }
+        }
+        for (choice, with_tools, required) in [
+            ("auto", true, true),
+            ("none", true, false),
+            ("auto", false, false),
+        ] {
+            let request = request(json!({
+                "tools": if with_tools { tools() } else { json!(null) },
+                "tool_choice": choice,
+                "parallel_tool_calls": false,
+                "guided_json": {"type": "object"},
+            }));
+            let result = preprocessor.apply_tool_choice_guided_decoding(
+                &request,
+                &mut preprocessed_request(),
+                false,
+            );
+            assert_eq!(
+                result.is_err(),
+                required,
+                "parallel=false choice={choice} tools={with_tools}"
+            );
+            if let Err(error) = result {
+                assert!(error.to_string().contains("cannot enforce"));
             }
         }
     }
