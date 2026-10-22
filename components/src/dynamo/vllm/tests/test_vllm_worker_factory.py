@@ -91,6 +91,17 @@ def _make_factory(**overrides) -> WorkerFactory:
     return WorkerFactory(**defaults)
 
 
+def _make_decode_handler(**overrides) -> Mock:
+    return Mock(
+        **{
+            "embedding_cache_manager": None,
+            "initialize_decision_read": AsyncMock(),
+            "decision_read_profile": None,
+            **overrides,
+        }
+    )
+
+
 def test_register_request_cache_metrics_includes_multimodal_image_loader():
     endpoint = Mock()
     embedding_cache = object()
@@ -1666,9 +1677,14 @@ def restore_path_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "RealtimeHandler",
         "RealtimeTranscriptionHandler",
     ):
+        handler = (
+            _make_decode_handler()
+            if handler_cls == "DecodeWorkerHandler"
+            else Mock(embedding_cache_manager=None)
+        )
         monkeypatch.setattr(
             f"dynamo.vllm.worker_factory.{handler_cls}",
-            Mock(return_value=Mock(embedding_cache_manager=None)),
+            Mock(return_value=handler),
         )
     for payload_cls in ("VllmHealthCheckPayload", "VllmPrefillHealthCheckPayload"):
         monkeypatch.setattr(
@@ -1710,7 +1726,8 @@ async def test_fpm_relay_starts_only_after_shadow_election(
         setup_fpm_relay_fn=relay,
         register_vllm_model_fn=register,
     )
-    handler = Mock(
+    handler_factory = _make_decode_handler if path == "decode" else Mock
+    handler = handler_factory(
         embedding_cache_manager=None,
         _pause_controller=SimpleNamespace(pause=AsyncMock()),
     )
@@ -2532,7 +2549,7 @@ def _decode_benchmark_factory(monkeypatch, tmp_path, register_fn):
     )
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.DecodeWorkerHandler",
-        Mock(return_value=Mock(embedding_cache_manager=None)),
+        Mock(return_value=_make_decode_handler()),
     )
     runtime = Mock()
     runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="worker-id"))
@@ -2557,6 +2574,89 @@ def _decode_benchmark_factory(monkeypatch, tmp_path, register_fn):
         custom_jinja_template=None,
     )
     return factory, runtime, config, engine_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_vllm_tokenizer", [False, True])
+@pytest.mark.parametrize(
+    "ready_profile",
+    [None, "vllm_liquid_decision_v1", "vllm_diffusion_canvas_decision_v1"],
+)
+async def test_decode_initializes_native_read_before_registration(
+    monkeypatch, tmp_path, use_vllm_tokenizer, ready_profile
+):
+    register = AsyncMock(side_effect=_ReachedRegistration)
+    factory, runtime, config, engine_client = _decode_benchmark_factory(
+        monkeypatch, tmp_path, register
+    )
+    factory.setup_vllm_engine.return_value[1].additional_config.clear()
+    config.use_vllm_tokenizer = use_vllm_tokenizer
+    runtime.endpoint.return_value.first_token_source = AsyncMock()
+    handler = _make_decode_handler()
+    entered = asyncio.Event()
+    released = asyncio.Event()
+
+    async def initialize():
+        entered.set()
+        await released.wait()
+        handler.decision_read_profile = ready_profile
+
+    handler.initialize_decision_read.side_effect = initialize
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.DecodeWorkerHandler", Mock(return_value=handler)
+    )
+    task = asyncio.create_task(
+        factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        register.assert_not_awaited()
+        assert handler.decision_read_profile is None
+        released.set()
+        with pytest.raises(_ReachedRegistration):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    handler.initialize_decision_read.assert_awaited_once_with()
+    register.assert_awaited_once()
+    assert register.await_args.args[0] == (
+        ModelInput.Text if use_vllm_tokenizer else ModelInput.Tokens
+    )
+    assert register.await_args.kwargs == {
+        "worker_type": WorkerType.Aggregated,
+        "needs": [],
+        "decision_read_profile": ready_profile,
+    }
+    runtime.endpoint.return_value.serve_endpoint.assert_not_called()
+    handler.cleanup.assert_called_once()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_decode_native_read_initialization_error_prevents_registration(
+    monkeypatch, tmp_path
+):
+    register = AsyncMock()
+    factory, runtime, config, engine_client = _decode_benchmark_factory(
+        monkeypatch, tmp_path, register
+    )
+    error = ValueError("native read initialization bug")
+    handler = _make_decode_handler()
+    handler.initialize_decision_read.side_effect = error
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.DecodeWorkerHandler", Mock(return_value=handler)
+    )
+
+    with pytest.raises(ValueError, match="native read initialization bug") as failure:
+        await factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+
+    assert failure.value is error
+    register.assert_not_awaited()
+    handler.cleanup.assert_called_once()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
 @pytest.mark.asyncio

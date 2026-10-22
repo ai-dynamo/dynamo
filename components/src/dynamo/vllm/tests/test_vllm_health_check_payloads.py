@@ -10,6 +10,8 @@ parity with trtllm/sglang for any future marker-gated behavior.
 """
 
 import json
+from importlib.metadata import PackageNotFoundError, version
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +26,7 @@ from dynamo.vllm.health_check import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -89,3 +92,64 @@ def test_embedding_payload_omits_model_when_no_name():
     assert "model" not in payload
     assert payload.get("input") == "probe"
     assert payload.get(HEALTH_CHECK_KEY) is True
+
+
+@pytest.mark.parametrize(
+    "make", [VllmHealthCheckPayload, VllmPrefillHealthCheckPayload]
+)
+@pytest.mark.parametrize("use_text_input", [False, True])
+@pytest.mark.parametrize("is_diffusion", [False, True])
+def test_generation_canary_uses_effective_model_temperature(
+    make, use_text_input, is_diffusion
+):
+    engine = SimpleNamespace(model_config=SimpleNamespace(is_diffusion=is_diffusion))
+    payload = make(engine, use_text_input=use_text_input).to_dict()
+    sampling = payload if use_text_input else payload["sampling_options"]
+    assert sampling["temperature"] == (1.0 if is_diffusion else 0.0)
+    assert payload[HEALTH_CHECK_KEY] is True
+    if use_text_input:
+        assert payload["prompt"] == "Test"
+        assert payload["max_tokens"] == 1
+    else:
+        assert payload["token_ids"] == [1]
+        assert payload["stop_conditions"]["max_tokens"] == 1
+
+
+@pytest.mark.parametrize("use_text_input", [False, True])
+def test_diffusion_canary_preserves_explicit_override(monkeypatch, use_text_input):
+    override = (
+        {"prompt": "override", "temperature": 0.0, "max_tokens": 2}
+        if use_text_input
+        else {
+            "token_ids": [42],
+            "sampling_options": {"temperature": 0.0},
+            "stop_conditions": {"max_tokens": 2},
+        }
+    )
+    monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", json.dumps(override))
+    engine = SimpleNamespace(model_config=SimpleNamespace(is_diffusion=True))
+    payload = VllmHealthCheckPayload(engine, use_text_input=use_text_input).to_dict()
+    assert payload == {**override, HEALTH_CHECK_KEY: True}
+
+
+@pytest.mark.parametrize("use_text_input", [False, True])
+def test_installed_main_accepts_default_diffusion_canary_sampling(use_text_input):
+    try:
+        installed = version("vllm")
+    except PackageNotFoundError:
+        pytest.skip("Optional vLLM runtime is not installed")
+    if installed != "0.32.1rc1.dev172+g9da5f2d31":
+        pytest.skip("Exact pinned-main native validation API is not installed")
+    from vllm.sampling_params import SamplingParams
+
+    model = SimpleNamespace(is_diffusion=True)
+    payload = VllmHealthCheckPayload(
+        SimpleNamespace(model_config=model), use_text_input=use_text_input
+    ).to_dict()
+    sampling = (
+        {"temperature": payload["temperature"], "max_tokens": payload["max_tokens"]}
+        if use_text_input
+        else {**payload["sampling_options"], **payload["stop_conditions"]}
+    )
+    params = SamplingParams(**sampling)
+    params._validate_diffusion(model)
