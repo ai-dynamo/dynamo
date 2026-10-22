@@ -28,10 +28,6 @@ RUN apt-get update -y \
         net-tools \
         ninja-build \
         pybind11-dev \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
         libibverbs-dev \
         rdma-core \
