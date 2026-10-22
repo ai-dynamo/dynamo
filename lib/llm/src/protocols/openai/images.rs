@@ -1,6 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Image generation protocol: `/v1/images/generations` and `/v1/images/edits`.
+//!
+//! These types re-declare the fields of the OpenAI `CreateImageRequest` and
+//! `ImagesResponse` instead of wrapping `dynamo_protocols::types::CreateImageRequest`,
+//! which re-exports the `async-openai` type. The Python worker models are
+//! generated from a `utoipa` schema of these types (see `media_schemas.rs`),
+//! and no schema exists upstream: `async-openai` has no schema derive, and
+//! the `protocol-schema` placeholders in `dynamo-protocols` carry a type name
+//! with no field shape. Owning the fields also replaces the hand-written
+//! serde that the wrapper needed to flatten the OpenAI fields next to the
+//! passthrough map, and lets an explicit `null` for a typed field read as
+//! absent instead of landing in the passthrough.
+//!
+//! The right home for the schema derive is upstream, in `async-openai` or in
+//! `dynamo-protocols`. When it exists there, these types can shrink back to
+//! a wrapper. Until then, the tests in this module hold the wire format to
+//! the OpenAI type: every enum value and every rejected input is checked
+//! against `dynamo_protocols::types::CreateImageRequest`.
+
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -16,7 +35,8 @@ pub use nvext::NvExt;
 
 /// Request for image generation (/v1/images/generations and /v1/images/edits).
 ///
-/// The OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`.
+/// The OpenAI fields keep the wire format of the OpenAI `CreateImageRequest`;
+/// the module documentation says why they are declared here and not wrapped.
 /// `model` and `size` are free text, because the OpenAI type accepts any
 /// string there.
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
