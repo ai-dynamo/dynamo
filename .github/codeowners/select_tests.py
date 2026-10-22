@@ -404,6 +404,9 @@ def write_summary(path: Path, selection: dict[str, Any]) -> None:
     def escape_path(value: object) -> str:
         return str(value).replace("|", "\\|").replace("`", "\\`")
 
+    def escape_reason(value: str) -> str:
+        return escape_path(" ".join(value.split()))
+
     def count_label(count: int, noun: str) -> str:
         return f"{count} {noun}" + ("" if count == 1 else "s")
 
@@ -414,6 +417,15 @@ def write_summary(path: Path, selection: dict[str, Any]) -> None:
         if remaining > 0:
             shown += f" and {remaining} more"
         return shown
+
+    def group_sort_key(classification: str) -> tuple[int, str]:
+        if classification == "shared_full":
+            return (0, classification)
+        if classification == "unmapped":
+            return (1, classification)
+        if classification == "framework" or classification.startswith("framework:"):
+            return (2, classification)
+        return (3, classification)
 
     frameworks = selection["frameworks"]
     lines = [
@@ -437,56 +449,32 @@ def write_summary(path: Path, selection: dict[str, Any]) -> None:
                 )
         lines.append(f"| {framework} | {decision['decision']} | {runs} |")
 
-    full_frameworks = {
-        framework: decision
-        for framework, decision in frameworks.items()
-        if decision["decision"] == "full"
-    }
-    if full_frameworks:
-        shared_full_paths: set[str] = set()
-        unmapped_paths: set[str] = set()
-        framework_paths: dict[str, set[str]] = {}
-        bare_reasons: set[str] = set()
-        for framework, decision in full_frameworks.items():
-            for reason in decision.get("reasons", []):
-                if reason.startswith(("feature:", "test_file:")):
-                    continue
-                prefix, separator, reason_path = reason.partition(":")
-                if separator and reason_path and prefix == "shared_full":
-                    shared_full_paths.add(reason_path)
-                elif separator and reason_path and prefix == "unmapped":
-                    unmapped_paths.add(reason_path)
-                elif separator and reason_path and prefix == "framework":
-                    framework_paths.setdefault(reason_path, set()).add(framework)
-                else:
-                    bare_reasons.add(reason)
-
-        why_full: list[str] = []
-        if shared_full_paths:
-            why_full.append(
-                f"- `shared_full` "
-                f"({count_label(len(shared_full_paths), 'path')}): "
-                f"{format_paths(shared_full_paths, 5)}"
-            )
-        if framework_paths:
-            applicable_frameworks = sorted(
-                framework
-                for frameworks_for_path in framework_paths.values()
-                for framework in frameworks_for_path
-            )
-            framework_names = ", ".join(sorted(set(applicable_frameworks)))
-            why_full.append(
-                f"- `framework` ({framework_names}, "
-                f"{count_label(len(framework_paths), 'path')}): "
-                f"{format_paths(set(framework_paths), 5)}"
-            )
-        if unmapped_paths:
-            why_full.append(
-                f"- `unmapped` ({count_label(len(unmapped_paths), 'path')}): "
-                f"{format_paths(unmapped_paths, 5)}"
-            )
-        why_full.extend(f"- `{escape_path(reason)}`" for reason in sorted(bare_reasons))
-        lines.extend(["", "**Why full**", *why_full])
+    full_reasons: set[str] = set()
+    path_frameworks: dict[str, set[str]] = {}
+    for framework, decision in frameworks.items():
+        for reason in decision.get("reasons", []):
+            if reason.startswith(("feature:", "test_file:")):
+                continue
+            prefix, separator, reason_path = reason.partition(":")
+            if (
+                separator
+                and reason_path
+                and prefix
+                in {
+                    "shared_full",
+                    "unmapped",
+                    "framework",
+                }
+            ):
+                if prefix == "framework":
+                    path_frameworks.setdefault(reason_path, set()).add(framework)
+                continue
+            full_reasons.add(reason)
+    if full_reasons:
+        reasons = ", ".join(
+            f"`{escape_reason(reason)}`" for reason in sorted(full_reasons)
+        )
+        lines.extend(["", f"Full because: {reasons}"])
 
     paths = selection.get("paths", {})
     if isinstance(paths, dict) and paths:
@@ -500,10 +488,38 @@ def write_summary(path: Path, selection: dict[str, Any]) -> None:
                 "",
             ]
         )
-        for classification in sorted(grouped_paths):
+        for classification in sorted(grouped_paths, key=group_sort_key):
             changed_paths = grouped_paths[classification]
+            group_label = classification
+            full_annotation = ""
+            if classification in {"shared_full", "unmapped"}:
+                full_annotation = ", forces full"
+            elif classification == "framework" or classification.startswith(
+                "framework:"
+            ):
+                if classification.startswith("framework:"):
+                    framework_names = sorted(
+                        name
+                        for name in classification.partition(":")[2].split(",")
+                        if name
+                    )
+                else:
+                    framework_names = sorted(
+                        {
+                            framework
+                            for changed_path in changed_paths
+                            for framework in path_frameworks.get(changed_path, set())
+                        }
+                    )
+                    if framework_names:
+                        group_label = f"framework:{','.join(framework_names)}"
+                if framework_names:
+                    full_annotation = f", forces full for {', '.join(framework_names)}"
+                else:
+                    full_annotation = ", forces full"
             lines.append(
-                f"- `{escape_path(classification)}` ({len(changed_paths)}): "
+                f"- `{escape_path(group_label)}` "
+                f"({len(changed_paths)}{full_annotation}): "
                 f"{format_paths(changed_paths, 20)}"
             )
         lines.extend(["", "</details>"])
