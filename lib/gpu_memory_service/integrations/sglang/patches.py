@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
+import sys
 from contextlib import contextmanager
 from typing import Optional
 
@@ -241,11 +243,13 @@ def patch_kv_cache_sizing_for_gms() -> None:
     add-back exists to undo a depressed *pre-load* reading,
     and on XPU that reading was never depressed in the first place.
 
-    Three modules bind the helper with a from-import, so each name is rebound
-    separately: kv_cache_configurator (sizes the pool), model_runner
-    (weight_load_mem_usage) and scheduler (startup_available_gpu_memory_gb).
-    distributed.bootstrap is left alone -- it samples the pre-load baseline
-    before the loader has connected, and that baseline should exclude W.
+    SGLang binds the helper with ``from ... import get_available_gpu_memory``
+    in many modules, so patching by module name would miss new call sites.
+    Instead, wrap it at its definition (sglang.srt.utils.common), which late
+    importers resolve through, and rebind every already-loaded module
+    attribute that *is* the original function object. The wrapper is a no-op
+    until a reader sets impl.preloaded_weights_bytes during load_model(), so
+    the pre-load baseline sampled by distributed.bootstrap is unaffected.
     """
     global _kv_cache_sizing_patched
 
@@ -287,54 +291,40 @@ def patch_kv_cache_sizing_for_gms() -> None:
 
         return patched_get_available_gpu_memory
 
-    modules = []
-
     try:
-        from sglang.srt.mem_cache import kv_cache_configurator
-
-        modules.append(kv_cache_configurator)
+        common = importlib.import_module("sglang.srt.utils.common")
     except ImportError:
         logger.warning(
-            "[GMS] Could not import kv_cache_configurator, KV pool sizing "
+            "[GMS] Could not import sglang.srt.utils.common, KV pool sizing "
             "will not account for GMS-resident weights"
         )
-
-    try:
-        from sglang.srt.model_executor import model_runner
-
-        modules.append(model_runner)
-    except ImportError:
-        logger.warning(
-            "[GMS] Could not import model_runner, its avail-mem logs will "
-            "not account for GMS-resident weights"
-        )
-
-    try:
-        from sglang.srt.managers import scheduler
-
-        modules.append(scheduler)
-    except ImportError:
-        logger.warning(
-            "[GMS] Could not import scheduler, startup_available_gpu_memory_gb "
-            "will not account for GMS-resident weights"
-        )
-
-    if not modules:
         return
 
-    for module in modules:
-        original = getattr(module, "get_available_gpu_memory", None)
-        if original is None:
-            # Partially initialised module (circular import) or an upstream
-            # rename; leave it alone rather than guess.
-            logger.warning(
-                "[GMS] %s has no get_available_gpu_memory, not patching it",
-                module.__name__,
-            )
-            continue
+    original = getattr(common, "get_available_gpu_memory", None)
+    if original is None:
+        logger.warning(
+            "[GMS] sglang.srt.utils.common has no get_available_gpu_memory, "
+            "KV pool sizing will not account for GMS-resident weights"
+        )
+        return
 
-        module.get_available_gpu_memory = make_gms_aware_probe(original)
-        logger.info("[GMS] Patched %s.get_available_gpu_memory", module.__name__)
+    wrapped = make_gms_aware_probe(original)
+
+    # Read module __dict__ directly so lazy module __getattr__ hooks are not
+    # triggered. The definition site is included, so late importers resolve
+    # to the wrapper too.
+    rebound = []
+    for name, module in list(sys.modules.items()):
+        namespace = getattr(module, "__dict__", None)
+        if namespace and namespace.get("get_available_gpu_memory") is original:
+            module.get_available_gpu_memory = wrapped
+            rebound.append(name)
+
+    logger.info(
+        "[GMS] Patched get_available_gpu_memory in %d modules: %s",
+        len(rebound),
+        ", ".join(sorted(rebound)),
+    )
 
     _kv_cache_sizing_patched = True
 
