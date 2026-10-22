@@ -128,7 +128,9 @@ its message names the branch that switches it on.
 
 The check also warns, without blocking, when the linked Linear issue is in no
 project. Put the issue in its feature project or workstream project (see Sort
-the Issue); the warning clears on the next run.
+the Issue), or leave it out when neither fits; the warning is advisory either
+way. Changing the issue in Linear does not re-run the check, so the warning
+stays until the PR is next edited or pushed.
 
 ## Related
 

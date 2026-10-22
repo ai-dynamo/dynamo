@@ -266,14 +266,16 @@ def project_warning(identifier: str, api_key: str) -> list[str]:
         return []
     print(
         f"::warning title=Linear issue has no project::{identifier} is in no Linear "
-        "project. Put it in the feature project for its feature, or the "
-        "workstream project."
+        "project. If it is feature work, put it in its feature project; if it is "
+        "a bug, test or other work in a workstream, put it in that workstream "
+        "project. Leave it out of a project only when neither fits."
     )
     return [
         "",
-        f"Warning: Linear issue {identifier} is in no project. Put it in the feature",
-        "project for its feature, or the workstream project for bugs, tests and",
-        "non-feature work. This warning does not block the merge.",
+        f"Warning: Linear issue {identifier} is in no project. If it is feature work,",
+        "put it in its feature project; if it is a bug, test or other work in a",
+        "workstream, put it in that workstream project. Leave it out of a project",
+        "only when neither fits. This warning does not block the merge.",
     ]
 
 
