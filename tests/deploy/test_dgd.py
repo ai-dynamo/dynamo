@@ -129,6 +129,9 @@ async def validate_gms_allocation(deployment: ManagedDeployment) -> None:
     claim = await deployment._custom_api.get_namespaced_custom_object(
         "resource.k8s.io", "v1", deployment.namespace, "resourceclaims", allocated_name
     )
+    artifact = Path(deployment.log_dir) / "gms-resourceclaim.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(json.dumps(claim, indent=2))
     claim_status = claim.get("status", {})
     devices = claim_status.get("allocation", {}).get("devices", {}).get("results", [])
     assert (
@@ -138,9 +141,6 @@ async def validate_gms_allocation(deployment: ManagedDeployment) -> None:
         reservation.get("uid") == pod["metadata"]["uid"]
         for reservation in claim_status.get("reservedFor", [])
     ), "GMS ResourceClaim is not reserved for the worker pod"
-    artifact = Path(deployment.log_dir) / "gms-resourceclaim.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps(claim, indent=2))
 
 
 @pytest.mark.framework_only
@@ -291,15 +291,23 @@ async def test_deployment(
             )
             assert model_ready, f"Model '{model}' did not become available"
             if (framework, profile) == ("vllm", "agg_gms"):
-                with await asyncio.to_thread(
-                    requests.get,
-                    f"{base_url}/v1/models",
+                response, port_forward = await asyncio.to_thread(
+                    deployment.send_request_with_port_forward_retry,
+                    pod=frontend_pod,
+                    remote_port=port,
+                    endpoint="/v1/models",
+                    payload=None,
                     timeout=DEFAULT_REQUEST_TIMEOUT,
-                ) as response:
+                    port_forward=port_forward,
+                    method="GET",
+                )
+                with response:
                     response.raise_for_status()
                     assert model in {
                         item["id"] for item in response.json()["data"]
                     }, "GMS model is not listed by the frontend"
+                base_url = f"http://localhost:{port_forward.local_port}"
+                url = base_url + endpoint
             frontend_log_baseline = (
                 len(normalize_log_lines(frontend_pod.logs(container="main")))
                 if validate_agg_logging

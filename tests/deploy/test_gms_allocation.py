@@ -3,6 +3,7 @@
 
 """CPU checks for the aggregate GMS deployment's GPU allocation assertions."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -62,6 +63,18 @@ async def test_gms_allocation_records_shared_gpu(gms_deployment, tmp_path):
         "resource.k8s.io", "v1", "gms-test", "resourceclaims", "worker-gpu"
     )
     assert (tmp_path / "gms-resourceclaim.json").exists()
+
+
+async def test_gms_allocation_keeps_unallocated_claim_artifact(
+    gms_deployment, tmp_path
+):
+    claim = gms_deployment._custom_api.get_namespaced_custom_object.return_value
+    claim["status"].pop("allocation")
+
+    with pytest.raises(AssertionError, match="exactly one NVIDIA GPU"):
+        await validate_gms_allocation(gms_deployment)
+
+    assert json.loads((tmp_path / "gms-resourceclaim.json").read_text()) == claim
 
 
 @pytest.mark.parametrize(

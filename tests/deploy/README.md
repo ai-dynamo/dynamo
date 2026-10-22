@@ -12,8 +12,9 @@ H100 support matrix.
 
 The vLLM `agg_gms` profile is the single-GPU GMS weight-loading smoke test. It
 checks model availability and inference, a Ready native GMS sidecar, and a single
-NVIDIA DRA GPU claim shared by the sidecar and worker. The allocated claim is
-saved as `gms-resourceclaim.json` with the deployment's other test artifacts.
+NVIDIA DRA GPU claim shared by the sidecar and worker. The claim is saved as
+`gms-resourceclaim.json` before allocation assertions, preserving diagnostics
+even when validation fails and teardown removes the deployment.
 
 Run it in a dedicated test namespace on a cluster with Kubernetes 1.34+, the
 NVIDIA GPU DRA driver, `gpu.nvidia.com` DeviceClass, available DRA devices, a

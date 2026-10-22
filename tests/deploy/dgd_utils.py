@@ -1847,10 +1847,11 @@ class ManagedDeployment:
         pod: Pod,
         remote_port: int,
         endpoint: str,
-        payload: dict[str, Any],
+        payload: dict[str, Any] | None,
         timeout: float,
         port_forward: Any,
         request_sender: Any = send_request,
+        method: str = "POST",
     ) -> tuple[requests.Response, Any]:
         """Retry one complete response and return its active port-forward."""
         active_port_forward = port_forward
@@ -1861,7 +1862,7 @@ class ManagedDeployment:
             url = f"http://localhost:{active_port_forward.local_port}{endpoint}"
             response = None
             try:
-                response = request_sender(url, payload, timeout=timeout, method="POST")
+                response = request_sender(url, payload, timeout=timeout, method=method)
                 # Keep streamed body reads inside the retry boundary. Accessing
                 # content is a no-op for responses that are already buffered.
                 _ = response.content
