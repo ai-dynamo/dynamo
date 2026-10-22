@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Opt-in parity against the separately qualified SGLang 0.5.19 profile.
+"""Opt-in native parity qualification for SGLang 0.5.19 and 0.5.22 targets.
 
-Set DYNAMO_DECISION_RUN_PINNED_SGLANG=1 in an explicitly provisioned 0.5.19
-environment. The default backend on main is not qualified by these fixtures;
-ordinary CI deselects them before worker startup. This small-model campaign does
-not establish Qwen3.8-27B qualification or physical GPU cancellation settlement.
+Set DYNAMO_DECISION_RUN_PINNED_SGLANG=1 in an explicitly provisioned target
+environment. Version acceptance enables the campaign; it is not qualification
+evidence. Ordinary CI deselects these tests before worker startup. This
+small-model campaign does not establish Qwen3.8-27B qualification or physical
+GPU cancellation settlement.
 """
 
 import math
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version
@@ -49,9 +51,9 @@ def systemone_sglang_server(
     dynamo_dynamic_ports,
     predownload_models,
 ):
-    assert (
-        version("sglang").split("+")[0] == "0.5.19"
-    ), "Parity is pinned to SGLang 0.5.19"
+    assert re.fullmatch(
+        r"0\.5\.(?:19|22)(?:\+cu[0-9]+)?", version("sglang")
+    ), "Parity targets SGLang 0.5.19 or 0.5.22 with an optional CUDA build suffix"
     ports = dynamo_dynamic_ports
     base_url = f"http://localhost:{ports.frontend_port}"
     env = {**os.environ, "DYN_SYSTEM_PORT": str(ports.system_ports[0])}

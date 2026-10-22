@@ -4,12 +4,49 @@
 """Qualification collection must require an explicitly provisioned profile."""
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
 
 pytest_plugins = ["pytester"]
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
+
+
+@pytest.mark.parametrize(
+    "release,is_target",
+    [
+        ("0.5.19", True),
+        ("0.5.22", True),
+        ("0.5.19+cu128", True),
+        ("0.5.22+cu130", True),
+        ("0.5.19+debug", False),
+        ("0.5.22+debug", False),
+        ("0.5.22+cu130.debug", False),
+        ("0.5.22rc1", False),
+        ("0.5.22.dev1", False),
+        ("0.5.22.post1", False),
+        ("0.5.23", False),
+    ],
+)
+def test_native_parity_fixture_accepts_only_target_release_versions(release, is_target):
+    source = Path(__file__).parent / "serve" / "test_systemone_sglang.py"
+    fixture = next(
+        node
+        for node in ast.parse(source.read_text()).body
+        if isinstance(node, ast.FunctionDef) and node.name == "systemone_sglang_server"
+    )
+    # Execute the fixture's real version assertion without starting any services.
+    assert isinstance(fixture.body[0], ast.Assert)
+    gate = compile(
+        ast.Module(body=[fixture.body[0]], type_ignores=[]), str(source), "exec"
+    )
+    namespace = {"version": lambda _: release, "re": re}
+    if is_target:
+        exec(gate, namespace)
+    else:
+        with pytest.raises(AssertionError):
+            exec(gate, namespace)
 
 
 @pytest.mark.parametrize(
