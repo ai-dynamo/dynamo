@@ -2023,6 +2023,23 @@ def test_systemone_serial_capability_version_gate(monkeypatch, installed, expect
     )
 
 
+def test_systemone_unqualified_serial_version_warns(monkeypatch, caplog):
+    assert sglang_register is not None
+    monkeypatch.setattr(sglang_register, "version", lambda package: "0.5.20")
+    server_args = SimpleNamespace(
+        max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+    )
+    with caplog.at_level(logging.WARNING):
+        assert not sglang_register._supports_systemone_serial(
+            server_args,
+            sglang_register.ModelInput.Tokens,
+            sglang_register.ModelType.Chat,
+            sglang_register.WorkerType.Aggregated,
+        )
+    assert "0.5.20" in caplog.text
+    assert "decision" in caplog.text.lower()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("serial", [False, True])
 async def test_systemone_serial_capability_published_only_when_isolated(
