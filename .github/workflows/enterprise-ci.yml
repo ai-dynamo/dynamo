@@ -55,17 +55,6 @@ jobs:
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-operator-enterprise
 
-  sidecar-build:
-    name: dynamo-sidecar
-    permissions:
-      actions: read
-      contents: read
-    uses: $/.github/workflows/shared-build-sidecar.yml
-    with:
-      build_timeout_minutes: 90
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      image_tag_suffix: '-enterprise'
-
   vllm-build:
     name: vllm-runtime-enterprise
     uses: $/.github/workflows/shared-build-image.yml
@@ -104,32 +93,6 @@ jobs:
   # ============================================================================
   # TEST JOBS (same suites post-merge runs for vllm-runtime)
   # ============================================================================
-
-  sidecar-vllm-test:
-    name: sidecar-runtime
-    needs: [vllm-build, sidecar-build]
-    strategy:
-      fail-fast: false
-      matrix:
-        gpu_count: [1, 2]
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      dd_env: enterprise
-      test_suite_name: vllm
-      framework: vllm
-      test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
-      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
-      amd_runner_labels: ${{ format('["{0}","amd64","v2","us-east-1"]', matrix.gpu_count == 2 && 'gpu-2' || 'gpu-1') }}
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      image_tag_suffix: '-enterprise'
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      run_sanity_check: false
-      gpu_test_markers: ${{ format('post_merge and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
-      gpu_test_timeout_minutes: 45
-      sidecar_backend: vllm
-      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
-    secrets: inherit
 
   vllm-test:
     name: vllm-runtime-enterprise
@@ -525,7 +488,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [operator, sidecar-build, vllm-build, frontend-build]
+    needs: [operator, vllm-build, frontend-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -546,7 +509,7 @@ jobs:
 
   notify-slack:
     if: always() && github.event_name == 'schedule'
-    needs: [deploy-status-check, vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, sidecar-vllm-test]
+    needs: [deploy-status-check, vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
