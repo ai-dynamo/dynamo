@@ -62,6 +62,9 @@ impl CompatibilityState {
             tokens: request.tokens,
             max_output_tokens: request.max_output_tokens,
             output_token_ids: request.output_token_ids,
+            session_id: request
+                .replay_context
+                .and_then(|context| context.session_id().map(str::to_owned)),
         }
     }
 
@@ -339,5 +342,25 @@ mod tests {
 
         assert!(handoffs.dynamo(target_native).is_err());
         assert_eq!(handoffs.dynamo(unrelated_native).unwrap(), unrelated);
+    }
+    use crate::common::protocols::ReplayRequestContext;
+
+    #[test]
+    fn native_request_preserves_normalized_optional_session() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        for (session_id, expected) in [
+            (Some(" session "), Some("session")),
+            (Some(" "), None),
+            (None, None),
+        ] {
+            let request = state.native_request(DirectRequest {
+                replay_context: session_id.map(|id| ReplayRequestContext {
+                    session_id: Some(id.to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            assert_eq!(request.session_id.as_deref(), expected);
+        }
     }
 }
