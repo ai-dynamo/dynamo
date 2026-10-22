@@ -27,7 +27,7 @@ pub(super) fn error(dialect: Dialect, status: StatusCode, message: impl Into<Str
     decision_error(DecisionError::new(dialect, status.as_u16(), code, message))
 }
 
-pub(super) fn attach_request_ids(response: &mut Response, request_id: &str) {
+pub(in crate::http::service) fn attach_request_ids(response: &mut Response, request_id: &str) {
     response.headers_mut().insert(
         HeaderName::from_static("x-dynamo-systemone-version"),
         HeaderValue::from_static("1"),
