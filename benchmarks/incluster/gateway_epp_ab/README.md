@@ -99,8 +99,9 @@ B=benchmarks/incluster/gateway_epp_ab/run.sh
 # 1. Check the wiring with 8 workers and one short run per arm. This takes a few minutes.
 WORKERS=8 REQUEST_RATES=4 ROUNDS=1 DURATION_S=30 $B all
 
-# 2. The benchmark: 2048 workers per arm, one arm at a time.
-$B all
+# 2. The benchmark: 2048 workers per arm, one arm at a time, on images with the latency
+#    fixes that the 1.5.1 defaults lack (see "Comparing the arms").
+FRONTEND_IMAGE=<frontend image> WORKER_IMAGE=<planner image> $B all
 
 # 3. Plot arm B against arm A with aiperf.
 $B plot benchmarks/results/gateway_epp_ab/<UTC time>
@@ -234,10 +235,16 @@ Keep these limits in mind when reading the results:
 - **Arm B uses more CPU in total.** It runs a Frontend sidecar in every worker pod. That cost is
   part of the architecture, so the benchmark includes it.
 - **Mocker timings are synthetic.** Compare A with B, never a mocker number with a GPU number.
-- **Dynamo 1.5.1 Frontends do not set `TCP_NODELAY`** ([#16859](https://github.com/ai-dynamo/dynamo/issues/16859),
-  fixed by [#16862](https://github.com/ai-dynamo/dynamo/pull/16862)). Behind agentgateway, this
-  holds back some first tokens by about 40 ms, on both arms. Set `FRONTEND_IMAGE` to an image with
-  the fix for absolute TTFT numbers.
+- **The 1.5.1 default images lack two latency fixes.** In 1.5, the Frontend's HTTP server and the
+  EPP's TLS ext_proc listener leave Nagle's algorithm on
+  ([#16859](https://github.com/ai-dynamo/dynamo/issues/16859)). Behind agentgateway, a reply can
+  then wait about 40 ms for the gateway's delayed ACK. Arm A's requests cross one such hop and arm
+  B's cross two, so these images skew the difference between the arms as well as the absolute TTFT.
+  [#16728](https://github.com/ai-dynamo/dynamo/pull/16728) fixes the Frontend and
+  [#16862](https://github.com/ai-dynamo/dynamo/pull/16862) the EPP. Until a release has both, set
+  `FRONTEND_IMAGE` and `WORKER_IMAGE` to one build of a main commit that includes #16862, so the
+  Frontend, the EPP and the workers run the same version. `run.sh` warns when `FRONTEND_IMAGE` is a
+  1.5 image.
 
 ## Running 2048 workers
 
@@ -280,7 +287,7 @@ Keep these limits in mind when reading the results:
 | `WORKERS` | `2048` | mocker workers per arm |
 | `RAMP_STEP` | `512` | workers added at a time; `0` adds them all at once |
 | `DYNAMO_VERSION` | `1.5.1` | tag of the default images |
-| `FRONTEND_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION` | Frontend, EPP and sidecar |
+| `FRONTEND_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION` | Frontend, EPP and sidecar; 1.5 images lack the latency fixes |
 | `WORKER_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION` | mocker workers |
 | `AIPERF_IMAGE` | the image of the arm's Frontend or EPP | the aiperf Job; the frontend image ships aiperf. Pin it to keep one aiperf version across the builds you compare |
 | `MODEL_CACHE_PVC` | `model-cache` | PVC with the model files |

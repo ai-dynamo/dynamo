@@ -388,6 +388,20 @@ def test_run_accepts_the_default_settings_and_reaches_preflight(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "image, warned",
+    [
+        (None, True),  # the 1.5.1 default
+        ("registry.test/dynamo-frontend:1.5.0", True),
+        ("registry.test/dynamo:main-dynamo-frontend-0123abcd", False),
+    ],
+)
+def test_deploy_warns_about_images_without_the_latency_fixes(tmp_path, image, warned):
+    settings = {"FRONTEND_IMAGE": image} if image else {}
+    result, _ = run_script(tmp_path, ["deploy", "a"], settings)
+    assert ("lacks the Frontend and EPP TCP_NODELAY fixes" in result.stderr) == warned
+
+
 def test_plot_finds_aiperf_behind_pips_sh_launcher(tmp_path):
     # pip writes a /bin/sh launcher instead of a #! line when the
     # interpreter's path is too long. A stub aiperf package stands in for aiperf.

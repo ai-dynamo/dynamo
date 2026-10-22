@@ -127,6 +127,13 @@ validate_settings() {
   [[ $KEEP == 0 || $KEEP == 1 ]] || invalid "KEEP must be 0 or 1, not '$KEEP'"
 }
 
+# 1.5 images leave Nagle's algorithm on in the Frontend and the EPP; README.md explains.
+warn_unfixed_image() {
+  if [[ $1 == *:1.5.* ]]; then
+    log "warning: $1 lacks the Frontend and EPP TCP_NODELAY fixes (#16728, #16862); behind the Gateway some replies wait about 40 ms, more often on arm B"
+  fi
+}
+
 preflight() {
   k get dynamographdeployments,httproutes,inferencepools.inference.networking.k8s.io >/dev/null 2>"$WORK/err" ||
     die "cannot list DGDs, HTTPRoutes and InferencePools in $NAMESPACE ($(cat "$WORK/err")); see Prerequisites in README.md"
@@ -466,12 +473,15 @@ main() {
   case $command in
     all)
       validate_settings
+      warn_unfixed_image "$FRONTEND_IMAGE"
       all
       ;;
     deploy | bench)
       check_arm "${2:-}"
       validate_settings
+      if [[ $command == deploy ]]; then warn_unfixed_image "$FRONTEND_IMAGE"; fi
       preflight
+      if [[ $command == bench ]]; then warn_unfixed_image "$(router_image "$2" || true)"; fi
       "$command" "$2"
       ;;
     collect | teardown)
