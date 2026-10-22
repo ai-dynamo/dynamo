@@ -19,6 +19,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -205,10 +207,6 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) buildRun(
 	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
 ) (*nvidiacomv1beta2.DynamoGraphDeploymentRun, error) {
-	if name := dgdrV1beta2RunName(request); len(name) > dgdrV1beta2MaxRunNameLength {
-		return nil, fmt.Errorf("the Request name is too long: the Run name %q would exceed %d characters",
-			name, dgdrV1beta2MaxRunNameLength)
-	}
 	spec := &request.Spec
 	if spec.AISimulate == nil || spec.AISimulate.Image == "" {
 		return nil, errors.New("spec.aisimulate.image is required")
@@ -301,7 +299,23 @@ func dgdrRunControllerUIDs(obj client.Object) []string {
 // dgdrV1beta2RunName names the Run of one Request generation. A metadata-only update keeps the
 // generation, so it never creates a second Run.
 func dgdrV1beta2RunName(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) string {
-	return fmt.Sprintf("%s-%d", request.Name, request.Generation)
+	return dgdrV1beta2RunNameFor(request.Name, request.Generation)
+}
+
+// dgdrV1beta2RunNameFor is <request-name>-<generation> whenever that fits in an object name. A longer
+// name keeps the generation suffix and a stable hash of the full Request name, and truncates only the
+// Request-name part, so every valid Request name has a valid Run name and two long names that share a
+// prefix still get different Run names.
+func dgdrV1beta2RunNameFor(requestName string, generation int64) string {
+	suffix := "-" + strconv.FormatInt(generation, 10)
+	if len(requestName)+len(suffix) <= dgdrV1beta2MaxRunNameLength {
+		return requestName + suffix
+	}
+	sum := sha256.Sum256([]byte(requestName))
+	hash := hex.EncodeToString(sum[:6])
+	maxPrefix := dgdrV1beta2MaxRunNameLength - len(suffix) - 1 - len(hash)
+	prefix := strings.TrimRight(requestName[:maxPrefix], "-.")
+	return prefix + "-" + hash + suffix
 }
 
 func dgdrV1beta2Condition(
@@ -324,17 +338,21 @@ func dgdrV1beta2IsTerminal(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) bool 
 	return meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
 }
 
-// dgdrV1beta2RunGeneration reads the Request generation from the immutable Run name
-// (<request-name>-<generation>). A Run that does not follow it is an error, never generation zero.
+// dgdrV1beta2RunGeneration reads the Request generation from the immutable Run name. The name is
+// accepted only if it is exactly the name this Request derives for that generation; anything else is an
+// error, never generation zero.
 func dgdrV1beta2RunGeneration(requestName string, run *nvidiacomv1beta2.DynamoGraphDeploymentRun) (int64, error) {
-	prefix := requestName + "-"
-	value, ok := strings.CutPrefix(run.Name, prefix)
-	if !ok {
-		return 0, fmt.Errorf("run %q does not use the Request prefix %q", run.Name, prefix)
+	index := strings.LastIndex(run.Name, "-")
+	if index < 0 {
+		return 0, fmt.Errorf("run %q has no Request generation suffix", run.Name)
 	}
-	generation, err := strconv.ParseInt(value, 10, 64)
+	generation, err := strconv.ParseInt(run.Name[index+1:], 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("run %q has no valid Request generation: %w", run.Name, err)
+	}
+	if expected := dgdrV1beta2RunNameFor(requestName, generation); run.Name != expected {
+		return 0, fmt.Errorf("run %q is not the Run name of generation %d of Request %q (expected %q)",
+			run.Name, generation, requestName, expected)
 	}
 	return generation, nil
 }
