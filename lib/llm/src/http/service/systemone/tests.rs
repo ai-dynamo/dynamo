@@ -26,6 +26,12 @@ mod preflight;
 #[path = "tests/vllm.rs"]
 mod vllm;
 
+#[path = "tests/head.rs"]
+mod head;
+
+#[path = "tests/native_read.rs"]
+mod native_read;
+
 #[tokio::test]
 async fn empty_canonical_questions_are_rejected_before_admission() {
     let service = super::service_v2::HttpService::builder().build().unwrap();

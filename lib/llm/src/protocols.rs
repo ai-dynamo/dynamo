@@ -14,9 +14,7 @@ pub mod agents;
 pub mod anthropic;
 pub mod codec;
 pub mod common;
-#[allow(dead_code)]
 pub(crate) mod decision_head;
-#[allow(dead_code)]
 pub(crate) mod decision_read;
 pub mod openai;
 pub mod response_merge;

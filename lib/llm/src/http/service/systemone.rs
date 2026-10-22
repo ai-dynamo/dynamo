@@ -51,6 +51,12 @@ use execution::{
     PreparedScoringRequest, measured_cached_tokens, read_vllm_branch, scoring_placement,
 };
 
+#[path = "systemone/head.rs"]
+mod head;
+
+#[path = "systemone/native_read.rs"]
+mod native_read;
+
 #[path = "systemone/response.rs"]
 mod response;
 use response::{attach_request_ids, decision_error, error};
@@ -316,7 +322,7 @@ async fn handle_request(
         deadline,
         spawn_blocking_with_permit(admission_permit, move || {
             let _preflight_permit = preflight_permit;
-            prepare_branches(
+            head::prepare(
                 &preflight_request,
                 &selection_for_preflight,
                 max_input_tokens,
@@ -351,12 +357,7 @@ async fn handle_request(
         SystemOnePhase::Preflight,
         preflight_started.elapsed().as_secs_f64(),
     );
-    metrics.observe_systemone_work(
-        metric_model,
-        branches.len(),
-        branches.iter().map(|branch| branch.prompt_ids.len()).sum(),
-        branches.iter().map(|branch| branch.label_ids.len()).sum(),
-    );
+    head::observe_work(metric_model, &branches, &metrics);
 
     let parent = Context::with_id_and_metadata((), request_id.clone(), Default::default());
     let parent_context = parent.context();
@@ -374,7 +375,7 @@ async fn handle_request(
         cancellation_labels,
     )
     .await;
-    let task = tokio::spawn(dispatch(
+    let task = tokio::spawn(head::dispatch(
         selection,
         branches,
         request_id.clone(),

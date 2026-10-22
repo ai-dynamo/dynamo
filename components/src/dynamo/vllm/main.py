@@ -76,6 +76,8 @@ from .capacity import (
 )
 from .constants import MX_LOAD_FORMATS
 from .decision_execution import publish_vllm_decision_capability
+from .decision_heads import publish_decision_head_capability
+from .decision_reads import DIFFUSION_PROFILE, LIQUID_PROFILE
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -945,6 +947,23 @@ async def register_vllm_model(
         needs=needs,
     ):
         logger.info("Published vLLM causal decision capability")
+    if (
+        model_input == ModelInput.Text
+        and model_type.supports_classify()
+        and model_type.supports_pooling()
+        and worker_type == WorkerType.Aggregated
+        and not any(needs or ())
+        and publish_decision_head_capability(runtime_config, decision_head_profile)
+    ):
+        logger.info("Published vLLM native head decision capability")
+    if (
+        worker_type == WorkerType.Aggregated
+        and (model_type.supports_chat() or model_type == ModelType.Completions)
+        and not any(needs or ())
+        and decision_read_profile in (LIQUID_PROFILE, DIFFUSION_PROFILE)
+    ):
+        runtime_config.set_engine_specific(decision_read_profile, "true")
+        logger.info("Published vLLM native generative decision capability")
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len

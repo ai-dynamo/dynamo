@@ -3,11 +3,9 @@
 
 mod model;
 pub(crate) mod readiness;
-#[cfg(test)]
-pub(crate) use model::DecisionExecutor;
 pub use model::Model;
 pub(crate) use model::{
-    GenerateEngineSelection, SystemOneExecutionSelection, SystemOneSelectionError,
+    DecisionExecutor, GenerateEngineSelection, SystemOneExecutionSelection, SystemOneSelectionError,
 };
 
 pub mod kv_source_membership;

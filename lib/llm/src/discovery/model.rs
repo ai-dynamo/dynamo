@@ -92,7 +92,6 @@ pub(crate) struct GenerateEngineSelection {
 
 /// Scoring engine and model assets selected from one WorkerSet snapshot.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) enum DecisionExecutor {
     Token {
         engine: GenerateStreamingEngine,
@@ -802,9 +801,6 @@ impl Model {
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
         let profile = card.decision_execution_profile()?;
-        if !profile.is_token_scoring() {
-            return None;
-        }
         if !worker_set.supports_runtime_capability(profile.generate_capability()) {
             return None;
         }
