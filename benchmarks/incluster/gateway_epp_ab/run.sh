@@ -134,11 +134,26 @@ warn_unfixed_image() {
   fi
 }
 
+# agentgateway before v1.2.0 opens a new TLS connection to the EPP for every
+# request, so arm B fails under load; README.md explains.
+warn_old_gateway() {
+  local images image
+  read -ra images <<< "$(kg get pods -l "gateway.networking.k8s.io/gateway-name=$GATEWAY_NAME" \
+    -o jsonpath='{.items[*].spec.containers[*].image}' 2>/dev/null || true)"
+  for image in "${images[@]}"; do
+    if [[ $image == *agentgateway*:v0.* || $image == *agentgateway*:v1.[01].* ]]; then
+      log "warning: Gateway $GATEWAY_NAMESPACE/$GATEWAY_NAME runs $image; before v1.2.0, agentgateway opens a new TLS connection to the EPP for every request, and arm B fails under load"
+      return
+    fi
+  done
+}
+
 preflight() {
   k get dynamographdeployments,httproutes,inferencepools.inference.networking.k8s.io >/dev/null 2>"$WORK/err" ||
     die "cannot list DGDs, HTTPRoutes and InferencePools in $NAMESPACE ($(cat "$WORK/err")); see Prerequisites in README.md"
   [[ $(kg get gateway "$GATEWAY_NAME" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}') == True ]] ||
     die "Gateway $GATEWAY_NAMESPACE/$GATEWAY_NAME is missing or not Programmed"
+  warn_old_gateway
   k get pvc "$MODEL_CACHE_PVC" >/dev/null ||
     die "PVC $MODEL_CACHE_PVC is missing in $NAMESPACE; see Prerequisites in README.md"
 }

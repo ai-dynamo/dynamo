@@ -319,13 +319,16 @@ def test_scripts_parse(script):
     subprocess.run(["bash", "-n", str(BENCH_DIR / script)], check=True)
 
 
-def run_script(tmp_path, args, settings=None, extra_env=None):
-    """run.sh with a kubectl that records its calls and fails, and no other cluster."""
+def run_script(tmp_path, args, settings=None, extra_env=None, kubectl_body="exit 1"):
+    """run.sh with a kubectl that records its calls, and no other cluster.
+
+    The kubectl runs kubectl_body, a shell snippet, which fails by default.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     calls = tmp_path / "kubectl-calls"
     kubectl = bin_dir / "kubectl"
-    kubectl.write_text(f"#!/bin/sh\necho \"$*\" >> '{calls}'\nexit 1\n")
+    kubectl.write_text(f"#!/bin/sh\necho \"$*\" >> '{calls}'\n{kubectl_body}\n")
     kubectl.chmod(0o755)
     env = {
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -400,6 +403,38 @@ def test_deploy_warns_about_images_without_the_latency_fixes(tmp_path, image, wa
     settings = {"FRONTEND_IMAGE": image} if image else {}
     result, _ = run_script(tmp_path, ["deploy", "a"], settings)
     assert ("lacks the Frontend and EPP TCP_NODELAY fixes" in result.stderr) == warned
+
+
+# A kubectl that passes preflight up to the model cache, and reports
+# $GATEWAY_IMAGE as the image of the Gateway's pod.
+PREFLIGHT_KUBECTL = """case "$*" in
+  *"get dynamographdeployments,"*) exit 0 ;;
+  *" get gateway "*) echo True ;;
+  *"gateway.networking.k8s.io/gateway-name="*) echo "$GATEWAY_IMAGE" ;;
+  *) exit 1 ;;
+esac"""
+
+
+@pytest.mark.parametrize(
+    "image, warned",
+    [
+        ("cr.agentgateway.dev/agentgateway:v1.0.0", True),  # the old installer pin
+        ("cr.agentgateway.dev/agentgateway:v1.1.0", True),
+        ("cr.agentgateway.dev/agentgateway:v1.6.0", False),
+        ("cr.agentgateway.dev/agentgateway:v1.10.0", False),
+        ("registry.test/other-gateway:v1.0.0", False),
+    ],
+)
+def test_preflight_warns_about_agentgateway_before_1_2(tmp_path, image, warned):
+    result, _ = run_script(
+        tmp_path,
+        ["deploy", "b"],
+        extra_env={"GATEWAY_IMAGE": image},
+        kubectl_body=PREFLIGHT_KUBECTL,
+    )
+    # preflight stops at the missing model cache, after the Gateway checks.
+    assert "PVC model-cache is missing" in result.stderr, result.stderr
+    assert ("opens a new TLS connection to the EPP" in result.stderr) == warned
 
 
 def test_plot_finds_aiperf_behind_pips_sh_launcher(tmp_path):
