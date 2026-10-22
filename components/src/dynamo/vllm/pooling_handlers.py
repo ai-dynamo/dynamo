@@ -24,6 +24,13 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from dynamo._core import Context
 
 from .args import Config
+from .decision_heads import (
+    PINNED_VLLM_COMMIT,
+    HeadExecutionAdapter,
+    HeadRuntimeError,
+    HeadValidationError,
+    select_decision_head_profile,
+)
 from .handlers import EmbeddingWorkerHandler
 
 logger = logging.getLogger(__name__)
@@ -61,7 +68,73 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         )
         self.model_config = model_config
         self._default_pooling_task: str | None = None
+        self.decision_head_adapter: HeadExecutionAdapter | None = None
+        self._decision_head_initialization_attempted = False
+        self._decision_head_initialization_lock = asyncio.Lock()
         logger.info("Classify worker handler initialized")
+
+    @property
+    def decision_head_profile(self) -> str | None:
+        """Return an advertiseable profile only after successful initialization."""
+        adapter = self.decision_head_adapter
+        return adapter.profile if adapter is not None else None
+
+    async def initialize_decision_head(self) -> None:
+        """Probe optional native-head support once before model registration."""
+        async with self._decision_head_initialization_lock:
+            if self._decision_head_initialization_attempted:
+                return
+            self._decision_head_initialization_attempted = True
+            try:
+                profile = select_decision_head_profile(self.model_config, self.config)
+                if profile is None:
+                    return
+                self.decision_head_adapter = await HeadExecutionAdapter.create(
+                    self.engine_client,
+                    profile,
+                    source_commit=PINNED_VLLM_COMMIT,
+                    abort_monitor=self._abort_monitor,
+                )
+            except HeadRuntimeError as cause:
+                logger.warning("vLLM native head decision support disabled: %s", cause)
+
+    def decision_head_health_check_payload(self, model_name: str) -> dict | None:
+        """Prepare a bounded native-head canary, or retain the legacy probe."""
+        adapter = self.decision_head_adapter
+        if adapter is None:
+            return None
+        payload = {
+            "decision_head": {
+                "protocol_version": 1,
+                "profile": adapter.profile,
+                "model": model_name,
+                "input": "probe",
+                "questions": [
+                    {
+                        "ordinal": 0,
+                        "kind": "Predicate",
+                        "instructions": "Is this a health probe?",
+                        "candidates": [{"value": True}, {"value": False}],
+                    }
+                ],
+                "temperature": 1,
+                "cache_salt": "dynamo-native-head-health-v1",
+                "max_input_tokens": min(
+                    adapter.engine.model_config.max_model_len, 4096
+                ),
+                "max_tokenization_work": 8192,
+                "max_encoding_bytes": 16384,
+            }
+        }
+        try:
+            adapter.prepare(payload)
+        except HeadValidationError as cause:
+            self.decision_head_adapter = None
+            logger.warning(
+                "vLLM native head canary disabled optional support: %s", cause
+            )
+            return None
+        return payload
 
     def _id2label(self) -> dict[int, str]:
         """Return the model's Hugging Face label map with integer keys."""
@@ -188,6 +261,17 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         self, request: dict, context: Context
     ) -> AsyncIterator[dict[str, Any]]:
         """Handle one internal classify or pooling wire request."""
+        if "decision_head" in request:
+            if self.decision_head_adapter is None:
+                raise HeadValidationError("native head execution is not available")
+            yield await self.decision_head_adapter.execute(
+                request,
+                context,
+                request_id=context.id(),
+                cancelled=lambda: context.is_stopped() or context.is_killed(),
+                trace_headers=context.trace_headers(),
+            )
+            return
         if "encoding_format" in request:
             async for response in self._generate_pooling(request, context):
                 yield response

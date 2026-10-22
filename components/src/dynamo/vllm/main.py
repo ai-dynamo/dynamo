@@ -881,6 +881,7 @@ async def register_vllm_model(
     vllm_config: VllmConfig,
     worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
+    decision_head_profile: str | None = None,
 ) -> None:
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -901,6 +902,7 @@ async def register_vllm_model(
             frontend's model-serving-readiness check.
         needs: Peer worker types required to serve traffic, in DNF form
             (list of alternative AND-sets).
+        decision_head_profile: Native head profile initialized by the pooling handler.
     """
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)

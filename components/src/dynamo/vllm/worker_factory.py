@@ -29,6 +29,7 @@ from dynamo.common.utils.prometheus import (
     register_embedding_cache_metrics,
     register_image_loader_metrics,
 )
+from dynamo.health_check import load_health_check_from_env
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint
 
@@ -2184,12 +2185,21 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
         )
 
-        classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
-            model_name=config.served_model_name or config.model
-        ).to_dict()
-
         logger.info("Starting to serve the classify worker endpoint...")
         try:
+            await handler.initialize_decision_head()
+            model_name = config.served_model_name or config.model
+            classify_health_check_payload = handler.decision_head_health_check_payload(
+                model_name
+            )
+            if classify_health_check_payload is None:
+                classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
+                    model_name=model_name
+                ).to_dict()
+            else:
+                override = load_health_check_from_env()
+                if override is not None:
+                    classify_health_check_payload = override
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
@@ -2205,6 +2215,7 @@ class WorkerFactory:
                     vllm_config,
                     worker_type=WorkerType.Aggregated,
                     needs=[],
+                    decision_head_profile=handler.decision_head_profile,
                 ),
             )
         except Exception as e:
