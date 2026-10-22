@@ -31,6 +31,7 @@ from tests.utils.engine_metrics import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
+from tests.utils.multimodal import make_audio_payload
 from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
     chat_payload,
@@ -52,6 +53,12 @@ sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
 )
 trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/trtllm"
+)
+trtllm_whisper_chat_template = os.path.join(
+    WORKSPACE_DIR, "tests/serve/fixtures/trtllm_whisper_chat_template.jinja"
+)
+trtllm_whisper_engine_args = os.path.join(
+    WORKSPACE_DIR, "tests/serve/fixtures/trtllm_whisper_agg.yaml"
 )
 
 
@@ -256,6 +263,34 @@ sidecar_configs = {
             # Public disconnect/recovery only: no native scheduler observations.
             *http_cancellation_payloads(None, max_tokens=CANCELLATION_MAX_TOKENS),
         ],
+    ),
+    "trtllm_aggregated_audio": SidecarConfig(
+        name="trtllm_aggregated_audio",
+        directory=trtllm_sidecar_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(6.0),
+            pytest.mark.requested_trtllm_kv_tokens(2048),
+            pytest.mark.timeout(960),
+            # This is the only test that covers audio URL handling across the
+            # frontend, sidecar, and OpenEngine boundary.
+            pytest.mark.pre_merge,
+        ],
+        model="openai/whisper-tiny",
+        timeout=900,
+        delayed_start=60,
+        env={
+            "AGG_ENGINE_ARGS": trtllm_whisper_engine_args,
+            "DYN_CUSTOM_JINJA_TEMPLATE": trtllm_whisper_chat_template,
+            "MODALITY": "multimodal",
+            "PYTHONUNBUFFERED": "1",
+            "TRTLLM_CONTEXT_LENGTH": "1500",
+            "TRTLLM_DISABLE_GUIDED_DECODING": "1",
+        },
+        request_payloads=[make_audio_payload(["thoughts affected Hester"])],
     ),
     "trtllm_aggregated_multimodal": SidecarConfig(
         name="trtllm_aggregated_multimodal",
@@ -573,7 +608,11 @@ sidecar_configs = {
 def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
     if (
-        config.name == "trtllm_aggregated_multimodal"
+        config.name
+        in {
+            "trtllm_aggregated_multimodal",
+            "trtllm_aggregated_audio",
+        }
         and not _trtllm_serves_openengine()
     ):
         if os.environ.get("DYNAMO_TEST_SIDECAR_BACKEND") == "trtllm":

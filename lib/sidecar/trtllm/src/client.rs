@@ -32,6 +32,14 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) struct SupportedMedia {
     pub(crate) image: bool,
     pub(crate) video: bool,
+    pub(crate) audio: bool,
+}
+
+/// Input forms explicitly advertised by `Control.GetModelInfo`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SupportedInputs {
+    pub(crate) text: bool,
+    pub(crate) token_ids: bool,
 }
 
 impl SupportedMedia {
@@ -39,6 +47,7 @@ impl SupportedMedia {
         match modality {
             "image" => self.image,
             "video" => self.video,
+            "audio" => self.audio,
             _ => false,
         }
     }
@@ -56,6 +65,9 @@ pub(crate) struct ModelLimits {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
+    /// `None` preserves token-ID behavior for older servers that omit both
+    /// optional input-capability fields.
+    pub(crate) supported_inputs: Option<SupportedInputs>,
     /// Modalities advertised by both the portable and engine-specific capabilities.
     /// `None` means startup discovery failed transiently and may be retried.
     pub(crate) supported_media: Option<SupportedMedia>,
@@ -128,6 +140,15 @@ impl TrtllmClient {
             .await?
             .into_inner();
         let mut supported_media = SupportedMedia::default();
+        let supported_inputs =
+            if info.supports_text_input.is_none() && info.supports_token_ids_input.is_none() {
+                None
+            } else {
+                Some(SupportedInputs {
+                    text: info.supports_text_input == Some(true),
+                    token_ids: info.supports_token_ids_input == Some(true),
+                })
+            };
         if info.supports_multimodal == Some(true)
             && let Some(prost_types::value::Kind::ListValue(modalities)) = info
                 .extra
@@ -143,6 +164,7 @@ impl TrtllmClient {
                 match modality.as_str() {
                     "image" => supported_media.image = true,
                     "video" => supported_media.video = true,
+                    "audio" => supported_media.audio = true,
                     _ => {}
                 }
             }
@@ -151,6 +173,7 @@ impl TrtllmClient {
             context_length: info.max_context_length.filter(|len| *len > 0),
             engine_context_length: info.max_context_length.filter(|len| *len > 0),
             max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+            supported_inputs,
             supported_media: Some(supported_media),
         })
     }

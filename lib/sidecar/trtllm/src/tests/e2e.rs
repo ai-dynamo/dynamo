@@ -455,3 +455,64 @@ async fn e2e_real_openengine_video() {
         "the engine must report the expanded video prompt"
     );
 }
+
+/// `TRTLLM_E2E_AUDIO_DATA_URI` must contain a complete `data:audio/...` URI.
+#[tokio::test]
+#[ignore = "requires a live audio-capable TensorRT-LLM OpenEngine server"]
+async fn e2e_real_openengine_audio() {
+    let endpoint = std::env::var("TRTLLM_E2E_ENDPOINT")
+        .expect("set TRTLLM_E2E_ENDPOINT, e.g. http://127.0.0.1:50051");
+    let model =
+        std::env::var("TRTLLM_E2E_MODEL").unwrap_or_else(|_| "openai/whisper-tiny".to_string());
+    let audio = std::env::var("TRTLLM_E2E_AUDIO_DATA_URI")
+        .expect("set TRTLLM_E2E_AUDIO_DATA_URI to an audio data URI");
+    let engine = TrtllmSidecarEngine::new(
+        GrpcEndpoint::parse(&endpoint, "--grpc-endpoint").expect("valid endpoint"),
+        transport(1),
+        ConfiguredModel {
+            source: model.clone(),
+            context_length: None,
+        },
+        AGG,
+    );
+    engine
+        .start(0)
+        .await
+        .expect("start against the live audio-capable server");
+
+    let mut request = PreprocessedRequest::builder()
+        .model(model)
+        .token_ids(vec![50258, 50259, 50359, 50363])
+        .stop_conditions(StopConditions {
+            max_tokens: Some(96),
+            ..Default::default()
+        })
+        .sampling_options(SamplingOptions {
+            temperature: Some(0.0),
+            ..Default::default()
+        })
+        .output_options(OutputOptions::default())
+        .build()
+        .expect("request");
+    request.multi_modal_data = Some(HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl(audio)],
+    )]));
+
+    let outputs = collect(&engine, request).await;
+    let generated = outputs
+        .iter()
+        .flat_map(|output| output.token_ids.iter().copied())
+        .collect::<Vec<_>>();
+    let terminal = outputs
+        .iter()
+        .find(|output| output.finish_reason.is_some())
+        .expect("terminal output");
+    let usage = terminal.completion_usage.as_ref().expect("terminal usage");
+    eprintln!(
+        "[e2e-audio] generated={generated:?}; usage: prompt={}, completion={}",
+        usage.prompt_tokens, usage.completion_tokens
+    );
+
+    assert!(!generated.is_empty(), "expected audio-conditioned output");
+}

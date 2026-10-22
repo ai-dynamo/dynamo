@@ -9,6 +9,7 @@
 # Source it, then call:
 #   trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"
 #   trtllm_resolve_context_length "${EXTRA_ARGS[@]}"
+#   trtllm_write_merged_config "$BASE" "$OVERRIDES" "$OUTPUT" "$TRTLLM_PYTHON"
 #
 # `trtllm_resolve_context_length` sets TRTLLM_MAX_SEQ_LEN_ARGS,
 # TRTLLM_CONTEXT_LENGTH_ARGS, and TRTLLM_CONTEXT_LENGTH.
@@ -77,4 +78,51 @@ trtllm_resolve_context_length() {
     if [[ -n "${TRTLLM_CONTEXT_LENGTH:-}" ]]; then
         TRTLLM_CONTEXT_LENGTH_ARGS=(--context-length "$TRTLLM_CONTEXT_LENGTH")
     fi
+}
+
+# Write a TensorRT-LLM options file by recursively applying JSON overrides to
+# an optional YAML/JSON base. Recursive merging preserves sibling settings in
+# nested blocks such as kv_cache_config when the test profiler supplies a
+# max_tokens override.
+trtllm_write_merged_config() {
+    local base_config="$1"
+    local overrides_json="$2"
+    local output="$3"
+    local python="$4"
+
+    if [[ -z "$base_config" ]]; then
+        printf '%s\n' "$overrides_json" > "$output"
+        return 0
+    fi
+    if [[ ! -r "$base_config" ]]; then
+        echo "TensorRT-LLM engine config is not readable: $base_config" >&2
+        return 1
+    fi
+
+    "$python" - "$base_config" "$overrides_json" "$output" <<'PY'
+import json
+import sys
+
+import yaml
+
+
+def merge(base, overrides):
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            merge(base[key], value)
+        else:
+            base[key] = value
+
+
+base_path, overrides_json, output_path = sys.argv[1:]
+with open(base_path, encoding="utf-8") as source:
+    config = yaml.safe_load(source)
+if config is None:
+    config = {}
+if not isinstance(config, dict):
+    raise TypeError(f"TensorRT-LLM engine config must be a mapping: {base_path}")
+merge(config, json.loads(overrides_json))
+with open(output_path, "w", encoding="utf-8") as destination:
+    yaml.safe_dump(config, destination, sort_keys=False)
+PY
 }

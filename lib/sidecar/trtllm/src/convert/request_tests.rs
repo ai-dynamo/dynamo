@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::client::SupportedMedia;
+use crate::client::{SupportedInputs, SupportedMedia};
 use crate::test_fixtures::*;
 use dynamo_backend_common::MultimodalItemRef;
 use serde_json::json;
@@ -79,6 +79,65 @@ fn request_maps_sampling_stop_and_output_fields() {
 }
 
 #[test]
+fn text_input_model_receives_the_formatted_audio_prompt() {
+    let mut req = request();
+    req.token_ids = Arc::new(Vec::new());
+    req.multi_modal_data = Some(HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/audio.wav".to_string(),
+        )],
+    )]));
+    let task_prompt = "<|startoftranscript|><|fr|><|translate|><|notimestamps|>";
+    req.extra_args = Some(json!({"formatted_prompt": task_prompt}));
+    let mut model_limits = all_media_limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let proto = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect("text-input audio request");
+    assert_eq!(
+        proto.input,
+        Some(pb::generate_request::Input::Prompt(task_prompt.to_string()))
+    );
+}
+
+#[test]
+fn text_input_model_accepts_an_empty_formatted_prompt() {
+    let mut req = request();
+    req.token_ids = Arc::new(Vec::new());
+    req.extra_args = Some(json!({"formatted_prompt": ""}));
+    let mut model_limits = limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let proto = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect("an empty prompt lets the engine select its model default");
+    assert_eq!(
+        proto.input,
+        Some(pb::generate_request::Input::Prompt(String::new()))
+    );
+}
+
+#[test]
+fn text_input_model_requires_a_formatted_prompt() {
+    let req = request();
+    let mut model_limits = limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let error = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect_err("a token-only preprocessed request cannot serve a text-input model");
+    assert!(error.to_string().contains("extra_args.formatted_prompt"));
+}
+
+#[test]
 fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
     let mut req = request();
     // Routing-only multimodal metadata has already served its purpose by the
@@ -116,7 +175,7 @@ fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
 }
 
 #[test]
-fn mixed_image_and_video_media_follow_prompt_order() {
+fn mixed_media_follow_prompt_order() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([
         (
@@ -133,6 +192,12 @@ fn mixed_image_and_video_media_follow_prompt_order() {
                 MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".to_string()),
             ],
         ),
+        (
+            "audio_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:audio/wav;base64,YXVkaW8=".to_string(),
+            )],
+        ),
     ]));
     req.multi_modal_uuids = Some(HashMap::from([
         (
@@ -143,6 +208,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
             "video_url".to_string(),
             vec![Some("video-0".to_string()), Some("video-1".to_string())],
         ),
+        ("audio_url".to_string(), vec![Some("audio-0".to_string())]),
     ]));
     req.multi_modal_order = Some(vec![
         MultimodalItemRef {
@@ -151,6 +217,10 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         },
         MultimodalItemRef {
             modality: "image_url".to_string(),
+            index: 0,
+        },
+        MultimodalItemRef {
+            modality: "audio_url".to_string(),
             index: 0,
         },
         MultimodalItemRef {
@@ -163,7 +233,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         },
     ]);
 
-    let proto = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", all_media_limits(4096), AGG)
         .expect("mixed media request");
 
     assert_eq!(
@@ -175,6 +245,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         [
             pb::Modality::Video as i32,
             pb::Modality::Image as i32,
+            pb::Modality::Audio as i32,
             pb::Modality::Video as i32,
             pb::Modality::Image as i32,
         ]
@@ -185,7 +256,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
             .iter()
             .map(|item| item.uuid.as_str())
             .collect::<Vec<_>>(),
-        ["video-0", "image-0", "video-1", ""]
+        ["video-0", "image-0", "audio-0", "video-1", ""]
     );
 }
 
@@ -250,7 +321,11 @@ fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
 
 #[test]
 fn media_requires_the_loaded_models_advertised_capability() {
-    for (key, modality) in [("image_url", "image"), ("video_url", "video")] {
+    for (key, modality) in [
+        ("image_url", "image"),
+        ("video_url", "video"),
+        ("audio_url", "audio"),
+    ] {
         let mut req = request();
         req.multi_modal_data = Some(HashMap::from([(
             key.to_string(),
@@ -281,6 +356,7 @@ fn images_reject_unknown_or_overridden_engine_windows() {
                 supported_media: Some(SupportedMedia {
                     image: true,
                     video: true,
+                    ..Default::default()
                 }),
                 ..Default::default()
             });
@@ -292,18 +368,37 @@ fn images_reject_unknown_or_overridden_engine_windows() {
 }
 
 #[test]
-fn unsupported_media_modalities_and_sources_are_rejected() {
+fn image_video_models_reject_audio() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([(
         "audio_url".to_string(),
         vec![MultimodalData::RawUrl(
+            "https://example.com/audio.wav".to_string(),
+        )],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
+        .expect_err("a model without audio support must reject audio");
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise audio support"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn unsupported_media_modalities_and_sources_are_rejected() {
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "future_media".to_string(),
+        vec![MultimodalData::RawUrl(
             "https://example.com/media".to_string(),
         )],
     )]));
-    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
-        .expect_err("audio is not supported yet");
+    let error = build_generate_request(req, "req", "model", all_media_limits(4096), AGG)
+        .expect_err("unsupported modalities must be rejected");
     assert!(
-        error.to_string().contains("audio_url"),
+        error.to_string().contains("future_media"),
         "unexpected error: {error}"
     );
 
@@ -499,6 +594,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
         Some(ModelLimits {
             context_length: Some(4096),
             max_output_tokens: Some(256),
+            supported_inputs: None,
             supported_media: Some(SupportedMedia::default()),
             ..Default::default()
         }),
