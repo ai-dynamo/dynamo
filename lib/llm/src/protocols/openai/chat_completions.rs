@@ -400,7 +400,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
 /// Both streaming tool-call paths use this constructor when an engine omits a
 /// terminal choice. Accounting data belongs only on the usage chunk and must
 /// not be copied onto the synthetic choice.
-pub(super) fn stream_choice_chunk_from_template(
+pub(crate) fn stream_choice_chunk_from_template(
     template: &NvCreateChatCompletionStreamResponse,
     index: u32,
     content: Option<ChatCompletionMessageContent>,
