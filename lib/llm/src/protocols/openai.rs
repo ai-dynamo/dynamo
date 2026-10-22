@@ -157,7 +157,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
 
         let mut temperature = validate_range(self.get_temperature(), &TEMPERATURE_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating temperature: {}", e))?;
-        // `top_p` must be between MIN_TOP_P and MAX_TOP_P.
+        // `top_p` must be in (MIN_TOP_P_EXCLUSIVE, MAX_TOP_P].
         let mut top_p: Option<f32> = self.get_top_p();
         validate_top_p(top_p).map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
         let frequency_penalty =
