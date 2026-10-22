@@ -21,10 +21,6 @@ dynamo:
     # is a STEM; the licenses stage appends -${TARGETARCH}.cdx.json so each arch
     # of a multi-arch build subtracts its own-arch floor (the @<digest8> is the
     # shared multi-arch index digest).
-  frontend:
-    # PyPI NIXL version (the tag minus its leading "v"), pinned separately
-    # from the dynamo runtime's nixl_ref below.
-    nixl_ref: v1.5.0
   # Dynamo's native Rust EPP (deploy/inference-gateway/ext-proc). This is the
   # default value of the frontend's EPP_IMAGE build arg; the frontend copies
   # /epp out of it. CI overrides EPP_IMAGE with the per-commit image it just
@@ -64,8 +60,8 @@ dynamo:
   nats_version: v2.14.7
   etcd_version: v3.5.34
 
-  # PyPI NIXL version for the dynamo runtime and dev images.
-  nixl_ref: v1.3.2
+  # PyPI NIXL version for the frontend, runtime and dev images.
+  nixl_ref: v1.5.0
   # UCX for the XPU and CPU NIXL source builds.
   nixl_ucx_ref: v1.22.0
   enable_media_ffmpeg: "false"
@@ -103,17 +99,20 @@ vllm:
     base_image_tag: v0.31.0
     runtime_image_tag: v0.31.0
     baseline_sbom: vllm-openai-xpu@95ac8150
+    # NIXL for the XPU source build. CUDA uses upstream vLLM's NIXL.
+    nixl_ref: v1.4.1
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
     runtime_image_tag: v0.31.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
+    # NIXL for the CPU source build.
+    nixl_ref: v1.4.1
   vllm_omni_ref: "v0.31.0rc1"
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"
-  nixl_ref: v1.4.1
   max_jobs: "10"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
@@ -165,9 +164,6 @@ trtllm:
     runtime_image_tag: 1.4.0rc0
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
     baseline_sbom: release@cab83184
-  # PyPI NIXL for the EFA image's LIBFABRIC plugin, which the base image's
-  # NIXL lacks. Match the base image's NIXL version (/opt/nvidia/nvda_nixl).
-  nixl_ref: v1.3.0
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
 

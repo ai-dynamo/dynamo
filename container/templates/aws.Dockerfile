@@ -40,11 +40,13 @@ ENV EFA_VERSION="${EFA_VERSION}"
 
 {% if framework == "trtllm" %}
 # EFA uses NIXL's LIBFABRIC backend, which the base image's NIXL lacks. Preload
-# the PyPI build of the same NIXL version, which has it, against the EFA
-# installer's libfabric. libcuda.so.1 comes from the host driver at runtime.
-ARG NIXL_REF
-RUN echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
-    /opt/uv/bin/uv pip install --no-deps --target /opt/dynamo/nixl-efa "nixl-cu13==${NIXL_REF#v}" && \
+# the PyPI build of the same NIXL version (the base image's NIXL_VERSION, or
+# NIXL_EFA_VERSION when set), which has it, against the EFA installer's
+# libfabric. libcuda.so.1 comes from the host driver at runtime.
+ARG NIXL_EFA_VERSION=""
+RUN NIXL_EFA_VERSION="${NIXL_EFA_VERSION:-${NIXL_VERSION:-}}" && \
+    [ -n "${NIXL_EFA_VERSION}" ] || { echo "set NIXL_EFA_VERSION: base image does not set NIXL_VERSION" >&2; exit 1; } && \
+    /opt/uv/bin/uv pip install --no-deps --target /opt/dynamo/nixl-efa "nixl-cu13==${NIXL_EFA_VERSION}" && \
     NIXL_EFA_LIB_DIR=/opt/dynamo/nixl-efa/.nixl_cu13.mesonpy.libs && \
     test -f "${NIXL_EFA_LIB_DIR}/libnixl.so" && \
     test -f "${NIXL_EFA_LIB_DIR}/plugins/libplugin_LIBFABRIC.so" && \
