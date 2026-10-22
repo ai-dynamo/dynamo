@@ -30,6 +30,60 @@ fn invalid_argument(message: impl Into<String>, public_message: Option<&str>) ->
 }
 
 impl OpenAIPreprocessor {
+    /// Align GPT-OSS's prompt with the JSON-array fallback installed below.
+    /// Its native template describes separate Harmony messages, which otherwise
+    /// encourages a handoff after the first of several independent calls.
+    pub(super) fn apply_gpt_oss_json_tool_prompt(
+        &self,
+        request: &mut NvCreateChatCompletionRequest,
+    ) {
+        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) != Some("gpt_oss")
+            || self.runtime_config.structural_tag.is_some()
+            || !matches!(
+                request.inner.tool_choice,
+                Some(ChatCompletionToolChoiceOption::Required)
+            )
+        {
+            return;
+        }
+        use dynamo_protocols::types::{
+            ChatCompletionRequestMessage as Message,
+            ChatCompletionRequestSystemMessageContent as Content,
+        };
+        let mut instruction = "After reasoning, emit tool calls as a JSON array of objects with name and parameters fields. ".to_string();
+        if request.inner.parallel_tool_calls == Some(false) {
+            instruction.push_str("Emit exactly one tool call. ");
+        } else {
+            instruction.push_str("If multiple independent calls are requested, include all of them in this one response before waiting for any tool results. Preserve the requested call order. ");
+        }
+        instruction.push_str("The JSON output replaces Harmony tool-call headers.");
+        if let Some(Message::System(system)) = request.inner.messages.first_mut() {
+            match &mut system.content {
+                Content::Text(text) => {
+                    text.push_str("\n\n");
+                    text.push_str(&instruction);
+                }
+                Content::Array(parts) => parts.push(
+                    serde_json::from_value(serde_json::json!({"type":"text","text":instruction}))
+                        .expect("valid text content part"),
+                ),
+            }
+        } else {
+            request.inner.messages.insert(
+                0,
+                Message::System(
+                    dynamo_protocols::types::ChatCompletionRequestSystemMessage {
+                        content: Content::Text(instruction),
+                        ..Default::default()
+                    },
+                ),
+            );
+        }
+    }
+
     /// Whether this request permits model output to be interpreted as tool calls.
     ///
     /// A configured parser describes the model's wire format; it does not grant
@@ -423,6 +477,93 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn gpt_oss_v2_rejects_unsupported_reasoning_effort() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_rejects_unsupported_reasoning_effort"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let preprocessor = preprocessor("harmony", StructuralTagMode::Off);
+        for effort in ["none", "low", "medium", "high"] {
+            let mut request = request(json!({"reasoning_effort": effort}));
+            request.normalize_reasoning_template_args().unwrap();
+            let result = preprocessor.builder(&request);
+            if effort == "none" {
+                let error = result.err().expect("unsupported effort must be rejected");
+                let error = error.downcast_ref::<DynamoError>().unwrap();
+                assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+                assert!(error.to_string().contains("GPT-OSS does not support"));
+            } else {
+                assert!(result.is_ok(), "{effort}: {:?}", result.err());
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_json_prompt_matches_the_required_fallback_only() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_json_prompt_matches_the_required_fallback_only"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for (parser, mode, choice, parallel, changes) in [
+            ("harmony", StructuralTagMode::Off, "required", true, true),
+            ("harmony", StructuralTagMode::Off, "required", false, true),
+            ("harmony", StructuralTagMode::On, "required", true, false),
+            ("harmony", StructuralTagMode::Off, "auto", true, false),
+            ("qwen3", StructuralTagMode::Off, "required", true, false),
+        ] {
+            let preprocessor = preprocessor(parser, mode);
+            let mut request = request(
+                json!({"tools":tools(),"tool_choice":choice,"parallel_tool_calls":parallel,"messages":[{"role":"system","content":"Original system"},{"role":"user","content":"Original user"}]}),
+            );
+            let original = request.inner.messages.clone();
+            preprocessor.apply_gpt_oss_json_tool_prompt(&mut request);
+            if parser == "harmony" && choice == "required" {
+                let mut common = preprocessed_request();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                    .unwrap();
+                let guided = common.sampling_options.guided_decoding.unwrap();
+                if mode == StructuralTagMode::On {
+                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                    assert!(guided.structural_tag.is_some());
+                    assert!(guided.json.is_none());
+                } else {
+                    assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
+                    assert!(guided.json.is_some() || guided.regex.is_some());
+                    assert!(guided.structural_tag.is_none());
+                }
+            }
+            assert_eq!(request.inner.messages[1], original[1]);
+            if changes {
+                let rendered = serde_json::to_value(&request.inner.messages).unwrap();
+                let system = rendered[0]["content"].as_str().unwrap();
+                assert!(system.starts_with("Original system\n\nAfter reasoning"));
+                assert!(system.contains("name and parameters"));
+                assert_eq!(system.contains("all of them"), parallel);
+                assert_eq!(system.contains("exactly one"), !parallel);
+            } else {
+                assert_eq!(request.inner.messages, original);
+            }
+        }
     }
 
     #[test]
