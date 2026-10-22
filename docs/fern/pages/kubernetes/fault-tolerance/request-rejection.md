@@ -17,8 +17,9 @@ that the service is unavailable. Rejection metrics stay in the overload class.
 Rejection is **off by default**. Each threshold is independently opt-in: setting one numeric threshold
 enables only that check. You do not need `--admission-control`; that compatibility flag is ignored.
 
-> **How it works:** The busy-detection formulas, data-parallel rank aggregation, worker-load event
-> processing, and worker-side overflow queue are documented in
+> [!NOTE]
+> The busy-detection formulas, data-parallel rank aggregation, and worker-load event processing are
+> documented in
 > [Request Rejection Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md).
 
 <Steps toc={true} tocDepth={2}>
@@ -118,45 +119,6 @@ decision immediately. This endpoint does not enable `--router-mode kv` or
 
 </Step>
 
-<Step title="Add a worker-side hard cap">
-
-Optional. A worker can independently cap concurrent engine work and queue only a small burst. Set
-`--engine-request-limit N` (or `DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component:
-
-```yaml
-- name: worker
-  type: worker
-  podTemplate:
-    spec:
-      containers:
-        - name: main
-          args:
-            - --engine-request-limit
-            - "32"
-```
-
-When all `N` engine slots and the overflow queue are full, the worker rejects the request. What the
-client receives depends on migration:
-
-- Migration is disabled, or the request is pinned to one worker: HTTP 529 (the configured overload
-  status).
-- With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on
-  another eligible worker first. If the migration limit runs out first, the client receives HTTP 529.
-  If every eligible worker rejects the request as overloaded, the Frontend treats the pool as
-  exhausted and returns HTTP 429, the same as a router admission refusal.
-
-Split or standalone routing uses global overload and fault state, so its retry is best-effort and can
-select the same worker again.
-`DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue size, defaults to `16`, must be
-at least `2`, and has an effect only when the engine limit is set. The effective cap is `N + Q`
-in-flight requests per worker.
-
-See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) for the exact
-fields and [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission)
-for the queue implementation.
-
-</Step>
-
 <Step title="Verify rejection">
 
 Inspect the configured thresholds and worker-load metrics:
@@ -167,12 +129,11 @@ curl -s http://localhost:8000/metrics \
   | grep -E 'dynamo_frontend_worker_active_(decode_blocks|prefill_tokens)'
 ```
 
-Generate enough load to exceed the configured threshold, then confirm:
+Generate enough load to exceed the configured threshold, then confirm Frontend busy-threshold
+rejection:
 
 - The client receives HTTP 429 with `error.type` `Too Many Requests`.
 - `dynamo_frontend_model_rejection_total` increases for the affected `model` and `endpoint`.
-- Worker-side hard-cap tests increase `dynamo_rejection_request_total` when both the engine and queue
-  are full.
 
 For all metric fields and labels, see
 [Cancellation and Rejection](../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection).
@@ -258,8 +219,8 @@ stay HTTP 429.
 
 ## Related Documentation
 
-- [Request Rejection Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md) - Busy detection, event flow, and admission internals
+- [Admission Control](admission-control.md) - Configure the backend admission gate on Kubernetes
+- [Request Rejection Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md) - Busy detection, event flow, and overload errors
 - [Frontend Configuration](../../reference/components/frontend-configuration.mdx#fault-tolerance) - Thresholds, overload status, and admin API
-- [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) - Worker-side engine and queue limits
-- [Metrics Catalog](../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection) - Rejection and admission metrics
+- [Metrics Catalog](../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection) - Frontend rejection metrics
 - [Request Migration](request-migration.md) - Recovering in-flight requests after worker failure

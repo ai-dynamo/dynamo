@@ -27,8 +27,10 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
 <input className="dynamo-filter-input" type="radio" id="provider-lg" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-skt" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-upstage" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-minimax" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-motif" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-reflection" name="provider" />
 {/* provider-inputs:end */}
 <input className="dynamo-filter-input" type="radio" id="runtime-all" name="runtime" defaultChecked />
 <input className="dynamo-filter-input" type="radio" id="runtime-vllm" name="runtime" />
@@ -40,6 +42,7 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
 <input className="dynamo-filter-input" type="radio" id="hardware-gb200" name="hardware" />
 <input className="dynamo-filter-input" type="radio" id="hardware-gb300" name="hardware" />
 <input className="dynamo-filter-input" type="radio" id="hardware-b200" name="hardware" />
+<input className="dynamo-filter-input" type="radio" id="hardware-b300" name="hardware" />
 
 <div className="dynamo-recipe-browser" aria-label="Dynamo model recipe browser">
   <div className="dynamo-recipe-browser-header">
@@ -68,8 +71,10 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
 <label className="dynamo-recipe-chip" htmlFor="provider-lg">LG AI Research</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-skt">SK Telecom</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-upstage">Upstage</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-minimax">MiniMax</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-motif">Motif Technologies</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="provider-motif">Motif Technologies</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-reflection">Reflection</label></div></div>
 {/* provider-chips:end */}
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Runtime</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="runtime-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-sglang">SGLang</label>
@@ -79,6 +84,7 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
 <label className="dynamo-recipe-chip" htmlFor="hardware-h100">H100</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-h200">H200</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-b200">B200</label>
+<label className="dynamo-recipe-chip" htmlFor="hardware-b300">B300</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-gb200">GB200</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-gb300">GB300</label></div></div>
 </div>
@@ -316,6 +322,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x/8x B200</span><span>Chat trace replay</span></div>
     <a className="dynamo-card-link" href="solar-open2-250b.mdx" aria-label="Open the Solar Open2 250B recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="meta" data-runtime="sglang vllm trtllm" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing" data-workload="agentic-coding long-context-reuse" data-targets="sglang-agg-gb200 sglang-disagg-gb200 sglang-kv-router-gb200 sglang-agg-gb300 sglang-disagg-gb300 sglang-kv-router-gb300 vllm-agg-gb200 vllm-agg-gb300 trtllm-agg-gb200 trtllm-agg-gb300">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/meta-llama.webp" alt="" />
+      <div><h3>Muse-Spark-Open-816B-A42B</h3><p>Meta</p></div>
+    </div>
+    <p className="dynamo-model-summary">SGLang and experimental vLLM and TensorRT-LLM recipes for agentic serving on GB200 and GB300. SGLang includes aggregated, disaggregated, and KV-aware routed targets; vLLM and TensorRT-LLM include aggregated targets.</p>
+    <div className="dynamo-model-tags"><span>SGLang + vLLM + TensorRT-LLM</span><span>GB200 · GB300</span><span>Agentic</span></div>
+  <a className="dynamo-card-link" href="Muse-Spark-Open.mdx" aria-label="Open the Muse-Spark-Open-816B-A42B recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="minimax" data-runtime="vllm" data-hardware="gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="vllm-agg-gb200-agentic vllm-disagg-gb200-agentic">
     <div className="dynamo-model-card-top">
       <div><h3>MiniMax M3</h3><p>MiniMax / NVIDIA</p></div>
@@ -329,6 +344,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <p className="dynamo-model-summary">Experimental Motif vLLM recipes for aggregated chat on two B200 GPUs or 3P1D KV-aware serving on eight B200 GPUs, with TP2 and MTP2.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>2x or 8x B200</span><span>Chat trace replay</span></div>
     <a className="dynamo-card-link" href="motif-3.mdx" aria-label="Open the Motif-3 NVFP4 recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="reflection" data-runtime="sglang vllm" data-hardware="h200 b200 b300 gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="chat" data-targets="sglang-agg-h200 sglang-disagg-h200 sglang-agg-b200-nvfp4 sglang-disagg-b200-nvfp4 sglang-agg-b300-nvfp4 sglang-disagg-b300-nvfp4 sglang-agg-gb200-nvfp4 sglang-disagg-gb200-nvfp4 sglang-agg-gb300-nvfp4 sglang-disagg-gb300-nvfp4 vllm-agg-h200 vllm-disagg-h200 vllm-agg-b200-nvfp4 vllm-disagg-b200-nvfp4 vllm-agg-b300-nvfp4 vllm-disagg-b300-nvfp4 vllm-agg-gb200-nvfp4 vllm-disagg-gb200-nvfp4 vllm-agg-gb300-nvfp4 vllm-disagg-gb300-nvfp4">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/reflection.png" alt="Reflection logo" style={{ padding: 3, objectFit: "contain", boxSizing: "border-box" }} />
+      <div><h3>Beam-1.0-501B-A23B</h3><p>Reflection</p></div>
+    </div>
+    <p className="dynamo-model-summary">FP8 on H200 and NVFP4 on B200, B300, GB200, or GB300. SGLang and vLLM aggregated/disaggregated serving, with KV-aware routing, FP8 KV cache, and DFlash2 block length 8.</p>
+    <div className="dynamo-model-tags"><span>SGLang · vLLM</span><span>H200 · B200 · B300 · GB200 · GB300</span><span>Aggregated · Disaggregated</span></div>
+    <a className="dynamo-card-link" href="beam-1-0-501b.mdx" aria-label="Open the Beam-1.0-501B-A23B recipe">Open recipe</a>
   </div>
   {/* recipe-cards:end */}
 </div>
