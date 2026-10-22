@@ -41,6 +41,8 @@ use crate::{
     },
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
+        decision_head::{DecisionHeadRequest, DecisionHeadResponse},
+        decision_read::{DecisionReadRequest, DecisionReadResponse},
         openai::{
             audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
             chat_completions::{
@@ -150,6 +152,20 @@ fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[
     capabilities
         .iter()
         .any(|capability| supports_generate_capability(card, capability))
+}
+
+fn validate_decision_whole_request_router_mode(mode: RouterMode) -> anyhow::Result<()> {
+    match mode {
+        RouterMode::RoundRobin
+        | RouterMode::Random
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded
+        | RouterMode::DeviceAwareWeighted => Ok(()),
+        RouterMode::KV | RouterMode::Direct => anyhow::bail!(
+            "whole-request decision execution does not support {mode:?} routing: \
+             requests contain neither KV-routing tokens nor an explicit worker ID"
+        ),
+    }
 }
 
 // Generate's opaque request state is not yet verified for migration replay.
@@ -548,8 +564,10 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let needs_systemone_preprocessor =
-                self.systemone_enabled && card.is_systemone_serial_eligible();
+            let needs_systemone_preprocessor = self.systemone_enabled
+                && card
+                    .decision_execution_profile()
+                    .is_some_and(|profile| profile.is_token_scoring());
             let needs_local_tokenizer =
                 needs_local_chat_pipeline || needs_local_completions_pipeline;
             let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
@@ -576,8 +594,14 @@ impl ModelWatcher {
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
             let needs_generate_pipeline =
                 supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
-            let needs_preprocessed_routing =
-                needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
+            let needs_native_read = self.systemone_enabled
+                && card
+                    .decision_execution_profile()
+                    .is_some_and(|profile| profile.is_native_read());
+            let needs_preprocessed_routing = needs_factory_chat_pipeline
+                || tokenizer.is_some()
+                || needs_generate_pipeline
+                || needs_native_read;
 
             let load_thresholds =
                 LoadThresholdHandle::new(router_config.load_threshold_config.clone());
@@ -599,6 +623,19 @@ impl ModelWatcher {
             } else {
                 None
             };
+
+            if needs_native_read {
+                validate_decision_whole_request_router_mode(router_config.router_mode)?;
+                let read_client = load_context
+                    .as_ref()
+                    .context("native decision load context")?
+                    .client()
+                    .clone();
+                let router = PushRouter::<DecisionReadRequest, Annotated<DecisionReadResponse>>::from_client_with_monitor(
+                    read_client, router_config.router_mode, None,
+                ).await?;
+                worker_set.decision_read_engine = Some(Arc::new(router));
+            }
 
             // Create the KV router whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
@@ -776,9 +813,9 @@ impl ModelWatcher {
                             )
                             .context("PreprocessedRouting::build_pipeline")?,
                         )
-                } else if needs_generate_pipeline {
+                } else if needs_generate_pipeline || needs_native_read {
                     tracing::warn!(
-                        "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; Generate remains available"
+                        "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; token-native serving remains available"
                     );
                     None
                 } else {
@@ -844,6 +881,10 @@ impl ModelWatcher {
                 tracing::info!("Generate (token-in/token-out) is ready");
             }
 
+            if let Some(load_context) = load_context {
+                worker_set.set_load_context(load_context);
+            }
+
             // Verify we built at least one serving engine. Generate can be the
             // sole engine because token-native requests need no frontend tokenizer.
             if !worker_set.has_any_serving_engine() {
@@ -873,6 +914,30 @@ impl ModelWatcher {
             )
             .await?;
             let client = load_context.client().clone();
+
+            if self.systemone_enabled
+                && card
+                    .decision_execution_profile()
+                    .is_some_and(|profile| profile.is_native_read())
+            {
+                validate_decision_whole_request_router_mode(router_config.router_mode)?;
+                let router = PushRouter::<DecisionReadRequest, Annotated<DecisionReadResponse>>::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None,
+                ).await?;
+                worker_set.decision_read_engine = Some(Arc::new(router));
+            }
+
+            if self.systemone_enabled
+                && card
+                    .decision_execution_profile()
+                    .is_some_and(|profile| profile.is_head())
+            {
+                validate_decision_whole_request_router_mode(router_config.router_mode)?;
+                let push_router = PushRouter::<DecisionHeadRequest, Annotated<DecisionHeadResponse>>::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                ).await?;
+                worker_set.decision_head_engine = Some(Arc::new(push_router));
+            }
 
             if card.model_type.supports_embedding() {
                 let push_router = PushRouter::<
@@ -2200,6 +2265,30 @@ mod tests {
     }
 
     #[test]
+    fn decision_whole_request_router_mode_preserves_supported_modes() {
+        for mode in [
+            RouterMode::RoundRobin,
+            RouterMode::Random,
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+        ] {
+            assert!(validate_decision_whole_request_router_mode(mode).is_ok());
+        }
+    }
+
+    #[test]
+    fn decision_whole_request_router_mode_rejects_missing_routing_inputs() {
+        for mode in [RouterMode::KV, RouterMode::Direct] {
+            let error = validate_decision_whole_request_router_mode(mode)
+                .expect_err("whole-request decisions lack KV tokens and explicit worker IDs");
+            let message = error.to_string();
+            assert!(message.contains("whole-request decision execution"));
+            assert!(message.contains(&format!("{mode:?}")));
+        }
+    }
+
+    #[test]
     fn generate_requires_enabled_matching_worker_capability() {
         const OTHER_GENERATE_CAPABILITY: &str = "other_generate";
         let mut card = ModelDeploymentCard::with_name_only("model");
@@ -2495,6 +2584,124 @@ request_classifier:
             desired.card.runtime_config.tokenizer_fallback_enabled,
             Some(false)
         );
+    }
+
+    #[tokio::test]
+    async fn token_native_read_without_frontend_tokenizer_retains_load_context() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::token_native_read_without_frontend_tokenizer_retains_load_context"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_NATIVE_READ_ROUTING_TEST").as_deref() != Ok(test_name) {
+            let output = tokio::time::timeout(
+                Duration::from_secs(30),
+                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
+                    .env("DYNAMO_NATIVE_READ_ROUTING_TEST", test_name)
+                    .env("DYN_ROUTER_MIN_INITIAL_WORKERS", "0")
+                    .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("native read routing subprocess timed out")
+            .unwrap();
+            crate::test_utils::assert_isolated_success(&output);
+            return;
+        }
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig {
+                router_mode: RouterMode::RoundRobin,
+                ..Default::default()
+            },
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+        watcher.set_systemone_enabled(true);
+        assert!(watcher.generate_engine_capabilities.is_empty());
+
+        for native_enabled in [false, true] {
+            let mcid = ModelCardInstanceId {
+                namespace: "native-token-ns".into(),
+                component: "workers".into(),
+                endpoint: "generate".into(),
+                instance_id: 7,
+                model_suffix: None,
+            };
+            let mut card = ModelDeploymentCard::with_name_only("native-token-model");
+            card.model_input = ModelInput::Tokens;
+            card.model_type = ModelType::Chat | ModelType::Completions;
+            card.worker_type = Some(WorkerType::Aggregated);
+            if native_enabled {
+                card.runtime_config
+                    .set_engine_specific(
+                        crate::local_model::runtime_config::VLLM_LIQUID_DECISION_V1,
+                        true,
+                    )
+                    .unwrap();
+            }
+            assert!(!card.has_tokenizer());
+            let endpoint_id = model_card_endpoint_id(&mcid);
+            let key = GroupKey {
+                model_name: card.name().to_string(),
+                worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
+            };
+            let desired = DesiredInstance {
+                key: mcid.to_path(),
+                mcid,
+                endpoint_id,
+                mdc_checksum: card.mdcsum().to_string(),
+                projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+                video_contract: None,
+                card,
+                group_key: key.clone(),
+            };
+            let spec = GroupSpec {
+                key,
+                mdc_checksum: desired.mdc_checksum.clone(),
+                fingerprint: desired.mdc_checksum.clone(),
+                generation: 1,
+                representative: desired,
+                video_contract: None,
+            };
+            let (admission_tx, admission_rx) = tokio::sync::watch::channel(vec![7]);
+            let prepared = watcher
+                .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+                .await;
+            if !native_enabled {
+                assert!(prepared.is_err());
+                continue;
+            }
+            let prepared = prepared.expect("native reads need no frontend tokenizer or Generate");
+            let worker_set = prepared.worker_set.as_ref().unwrap();
+            assert!(worker_set.decision_read_engine.is_some());
+            assert!(worker_set.chat_engine.is_none());
+            assert!(worker_set.completions_engine.is_none());
+            assert!(worker_set.generate_engine.is_none());
+            assert!(worker_set.systemone_preprocessor.is_none());
+            assert!(worker_set.load_thresholds.is_some());
+            let load_context = worker_set.load_context().expect("native route load owner");
+            assert_eq!(load_context.source(), RouterLoadSource::Aggregated);
+            assert!(load_context.monitor().is_some());
+            let cancellation = load_context.cancellation_token();
+            assert!(!cancellation.is_cancelled());
+            let admissions = worker_set.decision_admissions().unwrap();
+            assert_eq!(*admissions.borrow(), vec![7]);
+            admission_tx.send(vec![]).unwrap();
+            assert!(admissions.borrow().is_empty());
+            drop(prepared);
+            assert!(cancellation.is_cancelled());
+        }
+        runtime.shutdown();
     }
 
     #[tokio::test]

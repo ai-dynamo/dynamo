@@ -1566,7 +1566,6 @@ impl ModelManager {
     pub(crate) fn get_systemone_execution_selection(
         &self,
         requested_model: &str,
-        capability: &str,
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         let catalog = self.catalog.load();
         let canonical_model = catalog
@@ -1575,7 +1574,7 @@ impl ModelManager {
             .map(String::as_str)
             .unwrap_or(requested_model);
         if let Some(model) = catalog.models.get(canonical_model) {
-            return model.get_systemone_execution_selection(capability);
+            return model.get_systemone_execution_selection();
         }
 
         Err(SystemOneSelectionError::NotFound)
@@ -3039,17 +3038,16 @@ mod tests {
     fn systemone_model_resolution_requires_registered_aliases() {
         let manager = ModelManager::new();
         let _workers = register_systemone_model(&manager, "model-a");
-        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
         for unregistered in ["jev-latest", "default", "typo"] {
             assert!(matches!(
-                manager.get_systemone_execution_selection(unregistered, capability),
+                manager.get_systemone_execution_selection(unregistered),
                 Err(SystemOneSelectionError::NotFound)
             ));
         }
         assert!(manager.register_alias("jev-latest", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("jev-latest", capability)
+                .get_systemone_execution_selection("jev-latest")
                 .unwrap()
                 .canonical_model,
             "model-a"
@@ -3057,18 +3055,18 @@ mod tests {
         assert!(manager.register_alias("public-model", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("public-model", capability)
+                .get_systemone_execution_selection("public-model")
                 .unwrap()
                 .canonical_model,
             "model-a"
         );
         assert!(matches!(
-            manager.get_systemone_execution_selection("typo", capability),
+            manager.get_systemone_execution_selection("typo"),
             Err(SystemOneSelectionError::NotFound)
         ));
         manager.add_worker_set("unsupported", "other", make_worker_set("other", "other"));
         assert!(matches!(
-            manager.get_systemone_execution_selection("unsupported", capability),
+            manager.get_systemone_execution_selection("unsupported"),
             Err(SystemOneSelectionError::Unsupported)
         ));
     }
@@ -3077,21 +3075,20 @@ mod tests {
     fn systemone_default_model_does_not_retarget_during_worker_churn() {
         let manager = ModelManager::new();
         let workers_a = register_systemone_model(&manager, "model-a");
-        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
         assert!(manager.register_alias("jev-latest", "model-a"));
         workers_a.send(vec![]).unwrap();
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest", capability),
+            manager.get_systemone_execution_selection("jev-latest"),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let _workers_b = register_systemone_model(&manager, "model-b");
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest", capability),
+            manager.get_systemone_execution_selection("jev-latest"),
             Err(SystemOneSelectionError::Unavailable)
         ));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("model-b", capability)
+                .get_systemone_execution_selection("model-b")
                 .unwrap()
                 .canonical_model,
             "model-b"
@@ -3103,10 +3100,7 @@ mod tests {
         let manager = ModelManager::new();
         let workers = register_systemone_model(&manager, "model-a");
         let selection = manager
-            .get_systemone_execution_selection(
-                "model-a",
-                crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY,
-            )
+            .get_systemone_execution_selection("model-a")
             .unwrap();
         assert_eq!(selection.validate_dispatch(None), Ok(()));
         assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));

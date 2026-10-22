@@ -43,7 +43,10 @@ fn preflight_selection(reasoning: Option<&str>) -> SystemOneExecutionSelection {
             .unwrap();
     SystemOneExecutionSelection {
         card,
-        preprocessor,
+        executor: crate::discovery::DecisionExecutor::Token {
+            engine: selection.token_parts().unwrap().0.clone(),
+            preprocessor,
+        },
         ..selection
     }
 }
