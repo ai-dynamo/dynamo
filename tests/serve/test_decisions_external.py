@@ -28,9 +28,9 @@ from urllib.parse import urlsplit
 import pytest
 import requests
 
-from tests.serve.test_systemone_sglang import assert_native_sglang_parity
 from tests.utils.decision_api import (
     assert_decision_body,
+    assert_native_sglang_parity,
     assert_request_headers,
     decision_payload,
 )
@@ -47,9 +47,7 @@ pytestmark = [
 
 @pytest.fixture
 def external_decision_server():
-    base_url = os.environ.get("DYNAMO_DECISION_TEST_URL")
-    if not base_url:
-        pytest.skip("Set DYNAMO_DECISION_TEST_URL for an explicitly provisioned server")
+    base_url = os.environ["DYNAMO_DECISION_TEST_URL"].strip()
     parsed = urlsplit(base_url)
     assert parsed.scheme in ("http", "https") and parsed.netloc
     assert parsed.path in ("", "/"), "Use the server origin, without /v1"
@@ -149,6 +147,7 @@ def test_external_typesafe_sdk_evaluation(external_decision_server):
         assert error.value.status == 422
 
 
+@pytest.mark.timeout(600)  # Six sequential HTTP calls can each take 60 seconds.
 def test_external_native_sglang_numeric_parity(external_decision_server):
     base_url, model = external_decision_server
     native_url = os.environ.get("DYNAMO_DECISION_NATIVE_URL")
@@ -160,4 +159,8 @@ def test_external_native_sglang_numeric_parity(external_decision_server):
         native_url.rstrip("/") != base_url
     ), "Native parity requires an independent server, not Dynamo /generate"
     tokenizer_path = os.environ.get("DYNAMO_DECISION_TOKENIZER_PATH")
-    assert_native_sglang_parity(base_url, native_url.rstrip("/"), model, tokenizer_path)
+    # Only native numerical parity needs the optional tokenizer dependency.
+    tokenizer = importlib.import_module("transformers").AutoTokenizer.from_pretrained(
+        tokenizer_path or model, local_files_only=True
+    )
+    assert_native_sglang_parity(base_url, native_url.rstrip("/"), model, tokenizer)

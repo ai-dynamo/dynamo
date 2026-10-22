@@ -7,12 +7,14 @@ import math
 
 import pytest
 import requests
+from transformers import AutoTokenizer
 
 from dynamo import prometheus_names
 from tests.frontend.conftest import MockerWorkerProcess, wait_for_http_completions_ready
 from tests.utils.constants import QWEN
 from tests.utils.decision_api import (
     assert_decision_body,
+    assert_mocker_probabilities,
     assert_request_headers,
     decision_payload,
 )
@@ -225,6 +227,18 @@ def test_systemone_impossible_admission_and_recovery(systemone_server):
 
 
 def test_decisions_and_systemone_preserve_their_contracts(systemone_server):
+    tokenizer = AutoTokenizer.from_pretrained(QWEN, local_files_only=True)
+    label_token_ids = {}
+    for question, labels in (
+        ("route", ("A", "B")),
+        ("urgent", ("yes", "no")),
+        ("severity", ("0", "1", "2")),
+    ):
+        encoded = [
+            tokenizer.encode(label, add_special_tokens=False) for label in labels
+        ]
+        assert all(len(tokens) == 1 for tokens in encoded), encoded
+        label_token_ids[question] = [tokens[0] for tokens in encoded]
     results = {}
     for dialect in ("oai", "systemone"):
         route = "systemone" if dialect == "systemone" else "decisions"
@@ -237,6 +251,7 @@ def test_decisions_and_systemone_preserve_their_contracts(systemone_server):
         assert_request_headers(response)
         results[dialect] = response.json()
         assert_decision_body(results[dialect], QWEN, dialect)
+        assert_mocker_probabilities(results[dialect], dialect, label_token_ids)
     oai, jev = (results[k] for k in ("oai", "systemone"))
     for index, key in ((0, "route"), (2, "severity")):
         expected = list(jev["answers"][key]["probabilities"].values())
