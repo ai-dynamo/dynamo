@@ -47,7 +47,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.1
           imagePullPolicy: IfNotPresent
   - name: TRTLLMWorker
     type: worker
@@ -80,7 +80,7 @@ spec:
             name: qwen3-0-6b-trtllm-snapshot-restore-engine
         containers:
         - name: main
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.1
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/
           command:

@@ -30,8 +30,8 @@ crate-type = ["cdylib", "staticlib"]
 cbindgen = "0.27"
 
 [dependencies]
-dynamo-kv-router = { path = "../../kv-router" }
-dynamo-runtime = { path = "../../runtime" }
+dynamo-kv-router = { path = "../../kv-router", version = "1.6.1" }
+dynamo-runtime = { path = "../../runtime", version = "1.6.1" }
 
 anyhow = { workspace = true }
 tokio = { workspace = true }
@@ -43,7 +43,7 @@ once_cell = { version = "1" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dynamo-llm = { path = "../../llm" }
+dynamo-llm = { path = "../../llm", version = "1.6.1" }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-llm = { path = "../../llm", version = "1.6.1", default-features = false }

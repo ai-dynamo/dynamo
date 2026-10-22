@@ -124,7 +124,7 @@ Download the selected recipe from the matching release and set the runtime image
 ```bash
 export EXAMPLE_URL="https://raw.githubusercontent.com/ai-dynamo/dynamo/v${RELEASE_VERSION}/examples/backends/trtllm/deploy/snapshot"
 curl --fail --location "$EXAMPLE_URL/$RECIPE.yaml" -o snapshot-template.yaml
-sed "s|my-registry/tensorrtllm-runtime:my-tag|${TRTLLM_IMAGE}|g" \
+sed "s|nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.1|${TRTLLM_IMAGE}|g" \
   snapshot-template.yaml > snapshot-restore.yaml
 kubectl get pvc model-cache -n "$NAMESPACE"
 ```
@@ -136,7 +136,7 @@ download time outside Dynamo's one-hour capture deadline:
 if [ "$RECIPE" = glm-5.3 ]; then
   curl --fail --location "$EXAMPLE_URL/glm-5.3-model-cache.yaml" \
     -o model-cache-template.yaml
-  sed "s|my-registry/tensorrtllm-runtime:my-tag|${TRTLLM_IMAGE}|g" \
+  sed "s|nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.1|${TRTLLM_IMAGE}|g" \
     model-cache-template.yaml > model-cache-job.yaml
   kubectl apply -n "$NAMESPACE" -f model-cache-job.yaml
   kubectl wait job/glm-5-3-model-cache -n "$NAMESPACE" \

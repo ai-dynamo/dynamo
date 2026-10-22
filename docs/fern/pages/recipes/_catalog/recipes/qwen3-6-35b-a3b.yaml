@@ -25,7 +25,7 @@ targets:
     count: 1
   runtime:
     framework: Dynamo + SGLang
-    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.1
   topology: aggregated
   techniques:
   - speculative-decoding
@@ -45,7 +45,7 @@ targets:
     count: 1
   runtime:
     framework: Dynamo + SGLang
-    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.1
   topology: aggregated
   techniques:
   - prefix-caching

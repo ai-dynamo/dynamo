@@ -18,7 +18,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.1
               imagePullPolicy: Always
               command: ["python3"]
               args:
@@ -37,7 +37,7 @@ spec:
             nvidia.com/gpu.product: NVIDIA-B200
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.1
               imagePullPolicy: Always
               command:
                 - python3
