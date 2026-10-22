@@ -1954,8 +1954,17 @@ def test_use_modelexpress_remote_instance_rejects_other_load_paths(
             {"max_running_requests": 2, "dp_size": 2, "enable_dp_attention": True},
             "Tokens",
             "Aggregated",
-            True,
+            False,
         ),
+        ({"dp_size": 2}, "Tokens", "Aggregated", False),
+        ({"enable_dp_attention": True}, "Tokens", "Aggregated", False),
+        (
+            {"max_running_requests": 2, "attn_dp_size": 2},
+            "Tokens",
+            "Aggregated",
+            False,
+        ),
+        ({"ep_join_mode": "scale"}, "Tokens", "Aggregated", False),
     ],
 )
 def test_systemone_serial_capability_registration_gate(
