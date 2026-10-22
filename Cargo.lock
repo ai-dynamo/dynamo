@@ -2490,9 +2490,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-example-adaptive-imbalance"
+version = "1.6.0"
+dependencies = [
+ "arc-swap",
+ "dynamo-kv-router",
+ "serde",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-custom-policy-example-catalog"
 version = "1.6.0"
 dependencies = [
+ "dynamo-custom-policy-example-adaptive-imbalance",
  "dynamo-custom-policy-example-disagg-filter-score-pick",
  "dynamo-custom-policy-example-simple-filter-score-pick",
  "dynamo-custom-policy-example-simple-stacked-score-pick",

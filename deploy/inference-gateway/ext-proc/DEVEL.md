@@ -125,7 +125,10 @@ Common image targets:
 
 The EPP serves Envoy `ext_proc` gRPC on port `9002` and plaintext gRPC health on port `9003`.
 It serves TLS on the `ext_proc` port by default. Set `DYN_SECURE_SERVING=false` only for local
-debugging with a plaintext h2c gateway.
+debugging with a plaintext h2c gateway. In TLS mode the server accepts at most
+`DYN_EPP_MAX_CONNECTIONS` concurrent connections (default `1024`); raise it when the gateway
+opens one connection per `ext_proc` stream and keeps idle connections open, otherwise the EPP
+stops accepting new streams until those connections time out.
 
 The common local environment variables are:
 
