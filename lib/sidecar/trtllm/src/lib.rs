@@ -36,12 +36,19 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
         let metadata = discover_node(&args)
             .await
             .map_err(SidecarStartupError::from)?;
-        Ok::<_, anyhow::Error>((args, metadata))
+        let (engine, config) = if metadata.as_ref().is_some_and(|node| !node.leader) {
+            (engine, config)
+        } else {
+            TrtllmSidecarEngine::bootstrap((engine, config))
+                .await
+                .map_err(SidecarStartupError::from)?
+        };
+        Ok::<_, anyhow::Error>((args, metadata, engine, config))
     };
     dynamo_sidecar_common::run_with_drt(
         runtime_config,
         bootstrap,
-        move |drt, (args, metadata), shutdown| async move {
+        move |drt, (args, metadata, engine, config), shutdown| async move {
             if let Some(node) = metadata.filter(|node| !node.leader) {
                 headless::relay(drt, args, node, shutdown).await
             } else {
@@ -67,11 +74,21 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
 async fn discover_node(
     args: &args::Args,
 ) -> Result<Option<node::NodeMetadata>, dynamo_backend_common::DynamoError> {
-    let client =
-        client::TrtllmClient::connect(&args.sidecar.grpc_endpoint, args.sidecar.grpc.config())
-            .await?;
-    node::NodeMetadata::from_info(client.server_info().await?.as_ref())
+    let transport = args.sidecar.grpc.config();
+    tokio::time::timeout(transport.startup_deadline, async {
+        let client = client::TrtllmClient::connect(&args.sidecar.grpc_endpoint, transport).await?;
+        node::NodeMetadata::from_info(client.server_info().await?.as_ref())
+    })
+    .await
+    .map_err(|_| {
+        dynamo_sidecar_common::connection_timeout(
+            "OpenEngine node discovery exceeded the gRPC startup deadline",
+        )
+    })?
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod test_fixtures;

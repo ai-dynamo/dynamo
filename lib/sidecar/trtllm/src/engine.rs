@@ -29,6 +29,7 @@ use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
+const LOAD_STALENESS_LIMIT: Duration = Duration::from_secs(30);
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
 const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -56,14 +57,13 @@ pub struct TrtllmSidecarEngine {
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
     subagent_affinity_auth_key: Option<String>,
-    client: OnceCell<TrtllmClient>,
-    /// Engine limits resolved at `start` from `--context-length` and
-    /// `Control.GetModelInfo`, so `generate` can derive a default `max_tokens`
-    /// for requests that omit one.
-    limits: OnceCell<ModelLimits>,
+    /// Connection and limits may be discovered in the cancellable sidecar bootstrap.
+    connection: OnceCell<(TrtllmClient, ModelLimits)>,
+    started: OnceCell<()>,
     routing: OnceCell<RoutingState>,
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
+    load_failed: CancellationToken,
 }
 
 impl TrtllmSidecarEngine {
@@ -79,25 +79,33 @@ impl TrtllmSidecarEngine {
             model,
             mode,
             subagent_affinity_auth_key: None,
-            client: OnceCell::new(),
-            limits: OnceCell::new(),
+            connection: OnceCell::new(),
+            started: OnceCell::new(),
             routing: OnceCell::new(),
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
+            load_failed: CancellationToken::new(),
         }
     }
 
     /// Fence a restarted native engine before continuing with stale discovery.
     pub(crate) async fn monitor_routing(&self) -> anyhow::Result<()> {
-        let mut ticks = tokio::time::interval(Duration::from_secs(5));
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticks.tick().await;
-            if let (Some(client), Some(routing)) = (self.client.get(), self.routing.get())
-                && let Some(node) = &routing.node
-            {
-                return crate::headless::monitor_engine(client, node, &routing.sources).await;
+        tokio::select! {
+            _ = self.load_failed.cancelled() => {
+                anyhow::bail!("Routing load remained unavailable for 30 seconds; withdrawing worker")
             }
+            result = async {
+                let mut ticks = tokio::time::interval(Duration::from_secs(5));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticks.tick().await;
+                    if let (Some((client, _)), Some(routing)) = (self.connection.get(), self.routing.get())
+                        && let Some(node) = &routing.node
+                    {
+                        return crate::headless::monitor_engine(client, node, &routing.sources).await;
+                    }
+                }
+            } => result,
         }
     }
 
@@ -127,7 +135,7 @@ impl TrtllmSidecarEngine {
         DynamoError,
     > {
         let parsed = Self::from_parsed(<Args as clap::Parser>::parse())?;
-        Ok((parsed.1.runtime.clone(), std::future::ready(Ok(parsed))))
+        Ok((parsed.1.runtime.clone(), Self::bootstrap(parsed)))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -143,10 +151,7 @@ impl TrtllmSidecarEngine {
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         let initialized = Self::from_parsed(args)?;
-        Ok((
-            initialized.1.runtime.clone(),
-            std::future::ready(Ok(initialized)),
-        ))
+        Ok((initialized.1.runtime.clone(), Self::bootstrap(initialized)))
     }
 
     pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -186,6 +191,8 @@ impl TrtllmSidecarEngine {
         };
         let mut engine = Self::new(endpoint, transport, model.clone(), mode);
         engine.subagent_affinity_auth_key = args.subagent_affinity_auth_key;
+        // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
+        let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -204,6 +211,7 @@ impl TrtllmSidecarEngine {
             served_model_name: None,
             tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
             reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
+            structural_tag,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
@@ -219,14 +227,22 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
-}
 
-#[async_trait]
-impl LLMEngine for TrtllmSidecarEngine {
-    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-        if self.client.initialized() {
-            return Err(client::engine_shutdown(ALREADY_STARTED));
-        }
+    pub(crate) async fn bootstrap(
+        (engine, config): (Self, WorkerConfig),
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        // Worker deliberately lets engine.start() finish before cleanup. Discover
+        // here so signals can cancel a stalled remote connection without waiting
+        // for that worker shutdown deadline. Dropping discovery only drops gRPC
+        // clients; it does not leave a partially loaded in-process engine.
+        engine
+            .connection
+            .get_or_try_init(|| engine.connect())
+            .await?;
+        Ok((engine, config))
+    }
+
+    async fn connect(&self) -> Result<(TrtllmClient, ModelLimits), DynamoError> {
         tracing::info!(
             endpoint = %self.endpoint,
             connections = self.transport.connections.get(),
@@ -243,13 +259,12 @@ impl LLMEngine for TrtllmSidecarEngine {
                 "OpenEngine does not advertise signed subagent affinity; upgrade or configure the server",
             ));
         }
-        let connection_count = client.connection_count();
 
         // `--context-length` wins over what the engine reports, and is the
         // only source when the engine reports nothing usable. The resolved
         // value backs both the registered window and the default-`max_tokens`
         // path in `convert::max_tokens`.
-        let mut model = self.model.clone();
+        let model = &self.model;
         let limits = match model.context_length {
             // Configured: the engine is consulted once, to cross-check the
             // value and to learn its output cap. It may not answer at all --
@@ -317,9 +332,24 @@ impl LLMEngine for TrtllmSidecarEngine {
                     })?
             }
         };
-        model.context_length = limits.context_length;
-        let _ = self.limits.set(limits);
+        Ok((client, limits))
+    }
+}
 
+#[async_trait]
+impl LLMEngine for TrtllmSidecarEngine {
+    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+        if self.started.initialized() {
+            return Err(client::engine_shutdown(ALREADY_STARTED));
+        }
+        // Synchronous constructors retain deferred discovery; the CLI and Python
+        // sidecar launcher reuse the connection prepared by their async bootstrap.
+        let (client, limits) = self.connection.get_or_try_init(|| self.connect()).await?;
+        self.started
+            .set(())
+            .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
+        let mut model = self.model.clone();
+        model.context_length = limits.context_length;
         {
             let routing_deadline = startup_deadline(self.transport.startup_deadline)?;
             let routing_discovery = async {
@@ -408,13 +438,9 @@ impl LLMEngine for TrtllmSidecarEngine {
                 .set(routing)
                 .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
         }
-
-        self.client
-            .set(client)
-            .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
         tracing::info!(
             endpoint = %self.endpoint,
-            connections = connection_count,
+            connections = client.connection_count(),
             model = %model.source,
             context_length = ?limits.context_length,
             max_output_tokens = ?limits.max_output_tokens,
@@ -436,20 +462,26 @@ impl LLMEngine for TrtllmSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let client = self
-            .client
+        let (client, limits) = self
+            .connection
             .get()
+            .filter(|_| self.started.initialized())
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
+        // A single-rank engine needs no hint, even when it advertises the
+        // capability. Suppress it and the associated anonymous conversation ID
+        // to avoid retaining one-shot per-conversation cache state.
+        let use_dp_targeting = self
+            .routing
+            .get()
+            .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
         let proto_request = build_generate_request_with_routing(
             &request,
             &request_id,
             &self.model.source,
-            self.limits.get().copied(),
+            Some(*limits),
             self.mode,
-            self.routing
-                .get()
-                .is_some_and(|routing| routing.dp_targeting),
+            use_dp_targeting,
         )?;
         let target_dp_rank = request.routing.as_ref().and_then(|routing| {
             if self.mode.is_prefill() {
@@ -466,13 +498,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                 )));
             }
         }
-        // Legacy single-rank servers accept logical rank zero, but not the
-        // optional OpenEngine targeting metadata.
-        let target_dp_rank = target_dp_rank.filter(|_| {
-            self.routing
-                .get()
-                .is_some_and(|routing| routing.dp_targeting)
-        });
+        let target_dp_rank = target_dp_rank.filter(|_| use_dp_targeting);
         let parent_affinity = if self.mode.is_prefill() && self.subagent_affinity_auth_key.is_some()
         {
             request.agent_context.as_ref().and_then(|agent| {
@@ -583,7 +609,7 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(client) = self.client.get() else {
+        let Some((client, _)) = self.connection.get().filter(|_| self.started.initialized()) else {
             return;
         };
         if let Err(error) = client.abort(ctx.id().to_string()).await {
@@ -636,14 +662,16 @@ impl LLMEngine for TrtllmSidecarEngine {
             return Ok(MetricsBindings::default());
         }
         let client = self
-            .client
+            .connection
             .get()
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?
+            .0
             .clone();
         let dp_size = routing.dp_size;
         let initial = routing.initial_snapshots.clone();
         let cancel = self.cancel.clone();
         let task_slot = Arc::clone(&self.metrics_task);
+        let load_failed = self.load_failed.clone();
 
         let bindings = MetricsBindings {
             dp_ranks: (0..dp_size).collect(),
@@ -655,14 +683,23 @@ impl LLMEngine for TrtllmSidecarEngine {
                     let mut interval = tokio::time::interval(LOAD_POLL_INTERVAL);
                     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     let mut warned = false;
+                    let mut deadline = tokio::time::Instant::now() + LOAD_STALENESS_LIMIT;
                     loop {
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep_until(deadline) => {
+                                load_failed.cancel();
+                                break;
+                            }
                             _ = interval.tick() => {
                                 let load = tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => break,
+                                    _ = tokio::time::sleep_until(deadline) => {
+                                        load_failed.cancel();
+                                        break;
+                                    }
                                     load = client.get_load(true) => load,
                                 };
                                 match load.and_then(|load| {
@@ -670,6 +707,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 }) {
                                     Ok(snapshots) => {
                                         warned = false;
+                                        deadline = tokio::time::Instant::now() + LOAD_STALENESS_LIMIT;
                                         for snapshot in snapshots {
                                             publisher.publish(snapshot.dp_rank, snapshot);
                                         }
@@ -838,3 +876,6 @@ fn load_snapshots(load: pb::LoadInfo, dp_size: u32) -> Result<Vec<ComponentSnaps
     }
     Ok(snapshots)
 }
+
+#[cfg(test)]
+mod tests;

@@ -562,6 +562,10 @@ pub mod llm {
     /// not parse or are above 1000000 use the default.
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
+    /// Publish the serving-load streams the KV DC Relay aggregates: frontend
+    /// request load and router scheduler load. Off unless truthy.
+    pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -741,6 +745,12 @@ pub mod llm {
         /// are recorded unredacted; avoid credential-bearing headers.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
+
+        /// Lowest-cost candidates retained per `router_selection` record. `0`
+        /// retains every scored candidate. The selected worker is always
+        /// retained. Default `16`.
+        pub const DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K: &str =
+            "DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K";
 
         /// S3 bucket for the S3 request-trace sink. Required when
         /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
@@ -1160,6 +1170,7 @@ mod tests {
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,

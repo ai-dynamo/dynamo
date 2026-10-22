@@ -23,7 +23,28 @@ use std::sync::Arc;
 /// Per-request score overrides are not used. Request load-tracking remains host-owned.
 pub fn default_policy(config: KvRouterConfig, worker_label: &'static str) -> WorkerSelectionPolicy {
     let parameters = PolicyParameters::from(&config);
-    policy_with_rng(config, parameters, worker_label, None, false)
+    runtime_policy(config, parameters, worker_label)
+}
+
+fn runtime_policy(
+    config: KvRouterConfig,
+    parameters: PolicyParameters,
+    worker_label: &'static str,
+) -> WorkerSelectionPolicy {
+    let initial = parameters.snapshot();
+    let policy = policy_with_rng(config.clone(), parameters, worker_label, None);
+    policy.with_runtime_config(
+        initial,
+        Arc::new(move |values| {
+            let parameters = PolicyParameters::from_runtime(values, &config)?;
+            Ok(policy_with_rng(
+                config.clone(),
+                parameters,
+                worker_label,
+                None,
+            ))
+        }),
+    )
 }
 
 fn policy_with_rng(
@@ -31,9 +52,8 @@ fn policy_with_rng(
     parameters: PolicyParameters,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
-    is_plain_decode: bool,
 ) -> WorkerSelectionPolicy {
-    let scorer = scorer::build(&parameters, worker_label, is_plain_decode);
+    let scorer = scorer::build(&parameters, worker_label);
     let picker = picker::DefaultPicker::new(parameters.router_temperature, rng);
     WorkerSelectionPolicy::new(config, worker_label, vec![scorer], Box::new(picker))
         .with_exclusive_affinity(true)
@@ -53,11 +73,18 @@ fn policy_for_role(
 ) -> WorkerSelectionPolicy {
     let is_plain_decode =
         role == dynamo_kv_router::WorkerType::Decode && !config.conditional_disagg_enabled;
-    policy_with_rng(
-        config,
-        parameters,
-        role.default_selector_label(),
-        None,
-        is_plain_decode,
-    )
+    // Plain decode has no cache inputs; expose its effective startup values so runtime
+    // attempts to enable any cache credit are rejected by the input-capability check.
+    let parameters = if is_plain_decode {
+        PolicyParameters {
+            overlap_score_credit: 0.0,
+            host_cache_hit_weight: 0.0,
+            disk_cache_hit_weight: 0.0,
+            shared_cache_multiplier: 0.0,
+            ..parameters
+        }
+    } else {
+        parameters
+    };
+    runtime_policy(config, parameters, role.default_selector_label())
 }

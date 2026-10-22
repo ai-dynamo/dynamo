@@ -104,6 +104,33 @@ dyn_port() {
     printf '%s\n' "${selected}"
 }
 
+# Resolve one worker's indexed managed ports into <name>_<kind>_PORT variables,
+# using a value already set in that variable as the standalone fallback.
+# Usage: dyn_worker_ports VLLM_DECODE1 1 HTTP=8100 GRPC=30001 NIXL_SIDE_CHANNEL=20096 KV_EVENT=20080
+dyn_worker_ports() {
+    local name="$1"
+    local index="$2"
+    shift 2
+    local spec kind prefix variable port
+    for spec in "$@"; do
+        kind="${spec%%=*}"
+        case "${kind}" in
+            HTTP) prefix=DYN_ENGINE_HTTP_PORT ;;
+            GRPC) prefix=DYN_ENGINE_GRPC_PORT ;;
+            KV_EVENT) prefix=DYN_VLLM_KV_EVENT_PORT ;;
+            KV_REPLAY) prefix=DYN_VLLM_KV_REPLAY_PORT ;;
+            NIXL_SIDE_CHANNEL) prefix=DYN_VLLM_NIXL_SIDE_CHANNEL_PORT ;;
+            *)
+                echo "Unknown port kind for ${name}: ${spec}" >&2
+                return 1
+                ;;
+        esac
+        variable="${name}_${kind}_PORT"
+        port=$(dyn_port "${prefix}" "${index}" "${!variable:-${spec#*=}}") || return 1
+        printf -v "${variable}" '%s' "${port}"
+    done
+}
+
 # wait_any_exit
 #
 # Waits for ANY backgrounded process to exit and propagates its exit code.

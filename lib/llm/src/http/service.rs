@@ -22,6 +22,7 @@ mod anthropic;
 mod batch_proxy;
 pub mod metadata;
 mod openai;
+mod server;
 mod write_timeout;
 
 pub mod busy_threshold;
@@ -33,6 +34,7 @@ pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
+pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
 mod worker_metrics;

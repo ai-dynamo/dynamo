@@ -59,6 +59,11 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 	ctx context.Context,
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
+	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
+	if request.Spec.V1Beta2 != nil {
+		return nil, nil
+	}
+
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
 	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
@@ -70,6 +75,11 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
+	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
+	if newRequest.Spec.V1Beta2 != nil {
+		return nil, nil
+	}
+
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
 	validation.warnDeprecatedDGDOverrideTargets(&newRequest.Spec)

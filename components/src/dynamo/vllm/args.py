@@ -30,9 +30,14 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.backend_args import (
+    DynamoVllmArgGroup,
+    DynamoVllmConfig,
+    _configured_artifact_router_profile,
+)
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
 
 from . import envs
 
@@ -116,6 +121,8 @@ async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
         The validated configuration, retaining the original source in ``model``.
     """
     dynamo_config, vllm_args = _parse_cli_args(argv)
+    if dynamo_config.artifact_router_profile is not None:
+        _configured_artifact_router_profile(dynamo_config.artifact_router_profile)
     if needs_local_model_path(dynamo_config.model):
         vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
         if not vllm_args.served_model_name:
@@ -377,11 +384,6 @@ def update_engine_config_with_dynamo(
         ensure_side_channel_host()
 
     defaults: Dict[str, Any] = {
-        # As of vLLM >=0.10.0 the engine unconditionally calls
-        # `sampling_params.update_from_tokenizer(...)`, so we can no longer
-        # skip tokenizer initialisation.  Setting this to **False** avoids
-        # a NoneType error when the processor accesses the tokenizer.
-        "skip_tokenizer_init": False,
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
@@ -601,16 +603,39 @@ def create_kv_events_config(
                 "To publish events, explicitly set enable_kv_cache_events to True."
             )
         logger.info(f"Using user-provided kv_events_config {c}")
+        _set_state_agent_topic(engine_config, c)
         return c
 
     return None
+
+
+def _set_state_agent_topic(
+    engine_config: AsyncEngineArgs, events: KVEventsConfig
+) -> None:
+    """Publish on this worker's KV state-agent topic, which its attachment
+    descriptors advertise, so the agent can route its raw streams by topic."""
+    from dynamo.common.kv_state_agent import worker_raw_topic
+
+    from .state_agent import state_agent_settings_from_engine_args
+
+    settings = state_agent_settings_from_engine_args(engine_config)
+    if settings is None:
+        return
+    topic = worker_raw_topic(settings.cache_owner_ids.values())
+    if events.topic != topic:
+        logger.info(
+            "Publishing KV events on the KV state-agent worker topic %r instead of %r",
+            topic,
+            events.topic,
+        )
+        events.topic = topic
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses NixlConnector.
 
     Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside PdConnector (kv_connector_extra_config.connectors contains
+    inside MultiConnector or PdConnector (kv_connector_extra_config.connectors contains
     "NixlConnector").
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
@@ -618,9 +643,8 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
         return False
     if kv_cfg.kv_connector == "NixlConnector":
         return True
-    # PdConnector wraps multiple connectors in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
-    if kv_cfg.kv_connector == "PdConnector":
+    if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
@@ -686,7 +710,7 @@ def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str
             "kv_connector": "PdConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"connectors": multi_connectors},
-            "kv_connector_module_path": "kvbm.vllm_integration.connector",
+            "kv_connector_module_path": "dynamo.vllm.pd_connector",
         }
     )
 

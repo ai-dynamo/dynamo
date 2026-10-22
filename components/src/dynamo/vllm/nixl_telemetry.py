@@ -24,6 +24,10 @@ def allow_nixl_telemetry_capture() -> bool:
     unset: NIXL 1.3.2, which the vLLM image builds, has no NOP plugin and
     loads an exporter only when enable is true. Returns True when the
     environment was changed.
+
+    Registered as a vLLM general plugin so Ray model actors apply this policy
+    locally, before worker initialization. Driver environment deletions do not
+    propagate to actors, and Ray preserves their existing exporter settings.
     """
     enable = os.environ.get("NIXL_TELEMETRY_ENABLE")
     if enable is None or enable.lower() not in _FALSE:

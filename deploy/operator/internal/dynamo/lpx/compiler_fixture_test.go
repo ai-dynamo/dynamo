@@ -8,6 +8,7 @@ package lpx
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,19 +25,23 @@ import (
 const (
 	otherFixtureValue  = "other"
 	v2TestBuildName    = "v2-test-build"
-	v3HXTopologyFamily = "16x8x2x3"
+	v3HXTopologyFamily = "HX16x8x2"
 	v3OpaqueTopology   = "opaque-v3-topology"
 )
 
-type unreachableBuildSnapshotSource struct{}
+type staticModelRegistry map[string]*Build
 
-func (unreachableBuildSnapshotSource) AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error) {
-	return nil, fmt.Errorf("unexpected build snapshot acquisition")
+func (staticModelRegistry) BuildURL(id string) (*url.URL, error) {
+	return nil, fmt.Errorf("unexpected build URL lookup for %q", id)
+}
+func (staticModelRegistry) EnsureDownloaded(_ context.Context, buildURL url.URL) (bool, error) {
+	return false, fmt.Errorf("unexpected build download for %q", buildURL.String())
+}
+func (staticModelRegistry) EnsureCheckpointDownloaded(_ context.Context, checkpoint *Checkpoint) (bool, error) {
+	return false, fmt.Errorf("unexpected checkpoint download for %q", CheckpointKey(checkpoint))
 }
 
-type staticBuildSnapshotSource map[string]*BuildSnapshot
-
-func (source staticBuildSnapshotSource) AcquireBuildSnapshot(_ context.Context, buildID string) (*BuildSnapshot, error) {
+func (source staticModelRegistry) AcquireBuild(_ context.Context, buildID string) (*Build, error) {
 	snapshot := source[buildID]
 	if snapshot == nil {
 		return nil, fmt.Errorf("unknown test build %q", buildID)
@@ -75,28 +80,21 @@ func testLPXPodTemplate(image string) *corev1.PodTemplateSpec {
 	}
 }
 
-func acquireTestSnapshot(t *testing.T, buildDir string) *BuildSnapshot {
+func acquireTestSnapshot(t *testing.T, buildDir string) *Build {
 	t.Helper()
 	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
-	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), buildDir)
+	snapshot, err := registry.AcquireBuild(t.Context(), buildDir)
 	require.NoError(t, err)
 	return snapshot
 }
 
-func normalizeTestSnapshot(t *testing.T, snapshot *BuildSnapshot) NormalizedBuildSnapshot {
-	t.Helper()
-	normalized, err := normalizeBuildSnapshot(snapshot)
-	require.NoError(t, err)
-	return normalized
-}
-
-func projectTestBuild(t *testing.T, snapshot NormalizedBuildSnapshot, pipeline Pipeline) *ModelProjection {
+func projectTestBuild(t *testing.T, snapshot *Build, pipeline Pipeline) *ModelProjection {
 	t.Helper()
 
 	t.Log("Project the caller-owned normalized build for the selected pipeline")
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: pipeline, Models: []string{"default"}, BuildSnapshot: snapshot,
+		Pipeline: pipeline, Models: []string{"default"}, Build: snapshot,
 	})
 	require.NoError(t, err)
 	return projectionBatch[0]

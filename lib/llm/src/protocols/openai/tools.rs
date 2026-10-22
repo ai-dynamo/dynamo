@@ -194,8 +194,7 @@ fn clone_parameters(function: &FunctionObject) -> Value {
 }
 
 /// Build an array of tool calls, preserving each parameter document's local definitions.
-/// Parameter schemas containing `$defs` live under separate root definitions so references
-/// can be relocated without mixing types from independent tools.
+/// Schemas with local references or `$defs` keep their own document root after nesting.
 fn build_required_schema(
     tools: &[ChatCompletionTool],
     parallel_tool_calls: Option<bool>,
@@ -205,16 +204,14 @@ fn build_required_schema(
 
     for (index, tool) in tools.iter().enumerate() {
         let mut schema = clone_parameters(&tool.function);
-        if let Some(local_defs) = schema.get("$defs") {
-            if !local_defs.is_object() {
-                return Err(ToolChoiceError::InvalidDefinitionMap(
-                    tool.function.name.clone(),
-                ));
-            }
-            let name = format!("tool_{index}");
-            let reference = format!("#/$defs/{name}");
-            rebase_schema_refs(&mut schema, &reference);
-            defs.insert(name, schema);
+        if schema.get("$defs").is_some_and(|defs| !defs.is_object()) {
+            return Err(ToolChoiceError::InvalidDefinitionMap(
+                tool.function.name.clone(),
+            ));
+        }
+        let reference = format!("#/$defs/tool_{index}");
+        if rebase_schema_refs(&mut schema, &reference) || schema.get("$defs").is_some() {
+            defs.insert(format!("tool_{index}"), schema);
             schema = json!({"$ref": reference});
         }
         any_of.push(json!({
@@ -261,16 +258,17 @@ fn build_required_schema(
 
 /// Relocate fragment-only JSON Pointer references with their parameter document.
 /// An explicit `$id` starts a separate resource; its references retain that base.
-fn rebase_schema_refs(schema: &mut Value, root: &str) {
+fn rebase_schema_refs(schema: &mut Value, root: &str) -> bool {
+    let mut rebased = false;
     match schema {
         Value::Array(schemas) => {
             for schema in schemas {
-                rebase_schema_refs(schema, root);
+                rebased |= rebase_schema_refs(schema, root);
             }
         }
         Value::Object(schema) => {
             if schema.contains_key("$id") {
-                return;
+                return false;
             }
             if let Some(Value::String(reference)) = schema.get_mut("$ref")
                 && let Some(fragment) = reference.strip_prefix('#')
@@ -281,6 +279,7 @@ fn rebase_schema_refs(schema: &mut Value, root: &str) {
                         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("%2f")))
             {
                 *reference = format!("{root}{fragment}");
+                rebased = true;
             }
             for (keyword, value) in schema {
                 match keyword.as_str() {
@@ -288,7 +287,7 @@ fn rebase_schema_refs(schema: &mut Value, root: &str) {
                     | "dependentSchemas" | "dependencies" => {
                         if let Value::Object(schemas) = value {
                             for schema in schemas.values_mut() {
-                                rebase_schema_refs(schema, root);
+                                rebased |= rebase_schema_refs(schema, root);
                             }
                         }
                     }
@@ -307,13 +306,14 @@ fn rebase_schema_refs(schema: &mut Value, root: &str) {
                     | "if"
                     | "then"
                     | "else"
-                    | "contentSchema" => rebase_schema_refs(value, root),
+                    | "contentSchema" => rebased |= rebase_schema_refs(value, root),
                     _ => {}
                 }
             }
         }
         _ => {}
     }
+    rebased
 }
 
 #[cfg(test)]
@@ -529,6 +529,7 @@ mod tests {
         assert_eq!(schema["type"], "array");
         assert_eq!(schema["minItems"], 1);
         assert!(schema["items"]["anyOf"].is_array());
+        assert!(schema.get("$defs").is_none());
 
         let any_of = schema["items"]["anyOf"].as_array().unwrap();
         assert_eq!(any_of.len(), 2);
@@ -551,6 +552,52 @@ mod tests {
         );
         let err = get_json_schema_from_tools(Some(&tool_choice), Some(&tools), None).unwrap_err();
         assert_eq!(err, ToolChoiceError::ToolNotFound("unknown".to_string()));
+    }
+
+    #[test]
+    fn required_choice_preserves_local_references_without_defs() {
+        for (parameters, reference_path, target) in [
+            (
+                json!({
+                    "type": "object",
+                    "properties": {"value": {"$ref": "#/definitions/value"}},
+                    "definitions": {"value": {"type": "string"}}
+                }),
+                "/properties/value/$ref",
+                json!({"type": "string"}),
+            ),
+            (
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "alias": {"$ref": "#/properties/value"}
+                    }
+                }),
+                "/properties/alias/$ref",
+                json!({"type": "string"}),
+            ),
+            (
+                json!({"type": "object", "properties": {"child": {"$ref": "#"}}}),
+                "/properties/child/$ref",
+                json!({
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/$defs/tool_0"}}
+                }),
+            ),
+        ] {
+            let mut tools = sample_tools();
+            tools.truncate(1);
+            tools[0].function.parameters = Some(parameters);
+            let schema = build_required_schema(&tools, None).unwrap();
+            let parameters = schema.pointer("/$defs/tool_0").expect("parameter document");
+            let reference = parameters
+                .pointer(reference_path)
+                .unwrap()
+                .as_str()
+                .unwrap();
+            assert_eq!(schema.pointer(&reference[1..]), Some(&target));
+        }
     }
 
     #[test]

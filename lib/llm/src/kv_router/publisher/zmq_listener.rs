@@ -158,14 +158,21 @@ pub(super) async fn start_zmq_listener(
                 let discontinuity = last_source_cursors
                     .insert(dp_rank, engine_seq)
                     .is_some_and(|previous| previous.checked_add(1) != Some(engine_seq));
-                let mut events = Vec::with_capacity(batch.events.len() + usize::from(discontinuity));
+                // Only sources that negotiate heartbeat-based residency invalidation
+                // opt into clearing on a gap. Legacy advisory streams warn and
+                // continue without discarding their cached residency.
+                let clear_on_gap = discontinuity && liveness.is_some();
+                let mut events = Vec::with_capacity(batch.events.len() + usize::from(clear_on_gap));
                 if discontinuity {
                     tracing::warn!(
                         endpoint = %zmq_endpoint,
                         source_cursor = engine_seq,
                         dp_rank,
-                        "ZMQ KV event sequence discontinuity; clearing stale router state"
+                        clear_on_gap,
+                        "ZMQ KV event sequence discontinuity"
                     );
+                }
+                if clear_on_gap {
                     let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                     let raw_event = RawKvEvent::AllBlocksCleared { ownership: None };
                     let raw_event = normalizer

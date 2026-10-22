@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
-use dynamo_backend_common::{DisaggregationMode, KvEventSource};
+use dynamo_backend_common::{DisaggregationMode, DynamoError, KvEventSource};
 use dynamo_llm::discovery::{RuntimeConfigWatch, runtime_config_watch};
 use dynamo_llm::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig};
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
@@ -226,24 +226,65 @@ pub(crate) async fn monitor_engine(
     node: &NodeMetadata,
     sources: &[pb::KvEventSource],
 ) -> Result<()> {
+    const RECOVERY_LIMIT: Duration = Duration::from_secs(30);
     let mut ticks = tokio::time::interval(POLL_INTERVAL);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut deadline = tokio::time::Instant::now() + RECOVERY_LIMIT;
+    let mut warned = false;
     loop {
         ticks.tick().await;
-        let info = client
-            .server_info()
-            .await?
-            .context("Local metadata endpoint disappeared")?;
-        ensure!(
-            NodeMetadata::from_info(Some(&info))?.as_ref() == Some(node),
-            "Local engine changed; restart engine and sidecars together"
-        );
-        let mut current_sources = client.kv_event_sources().await?;
-        node.select_local_sources(&mut current_sources)?;
-        current_sources.sort_by_key(|source| source.data_parallel_rank);
-        if current_sources != sources {
-            bail!("Local event sources changed; restart engine and sidecars together");
+        let check = async {
+            let info = client
+                .server_info()
+                .await?
+                .context("Local metadata endpoint disappeared")?;
+            ensure!(
+                NodeMetadata::from_info(Some(&info))?.as_ref() == Some(node),
+                "Local engine changed; restart engine and sidecars together"
+            );
+            let mut current_sources = client.kv_event_sources().await?;
+            node.select_local_sources(&mut current_sources)?;
+            current_sources.sort_by_key(|source| source.data_parallel_rank);
+            ensure!(
+                current_sources == sources,
+                "Local event sources changed; restart engine and sidecars together"
+            );
+            Ok::<_, anyhow::Error>(())
+        };
+        let attempt_deadline = deadline.min(tokio::time::Instant::now() + POLL_INTERVAL);
+        match tokio::time::timeout_at(attempt_deadline, check).await {
+            Ok(Ok(())) => {
+                deadline = tokio::time::Instant::now() + RECOVERY_LIMIT;
+                warned = false;
+                continue;
+            }
+            // Confirmed metadata changes are fatal; only RPC failures may recover.
+            Ok(Err(error))
+                if !error.downcast_ref::<DynamoError>().is_some_and(|error| {
+                    matches!(
+                        error.reason().as_str(),
+                        "backend.cannot_connect"
+                            | "backend.connection_timeout"
+                            | "capacity.worker_overloaded"
+                    )
+                }) =>
+            {
+                return Err(error);
+            }
+            result => {
+                if !warned {
+                    tracing::warn!(
+                        ?result,
+                        "Native metadata poll failed; retrying for a bounded recovery period"
+                    );
+                    warned = true;
+                }
+            }
         }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "Native metadata remained unavailable for 30 seconds; withdrawing worker"
+        );
     }
 }
 

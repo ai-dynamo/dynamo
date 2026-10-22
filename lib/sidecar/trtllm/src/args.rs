@@ -26,7 +26,11 @@ pub(crate) struct Args {
     pub default_thinking_mode: Option<String>,
 
     /// Shared secret for signed parent-session routing hints sent to OpenEngine.
-    #[arg(long, env = "TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY")]
+    #[arg(
+        long,
+        env = "TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY",
+        hide_env_values = true
+    )]
     pub subagent_affinity_auth_key: Option<String>,
 
     /// Model maximum sequence length (input + output). Used to register the

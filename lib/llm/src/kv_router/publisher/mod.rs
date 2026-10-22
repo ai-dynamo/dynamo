@@ -52,10 +52,11 @@ pub use multimodal_embedding_cache::{
 use sinks::EventPlanePublisher;
 pub use state_agent::{
     KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
-    KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+    KvStateAgentSockets, KvStateAgentVllmSource, resolve_stable_dp_slot_id,
 };
 pub use state_agent_host::{
-    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, KvStateAgentHost, KvStateAgentHostConfig,
+    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, DEFAULT_KV_STATE_AGENT_SLOTS_PER_SOCKET, KvStateAgentHost,
+    KvStateAgentHostConfig,
 };
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
@@ -566,17 +567,31 @@ impl KvEventPublisher {
         &self,
         events: Vec<(KvCacheEvent, StorageTier)>,
     ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
+        self.publish_batch_with_session_ids(
+            events
+                .into_iter()
+                .map(|(event, tier)| (event, tier, None))
+                .collect(),
+        )
+    }
+
+    /// Publishes session-attributed events as one processor input.
+    pub fn publish_batch_with_session_ids(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier, Option<String>)>,
+    ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
         if events.is_empty() {
             return Ok(());
         }
-
         let events = events
             .into_iter()
-            .map(|(event, storage_tier)| {
-                PlacementEvent::new(
+            .map(|(event, storage_tier, session_id)| {
+                let mut event = PlacementEvent::new(
                     Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
                     event,
-                )
+                );
+                event.session_id = session_id;
+                event
             })
             .collect();
 
