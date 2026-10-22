@@ -3,7 +3,6 @@
 
 use tonic_v14 as tonic;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -1227,59 +1226,7 @@ impl LLMEngine for VllmSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
-        let client = self.started_client()?;
-        let expected_dp_range = self.model.data_parallel_range();
-        let expected_dp_size = expected_dp_range.end - expected_dp_range.start;
-        let mut ranks = HashSet::new();
-        let mut sources = Vec::new();
-        let reported_sources = client.kv_event_sources().await?;
-        if reported_sources.is_empty() {
-            return Ok(Vec::new());
-        }
-        let image_token_id = self.routing_image_token_id.get().copied().flatten();
-        for source in reported_sources {
-            if source.transport != "zmq" {
-                tracing::warn!(
-                    transport = %source.transport,
-                    endpoint = %source.endpoint,
-                    "Skipping unsupported vLLM KV-event transport"
-                );
-                continue;
-            }
-            let dp_rank = source.data_parallel_rank.ok_or_else(|| {
-                client::protocol_error(
-                    "GetKvEventSources returned a ZMQ source without data_parallel_rank",
-                )
-            })?;
-            if !expected_dp_range.contains(&dp_rank) {
-                return Err(client::protocol_error(format!(
-                    "GetKvEventSources returned rank {dp_rank}, outside the expected local range {expected_dp_range:?}",
-                )));
-            }
-            if !ranks.insert(dp_rank) {
-                return Err(client::protocol_error(format!(
-                    "GetKvEventSources returned duplicate rank {dp_rank}",
-                )));
-            }
-            if source.endpoint.trim().is_empty() {
-                return Err(client::protocol_error(
-                    "GetKvEventSources returned a ZMQ source without an endpoint",
-                ));
-            }
-            sources.push(KvEventSource::Zmq {
-                endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
-                topic: source.topic,
-                dp_rank,
-                image_token_id,
-            });
-        }
-        if ranks.len() != expected_dp_size as usize {
-            return Err(client::protocol_error(format!(
-                "GetKvEventSources returned ZMQ sources for {} of {expected_dp_size} local data-parallel ranks; KV routing requires one source for every local rank",
-                ranks.len()
-            )));
-        }
-        Ok(sources)
+        self.recovery_sources().await
     }
 }
 
