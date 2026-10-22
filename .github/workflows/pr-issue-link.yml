@@ -15,8 +15,9 @@
 
 # Checks that every pull request references an issue: a Linear issue ID in the
 # PR title, description, or branch name, or a GitHub issue reference in the
-# title or description. Referenced issues are verified to exist. The check is
-# advisory today; the failure message carries the date it becomes required.
+# title or description. Referenced issues are verified to exist. The check
+# fails only once the next minor release branch is cut; before that it passes
+# with a warning and the same remediation.
 
 name: PR Issue Link
 
@@ -39,23 +40,30 @@ on:
       - ".github/workflows/pr-issue-link.yml"
       - ".github/workflows/pr_issue_link.py"
       - ".github/workflows/test_pr_issue_link.py"
+  # A result recorded before the cut stays on its commit after the cut, and
+  # creating a branch fires no pull request event. The cut re-runs those
+  # results so that a pull request without a link cannot merge on a green
+  # check from before the switch.
+  create:
 
 env:
-  # Referenced in the failure message; on this date the check is added to the
-  # required status checks in branch protection after the announced notice.
-  # Two weeks of advisory failures is the whole runway, so the announcement
-  # has to reach contributors rather than rely on them meeting the check by
-  # accident.
+  # The check fails pull requests without a link once this branch exists, and
+  # passes them with a warning before it does. Make it a required status check
+  # before the cut, so it switches on at the cut with no further settings
+  # change. Once `release/1.7.0` exists, `main` carries 1.8 work, so the check
+  # first governs what lands for 1.8. The script matches the full branch name,
+  # so model-launch branches like `release/1.6.0-<model>-dev.1` do not trip it.
   #
-  # It is the v1.6.0 GA date, two weeks past the code freeze, so the check
-  # stays advisory for all of 1.6 and first governs what lands for 1.7.
-  # Nothing a frozen branch takes is in scope either way: the base-branch
-  # filter above keeps the check to pull requests into `main`.
+  # A branch, once cut, stays, so the check stays on without maintenance. Do
+  # not bump this for later minors: naming a branch not yet cut switches the
+  # check back off until that cut.
   #
-  # The pull request template and the script default name this date too, so
-  # that a contributor reads it before the check fails rather than after. Bump
-  # all three together; the unit tests below fail when they disagree.
-  BLOCKING_DATE: "2026-10-21"
+  # The pull request template and the script default name this branch too, so
+  # that a contributor reads it before the check fails rather than after. If
+  # the switch-on release moves, change all three together, plus the literal in
+  # the `recheck-at-cut` job condition; the unit tests below fail when they
+  # disagree.
+  BLOCKING_BRANCH: "release/1.7.0"
 
 jobs:
   check-issue-link:
@@ -84,6 +92,35 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           REPO: ${{ github.repository }}
         run: python3 .github/workflows/pr_issue_link.py
+
+  recheck-at-cut:
+    name: Re-check open pull requests at the cut
+    runs-on: ubuntu-latest
+    # Job conditions cannot read `env`, so the branch is a literal here. Other
+    # branches are created often; matching at the job level keeps them from
+    # starting a runner.
+    if: ${{ github.event_name == 'create' && github.event.ref_type == 'branch' && github.event.ref == 'release/1.7.0' }}
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Re-run green issue-link results on open pull requests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        # A re-run reads the branch state live: a linked pull request passes
+        # again and one without a link now fails.
+        run: |
+          gh pr list --repo "$REPO" --base main --state open --limit 1000 \
+            --json headRefOid,isDraft \
+            --jq '.[] | select(.isDraft | not) | .headRefOid' |
+          while read -r sha; do
+            run=$(gh api "repos/$REPO/actions/workflows/pr-issue-link.yml/runs?head_sha=$sha&event=pull_request_target&per_page=1" \
+              --jq '.workflow_runs[0] | select(.conclusion == "success") | .id')
+            if [ -n "$run" ]; then
+              gh run rerun "$run" --repo "$REPO" || echo "::warning::Could not re-run $run for $sha"
+            fi
+          done
 
   unit-tests:
     name: Unit tests

@@ -41,6 +41,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # An owner or repository name is ASCII, starts alphanumeric, and runs to at
@@ -274,6 +275,27 @@ def project_warning(identifier: str, api_key: str) -> list[str]:
     ]
 
 
+def release_branch_cut(repo: str, branch: str, token: str) -> tuple[bool, bool]:
+    """Return (cut, api_ok) for an exact branch name in `repo`.
+
+    The `git/ref` endpoint matches the full name only, so the model-launch
+    branches cut as `release/1.6.0-<model>-dev.1` never read as `release/1.6.0`.
+    """
+    status, _ = http_json(
+        f"https://api.github.com/repos/{repo}/git/ref/heads/"
+        + urllib.parse.quote(branch, safe="/"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    if status == 200:
+        return True, True
+    if status in (404, 410):
+        return False, True
+    return False, False
+
+
 def main() -> int:
     title = os.environ.get("PR_TITLE", "")
     body = os.environ.get("PR_BODY", "") or ""
@@ -292,7 +314,7 @@ def main() -> int:
     needs_permission_check = head_repo.lower() != repo.lower() and not trusted_author
     gh_token = os.environ.get("GITHUB_TOKEN", "")
     linear_key = os.environ.get("LINEAR_API_KEY", "")
-    blocking_date = os.environ.get("BLOCKING_DATE", "2026-10-21")
+    blocking_branch = os.environ.get("BLOCKING_BRANCH", "release/1.7.0")
 
     if author in BOT_AUTHORS:
         print(f"Author {author} is a bot; skipping the issue-link check.")
@@ -511,6 +533,26 @@ def main() -> int:
         else []
     )
 
+    # The check fails only once the next minor release branch exists. Before
+    # that it reports the same remediation and passes, so the check can sit in
+    # the required status checks ahead of the cut and switch on by itself. An
+    # API failure reads as not cut yet, the same fail-open an outage earns
+    # everywhere else in this check.
+    cut, cut_known = release_branch_cut(repo, blocking_branch, gh_token)
+    gate_lines = (
+        [f"This check is required: `{blocking_branch}` has been cut."]
+        if cut
+        else [
+            f"This check is advisory until `{blocking_branch}` is cut and "
+            "passes for now. From the cut it fails pull requests without a link."
+        ]
+        + (
+            []
+            if cut_known
+            else ["", f"Could not confirm whether `{blocking_branch}` exists yet."]
+        )
+    )
+
     summarize(
         [
             (
@@ -533,8 +575,8 @@ def main() -> int:
             "  `ai-dynamo/enhancements#12`.",
             "",
             "If no issue exists yet, create one first and start the work from it.",
-            f"This check is advisory today and becomes required on {blocking_date}.",
         ]
+        + gate_lines
         + (
             [
                 "",
@@ -556,7 +598,10 @@ def main() -> int:
             else []
         )
     )
-    return 1
+    if cut:
+        return 1
+    print(f"::warning::No linked issue. Required once {blocking_branch} is cut.")
+    return 0
 
 
 if __name__ == "__main__":

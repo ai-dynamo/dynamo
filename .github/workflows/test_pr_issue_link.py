@@ -24,7 +24,7 @@ Two properties carry the check and neither is visible from reading one branch:
     lookup budget is not an outage, so a pull request whose checked
     references all came back definitively not-an-issue must still fail.
 
-Every test drives `main()` with the three verification calls replaced, so
+Every test drives `main()` with the four API calls replaced, so
 nothing here touches the network.
 """
 
@@ -57,7 +57,7 @@ ENV_DEFAULTS = {
 
 
 class FakeApi:
-    """Programmed stand-in for the three verification calls.
+    """Programmed stand-in for the four GitHub and Linear calls.
 
     Each map is keyed the way the check asks: `owner/repo#number` for GitHub
     issues, `owner/repo` for repository visibility, and the identifier for
@@ -77,6 +77,7 @@ class FakeApi:
         default_linear: tuple[bool, bool] = (False, True),
         write_access: bool = False,
         projects: dict[str, tuple[bool, bool]] | None = None,
+        branch_cut: tuple[bool, bool] = (True, True),
     ) -> None:
         self.github = github or {}
         self.deps = set(deps or ())
@@ -92,6 +93,8 @@ class FakeApi:
         self.permission_calls: list[str] = []
         self.projects = projects or {}
         self.project_calls: list[str] = []
+        self.branch_cut = branch_cut
+        self.branch_calls: list[str] = []
 
     def verify_github_issue(
         self, repo: str, number: str, token: str
@@ -119,6 +122,12 @@ class FakeApi:
         self.permission_calls.append(f"{repo}:{username}")
         return self.write_access
 
+    def release_branch_cut(
+        self, repo: str, branch: str, token: str
+    ) -> tuple[bool, bool]:
+        self.branch_calls.append(branch)
+        return self.branch_cut
+
 
 def run(
     monkeypatch: pytest.MonkeyPatch, api: FakeApi | None = None, **env: str
@@ -134,10 +143,11 @@ def run(
     monkeypatch.setattr(
         pr_issue_link, "has_repo_write_permission", api.has_repo_write_permission
     )
+    monkeypatch.setattr(pr_issue_link, "release_branch_cut", api.release_branch_cut)
     # The runner sets GITHUB_STEP_SUMMARY; leaving it set would make these
     # tests append to the real job summary.
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
-    monkeypatch.delenv("BLOCKING_DATE", raising=False)
+    monkeypatch.delenv("BLOCKING_BRANCH", raising=False)
     for key, value in {**ENV_DEFAULTS, **env}.items():
         monkeypatch.setenv(key, value)
     return pr_issue_link.main(), api
@@ -549,12 +559,44 @@ def test_invisible_cross_repo_reference_is_reported_not_passed(
     assert "cannot see" in out
 
 
-def test_missing_message_names_the_blocking_date(
+def test_missing_link_fails_once_the_release_branch_is_cut(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, _ = run(monkeypatch, BLOCKING_DATE="2026-10-21")
+    api = FakeApi(branch_cut=(True, True))
+    code, api = run(monkeypatch, api, BLOCKING_BRANCH="release/1.7.0")
     assert code == 1
-    assert "becomes required on 2026-10-21" in capsys.readouterr().out
+    assert api.branch_calls == ["release/1.7.0"]
+    assert "`release/1.7.0` has been cut" in capsys.readouterr().out
+
+
+def test_missing_link_passes_with_a_warning_before_the_cut(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(branch_cut=(False, True))
+    code, _ = run(monkeypatch, api, BLOCKING_BRANCH="release/1.7.0")
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "### PR issue link: missing" in out
+    assert "advisory until `release/1.7.0` is cut" in out
+    assert "::warning::" in out
+
+
+def test_an_unreadable_branch_state_fails_open(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(branch_cut=(False, False))
+    code, _ = run(monkeypatch, api)
+    assert code == 0
+    assert "Could not confirm whether `release/1.7.0` exists" in capsys.readouterr().out
+
+
+def test_a_linked_pull_request_never_reads_the_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(github={f"{REPO}#123": (True, True)})
+    code, api = run(monkeypatch, api, PR_BODY="Fixes #123")
+    assert code == 0
+    assert api.branch_calls == []
 
 
 def test_summary_is_appended_to_the_step_summary_file(
@@ -565,6 +607,7 @@ def test_summary_is_appended_to_the_step_summary_file(
     monkeypatch.setattr(pr_issue_link, "verify_github_issue", api.verify_github_issue)
     monkeypatch.setattr(pr_issue_link, "repo_visible", api.repo_visible)
     monkeypatch.setattr(pr_issue_link, "verify_linear_issue", api.verify_linear_issue)
+    monkeypatch.setattr(pr_issue_link, "release_branch_cut", api.release_branch_cut)
     for key, value in {**ENV_DEFAULTS, "PR_BODY": "Fixes #123"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
@@ -662,33 +705,37 @@ def test_the_check_runs_only_against_main() -> None:
 
 
 # ------------------------------------------------------------------
-# The blocking date, which lives in three files a human edits
+# The blocking branch, which lives in three files a human edits
 # ------------------------------------------------------------------
 
 
-def test_the_template_and_the_workflow_name_the_same_blocking_date() -> None:
+def test_the_template_and_the_workflow_name_the_same_blocking_branch() -> None:
     """Nothing else keeps the three copies in step.
 
-    `BLOCKING_DATE` drives the message a contributor sees when the check
-    fails. The pull request template carries the same date so they read it
-    before it fails, and the script repeats it as a default for any run that
-    does not set the variable. Bumping one without the others leaves the
-    template telling people the old date, or the script announcing one the
-    workflow never chose.
+    `BLOCKING_BRANCH` decides when the check starts failing and names the
+    branch in the message a contributor sees. The pull request template
+    carries the same branch so they read it before it fails, and the script
+    repeats it as a default for any run that does not set the variable.
+    If the switch-on release moves and only one copy changes, the template
+    names the wrong release, or the script gates on one the workflow never
+    chose.
     """
     workflows = Path(__file__).parent
     workflow = (workflows / "pr-issue-link.yml").read_text()
     template = (workflows.parent / "pull_request_template.md").read_text()
     script = (workflows / "pr_issue_link.py").read_text()
-    match = re.search(r'BLOCKING_DATE:\s*"(\d{4}-\d{2}-\d{2})"', workflow)
-    assert match, "the workflow does not set BLOCKING_DATE"
-    date = match.group(1)
-    assert f"becomes required on {date}" in template
+    match = re.search(r'BLOCKING_BRANCH:\s*"(release/\d+\.\d+\.\d+)"', workflow)
+    assert match, "the workflow does not set BLOCKING_BRANCH"
+    branch = match.group(1)
+    assert f"becomes required when `{branch}` is cut" in template
     default = re.search(
-        r'os\.environ\.get\(\s*"BLOCKING_DATE",\s*"(\d{4}-\d{2}-\d{2})"', script
+        r'os\.environ\.get\(\s*"BLOCKING_BRANCH",\s*"(release/[^"]+)"', script
     )
-    assert default, "the script does not default BLOCKING_DATE"
-    assert default.group(1) == date
+    assert default, "the script does not default BLOCKING_BRANCH"
+    assert default.group(1) == branch
+    recheck = re.search(r"github\.event\.ref == '([^']+)'", workflow)
+    assert recheck, "the recheck-at-cut job does not name a branch"
+    assert recheck.group(1) == branch
 
 
 # ------------------------------------------------------------------

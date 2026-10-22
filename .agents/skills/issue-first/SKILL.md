@@ -23,7 +23,7 @@ SPDX-License-Identifier: CC-BY-4.0
 Every pull request in this repository references the issue it implements, so
 work is traceable to a tracked task and release tracking stays live without
 manual reconciliation. The `PR Issue Link` CI check enforces this: advisory
-today, required from the date named in its failure message.
+today, required once the release branch named in its message is cut.
 
 ## When to Use
 
@@ -83,8 +83,8 @@ work issue for the change as well.
 The `PR Issue Link` check failing means no verifiable reference was found.
 Add one using the table above and edit the PR description; editing re-triggers
 the check. If no issue exists yet, create one first (see Start From an Issue).
-While the check is advisory it does not block merges; its failure message
-names the date it becomes required.
+Until the next minor release branch is cut the check passes with a warning;
+its message names the branch that switches it on.
 
 ## Related
 
