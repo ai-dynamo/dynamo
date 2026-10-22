@@ -10,6 +10,27 @@ example `DynamoGraphDeployment` manifests. `test_dgdr.py` validates the operator
 `DynamoGraphDeploymentRequest` API, and `test_dgdr_h100.py` contains its real-GPU
 H100 support matrix.
 
+The vLLM `agg_gms` profile is the single-GPU GMS weight-loading smoke test. It
+checks model availability and inference, a Ready native GMS sidecar, and a single
+NVIDIA DRA GPU claim shared by the sidecar and worker. The allocated claim is
+saved as `gms-resourceclaim.json` with the deployment's other test artifacts.
+
+Run it in a dedicated test namespace on a cluster with Kubernetes 1.34+, the
+NVIDIA GPU DRA driver, `gpu.nvidia.com` DeviceClass, available DRA devices, a
+compatible Dynamo operator, and the manifest's `hf-token-secret`. Set
+`KUBECONFIG` to the intended cluster explicitly; vCluster is optional.
+
+```bash
+python -m pytest tests/deploy/test_dgd.py \
+  --framework=vllm --profile=agg_gms \
+  --namespace=gms-test --image=registry.example/vllm-runtime:tag \
+  -m framework_only -k normal -v -s \
+  --junitxml=gms-results.xml
+```
+
+The namespace must not be shared by concurrent runs of this profile. Nightly
+scheduling requires a DRA-capable GPU allocation and is configured separately.
+
 The CPU DGDR lane uses mocker workers and needs a cluster with the Dynamo
 operator installed and a planner image:
 

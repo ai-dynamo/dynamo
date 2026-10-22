@@ -96,6 +96,53 @@ def validate_agg_logging_output(frontend_pod: Any, baseline_line_count: int) -> 
     )
 
 
+async def validate_gms_allocation(deployment: ManagedDeployment) -> None:
+    """Require the aggregate worker and GMS sidecar to share one allocated GPU."""
+    workers = deployment.get_pods(["worker"])["worker"]
+    assert len(workers) == 1, "agg_gms must have exactly one worker pod"
+    pod = workers[0].raw
+    spec, status = pod["spec"], pod["status"]
+    sidecars = {
+        container["name"]: container for container in spec.get("initContainers", [])
+    }
+    sidecar = sidecars.get("gms-server")
+    assert sidecar is not None, "GMS sidecar was not injected"
+    assert sidecar.get("restartPolicy") == "Always", "GMS must be a native sidecar"
+    assert any(
+        container["name"] == "gms-server" and container.get("ready")
+        for container in status.get("initContainerStatuses", [])
+    ), "GMS sidecar is not ready"
+
+    main = next(
+        container for container in spec["containers"] if container["name"] == "main"
+    )
+    claim_name = "intrapod-shared-gpu"
+    for container in (main, sidecar):
+        assert any(
+            claim["name"] == claim_name
+            for claim in container.get("resources", {}).get("claims", [])
+        ), f"{container['name']} does not use the shared GMS GPU claim"
+
+    claims = {claim["name"]: claim for claim in status.get("resourceClaimStatuses", [])}
+    allocated_name = claims.get(claim_name, {}).get("resourceClaimName")
+    assert allocated_name, "GMS pod has no resolved ResourceClaim"
+    claim = await deployment._custom_api.get_namespaced_custom_object(
+        "resource.k8s.io", "v1", deployment.namespace, "resourceclaims", allocated_name
+    )
+    claim_status = claim.get("status", {})
+    devices = claim_status.get("allocation", {}).get("devices", {}).get("results", [])
+    assert (
+        len(devices) == 1 and devices[0].get("driver") == "gpu.nvidia.com"
+    ), "GMS ResourceClaim must allocate exactly one NVIDIA GPU"
+    assert any(
+        reservation.get("uid") == pod["metadata"]["uid"]
+        for reservation in claim_status.get("reservedFor", [])
+    ), "GMS ResourceClaim is not reserved for the worker pod"
+    artifact = Path(deployment.log_dir) / "gms-resourceclaim.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(json.dumps(claim, indent=2))
+
+
 @pytest.mark.framework_only
 @pytest.mark.k8s
 @pytest.mark.deploy
@@ -200,6 +247,9 @@ async def test_deployment(
             namespace=namespace,
             skip_service_restart=skip_service_restart,
         ) as deployment:
+            if (framework, profile) == ("vllm", "agg_gms"):
+                await validate_gms_allocation(deployment)
+
             # Get frontend pod for port forwarding
             frontend_pods = deployment.get_pods([deployment.frontend_service_name])
             frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
@@ -240,6 +290,16 @@ async def test_deployment(
                 payload=ready_payload,
             )
             assert model_ready, f"Model '{model}' did not become available"
+            if (framework, profile) == ("vllm", "agg_gms"):
+                with await asyncio.to_thread(
+                    requests.get,
+                    f"{base_url}/v1/models",
+                    timeout=DEFAULT_REQUEST_TIMEOUT,
+                ) as response:
+                    response.raise_for_status()
+                    assert model in {
+                        item["id"] for item in response.json()["data"]
+                    }, "GMS model is not listed by the frontend"
             frontend_log_baseline = (
                 len(normalize_log_lines(frontend_pod.logs(container="main")))
                 if validate_agg_logging
