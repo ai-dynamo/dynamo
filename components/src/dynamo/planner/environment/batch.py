@@ -16,15 +16,20 @@ import logging
 import math
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Optional, Protocol, TypeVar, Union, cast
 from urllib.parse import quote
 
 import aiohttp
+import redis.asyncio as redis_asyncio
 from prometheus_client.parser import text_string_to_metric_families
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from dynamo.planner.core.types import (
     BatchDispatcherFeedback,
+    BatchDrainLimitDecision,
     BatchJobDemand,
     BatchSchedulingObservation,
     PoolTrafficDemand,
@@ -35,13 +40,18 @@ __all__ = [
     "BatchJobSource",
     "BatchResolver",
     "BatchSchedulingCollector",
+    "DISPATCH_RATE_LIMIT_API_VERSION",
     "DispatcherFeedbackSource",
+    "DrainLimitActuator",
     "LlmdAsyncPrometheusSource",
     "LlmdAsyncOpenMetricsSource",
     "OpenMetricsOnlineTrafficSource",
     "OnlineTrafficSource",
     "PrometheusQueryClient",
+    "RedisLeasedDrainLimitActuator",
 ]
+
+DISPATCH_RATE_LIMIT_API_VERSION = "llm-d.ai/v1alpha1"
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +70,7 @@ _KNOWN_BATCH_STATUSES = frozenset(
 _TERMINAL_BATCH_STATUSES = frozenset({"completed", "failed", "expired", "cancelled"})
 _PLANNER_REQUEST_COUNT_METADATA_KEY = "planner_request_count"
 _MAX_SIGNED_INT64 = (1 << 63) - 1
+_MAX_UNIX_MILLIS = (1 << 63) - 1
 _NANOSECONDS_PER_SECOND = 1_000_000_000
 _DEFAULT_METRICS_REQUEST_TIMEOUT_SECONDS = 5.0
 _GO_DURATION_COMPONENT = re.compile(
@@ -75,6 +86,94 @@ _GO_DURATION_UNIT_NANOSECONDS = {
     "m": 60 * _NANOSECONDS_PER_SECOND,
     "h": 60 * 60 * _NANOSECONDS_PER_SECOND,
 }
+
+_REDIS_WRITER_BOOTSTRAP_SCRIPT = """
+local redis_time = redis.call('TIME')
+local redis_now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+if tonumber(ARGV[5]) <= redis_now_ms then
+  return redis.error_reply('drain-limit lease expiry is not in Redis future')
+end
+
+local epoch = redis.call('HINCRBY', KEYS[2], 'epoch', 1)
+redis.call(
+  'HSET', KEYS[2],
+  'writer_id', ARGV[1],
+  'last_sequence', '0',
+  'last_api_version', ARGV[2],
+  'last_pool_id', ARGV[3],
+  'last_max_admission_rps', ARGV[4],
+  'last_valid_until_unix_ms', ARGV[5],
+  'last_decision_id', ARGV[6]
+)
+redis.call(
+  'HSET', KEYS[1],
+  'api_version', ARGV[2],
+  'pool_id', ARGV[3],
+  'max_admission_rps', ARGV[4],
+  'valid_until_unix_ms', ARGV[5],
+  'decision_id', ARGV[6],
+  'writer_epoch', tostring(epoch),
+  'writer_id', ARGV[1],
+  'writer_sequence', '0'
+)
+redis.call('PEXPIREAT', KEYS[1], ARGV[5])
+return tostring(epoch)
+"""
+
+_REDIS_FENCED_APPLY_SCRIPT = """
+local redis_time = redis.call('TIME')
+local redis_now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+if tonumber(ARGV[7]) <= redis_now_ms then
+  return redis.error_reply('drain-limit lease expiry is not in Redis future')
+end
+
+local fence_epoch = redis.call('HGET', KEYS[2], 'epoch')
+local fence_writer = redis.call('HGET', KEYS[2], 'writer_id')
+if fence_epoch ~= ARGV[1] or fence_writer ~= ARGV[2] then
+  return 0
+end
+
+local stored_sequence = tonumber(redis.call('HGET', KEYS[2], 'last_sequence') or '-1')
+local sequence = tonumber(ARGV[3])
+if sequence < stored_sequence then
+  return 0
+end
+if sequence == stored_sequence then
+  if redis.call('HGET', KEYS[2], 'last_api_version') ~= ARGV[4]
+    or redis.call('HGET', KEYS[2], 'last_pool_id') ~= ARGV[5]
+    or redis.call('HGET', KEYS[2], 'last_max_admission_rps') ~= ARGV[6]
+    or redis.call('HGET', KEYS[2], 'last_valid_until_unix_ms') ~= ARGV[7]
+    or redis.call('HGET', KEYS[2], 'last_decision_id') ~= ARGV[8] then
+    return redis.error_reply('writer sequence reused with different payload')
+  end
+end
+
+redis.call(
+  'HSET', KEYS[2],
+  'last_sequence', ARGV[3],
+  'last_api_version', ARGV[4],
+  'last_pool_id', ARGV[5],
+  'last_max_admission_rps', ARGV[6],
+  'last_valid_until_unix_ms', ARGV[7],
+  'last_decision_id', ARGV[8]
+)
+redis.call(
+  'HSET', KEYS[1],
+  'api_version', ARGV[4],
+  'pool_id', ARGV[5],
+  'max_admission_rps', ARGV[6],
+  'valid_until_unix_ms', ARGV[7],
+  'decision_id', ARGV[8],
+  'writer_epoch', ARGV[1],
+  'writer_id', ARGV[2],
+  'writer_sequence', ARGV[3]
+)
+redis.call('PEXPIREAT', KEYS[1], ARGV[7])
+if sequence == stored_sequence then
+  return 2
+end
+return 1
+"""
 
 
 class BatchJobSource(Protocol):
@@ -102,10 +201,25 @@ class DispatcherFeedbackSource(Protocol):
         ...
 
 
+class DrainLimitActuator(Protocol):
+    """Apply one leased batch-admission decision."""
+
+    async def apply_drain_limit(self, decision: BatchDrainLimitDecision) -> None:
+        ...
+
+
 class PrometheusQueryClient(Protocol):
     """Subset of a Prometheus client used by the dispatcher source."""
 
     def custom_query(self, query: str, *, timeout: float) -> object:
+        ...
+
+
+class _AsyncRedisClient(Protocol):
+    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Awaitable[object]:
+        ...
+
+    async def aclose(self) -> None:
         ...
 
 
@@ -1053,6 +1167,240 @@ class LlmdAsyncPrometheusSource:
         return _parse_prometheus_scalar(payload, query=query)
 
 
+def _fence_key_for(control_key: str) -> str:
+    hash_tag_start = control_key.find("{")
+    hash_tag_end = control_key.find("}", hash_tag_start + 1)
+    if hash_tag_start >= 0 and hash_tag_end > hash_tag_start + 1:
+        return f"{control_key}:planner-writer-fence"
+    return f"{{{control_key}}}:planner-writer-fence"
+
+
+class RedisLeasedDrainLimitActuator:
+    """Publish leased limits through a Redis-fenced single-writer epoch.
+
+    ``initialize_writer`` atomically acquires a non-expiring writer epoch and
+    replaces any surviving lease with a zero-rate lease. Every later write is
+    accepted only from that exact epoch/writer nonce and with a newer local
+    sequence. The non-expiring fence also retains the last sequence and payload,
+    so expiration or eviction of the leased control hash cannot resurrect an
+    older decision. Identical decision retries reuse their original sequence.
+
+    The control and fence keys participate in one Lua invocation. An existing
+    non-empty Redis Cluster hash tag on the control key is preserved; otherwise
+    the full control key becomes the fence key's hash tag, placing both keys in
+    the same slot. Losing the fence key makes existing writers fail closed; a
+    new bootstrap uses a fresh nonce so a reset numeric epoch cannot collide
+    with an old writer. Planner must have exclusive write ownership of both
+    keys: an external writer that bypasses this fencing protocol can overwrite
+    the control hash. A rollout from a legacy unfenced writer must not overlap.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: _AsyncRedisClient,
+        control_key_resolver: Callable[[str], str],
+        clock: Callable[[], float] = time.time,
+        owns_client: bool = False,
+        writer_id: Optional[str] = None,
+    ) -> None:
+        self._client = client
+        self._control_key_resolver = control_key_resolver
+        self._clock = clock
+        self._owns_client = owns_client
+        self._writer_id = writer_id or uuid.uuid4().hex
+        if not isinstance(self._writer_id, str) or not self._writer_id:
+            raise ValueError("writer_id must be a non-empty string")
+        self._writer_epoch: Optional[int] = None
+        self._control_key: Optional[str] = None
+        self._fence_key: Optional[str] = None
+        self._next_sequence = 1
+        self._decision_sequences: dict[str, tuple[tuple[str, ...], int, int]] = {}
+
+    @classmethod
+    def from_url(
+        cls,
+        redis_url: str,
+        *,
+        control_key_resolver: Callable[[str], str],
+        clock: Callable[[], float] = time.time,
+        writer_id: Optional[str] = None,
+        **redis_options: object,
+    ) -> RedisLeasedDrainLimitActuator:
+        """Create an actuator backed by the required async Redis client."""
+
+        if not isinstance(redis_url, str) or not redis_url:
+            raise ValueError("redis_url must be non-empty")
+        client = redis_asyncio.from_url(redis_url, **redis_options)
+        return cls(
+            client=client,
+            control_key_resolver=control_key_resolver,
+            clock=clock,
+            owns_client=True,
+            writer_id=writer_id,
+        )
+
+    async def initialize_writer(self, pause: BatchDrainLimitDecision) -> None:
+        """Acquire a writer epoch and atomically publish an initial pause."""
+
+        if self._writer_epoch is not None:
+            return
+        if pause.max_admission_rps != 0.0:
+            raise ValueError("writer bootstrap decision must pause admission")
+        control_key, valid_until_unix_ms, fields = self._prepare_write(pause)
+        fence_key = _fence_key_for(control_key)
+        result = await self._eval_with_retry(
+            _REDIS_WRITER_BOOTSTRAP_SCRIPT,
+            control_key,
+            fence_key,
+            self._writer_id,
+            fields["api_version"],
+            fields["pool_id"],
+            fields["max_admission_rps"],
+            fields["valid_until_unix_ms"],
+            fields["decision_id"],
+        )
+        if isinstance(result, bool) or not isinstance(result, (str, bytes, int)):
+            raise RuntimeError(
+                f"Redis writer bootstrap returned invalid epoch {result!r}"
+            )
+        try:
+            epoch = int(result)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Redis writer bootstrap returned invalid epoch {result!r}"
+            ) from exc
+        if epoch <= 0:
+            raise RuntimeError(
+                f"Redis writer bootstrap returned invalid epoch {result!r}"
+            )
+
+        self._writer_epoch = epoch
+        self._control_key = control_key
+        self._fence_key = fence_key
+        self._next_sequence = 1
+        self._decision_sequences = {
+            pause.decision_id: (
+                self._payload_identity(fields),
+                0,
+                valid_until_unix_ms,
+            )
+        }
+
+    async def apply_drain_limit(self, decision: BatchDrainLimitDecision) -> None:
+        control_key, valid_until_unix_ms, fields = self._prepare_write(decision)
+        epoch = self._writer_epoch
+        fence_key = self._fence_key
+        if epoch is None or self._control_key is None or fence_key is None:
+            raise RuntimeError("Redis drain-limit writer is not initialized")
+        if control_key != self._control_key:
+            raise ValueError("drain-limit writer cannot change its control key")
+
+        now_unix_ms = math.floor(self._clock() * 1000.0)
+        self._decision_sequences = {
+            decision_id: cached
+            for decision_id, cached in self._decision_sequences.items()
+            if cached[2] > now_unix_ms
+        }
+        payload = self._payload_identity(fields)
+        cached = self._decision_sequences.get(decision.decision_id)
+        if cached is not None:
+            cached_payload, sequence, _cached_expiry = cached
+            if cached_payload != payload:
+                raise ValueError("decision_id was reused with a different payload")
+        else:
+            sequence = self._next_sequence
+            self._next_sequence += 1
+            self._decision_sequences[decision.decision_id] = (
+                payload,
+                sequence,
+                valid_until_unix_ms,
+            )
+
+        result = await self._eval_with_retry(
+            _REDIS_FENCED_APPLY_SCRIPT,
+            control_key,
+            fence_key,
+            str(epoch),
+            self._writer_id,
+            str(sequence),
+            fields["api_version"],
+            fields["pool_id"],
+            fields["max_admission_rps"],
+            fields["valid_until_unix_ms"],
+            fields["decision_id"],
+        )
+        if result not in (1, 2, "1", "2", b"1", b"2"):
+            raise RuntimeError("Redis rejected a stale drain-limit writer or sequence")
+
+    def _prepare_write(
+        self, decision: BatchDrainLimitDecision
+    ) -> tuple[str, int, dict[str, str]]:
+        now_s = _require_finite_non_negative("current time", self._clock())
+        _validate_drain_decision(decision, now_s=now_s)
+        valid_until_unix_ms = math.floor(decision.valid_until_s * 1000.0)
+        now_unix_ms = math.floor(now_s * 1000.0)
+        if valid_until_unix_ms <= now_unix_ms:
+            raise ValueError(
+                "drain-limit lease must expire after the current millisecond"
+            )
+        if valid_until_unix_ms > _MAX_UNIX_MILLIS:
+            raise ValueError(
+                "drain-limit lease exceeds the Redis/llm-d timestamp range"
+            )
+        control_key = self._control_key_resolver(decision.pool_id)
+        if not isinstance(control_key, str) or not control_key:
+            raise ValueError("control_key_resolver must return a non-empty string")
+        fields = {
+            "api_version": DISPATCH_RATE_LIMIT_API_VERSION,
+            "pool_id": decision.pool_id,
+            "max_admission_rps": format(decision.max_admission_rps, ".17g"),
+            "valid_until_unix_ms": str(valid_until_unix_ms),
+            "decision_id": decision.decision_id,
+        }
+        return control_key, valid_until_unix_ms, fields
+
+    @staticmethod
+    def _payload_identity(fields: Mapping[str, str]) -> tuple[str, ...]:
+        return tuple(
+            fields[name]
+            for name in (
+                "api_version",
+                "pool_id",
+                "max_admission_rps",
+                "valid_until_unix_ms",
+                "decision_id",
+            )
+        )
+
+    async def _eval_with_retry(
+        self, script: str, control_key: str, fence_key: str, *args: str
+    ) -> object:
+        for attempt in range(2):
+            try:
+                return await self._client.eval(
+                    script,
+                    2,
+                    control_key,
+                    fence_key,
+                    *args,
+                )
+            except (RedisConnectionError, RedisTimeoutError):
+                if attempt == 1:
+                    raise
+                logger.warning(
+                    "Redis drain-limit transport failed; retrying once",
+                    exc_info=True,
+                )
+        raise RuntimeError("Redis retry loop ended without a result")
+
+    async def aclose(self) -> None:
+        """Close the Redis client only when it was created by ``from_url``."""
+
+        if self._owns_client:
+            await self._client.aclose()
+
+
 OpenMetricsSamples = dict[str, list[tuple[Mapping[str, str], float]]]
 
 
@@ -1554,3 +1902,22 @@ def _validate_dispatcher_feedback(
         if item.pool_id in seen_pools:
             raise ValueError(f"duplicate dispatcher pool {item.pool_id!r}")
         seen_pools.add(item.pool_id)
+
+
+def _validate_drain_decision(
+    decision: BatchDrainLimitDecision, *, now_s: float
+) -> None:
+    if not isinstance(decision, BatchDrainLimitDecision):
+        raise TypeError("decision must be a BatchDrainLimitDecision")
+    if not isinstance(decision.pool_id, str) or not decision.pool_id:
+        raise ValueError("drain-limit pool_id must be non-empty")
+    if not isinstance(decision.decision_id, str) or not decision.decision_id:
+        raise ValueError("drain-limit decision_id must be non-empty")
+    _require_finite_non_negative(
+        "drain-limit max_admission_rps", decision.max_admission_rps
+    )
+    valid_until_s = _require_finite_non_negative(
+        "drain-limit valid_until_s", decision.valid_until_s
+    )
+    if valid_until_s <= now_s:
+        raise ValueError("drain-limit lease has expired")
