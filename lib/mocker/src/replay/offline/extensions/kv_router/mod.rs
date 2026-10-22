@@ -17,8 +17,8 @@ use dynamo_kv_router::indexer::{
     query_lower_tiers_with_options,
 };
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints,
+    WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
@@ -28,8 +28,8 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
-    SessionContext, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
-    WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
+    SessionContext, SessionPrefixIndexer, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
 };
 use dynamo_tokens::SequenceHash;
 use futures::executor::block_on;
@@ -241,6 +241,8 @@ struct SyncReplayIndexer {
     /// Disaggregated decode placement never observes KV events, so its tree
     /// stays empty and hashing a prompt to query it would be wasted work.
     has_indexed_events: bool,
+    /// Logical lineage uses the production index, while residency remains in `tree`.
+    session_prefix_index: Option<SessionPrefixIndexer>,
 }
 
 impl SyncReplayIndexer {
@@ -250,6 +252,7 @@ impl SyncReplayIndexer {
             tree: RadixTree::new(),
             lower_tier: None,
             has_indexed_events: false,
+            session_prefix_index: None,
         }
     }
 
@@ -298,9 +301,15 @@ impl SyncReplayIndexer {
             let label = KvEventLabel::new(&event);
             self.has_indexed_events = true;
             if event.storage_tier.is_gpu() {
+                // The synchronous physical update must succeed before logical lineage advances.
+                // Clone only when opted in; events may already be delayed by the replay clock.
+                let session_event = self.session_prefix_index.as_ref().map(|_| event.clone());
                 self.tree
                     .apply_event(event)
                     .with_context(|| format!("failed to apply replay KV event {label}"))?;
+                if let Some(event) = session_event {
+                    self.apply_session_event(&event);
+                }
                 continue;
             }
             let block_size = self.block_size;
@@ -326,9 +335,45 @@ impl SyncReplayIndexer {
 
     fn remove_worker(&mut self, worker_id: WorkerId) {
         self.tree.remove_worker(worker_id);
+        if let Some(index) = &self.session_prefix_index {
+            index.clear_worker_id_frontiers(worker_id);
+        }
         if let Some(lower_tier) = &self.lower_tier {
             for indexer in lower_tier.all() {
                 block_on(indexer.remove_worker(worker_id));
+            }
+        }
+    }
+
+    fn apply_session_event(&self, event: &RouterEvent) {
+        let Some(index) = &self.session_prefix_index else {
+            return;
+        };
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        match &event.event.data {
+            KvCacheEventData::Stored(stored) => {
+                if let Some(session_id) = &event.session_id {
+                    let hashes = stored
+                        .blocks
+                        .iter()
+                        .map(|block| block.block_hash)
+                        .collect::<Vec<_>>();
+                    if let Err(error) = index.update_session_from_stored_blocks(
+                        session_id,
+                        worker,
+                        stored.parent_hash,
+                        &hashes,
+                    ) {
+                        // As in the live router, incomplete attribution must not fail routing.
+                        tracing::warn!(%error, %session_id, ?worker, "failed to record stored session blocks");
+                    }
+                }
+            }
+            KvCacheEventData::Removed(removed) => {
+                index.update_session_from_removed_blocks(worker, &removed.block_hashes);
+            }
+            KvCacheEventData::Cleared => {
+                index.clear_worker_frontiers(worker);
             }
         }
     }
@@ -363,6 +408,9 @@ struct PendingRequest {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    /// Authored local hashes for a fresh G1-only lookup at admission. Active-load
+    /// hashes can be keyed/randomized, and queued overlap snapshots can be stale.
+    session_block_hashes: Option<Vec<LocalBlockHash>>,
 }
 
 impl PendingRequest {
@@ -642,6 +690,11 @@ impl OfflineReplayRouter {
         selector_seed: Option<u64>,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        let mut indexer = SyncReplayIndexer::new(args.block_size as u32);
+        if config.enable_session_prefix_index {
+            config.validate().map_err(anyhow::Error::msg)?;
+            indexer.session_prefix_index = Some(SessionPrefixIndexer::new());
+        }
         let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
@@ -661,7 +714,7 @@ impl OfflineReplayRouter {
             slots,
             selector,
             pending: PolicyQueue::new(profile),
-            indexer: SyncReplayIndexer::new(args.block_size as u32),
+            indexer,
             prefill_load_estimator,
             // This is only a base Instant for converting replay `now_ms` values into
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
@@ -986,13 +1039,16 @@ impl OfflineReplayRouter {
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
         let (priority_jump, strict_priority) = request.router_priorities();
+        let track_session = self.indexer.session_prefix_index.is_some() && session_id.is_some();
+        let mut session_block_hashes = None;
         let (tiered, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
-                let tiered =
-                    self.indexer
-                        .find_matches_for_hashes(crate::loadgen::local_block_hashes(
-                            replay_hashes.local_block_hashes,
-                        ));
+                let local_hashes =
+                    crate::loadgen::local_block_hashes(replay_hashes.local_block_hashes);
+                if track_session {
+                    session_block_hashes = Some(local_hashes.clone());
+                }
+                let tiered = self.indexer.find_matches_for_hashes(local_hashes);
                 let token_seq = if !self.config.router_track_active_blocks {
                     None
                 } else if self.config.router_assume_kv_reuse
@@ -1017,7 +1073,17 @@ impl OfflineReplayRouter {
             }
             None => {
                 let tokens = request_view.prompt_tokens_for_placement()?;
-                let tiered = self.indexer.find_matches_for_request(&tokens, None);
+                let tiered = if track_session {
+                    let hashes = compute_block_hash_for_seq(
+                        &tokens,
+                        self.block_size,
+                        BlockHashOptions::default(),
+                    );
+                    session_block_hashes = Some(hashes.clone());
+                    self.indexer.find_matches_for_hashes(hashes)
+                } else {
+                    self.indexer.find_matches_for_request(&tokens, None)
+                };
                 let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
                     &self.tracking_hash,
                     self.tracking_hash_scope(),
@@ -1045,6 +1111,7 @@ impl OfflineReplayRouter {
             strict_priority,
             policy_class: request.policy_class.clone(),
             session_id,
+            session_block_hashes,
         })
     }
 
@@ -1121,6 +1188,19 @@ impl OfflineReplayRouter {
                 decay_now,
             )
             .map_err(anyhow::Error::from)?;
+
+        if let Some(index) = &self.indexer.session_prefix_index
+            && let Some(session_id) = request.session_id.as_deref()
+            && let Some(hashes) = request.session_block_hashes.take()
+            && let Some(&matched_hash) = self
+                .indexer
+                .tree
+                .find_match_details(hashes, false)
+                .last_matched_hashes
+                .get(&selection.worker)
+        {
+            index.update_session_from_match(session_id, selection.worker, matched_hash)?;
+        }
 
         Ok(AdmitOutcome {
             worker_idx,
@@ -2438,5 +2518,303 @@ policy_classes:
             crate::replay::with_kv_event_lag_ms(25.0, crate::replay::kv_event_lag_ms).unwrap();
         assert_eq!(inside, 25.0);
         assert_eq!(crate::replay::kv_event_lag_ms(), 0.0);
+    }
+
+    fn session_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            enable_session_prefix_index: true,
+            ..Default::default()
+        }
+    }
+
+    fn session_store(worker: u64, rank: u32, hash: u64, local: u64, session: &str) -> RouterEvent {
+        let mut event = store_event_for_rank(worker, rank, hash, local, StorageTier::Device);
+        event.session_id = Some(session.to_owned());
+        event
+    }
+
+    fn session_lineage(
+        router: &OfflineReplayRouter,
+        session: &str,
+        worker: u64,
+        rank: u32,
+    ) -> Vec<Vec<u64>> {
+        let mut paths = router
+            .indexer
+            .session_prefix_index
+            .as_ref()
+            .unwrap()
+            .get_session_block_lineage(session, WorkerWithDpRank::new(worker, rank), None)
+            .unwrap()
+            .into_iter()
+            .map(|path| path.into_iter().map(|hash| hash.0).collect())
+            .collect::<Vec<Vec<u64>>>();
+        paths.sort();
+        paths
+    }
+
+    fn session_remove(worker: u64, rank: u32, hashes: Vec<u64>) -> RouterEvent {
+        RouterEvent::new(
+            worker,
+            KvCacheEvent {
+                event_id: 100,
+                dp_rank: rank,
+                data: KvCacheEventData::Removed(dynamo_kv_router::protocols::KvCacheRemoveData {
+                    block_hashes: hashes.into_iter().map(ExternalSequenceBlockHash).collect(),
+                }),
+            },
+        )
+    }
+
+    #[test]
+    fn session_prefix_is_opt_in_and_requires_local_kv_events() {
+        let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        assert!(router.indexer.session_prefix_index.is_none());
+        for config in [
+            KvRouterConfig {
+                use_kv_events: false,
+                ..session_router_config()
+            },
+            KvRouterConfig {
+                use_remote_indexer: true,
+                ..session_router_config()
+            },
+        ] {
+            assert!(OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn session_prefix_stores_removes_and_clears_are_worker_rank_scoped() {
+        let mut args = replay_args();
+        args.dp_size = 2;
+        let mut router =
+            OfflineReplayRouter::new(&args, Some(session_router_config()), None, 2).unwrap();
+        let root = session_store(0, 0, 11, 1, "a");
+        let mut child = session_store(0, 0, 12, 2, "a");
+        let KvCacheEventData::Stored(stored) = &mut child.event.data else {
+            unreachable!()
+        };
+        stored.parent_hash = Some(ExternalSequenceBlockHash(11));
+        router
+            .on_kv_events(vec![
+                root,
+                child,
+                session_store(0, 1, 11, 1, "a"),
+                session_store(1, 0, 11, 1, "b"),
+            ])
+            .unwrap();
+        assert_eq!(session_lineage(&router, "a", 0, 0), vec![vec![11, 12]]);
+        router
+            .on_kv_events(vec![session_remove(0, 0, vec![12])])
+            .unwrap();
+        assert_eq!(session_lineage(&router, "a", 0, 0), vec![vec![11]]);
+        router
+            .on_kv_events(vec![RouterEvent::new(
+                0,
+                KvCacheEvent {
+                    event_id: 101,
+                    dp_rank: 0,
+                    data: KvCacheEventData::Cleared,
+                },
+            )])
+            .unwrap();
+        assert!(session_lineage(&router, "a", 0, 0).is_empty());
+        assert_eq!(session_lineage(&router, "a", 0, 1), vec![vec![11]]);
+        assert_eq!(session_lineage(&router, "b", 1, 0), vec![vec![11]]);
+        router.remove_worker(0).unwrap();
+        router.finalize_worker_removal(0).unwrap();
+        assert!(session_lineage(&router, "a", 0, 1).is_empty());
+        assert_eq!(session_lineage(&router, "b", 1, 0), vec![vec![11]]);
+    }
+
+    #[test]
+    fn session_prefix_ignores_unattributed_and_lower_tier_stores() {
+        let mut router =
+            OfflineReplayRouter::new(&replay_args(), Some(session_router_config()), None, 1)
+                .unwrap();
+        let mut host = session_store(0, 0, 12, 2, "a");
+        host.storage_tier = StorageTier::HostPinned;
+        router
+            .on_kv_events(vec![store_event(0, 11, 1, StorageTier::Device), host])
+            .unwrap();
+        assert_eq!(
+            router
+                .indexer
+                .session_prefix_index
+                .as_ref()
+                .unwrap()
+                .session_count(),
+            0
+        );
+        // A host-only match must not create a G1 session frontier.
+        let hashes = ReplayRequestHashes {
+            local_block_hashes: vec![2],
+            sequence_hashes: vec![12],
+        };
+        router
+            .on_request_arrival_for_session(&request(1, 7), Some(hashes), Some("a".into()), 0.0)
+            .unwrap();
+        assert!(session_lineage(&router, "a", 0, 0).is_empty());
+    }
+
+    #[test]
+    fn session_prefix_does_not_apply_a_physically_rejected_store() {
+        let mut router =
+            OfflineReplayRouter::new(&replay_args(), Some(session_router_config()), None, 1)
+                .unwrap();
+        let mut child = session_store(0, 0, 12, 2, "a");
+        let KvCacheEventData::Stored(stored) = &mut child.event.data else {
+            unreachable!()
+        };
+        stored.parent_hash = Some(ExternalSequenceBlockHash(11));
+        assert!(router.on_kv_events(vec![child]).is_err());
+        assert_eq!(
+            router
+                .indexer
+                .session_prefix_index
+                .as_ref()
+                .unwrap()
+                .node_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn session_prefix_route_match_uses_device_hashes_not_active_tracking_hashes() {
+        for track_active in [true, false] {
+            let config = KvRouterConfig {
+                router_track_active_blocks: track_active,
+                router_assume_kv_reuse: false,
+                ..session_router_config()
+            };
+            let mut router =
+                OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
+            router
+                .on_kv_events(vec![session_store(1, 0, 11, 1, "producer")])
+                .unwrap();
+            let hashes = ReplayRequestHashes {
+                local_block_hashes: vec![1],
+                sequence_hashes: vec![999],
+            };
+            let effects = router
+                .on_request_arrival_for_session(
+                    &request(1, 7),
+                    Some(hashes),
+                    Some("consumer".into()),
+                    0.0,
+                )
+                .unwrap();
+            assert_eq!(effects.admissions[0].worker_idx, 1);
+            assert_eq!(session_lineage(&router, "consumer", 1, 0), vec![vec![11]]);
+            assert!(session_lineage(&router, "consumer", 0, 0).is_empty());
+        }
+    }
+
+    #[test]
+    fn session_prefix_queued_match_rechecks_residency_at_admission() {
+        let config = KvRouterConfig {
+            enable_session_prefix_index: true,
+            ..queueing_router_config()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router
+            .on_kv_events(vec![session_store(0, 0, 11, 1, "producer")])
+            .unwrap();
+        let hashes = ReplayRequestHashes {
+            local_block_hashes: vec![1],
+            sequence_hashes: vec![11],
+        };
+        let effects = router
+            .on_request_arrival_for_session(
+                &request(2, 8),
+                Some(hashes),
+                Some("consumer".into()),
+                0.0,
+            )
+            .unwrap();
+        assert!(effects.admissions.is_empty());
+        assert!(session_lineage(&router, "consumer", 0, 0).is_empty());
+        router
+            .on_kv_events(vec![session_remove(0, 0, vec![11])])
+            .unwrap();
+        let effects = router
+            .on_request_completed(Uuid::from_u128(1), 10.0)
+            .unwrap();
+        assert_eq!(effects.admissions.len(), 1);
+        assert!(session_lineage(&router, "consumer", 0, 0).is_empty());
+    }
+
+    #[test]
+    fn session_prefix_respects_virtual_event_lag_and_worker_removal() {
+        let mut router =
+            OfflineReplayRouter::new(&replay_args(), Some(session_router_config()), None, 2)
+                .unwrap();
+        router.set_kv_event_lag_ms(50.0).unwrap();
+        router
+            .on_kv_events_at(
+                vec![
+                    session_store(0, 0, 11, 1, "a"),
+                    session_store(1, 0, 11, 1, "b"),
+                ],
+                0.0,
+            )
+            .unwrap();
+        assert!(session_lineage(&router, "a", 0, 0).is_empty());
+        router.remove_worker(1).unwrap();
+        router.finalize_worker_removal(1).unwrap();
+        router.on_topology_changed(50.0).unwrap();
+        assert_eq!(session_lineage(&router, "a", 0, 0), vec![vec![11]]);
+        assert!(session_lineage(&router, "b", 1, 0).is_empty());
+    }
+
+    #[test]
+    fn session_prefix_materialized_requests_preserve_placement() {
+        let target = request(1, 7);
+        let local =
+            compute_block_hash_for_seq(&target.tokens, 64, BlockHashOptions::default())[0].0;
+        let mut baseline = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let mut tracked =
+            OfflineReplayRouter::new(&replay_args(), Some(session_router_config()), None, 1)
+                .unwrap();
+        for router in [&mut baseline, &mut tracked] {
+            router
+                .on_kv_events(vec![session_store(0, 0, 11, local, "producer")])
+                .unwrap();
+        }
+        let before = baseline
+            .on_request_arrival_for_session(&target, None, Some("consumer".into()), 0.0)
+            .unwrap();
+        let after = tracked
+            .on_request_arrival_for_session(&target, None, Some("consumer".into()), 0.0)
+            .unwrap();
+        assert_eq!(before.admissions, after.admissions);
+        assert_eq!(session_lineage(&tracked, "consumer", 0, 0), vec![vec![11]]);
+    }
+
+    #[test]
+    fn session_prefix_incomplete_attribution_does_not_fail_physical_routing() {
+        let mut router =
+            OfflineReplayRouter::new(&replay_args(), Some(session_router_config()), None, 1)
+                .unwrap();
+        let mut child = session_store(0, 0, 12, 2, "a");
+        let KvCacheEventData::Stored(stored) = &mut child.event.data else {
+            unreachable!()
+        };
+        stored.parent_hash = Some(ExternalSequenceBlockHash(11));
+        // The physical parent is known, but its store had no session attribution.
+        router
+            .on_kv_events(vec![store_event(0, 11, 1, StorageTier::Device), child])
+            .unwrap();
+        let details = router
+            .indexer
+            .find_matches_for_hashes(vec![LocalBlockHash(1), LocalBlockHash(2)]);
+        assert_eq!(
+            details.device.last_matched_hashes[&WorkerWithDpRank::new(0, 0)],
+            ExternalSequenceBlockHash(12)
+        );
     }
 }

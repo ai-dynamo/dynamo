@@ -1009,9 +1009,15 @@ pub fn sanitize_frontend_prometheus_prefix(raw: &str) -> String {
 /// Builds a full component metric name by prepending the component prefix
 /// Sanitizes the metric name to ensure it's valid for Prometheus
 pub fn build_component_metric_name(metric_name: &str) -> String {
+    build_metric_name(name_prefix::COMPONENT, metric_name)
+}
+
+/// Builds a full metric name by prepending `prefix`
+/// Sanitizes the metric name to ensure it's valid for Prometheus
+pub(crate) fn build_metric_name(prefix: &str, metric_name: &str) -> String {
     let sanitized_name =
         sanitize_prometheus_name(metric_name).expect("metric name should be valid or sanitizable");
-    format!("{}_{}", name_prefix::COMPONENT, sanitized_name)
+    format!("{}_{}", prefix, sanitized_name)
 }
 
 /// Safely converts a u64 value to i64 for Prometheus metrics
