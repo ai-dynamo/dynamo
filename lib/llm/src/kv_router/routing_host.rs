@@ -85,6 +85,14 @@ fn request_lifecycle(request: &SingleIn<PreprocessedRequest>) -> Option<Arc<Life
         .flatten()
 }
 
+/// Context key for the attempt of a dispatch without a route trace context.
+/// The independent prefill leg copies the request attempt under it, because it
+/// must not share the attempt's route trace context with the decode leg.
+pub(super) const DISPATCH_ATTEMPT_CONTEXT_KEY: &str = "dynamo.request_lifecycle.dispatch_attempt";
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DispatchAttempt(pub(super) u32);
+
 /// Start `request.dispatch` for one phase leg; never invent a rootless identity.
 fn start_request_dispatch(
     request: &SingleIn<PreprocessedRequest>,
@@ -94,6 +102,20 @@ fn start_request_dispatch(
         trace.start(LifecycleStage::RequestDispatch)
     });
     span.record("dynamo.dispatch.phase", phase.as_str());
+    // Distinguishes one request's dispatches across migration retries.
+    if !span.is_none()
+        && let Some(attempt) = get_route_trace_context(request)
+            .map(|route| route.attempt())
+            .or_else(|| {
+                request
+                    .get_optional::<DispatchAttempt>(DISPATCH_ATTEMPT_CONTEXT_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|attempt| attempt.0)
+            })
+    {
+        span.record("dynamo.request.attempt", attempt);
+    }
     span
 }
 

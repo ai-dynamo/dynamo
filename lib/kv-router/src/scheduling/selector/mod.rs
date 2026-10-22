@@ -258,12 +258,7 @@ impl RouterSelectionTelemetry {
         }
     }
 
-    fn record_custom(
-        &self,
-        state: &ComposedPolicyState,
-        selected: ScoredWorkerCandidate,
-        pool_role: &'static str,
-    ) {
+    fn record_custom(&self, state: &ComposedPolicyState, selected: ScoredWorkerCandidate) {
         let candidates = &state.candidates;
         self.span.record("dynamo.router.algorithm.id", "composed");
         self.span.record("dynamo.router.algorithm.version", "v1");
@@ -271,7 +266,6 @@ impl RouterSelectionTelemetry {
             .record("dynamo.router.decision.schema", "selection.v1");
         self.span
             .record("dynamo.router.selection.policy", "composed");
-        self.span.record("dynamo.router.pool.role", pool_role);
         self.span.record(
             "dynamo.router.selected.worker.id",
             selected.worker.worker_id,
@@ -792,10 +786,14 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     trace: Option<SelectionTraceSpec>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
     let telemetry = current_router_selection_telemetry(workers, eligibility);
-    if let Some(telemetry) = &telemetry
-        && telemetry.filters.eligible == 0
-    {
-        telemetry.record_candidate_envelope(telemetry.filters.eligible);
+    if let Some(telemetry) = &telemetry {
+        // Recorded before selection so failed selections still name their pool.
+        telemetry
+            .span
+            .record("dynamo.router.pool.role", worker_type);
+        if telemetry.filters.eligible == 0 {
+            telemetry.record_candidate_envelope(telemetry.filters.eligible);
+        }
     }
     let result = select_worker_with_policy_inner(
         worker_type,
@@ -923,7 +921,7 @@ fn select_worker_with_policy_inner<C: WorkerConfigLike>(
                     )
                 });
                 if let Some(telemetry) = telemetry {
-                    telemetry.record_custom(&state, candidate, worker_type);
+                    telemetry.record_custom(&state, candidate);
                 }
                 Some((candidate.worker, candidate.cost, trace))
             }

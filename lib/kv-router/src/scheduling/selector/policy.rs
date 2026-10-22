@@ -694,6 +694,8 @@ mod tests {
             drop(span);
             let fields = capture.fields("router.selection", case);
             assert!(!fields.contains_key("dynamo.request.attempt"));
+            // Failed selections name their pool too.
+            assert_eq!(fields["dynamo.router.pool.role"], "test");
             let expected = match case {
                 "overloaded" => "overloaded",
                 "empty" => "no_endpoints",
