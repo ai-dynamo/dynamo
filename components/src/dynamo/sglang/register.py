@@ -5,12 +5,20 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Any, List, Optional
 
 import sglang as sgl
+import yaml
+from sglang.srt.environ import envs
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -298,6 +306,24 @@ def _get_bootstrap_info_for_config(
     return compute_bootstrap_address(engine)
 
 
+def _load_hicache_storage_extra_config_file(path: str) -> Any:
+    """Load an ``@path`` extra config the way SGLang's HiCache does.
+
+    SGLang accepts ``.json``, ``.toml``, ``.yaml`` and ``.yml`` files.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    if ext == ".toml":
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    if ext in (".yaml", ".yml"):
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    raise ValueError(f"unsupported config file {path!r} (format {ext!r})")
+
+
 def _parse_hicache_storage_extra_config(
     raw_extra_config: Optional[Any],
 ) -> dict[str, Any]:
@@ -312,10 +338,13 @@ def _parse_hicache_storage_extra_config(
         if not raw_extra_config:
             return {}
         try:
-            parsed = json.loads(raw_extra_config)
-        except json.JSONDecodeError as e:
+            if raw_extra_config.startswith("@"):
+                parsed = _load_hicache_storage_extra_config_file(raw_extra_config[1:])
+            else:
+                parsed = json.loads(raw_extra_config)
+        except (OSError, ValueError, yaml.YAMLError) as e:
             logging.warning(
-                f"Failed to parse hicache_storage_backend_extra_config JSON: {e}"
+                "Failed to parse hicache_storage_backend_extra_config: %s", e
             )
             return {}
 
@@ -323,7 +352,7 @@ def _parse_hicache_storage_extra_config(
             return parsed
 
         logging.warning(
-            "hicache_storage_backend_extra_config JSON was not an object; ignoring it."
+            "hicache_storage_backend_extra_config was not an object; ignoring it."
         )
         return {}
 
@@ -332,6 +361,45 @@ def _parse_hicache_storage_extra_config(
         type(raw_extra_config).__name__,
     )
     return {}
+
+
+def _mooncake_key_prefix(
+    extra_config: dict[str, Any], served_model_name: Optional[str]
+) -> Optional[str]:
+    """Return the prefix SGLang's MooncakeStore prepends to every stored key.
+
+    Mirrors ``config_prefix`` in SGLang's
+    ``srt/mem_cache/storage/mooncake_store/mooncake_store.py``: the backend tag
+    (when not ``None``) and the served model name with ``/`` replaced by ``-``,
+    joined with ``_``.
+    """
+    parts = []
+    extra_backend_tag = extra_config.get("extra_backend_tag")
+    if extra_backend_tag is not None:
+        parts.append(str(extra_backend_tag))
+    if served_model_name:
+        parts.append("-".join(served_model_name.split("/")))
+    return "_".join(parts) if parts else None
+
+
+def _mooncake_tenant_id(extra_config: dict[str, Any]) -> str:
+    # Older SGLang releases, such as 0.5.11, have no Mooncake tenant support.
+    if not hasattr(envs, "MOONCAKE_TENANT_ID"):
+        return "default"
+    # Match the tenant precedence of SGLang's MooncakeBaseStore._load_config.
+    if (
+        extra_config.get("master_server_address") is not None
+        or extra_config.get("client_server_address") is not None
+    ):
+        tenant = extra_config.get("tenant_id", "default")
+    elif (config_path := os.getenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH")) is not None:
+        with open(config_path, encoding="utf-8") as config_file:
+            tenant = json.load(config_file).get("tenant_id", "default")
+    else:
+        tenant = os.getenv("MOONCAKE_TENANT_ID", "default")
+    if tenant is None:
+        return "default"
+    return str(tenant).strip() or "default"
 
 
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
@@ -381,6 +449,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
 
     return {
         "backend": "mooncake",
+        "tenant_id": _mooncake_tenant_id(extra_config),
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
         "tp_size": tp_size,
         "pp_size": pp_size,
@@ -389,6 +458,9 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "tp_lcm_size": tp_lcm_size,
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
+        "key_prefix": _mooncake_key_prefix(
+            extra_config, getattr(server_args, "served_model_name", None)
+        ),
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 

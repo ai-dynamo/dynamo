@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import gc
 import logging
 import os
 from typing import Any
@@ -46,7 +45,16 @@ def _create_engine_snapshot_controller(
         engine=engine,
         pause_controller=pause_controller,
         snapshot_config=snapshot_config,
+        # Discard the KV cache and keep weights resident for capture. Resume
+        # wakes only the tags that were put to sleep.
+        pause_args=(["kv_cache"],),
     )
+
+
+def _create_pause_controller(engine: Any) -> Any:
+    from dynamo.trtllm.request_handlers.handler_base import TRTLLMEnginePauseController
+
+    return TRTLLMEnginePauseController(engine)
 
 
 async def _refresh_snapshot_restore_runtime_config(
@@ -62,26 +70,6 @@ async def _refresh_snapshot_restore_runtime_config(
         config,
         lambda: parse_snapshot_restore_runtime_config(argv),
     )
-
-
-class _NoOpSnapshotPauseController:
-    """Pause controller for pre-runtime TRT-LLM engine snapshots.
-
-    The snapshot hook runs after the TRT-LLM engine has loaded and before the
-    Dynamo runtime endpoint is created. There is no endpoint to drain or
-    unregister at this point, so keep the TRT-LLM/CUDA allocations resident and
-    only run Python GC before CRIU/cuda-checkpoint capture.
-    """
-
-    async def pause(self, *_args: object) -> bool:
-        gc.collect()
-        return True
-
-    async def resume(self) -> bool:
-        return True
-
-    def mark_resumed(self) -> None:
-        return None
 
 
 class _SnapshotRuntimeProxy:
@@ -112,7 +100,7 @@ class _SnapshotRuntimeProxy:
             "Checkpoint mode enabled: TRT-LLM engine is initialized before "
             "Dynamo runtime creation"
         )
-        pause_controller = _NoOpSnapshotPauseController()
+        pause_controller = _create_pause_controller(engine)
         snapshot_controller = _create_engine_snapshot_controller(
             engine=engine,
             pause_controller=pause_controller,

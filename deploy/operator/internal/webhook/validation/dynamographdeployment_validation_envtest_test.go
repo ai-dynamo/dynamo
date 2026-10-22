@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -60,17 +61,18 @@ type dgdAdmissionTestCase struct {
 	terminating        bool                             // deletes the seeded object so the update runs while it terminates
 	username           string                           // supplies the admission request identity
 
-	wantSchemaErr      string
-	wantCELErr         string
-	wantAdmissionErrs  []string
-	wantWebhookErrs    []string
-	wantWarnings       []string
-	notWantErr         string
-	wantPodAnnotations map[string]string
-	wantOriginVersion  string
-	wantProvider       string
-	wantRoleReplicas   map[string]int32
-	wantReplicas       map[string]*int32
+	wantSchemaErr          string
+	wantCELErr             string
+	wantAdmissionErrs      []string
+	wantWebhookErrs        []string
+	wantWarnings           []string
+	notWantErr             string
+	wantPodAnnotations     map[string]string
+	wantOriginVersion      string
+	wantProvider           string
+	wantRoleReplicas       map[string]int32
+	wantReplicas           map[string]*int32
+	wantRootProviderTarget string
 }
 
 func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
@@ -1072,74 +1074,146 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].roles[0].providerOverride.value.spec.minAvailable: Forbidden: minAvailable (1) belongs to the owning component`},
 		},
 
-		// Only explicit Coherent intent emits warnings about full component disruption.
 		{
-			name:         "explicit Coherent native minimum can take the entire worker down",
-			deployment:   minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
+			name:         "Coherent default budget can take the entire worker component down",
+			deployment:   groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent"),
 			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=2, minAvailable=2, maxUnavailable=2); provision spare serving capacity before updating`},
 		},
 		{
-			name:         "explicit Coherent default minimum warns for a single worker",
-			deployment:   minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
-			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+			name:         "Coherent explicit full budget warns even with minimum one",
+			deployment:   groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "Coherent"),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=4, minAvailable=1, maxUnavailable=4); provision spare serving capacity before updating`},
 		},
 		{
-			name:       "native minimum alone does not warn or enable Coherent",
-			deployment: minimumAvailabilityDGDForAdmission(2, 2, ""),
+			name:       "Coherent partial disruption budget does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 1, replicas: 4}, "Coherent"),
 		},
 		{
-			name:       "Coherent partial minimum leaves serving capacity",
-			deployment: minimumAvailabilityDGDForAdmission(1, 4, "Coherent"),
+			name:       "OnDelete minimum alone does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "OnDelete"),
 		},
 		{
-			name:       "Coherent scaled-to-zero component does not warn",
-			deployment: minimumAvailabilityDGDForAdmission(2, 0, "Coherent"),
+			name:       "RollingRecreate minimum alone does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "RollingRecreate"),
 		},
 		{
-			name:          "Coherent warning is not repeated on an unrelated label edit",
-			oldDeployment: minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
-			deployment:    dgdAdmissionWithLabel(t, minimumAvailabilityDGDForAdmission(2, 2, "Coherent")),
+			name:          "Coherent warning is not repeated for an unrelated metadata edit",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent"),
+			deployment:    betaDGDWithAvailabilityNoteForAdmission(),
 		},
+		{
+			name:          "replica reduction to the disruption budget warns",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 3}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 2}, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=2, minAvailable=1, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "increasing budget to full capacity warns",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 4}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=4, minAvailable=1, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "explicit Coherent strategy change warns about existing full unit",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "RollingRecreate"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=2, minAvailable=2, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name:            "explicit Coherent annotation enforces the budget floor",
+			deployment:      groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 3, budget: 2, replicas: 4}, "Coherent"),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate.maxUnavailable: Invalid value: 2: must not be less than minAvailable (3) under the Coherent update strategy`},
+		},
+
+		{
+			name:       "native minimum without an annotation uses RollingRecreate and does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, ""),
+		},
+		{
+			name:       "unannotated native budget uses RollingRecreate without a Coherent minimum floor",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 3, budget: 2, replicas: 4}, ""),
+		},
+		{
+			name:         "unannotated full budget warns for RollingRecreate",
+			deployment:   groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, ""),
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=4, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:         "RollingRecreate full budget warns when explicitly selected",
+			deployment:   groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=4, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:       "RollingRecreate partial budget does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 4}, "RollingRecreate"),
+		},
+		{
+			name:       "RollingRecreate default singleton preserves established warning behavior",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "RollingRecreate"),
+		},
+		{
+			name:          "RollingRecreate budget increase introduces full component disruption risk",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 4}, "RollingRecreate"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=4, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "RollingRecreate unrelated metadata edit does not repeat an outage warning",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			deployment:    betaDGDWithRolloutBudgetNoteForAdmission(),
+		},
+		{
+			name:          "RollingRecreate replica reduction leaves existing outage risk unchanged",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 3}, "RollingRecreate"),
+		},
+		{
+			name:          "RollingRecreate pod template edit warns about an existing full budget",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			deployment:    betaDGDWithRolloutBudgetImageForAdmission(),
+			wantWarnings:  []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=4, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+
 		{
 			name:          "Coherent replica reduction introduces full component disruption risk",
-			oldDeployment: minimumAvailabilityDGDForAdmission(1, 2, "Coherent"),
-			deployment:    minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 2}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
 			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
 		},
 		{
 			name:          "Coherent scale from zero introduces full component disruption risk",
-			oldDeployment: minimumAvailabilityDGDForAdmission(1, 0, "Coherent"),
-			deployment:    minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 0}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
 			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
 		},
 		{
 			name:          "Coherent scale up leaves serving capacity without warning",
-			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
-			deployment:    minimumAvailabilityDGDForAdmission(1, 2, "Coherent"),
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 2}, "Coherent"),
 		},
 		{
 			name: "Coherent explicit default replica count does not repeat the warning",
 			oldDeployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent")
 				betaWorkerComponent(dgd).Replicas = nil
 				return dgd
 			}(),
-			deployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
 		},
 		{
 			name:          "Coherent omitted default replica count does not repeat the warning",
-			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
 			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent")
 				betaWorkerComponent(dgd).Replicas = nil
 				return dgd
 			}(),
 		},
 		{
 			name:          "Coherent pod template edit still warns about existing full component disruption risk",
-			oldDeployment: minimumAvailabilityDGDForAdmission(1, 1, "Coherent"),
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
 			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
-				dgd := minimumAvailabilityDGDForAdmission(1, 1, "Coherent")
+				dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent")
 				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Image += "-coherent-update"
 				return dgd
 			}(),
@@ -1147,8 +1221,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 		{
 			name:          "removing the Coherent annotation restores RollingRecreate without warning",
-			oldDeployment: minimumAvailabilityDGDForAdmission(2, 2, "Coherent"),
-			deployment:    minimumAvailabilityDGDForAdmission(2, 2, ""),
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, ""),
 		},
 
 		// Replica availability rules.
@@ -2606,6 +2680,303 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 		// Provider-native override rules.
 		{
+			name: "v1alpha1 component budget converts and defaults",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = alphaGroveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+		},
+		{
+			name: "Grove standalone budget override is defaulted and admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+		},
+		{
+			name: "Grove multinode budget override is applied at component scope",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+		},
+		{
+			name: "Grove forced scaling group budget override is admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)}}
+			}),
+		},
+		{
+			name: "budget override coexists with typed topology",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology", PackDomain: "rack"}
+				worker.TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
+			}),
+		},
+		{
+			name:         "RollingRecreate allows budget below minAvailable",
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.MinAvailable = k8sptr.To(int32(3))
+			}),
+		},
+		{
+			name:         "Coherent rejects budget below minAvailable",
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[0] ("frontend"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.MinAvailable = k8sptr.To(int32(3))
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate.maxUnavailable: Invalid value: 2: must not be less than minAvailable (3) under the Coherent update strategy`},
+		},
+		{
+			name: "OnDelete rejects budget override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate: Forbidden: must not be set when the update strategy is OnDelete`},
+		},
+		{
+			name:         "budget may exceed desired replicas",
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=2); provision spare serving capacity before updating`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Replicas = k8sptr.To(int32(1))
+			}),
+		},
+		{
+			name: "scale-to-zero retains explicit budget",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Replicas = k8sptr.To(int32(0))
+			}),
+		},
+		{
+			name:         "replica reduction below an unchanged budget is admitted",
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=2); provision spare serving capacity before updating`},
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Replicas = k8sptr.To(int32(1))
+			}),
+		},
+		{
+			name: "replica update to zero retains the rollout budget",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Replicas = k8sptr.To(int32(0))
+			}),
+		},
+		{
+			name:         "forced scaling group retains budget while scaling to 1",
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=2); provision spare serving capacity before updating`},
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)}}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)}}
+			}),
+		},
+		{
+			name: "forced scaling group retains budget while scaling to 0",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)}}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(0))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)}}
+			}),
+		},
+		{
+			name:         "multinode scaling group retains budget while scaling to 1",
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=2); provision spare serving capacity before updating`},
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+		},
+		{
+			name: "multinode scaling group retains budget while scaling to 0",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(0))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+		},
+		{
+			name: "Coherent retains a budget above live replicas while scaling to 1",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(4))
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(4))
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name: "Coherent retains a budget above live replicas while scaling to 0",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(4))
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(4))
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(0))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+		},
+		{
+			name:         "strategy change revalidates unchanged budget",
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate: Forbidden: must not be set when the update strategy is OnDelete`},
+		},
+		{
+			name: "member clique role rejects budget override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":1}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles[0].providerOverride.value.rollingUpdate: Forbidden: member cliques use the owning component's rollingUpdate budget`},
+		},
+		{
+			name: "root override rejects rolling update configuration",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride("", `{"spec":{"template":{"topologyConstraint":{},"rollingUpdate":{"maxUnavailable":1}}}}`)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value.spec.template.rollingUpdate: Forbidden: is Dynamo-owned or not enabled for provider override`},
+		},
+		{
+			name:               "legacy minima retain RollingRecreate despite new origin and a smaller budget",
+			seedWithoutWebhook: true,
+			// Seed through the older test operator, then materialize the newer origin
+			// with the existing legacy seeder before exercising real update admission.
+			oldBeforeUpdate: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0"}
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.MinAvailable = k8sptr.To(int32(3))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":3}}`)
+			}),
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.MinAvailable = k8sptr.To(int32(3))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":3}}`)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.MinAvailable = k8sptr.To(int32(3))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+		},
+		{
+			name:         "authored origin does not opt a disaggregated budget into Coherent",
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[2].minAvailable ("prefill") is deprecated; use spec.components[2].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.ComponentType = "decode"
+				worker.MinAvailable = k8sptr.To(int32(3))
+				prefill := worker.DeepCopy()
+				prefill.ComponentName = "prefill"
+				prefill.ComponentType = "prefill"
+				prefill.ProviderOverride = nil
+				dgd.Spec.Components = append(dgd.Spec.Components, *prefill)
+			}),
+			wantOriginVersion: "1.6.0",
+		},
+		{
 			name: "valid Grove root provider override is admitted and defaulted",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.ProviderOverride = groveProviderOverride(
@@ -2615,10 +2986,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1alpha1 Grove root provider override converts and defaults",
+			name:                   "v1alpha1 Grove root provider override converts and defaults an omitted target",
+			wantRootProviderTarget: "PodCliqueSet",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = alphaGroveProviderOverride("", `{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`)
+			}),
+		},
+		{
+			name:                   "v1alpha1 Grove root provider override preserves an explicit target",
+			wantRootProviderTarget: "PodCliqueSet",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.ProviderOverride = alphaGroveProviderOverride(
-					"",
+					"PodCliqueSet",
 					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
 				)
 			}),
@@ -2712,7 +3091,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					`{"spec":{"template":{"topologyConstraint":{"pack":"rack"}}}}`,
 				)
 			}),
-			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field TopologyConstraint.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
+			// Go 1.27's encoding/json names the root struct (PodCliqueSet) in
+			// UnmarshalTypeError; Go 1.26 named the immediate parent
+			// (TopologyConstraint).
+			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field PodCliqueSet.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
 		},
 		{
 			name: "typed and provider-native Grove topology cannot be combined",
@@ -3686,6 +4068,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 	}
 
+	t.Log("Add complete-probe cases to the admission table for both API versions")
+	tests = append(tests, probeDGDAdmissionCases()...)
+
 	t.Log("Add the LPX scenarios to the same DGD admission table")
 	tests = append(tests, lpxDGDAdmissionCases()...)
 
@@ -3725,68 +4110,57 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil || tt.wantOriginVersion != "" || tt.wantProvider != "" || tt.wantRoleReplicas != nil || tt.wantReplicas != nil {
-				t.Log("Convert the admitted DGD for result assertions")
-				actualDGD := admittedBetaDGD(t, actual)
-
-				t.Log("Verify admission preserved component replica intent")
-				for name, want := range tt.wantReplicas {
-					component := actualDGD.GetComponentByName(name)
-					if component == nil {
-						t.Fatalf("admitted DGD has no component %q", name)
-					}
-					if !k8sptr.Equal(component.Replicas, want) {
-						t.Fatalf("component %q: replicas = %v, want %v", name, component.Replicas, want)
-					}
-				}
-
-				if tt.wantOriginVersion != "" {
-					t.Log("Verify creation stamped the authoritative operator origin version")
-					if got := actualDGD.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; got != tt.wantOriginVersion {
-						t.Fatalf("operator origin version = %q, want %q", got, tt.wantOriginVersion)
-					}
-				}
-				if tt.wantProvider != "" {
-					t.Log("Verify creation-time routing intent determined the admitted workload provider")
-					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
-						t.Fatalf("workload provider = %q, want %q", got, tt.wantProvider)
-					}
-				}
-				if tt.wantRoleReplicas != nil {
-					t.Log("Verify admission persisted the defaulted multinode role replicas")
-					component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
-					if component == nil {
-						t.Fatalf("admitted DGD has no component %q", dgdAdmissionWorkerName)
-					}
-					actualRoleReplicas := make(map[string]int32, len(component.Roles))
-					for i := range component.Roles {
-						role := &component.Roles[i]
-						actualRoleReplicas[role.Name] = k8sptr.Deref(role.Replicas, 0)
-					}
-					if !maps.Equal(actualRoleReplicas, tt.wantRoleReplicas) {
-						t.Fatalf("role replicas = %v, want %v", actualRoleReplicas, tt.wantRoleReplicas)
-					}
-				}
-				if tt.wantPodAnnotations == nil {
-					return
-				}
-
-				t.Log("Verify the API server preserved embedded component pod-template annotations")
-				component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
-				if component == nil || component.PodTemplate == nil {
-					t.Fatalf("admitted DGD has no pod template for component %q", dgdAdmissionWorkerName)
-				}
-				if got := component.PodTemplate.Annotations; !maps.Equal(got, tt.wantPodAnnotations) {
-					t.Fatalf(
-						"spec.components[%q].podTemplate.metadata.annotations = %v, want %v",
-						dgdAdmissionWorkerName,
-						got,
-						tt.wantPodAnnotations,
-					)
-				}
-			}
+			assertDGDAdmissionDefaults(t, actual, tt)
 		})
 	}
+}
+
+// probeDGDAdmissionCases builds probe rows for the shared DGD admission table.
+func probeDGDAdmissionCases() []dgdAdmissionTestCase {
+	var tests []dgdAdmissionTestCase
+	for _, placement := range []string{"main", "frontend sidecar", "role"} {
+		beta := betaDGDForAdmission(nil)
+		alpha := alphaDGDForAdmission(nil)
+		betaSpec := betaWorkerComponent(beta)
+		alphaSpec := alpha.Spec.Services["worker"]
+		betaPath := field.NewPath("spec", "components").Index(1)
+		alphaPath := field.NewPath("spec", "services").Key("worker")
+		betaContainer := &betaSpec.PodTemplate.Spec.Containers[0]
+		alphaContainer := alphaSpec.ExtraPodSpec.MainContainer
+
+		// Select a representative container in each source-version template.
+		switch placement {
+		case "main":
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(0)
+			alphaPath = alphaPath.Child("extraPodSpec", "mainContainer")
+		case "frontend sidecar":
+			betaSpec.FrontendSidecar = k8sptr.To("frontend")
+			betaSpec.PodTemplate.Spec.Containers = append(betaSpec.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: frontendImage150})
+			betaContainer = &betaSpec.PodTemplate.Spec.Containers[1]
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(1)
+			alphaSpec.ExtraPodSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "frontend", Image: frontendImage150}}}
+			alphaContainer = &alphaSpec.ExtraPodSpec.Containers[0]
+			alphaPath = alphaPath.Child("extraPodSpec", "containers").Index(0)
+		case "role":
+			setBetaExplicitMultinodeRoleTemplates(betaSpec, 2)
+			betaContainer = &betaSpec.Roles[1].PodTemplate.Spec.Containers[0]
+			betaPath = betaPath.Child("roles").Index(1).Child("podTemplate", "spec", "containers").Index(0)
+			setAlphaExplicitMultinodeRoleTemplates(alphaSpec, 2)
+			alphaContainer = &alphaSpec.Roles[0].PodTemplate.Spec.Containers[0]
+			alphaPath = alphaPath.Child("roles").Index(0).Child("podTemplate", "spec", "containers").Index(0)
+		}
+
+		// Keep the shared probe cases on the resource's production admission path.
+		probeCases := containerProbeAdmissionCases(beta, betaContainer, betaPath)
+		probeCases = append(probeCases, containerProbeAdmissionCases(alpha, alphaContainer, alphaPath)...)
+		for _, probeCase := range probeCases {
+			tests = append(tests, dgdAdmissionTestCase{
+				name: probeCase.name, deployment: probeCase.deployment,
+				oldDeployment: probeCase.oldDeployment, wantCELErr: probeCase.wantCELErr,
+			})
+		}
+	}
+	return tests
 }
 
 func admittedBetaDGD(t *testing.T, actual *unstructured.Unstructured) *nvidiacomv1beta1.DynamoGraphDeployment {
@@ -4338,13 +4712,115 @@ func nativeMinimumDGDForAdmission(minimum int32) *nvidiacomv1beta1.DynamoGraphDe
 	})
 }
 
-func minimumAvailabilityDGDForAdmission(minimum, replicas int32, strategy string) *nvidiacomv1beta1.DynamoGraphDeployment {
-	dgd := nativeMinimumDGDForAdmission(minimum)
+type groveAvailabilityForAdmission struct {
+	minimum  int32
+	budget   int32
+	replicas int32
+}
+
+func groveAvailabilityDGDForAdmission(availability groveAvailabilityForAdmission, strategy string) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := nativeMinimumDGDForAdmission(availability.minimum)
 	dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
 	dgd.Spec.Components[0].Replicas = k8sptr.To(int32(2))
-	betaWorkerComponent(dgd).Replicas = k8sptr.To(replicas)
+	worker := betaWorkerComponent(dgd)
+	worker.Replicas = k8sptr.To(availability.replicas)
+	if availability.budget > 0 {
+		worker.ProviderOverride.Value.Raw = []byte(fmt.Sprintf(`{"spec":{"minAvailable":%d},"rollingUpdate":{"maxUnavailable":%d}}`, availability.minimum, availability.budget))
+	}
 	if strategy != "" {
 		dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = strategy
 	}
 	return dgd
+}
+
+func betaDGDWithAvailabilityNoteForAdmission() *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent")
+	dgd.Annotations["example.com/note"] = "reviewed"
+	return dgd
+}
+
+func betaDGDWithRolloutBudgetNoteForAdmission() *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate")
+	dgd.Annotations["example.com/note"] = "reviewed"
+	return dgd
+}
+
+func betaDGDWithRolloutBudgetImageForAdmission() *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate")
+	betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
+	return dgd
+}
+
+func assertDGDAdmissionDefaults(t *testing.T, actual *unstructured.Unstructured, tt dgdAdmissionTestCase) {
+	t.Helper()
+	if !(tt.wantRootProviderTarget != "" || tt.wantPodAnnotations != nil || tt.wantOriginVersion != "" || tt.wantProvider != "" || tt.wantRoleReplicas != nil || tt.wantReplicas != nil) {
+		return
+	}
+
+	t.Log("Convert the admitted DGD for result assertions")
+	actualDGD := admittedBetaDGD(t, actual)
+
+	if tt.wantRootProviderTarget != "" {
+		t.Log("Verify the alpha root override keeps its resolved provider target")
+		if actualDGD.Spec.ProviderOverride == nil || actualDGD.Spec.ProviderOverride.Target != tt.wantRootProviderTarget {
+			t.Fatalf("root provider override = %v, want target %q", actualDGD.Spec.ProviderOverride, tt.wantRootProviderTarget)
+		}
+	}
+
+	t.Log("Verify admission preserved component replica intent")
+	for name, want := range tt.wantReplicas {
+		component := actualDGD.GetComponentByName(name)
+		if component == nil {
+			t.Fatalf("admitted DGD has no component %q", name)
+		}
+		if !k8sptr.Equal(component.Replicas, want) {
+			t.Fatalf("component %q: replicas = %v, want %v", name, component.Replicas, want)
+		}
+	}
+
+	if tt.wantOriginVersion != "" {
+		t.Log("Verify creation stamped the authoritative operator origin version")
+		if got := actualDGD.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; got != tt.wantOriginVersion {
+			t.Fatalf("operator origin version = %q, want %q", got, tt.wantOriginVersion)
+		}
+	}
+	if tt.wantProvider != "" {
+		t.Log("Verify creation-time routing intent determined the admitted workload provider")
+		if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
+			t.Fatalf("workload provider = %q, want %q", got, tt.wantProvider)
+		}
+	}
+	if tt.wantRoleReplicas != nil {
+		t.Log("Verify admission persisted the defaulted multinode role replicas")
+		component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
+		if component == nil {
+			t.Fatalf("admitted DGD has no component %q", dgdAdmissionWorkerName)
+		}
+		actualRoleReplicas := make(map[string]int32, len(component.Roles))
+		for i := range component.Roles {
+			role := &component.Roles[i]
+			actualRoleReplicas[role.Name] = k8sptr.Deref(role.Replicas, 0)
+		}
+		if !maps.Equal(actualRoleReplicas, tt.wantRoleReplicas) {
+			t.Fatalf("role replicas = %v, want %v", actualRoleReplicas, tt.wantRoleReplicas)
+		}
+	}
+	if tt.wantPodAnnotations == nil {
+		return
+	}
+
+	t.Log("Verify the API server preserved embedded component pod-template annotations")
+	component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
+	if component == nil || component.PodTemplate == nil {
+		t.Fatalf("admitted DGD has no pod template for component %q", dgdAdmissionWorkerName)
+	}
+	if got := component.PodTemplate.Annotations; !maps.Equal(got, tt.wantPodAnnotations) {
+		t.Fatalf(
+			"spec.components[%q].podTemplate.metadata.annotations = %v, want %v",
+			dgdAdmissionWorkerName,
+			got,
+			tt.wantPodAnnotations,
+		)
+	}
+
 }

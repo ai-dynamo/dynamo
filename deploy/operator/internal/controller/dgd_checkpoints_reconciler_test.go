@@ -33,6 +33,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
@@ -1295,7 +1296,7 @@ func TestDGDCheckpointsReconciler_CUDASharedMemorySupport(t *testing.T) {
 		},
 		{
 			name:        "keeps an explicit opt-out and skips the command requirement",
-			annotations: map[string]string{commonconsts.CUDASharedMemorySupportAnnotation: "disabled"},
+			annotations: map[string]string{podcontract.CuInterposeAnnotation: "disabled"},
 			target:      corev1.Container{Name: "snapshot-me", Image: "target:latest"},
 			want:        "disabled",
 		},
@@ -1347,7 +1348,7 @@ func TestDGDCheckpointsReconciler_CUDASharedMemorySupport(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, test.want, podTemplate.Annotations[commonconsts.CUDASharedMemorySupportAnnotation])
+			assert.Equal(t, test.want, podTemplate.Annotations[podcontract.CuInterposeAnnotation])
 		})
 	}
 }

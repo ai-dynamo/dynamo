@@ -14,32 +14,15 @@ use dynamo_kv_router::plugins::worker_selection::{
 pub(super) fn build(
     config: &PolicyParameters,
     worker_label: &'static str,
-    is_plain_decode: bool,
 ) -> Box<dyn WorkerScorer> {
     match (
         config.decode_active_request_weight != 0.0,
         config.shared_cache_multiplier != 0.0,
     ) {
-        (false, false) => Box::new(DefaultScorer::<false, false>::new(
-            config,
-            worker_label,
-            is_plain_decode,
-        )),
-        (false, true) => Box::new(DefaultScorer::<false, true>::new(
-            config,
-            worker_label,
-            is_plain_decode,
-        )),
-        (true, false) => Box::new(DefaultScorer::<true, false>::new(
-            config,
-            worker_label,
-            is_plain_decode,
-        )),
-        (true, true) => Box::new(DefaultScorer::<true, true>::new(
-            config,
-            worker_label,
-            is_plain_decode,
-        )),
+        (false, false) => Box::new(DefaultScorer::<false, false>::new(config, worker_label)),
+        (false, true) => Box::new(DefaultScorer::<false, true>::new(config, worker_label)),
+        (true, false) => Box::new(DefaultScorer::<true, false>::new(config, worker_label)),
+        (true, true) => Box::new(DefaultScorer::<true, true>::new(config, worker_label)),
     }
 }
 
@@ -52,7 +35,6 @@ struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
     decode_active_request_weight: f64,
     prefill_load_scale: f64,
     is_decode: bool,
-    is_plain_decode: bool,
     prepared: PreparedRequest,
 }
 
@@ -103,11 +85,7 @@ impl Default for IntegerDivisor {
 impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
-    pub(super) fn new(
-        config: &PolicyParameters,
-        worker_label: &'static str,
-        is_plain_decode: bool,
-    ) -> Self {
+    pub(super) fn new(config: &PolicyParameters, worker_label: &'static str) -> Self {
         Self {
             overlap_score_credit: config.overlap_score_credit,
             overlap_score_credit_decay: config.overlap_score_credit_decay,
@@ -117,7 +95,6 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             decode_active_request_weight: config.decode_active_request_weight,
             prefill_load_scale: config.prefill_load_scale,
             is_decode: worker_label == "decode",
-            is_plain_decode,
             prepared: PreparedRequest::default(),
         }
     }
@@ -131,23 +108,15 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
     ) -> Result<(), WorkerSelectionPolicyError> {
-        // Plain disaggregated decode is load-only. Conditional decode retains cache credit.
-        let overlap_credit = if self.is_plain_decode && !context.tracks_prefill_tokens() {
-            0.0
-        } else {
-            self.overlap_score_credit
-        };
         self.prepared = PreparedRequest {
             min_prefill: 0,
             block_size: IntegerDivisor::new(u64::from(context.block_size())),
             // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
             // clamp so a worker at the load floor does not compute 0/0.
             request_blocks: IntegerDivisor::new(context.request_blocks().max(1)),
-            overlap_credit,
+            overlap_credit: self.overlap_score_credit,
             needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
-            needs_decode_subtraction: self.is_decode
-                && !context.tracks_prefill_tokens()
-                && overlap_credit > 0.0,
+            needs_decode_subtraction: self.is_decode && !context.tracks_prefill_tokens(),
         };
         if self.prepared.needs_decay {
             let mut minimum = usize::MAX;
@@ -232,10 +201,12 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     for DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        // The builtin's load-only modes must book the full prompt without cache credit.
-        // Hosts still start indexing solely from the policy's declared inputs.
         let inputs = WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT;
-        if !self.is_plain_decode && self.overlap_score_credit != 0.0 {
+        if self.overlap_score_credit != 0.0
+            || self.host_cache_hit_weight != 0.0
+            || self.disk_cache_hit_weight != 0.0
+            || self.shared_cache_multiplier != 0.0
+        {
             inputs | WorkerInputs::CACHE
         } else {
             inputs

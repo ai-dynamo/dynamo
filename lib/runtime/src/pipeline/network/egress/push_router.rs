@@ -38,7 +38,43 @@ use std::{
 use tokio_stream::StreamExt;
 use tracing::Instrument;
 
+/// The stable reason of a worker's overload refusal.
+///
+/// Across the request plane a refusal keeps its semantic class and reason but
+/// decodes with the legacy type `ResourceExhausted`, which it shares with
+/// pool-wide exhaustion (`capacity.pool_exhausted`), so the reason, not the
+/// legacy type, identifies a worker-scoped overload.
+const WORKER_OVERLOADED_REASON: &str = "capacity.worker_overloaded";
+
+/// A worker's overload refusal, wherever it appears in an error chain.
+///
+/// A worker refusing a request it has no capacity for is backpressure from a
+/// healthy worker. The refusal reaches the router as the cause of a pre-stream
+/// `CannotConnect`, so only a walk of the whole chain finds it.
+fn worker_overload<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a DynamoError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>()
+            && error.class() == ErrorType::CapacityExhausted
+            && error.reason().as_str() == WORKER_OVERLOADED_REASON
+        {
+            return Some(error);
+        }
+        current = error.source();
+    }
+    None
+}
+
+/// Whether a worker's overload appears anywhere in an error chain: see
+/// [`worker_overload`].
+fn is_worker_overloaded(err: &(dyn std::error::Error + 'static)) -> bool {
+    worker_overload(err).is_some()
+}
+
 /// Check if an error chain indicates the worker should be reported as down.
+///
+/// Never for a chain that carries a worker's overload, whatever wraps it: see
+/// [`is_worker_overloaded`].
 fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     const INHIBITED: &[ErrorType] = &[
         ErrorType::CannotConnect,
@@ -54,7 +90,17 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // stale or the worker is shutting down. Same reasoning as above.
         ErrorType::WorkerUnavailable,
     ];
-    match_error_chain(err, INHIBITED, &[])
+    // Pre-stream request rejections can carry an outer CannotConnect wrapper.
+    !is_worker_overloaded(err)
+        && match_error_chain(
+            err,
+            INHIBITED,
+            &[
+                ErrorType::InvalidRequest,
+                ErrorType::InvalidArgument,
+                ErrorType::Backend(BackendError::InvalidArgument),
+            ],
+        )
 }
 
 /// Read the backend response inactivity timeout from the environment.
@@ -1111,11 +1157,7 @@ where
         // Fallback resolution owns the unavailable-target decision. Allowing it
         // to see a worker already absent from discovery preserves Direct's
         // historical standalone fallback; `Deny` remains exact-target behavior.
-        let selected_is_discovered = self
-            .client
-            .instances()
-            .iter()
-            .any(|instance| instance.instance_id == instance_id);
+        let selected_is_discovered = self.client.is_instance_live(instance_id);
         if !selected_is_discovered {
             let fallback_is_available = self
                 .client
@@ -1964,21 +2006,34 @@ where
             Err(err) => {
                 record_route_error(&route_span, err.as_ref());
                 if self.fault_detection_enabled {
-                    if is_inhibited(err.as_ref()) {
+                    // Overload first: a worker's refusal arrives as the cause
+                    // of a pre-stream `CannotConnect`, which on its own would
+                    // report a healthy worker down.
+                    if let Some(refusal) = worker_overload(err.as_ref()) {
+                        match refusal.error_type() {
+                            // Backpressure from one DP rank. The worker's other
+                            // ranks may still have room, which a lease on the
+                            // whole worker would withhold.
+                            ErrorType::WorkerRankOverloaded(dp_rank) => tracing::debug!(
+                                "Leaving instance {instance_id} routable: its overload is limited to DP rank {dp_rank}: {err}"
+                            ),
+                            // Backpressure: the worker said "my queue is full,
+                            // retry later". A bounded lease prevents an immediate
+                            // retry loop. Fresh monitor data clears the lease early.
+                            // Lease expiry permits a recovery probe when load events
+                            // remain unchanged. This is not a fault quarantine.
+                            _ => {
+                                tracing::debug!(
+                                    "Marking instance {instance_id} overloaded due to backpressure: {err}"
+                                );
+                                self.client.mark_overloaded_immediate(instance_id);
+                            }
+                        }
+                    } else if is_inhibited(err.as_ref()) {
                         tracing::debug!(
                             "Reporting instance {instance_id} down due to error: {err}"
                         );
                         self.client.report_instance_down(instance_id);
-                    } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
-                        // Backpressure: the worker said "my queue is full,
-                        // retry later". A bounded lease prevents an immediate
-                        // retry loop. Fresh monitor data clears the lease early.
-                        // Lease expiry permits a recovery probe when load events
-                        // remain unchanged. This is not a fault quarantine.
-                        tracing::debug!(
-                            "Marking instance {instance_id} overloaded due to backpressure: {err}"
-                        );
-                        self.client.mark_overloaded_immediate(instance_id);
                     }
                 }
                 return Err(err);
@@ -2536,6 +2591,199 @@ mod tests {
             .message("Server unavailable: unknown endpoint a/generate")
             .build();
         assert!(is_inhibited(&err));
+    }
+
+    /// A worker's admission refusal as the gate raises it, in process: for
+    /// the whole worker, or for DP rank `dp_rank` alone.
+    fn refusal(dp_rank: Option<u32>) -> DynamoError {
+        DynamoError::builder()
+            .error_type(
+                dp_rank.map_or(ErrorType::WorkerOverloaded, ErrorType::WorkerRankOverloaded),
+            )
+            .message("Server overloaded: worker at capacity")
+            .build()
+    }
+
+    /// The same refusal as the request plane delivers it: carried as JSON in
+    /// the response prologue, then made the cause of a pre-stream
+    /// `CannotConnect`.
+    fn admission_refusal(dp_rank: Option<u32>) -> DynamoError {
+        use crate::pipeline::network::{ResponseStreamPrologue, StreamPrologueError};
+
+        let prologue = ResponseStreamPrologue {
+            error: Some("Server overloaded: worker at capacity".to_string()),
+            typed_error: Some(refusal(dp_rank)),
+        };
+        let delivered: ResponseStreamPrologue =
+            serde_json::from_slice(&serde_json::to_vec(&prologue).unwrap()).unwrap();
+        crate::pipeline::network::egress::addressed_router::pre_stream_failure_error(
+            StreamPrologueError::new(
+                "Server overloaded: worker at capacity",
+                delivered
+                    .typed_error
+                    .expect("the prologue keeps the typed refusal"),
+            ),
+        )
+    }
+
+    /// The overload is found through the `CannotConnect` that wraps it — by
+    /// its reason, since the wire decodes its legacy type as the pool-wide
+    /// `ResourceExhausted` — and it never inhibits the worker, whether it
+    /// applies to the whole worker or names one DP rank, which it keeps.
+    /// Pool-wide exhaustion is not a worker's refusal, and a `CannotConnect`
+    /// without one is still a connection fault.
+    #[test]
+    fn a_wrapped_overload_is_backpressure_not_a_fault() {
+        let delivered = admission_refusal(None);
+        assert_eq!(
+            delivered.error_type(),
+            ErrorType::CannotConnect,
+            "the outer type is unchanged"
+        );
+        let cause = std::error::Error::source(&delivered)
+            .and_then(|source| source.downcast_ref::<DynamoError>())
+            .expect("the worker's refusal is the cause");
+        assert_eq!(cause.error_type(), ErrorType::ResourceExhausted);
+        assert_eq!(cause.reason().as_str(), WORKER_OVERLOADED_REASON);
+        assert!(is_worker_overloaded(&delivered));
+        assert!(!is_inhibited(&delivered));
+
+        let rank = admission_refusal(Some(4));
+        assert_eq!(rank.error_type(), ErrorType::CannotConnect);
+        assert!(!is_inhibited(&rank));
+        assert_eq!(
+            worker_overload(&rank).unwrap().error_type(),
+            ErrorType::WorkerRankOverloaded(4)
+        );
+
+        let local = refusal(None);
+        assert_eq!(local.reason().as_str(), WORKER_OVERLOADED_REASON);
+        assert!(is_worker_overloaded(&local));
+        assert!(!is_inhibited(&local));
+
+        let pool_exhausted = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("All workers are busy, please retry later")
+            .build();
+        assert!(!is_worker_overloaded(&pool_exhausted));
+
+        let connection_failure = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("connection refused")
+            .build();
+        assert!(!is_worker_overloaded(&connection_failure));
+        assert!(is_inhibited(&connection_failure));
+    }
+
+    /// Through the router's own fault detection, on one client: a refusal
+    /// that names one DP rank leaves the worker selectable for its other work,
+    /// while a whole-worker refusal — as an older worker's, which names none,
+    /// also is — marks it overloaded. Time is held still throughout, so no
+    /// lease can lapse between a refusal and the check after it. Neither
+    /// reports the worker down; a real connection failure still does.
+    #[tokio::test]
+    async fn fault_detection_marks_only_a_whole_worker_refusal_overloaded_and_never_down() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_admission_refusal_fault_detection".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        assert!(poll_until(|| client.instance_ids_avail().contains(&instance_id)).await);
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+
+        let refuse = |dp_rank| {
+            let error = router
+                .wrap_with_fault_detection(
+                    Err(admission_refusal(dp_rank).into()),
+                    instance_id,
+                    tracing::Span::none(),
+                )
+                .expect_err("the refusal propagates");
+            assert!(
+                is_worker_overloaded(error.as_ref()),
+                "the overload survives for the frontend to map"
+            );
+        };
+        let overloaded = || {
+            client
+                .overloaded_instance_ids()
+                .is_some_and(|overloaded| overloaded.contains(&instance_id))
+        };
+
+        tokio::time::pause();
+        refuse(Some(4));
+        assert!(!overloaded(), "a refusal for one rank marks nothing");
+        assert!(
+            router
+                .check_workers_available(instance_id, "sibling")
+                .is_ok(),
+            "so the same router still dispatches the worker's other work"
+        );
+        refuse(None);
+        assert!(overloaded(), "a whole-worker refusal marks it overloaded");
+        assert!(
+            router.check_workers_available(instance_id, "next").is_err(),
+            "so the same router holds new work for it back"
+        );
+        tokio::time::resume();
+        assert!(
+            client.instance_ids_avail().contains(&instance_id),
+            "a refusing worker is never reported down"
+        );
+
+        let connection_failure = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("connection refused")
+            .build();
+        let _ = router.wrap_with_fault_detection(
+            Err(connection_failure.into()),
+            instance_id,
+            tracing::Span::none(),
+        );
+        assert!(
+            !client.instance_ids_avail().contains(&instance_id),
+            "a real connection failure still reports the worker down"
+        );
+
+        rt.shutdown();
+    }
+
+    #[test]
+    fn pre_stream_invalid_request_does_not_quarantine_healthy_worker() {
+        use crate::pipeline::network::{
+            StreamPrologueError, egress::addressed_router::pre_stream_failure_error,
+        };
+
+        for (error_type, is_worker_fault) in [
+            (ErrorType::InvalidRequest, false),
+            (ErrorType::InvalidArgument, false),
+            (ErrorType::Backend(BackendError::InvalidArgument), false),
+            (ErrorType::CannotConnect, true),
+            (ErrorType::Unavailable, true),
+        ] {
+            let rejection = DynamoError::builder()
+                .error_type(error_type)
+                .message("native request failed")
+                .build();
+            let error =
+                pre_stream_failure_error(StreamPrologueError::new("Generate Error", rejection));
+            assert_eq!(is_inhibited(&error), is_worker_fault, "{error_type:?}");
+        }
     }
 
     #[test]

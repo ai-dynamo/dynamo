@@ -15,6 +15,15 @@ from dynamo.sglang.capacity import (
     kv_event_block_size,
 )
 
+# SGLang may be absent or partially stubbed during marker-only collection.
+# Keep import errors so the fixture still fails if a registration test runs.
+_register_import_error = None
+try:
+    from dynamo.sglang import register as _register
+except ImportError as exc:
+    _register = None
+    _register_import_error = exc
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
@@ -22,6 +31,14 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.fixture
+def register():
+    """Provide registration code only to tests that require SGLang."""
+    if _register_import_error is not None:
+        raise _register_import_error
+    return _register
 
 
 @pytest.mark.parametrize(
@@ -37,6 +54,7 @@ pytestmark = [
     ],
 )
 def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
+    register,
     parser,
     skip_tokenizer_init,
     has_engine,
@@ -45,8 +63,6 @@ def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
     think_end_ids,
     expected,
 ):
-    from dynamo.sglang import register
-
     async def async_generate(*, require_reasoning=False):
         pass
 
@@ -204,6 +220,7 @@ def test_token_budget_matches_sglang_policy(
     ],
 )
 def test_runtime_config_publishes_supported_disagg_capabilities(
+    register,
     monkeypatch,
     caplog,
     disaggregation_mode,
@@ -211,8 +228,6 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     enable_multimodal,
     capability_expected,
 ):
-    from dynamo.sglang import register
-
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
@@ -346,9 +361,9 @@ def test_hicache_write_through_ignores_fully_overlapped_host_pool():
 
 
 @pytest.mark.asyncio
-async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, caplog):
-    from dynamo.sglang import register
-
+async def test_hicache_publish_failure_preserves_core_capacity(
+    register, monkeypatch, caplog
+):
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
@@ -409,4 +424,137 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     }
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
+    )
+
+
+# Expected values follow SGLang MooncakeStore's `config_prefix`: backend tag (when
+# not None) then served model name with "/" -> "-", joined with "_".
+@pytest.mark.parametrize(
+    "extra_config, served_model_name, expected",
+    [
+        ({}, "Qwen/Qwen3-0.6B", "Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": "t"}, "Qwen/Qwen3-0.6B", "t_Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": ""}, "Qwen/Qwen3-0.6B", "_Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": 7}, "Qwen/Qwen3-0.6B", "7_Qwen-Qwen3-0.6B"),
+        ({}, "my-model", "my-model"),
+        ({"extra_backend_tag": "t"}, None, "t"),
+        ({}, None, None),
+    ],
+)
+def test_mooncake_runtime_data_publishes_sglang_key_prefix(
+    register, monkeypatch, extra_config, served_model_name, expected
+):
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(extra_config),
+        served_model_name=served_model_name,
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["key_prefix"] == expected
+
+
+@pytest.mark.parametrize(
+    "filename, content",
+    [
+        ("extra.json", '{"extra_backend_tag": "équipe"}'),
+        ("extra.toml", 'extra_backend_tag = "équipe"\n'),
+        ("extra.yaml", "extra_backend_tag: équipe\n"),
+        ("extra.yml", "extra_backend_tag: équipe\n"),
+    ],
+)
+def test_mooncake_key_prefix_reads_at_file_extra_config(
+    register, monkeypatch, tmp_path, filename, content
+):
+    """Preserve UTF-8 cache tags even when text reads default to ASCII."""
+
+    def open_with_ascii_default(path, mode="r", **kwargs):
+        if "b" not in mode:
+            kwargs.setdefault("encoding", "ascii")
+        return open(path, mode, **kwargs)
+
+    config_path = tmp_path / filename
+    config_path.write_bytes(content.encode("utf-8"))
+    monkeypatch.setattr(register, "open", open_with_ascii_default, raising=False)
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=f"@{config_path}",
+        served_model_name="Qwen/Qwen3-0.6B",
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["extra_backend_tag"] == "équipe"
+    assert runtime_data["key_prefix"] == "équipe_Qwen-Qwen3-0.6B"
+
+
+@pytest.mark.parametrize("filename", ["missing.json", "extra.ini"])
+def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename):
+    path = tmp_path / filename
+    if filename.endswith(".ini"):
+        path.write_text("extra_backend_tag = t\n")
+
+    assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
+
+
+@pytest.mark.parametrize(
+    "extra_config, file_tenant, env_tenant, expected",
+    [
+        (
+            {"master_server_address": "master", "tenant_id": " tenant-a "},
+            "file",
+            "env",
+            "tenant-a",
+        ),
+        ({"tenant_id": "unused"}, "file", "env", "file"),
+        (
+            {"master_server_address": "master", "tenant_id": None},
+            "file",
+            "env",
+            "default",
+        ),
+        ({}, None, "  ", "default"),
+    ],
+)
+def test_mooncake_runtime_data_publishes_effective_tenant(
+    register, monkeypatch, tmp_path, extra_config, file_tenant, env_tenant, expected
+):
+    monkeypatch.setattr(register, "envs", SimpleNamespace(MOONCAKE_TENANT_ID=object()))
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    monkeypatch.delenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MOONCAKE_TENANT_ID", raising=False)
+    if file_tenant is not None:
+        config_path = tmp_path / "mooncake.json"
+        config_path.write_text(json.dumps({"tenant_id": file_tenant}))
+        monkeypatch.setenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", str(config_path))
+    if env_tenant is not None:
+        monkeypatch.setenv("MOONCAKE_TENANT_ID", env_tenant)
+    args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(extra_config),
+        served_model_name="model",
+        page_size=4,
+    )
+    assert register._get_mooncake_runtime_data(args)["tenant_id"] == expected
+
+
+def test_mooncake_tenant_stays_default_without_upstream_support(register, monkeypatch):
+    monkeypatch.setattr(register, "envs", SimpleNamespace())
+    monkeypatch.setenv("MOONCAKE_TENANT_ID", "tenant-a")
+    assert (
+        register._mooncake_tenant_id(
+            {"master_server_address": "master", "tenant_id": "tenant-a"}
+        )
+        == "default"
     )

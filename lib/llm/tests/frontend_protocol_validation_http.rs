@@ -885,6 +885,51 @@ async fn anthropic_handler_errors_record_classification_with_response() {
     .await;
 }
 
+/// Invalid keys must produce HTTP 400 before generation, including before HTTP
+/// 200 streaming headers can be committed for a streaming request.
+#[tokio::test]
+#[serial]
+async fn completion_endpoints_reject_invalid_logit_bias_keys() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for stream in [false, true] {
+            for (path, body) in [
+                (
+                    "/v1/chat/completions",
+                    json!({
+                        "model": MODEL,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": stream,
+                        "logit_bias": {"not-a-token": 1.0}
+                    }),
+                ),
+                (
+                    "/v1/completions",
+                    json!({
+                        "model": MODEL,
+                        "prompt": "ping",
+                        "stream": stream,
+                        "logit_bias": {"not-a-token": 1.0}
+                    }),
+                ),
+            ] {
+                let response = post_json(&svc, path, body).await;
+                assert_openai_error(
+                    response,
+                    ExpectedError::Validation,
+                    "Logit bias key must be a non-negative 32-bit integer token id",
+                )
+                .await;
+            }
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 // `reqwest::send` completes when response headers arrive. A 400 for `stream: true`
 // proves converted-request validation ran before the HTTP 200 SSE response was committed.
 #[tokio::test]
@@ -941,6 +986,41 @@ async fn converted_validation_errors_are_returned_before_streaming_headers() {
 
 #[tokio::test]
 #[serial]
+async fn responses_auto_tool_choice_without_tools_reaches_backend() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 4]).await;
+
+        for tools in [Value::Null, json!([])] {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "tool_choice": "auto",
+                    "stream": stream
+                });
+                if !tools.is_null() {
+                    body["tools"] = tools.clone();
+                }
+                let response = post_json(&svc, "/v1/responses", body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                bounded(response.bytes()).await.unwrap();
+
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].inner.tools.is_none());
+                assert!(requests[0].inner.tool_choice.is_none());
+            }
+        }
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
     temp_env::async_with_vars(BASE_ENV, async {
         let svc = HarnessService::start(Vec::new()).await;
@@ -963,6 +1043,32 @@ async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
             let response = post_json(&svc, "/v1/responses", body).await;
             assert_openai_error(response, ExpectedError::Validation, message).await;
         }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_completions_reject_empty_tools() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        let body = json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 10,
+            "tools": []
+        });
+        let response = post_json(&svc, "/v1/chat/completions", body).await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "tools array cannot be empty; omit the field entirely to disable tool use",
+        )
+        .await;
 
         assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;

@@ -14,9 +14,9 @@ use dynamo_protocols::types::responses::{
     InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
-    Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status,
-    SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
-    ToolChoiceOptions, ToolChoiceParam, Truncation,
+    RefusalContent, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
+    ServiceTierResponses, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
+    ToolChoiceAllowed, ToolChoiceAllowedMode, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -845,6 +845,10 @@ fn convert_tools_and_choice(
     }
 
     let converted_choice = match tool_choice {
+        // vLLM rejects explicit auto without tools; use the backend default.
+        Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto)) if converted_tools.is_empty() => {
+            None
+        }
         Some(ToolChoiceParam::AllowedTools(choice)) => {
             let allowed = allowed_function_names(choice, names)?;
             let available: HashSet<&str> = converted_tools
@@ -1270,10 +1274,25 @@ pub fn chat_completion_to_response(
             }
             None => None,
         };
-        if let Some(content_text) = content_text
-            && !content_text.is_empty()
-        {
-            output.push(make_text_message(message_id.clone(), content_text));
+        let mut content = Vec::new();
+        if let Some(text) = content_text.filter(|text| !text.is_empty()) {
+            content.push(OutputMessageContent::OutputText(OutputTextContent {
+                text,
+                annotations: vec![],
+                logprobs: Some(vec![]),
+            }));
+        }
+        if let Some(refusal) = choice.message.refusal.filter(|refusal| !refusal.is_empty()) {
+            content.push(OutputMessageContent::Refusal(RefusalContent { refusal }));
+        }
+        if !content.is_empty() {
+            output.push(OutputItem::Message(OutputMessage {
+                id: message_id.clone(),
+                role: AssistantRole::Assistant,
+                status: OutputStatus::Completed,
+                phase: None,
+                content,
+            }));
         }
 
         if output.is_empty() {
@@ -1393,11 +1412,16 @@ pub fn chat_completion_to_response(
         usage: chat_resp.usage.map(|u| ResponseUsage {
             input_tokens: u.prompt_tokens,
             input_tokens_details: InputTokenDetails {
-                cache_write_tokens: None,
                 cached_tokens: u
                     .prompt_tokens_details
-                    .map(|d| d.cached_tokens.unwrap_or(0))
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens)
                     .unwrap_or(0),
+                cache_write_tokens: Some(
+                    u.prompt_tokens_details
+                        .and_then(|d| d.cache_write_tokens)
+                        .unwrap_or(0),
+                ),
             },
             output_tokens: u.completion_tokens,
             output_tokens_details: OutputTokenDetails {
@@ -2936,6 +2960,83 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_choice_without_function_tools() {
+        for tools in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([{
+                "type": "namespace", "name": "empty", "description": "Empty", "tools": []
+            }]),
+        ] {
+            for choice in [
+                serde_json::Value::Null,
+                serde_json::json!("auto"),
+                serde_json::json!("none"),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model", "input": "Say hello", "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
+                let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+                assert!(chat.inner.tools.is_none());
+                if choice == "none" {
+                    assert_eq!(
+                        chat.inner.tool_choice,
+                        Some(ChatCompletionToolChoiceOption::None)
+                    );
+                } else {
+                    assert_eq!(
+                        chat.inner.tool_choice, None,
+                        "tools={tools}, choice={choice}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_forced_tool_choice_without_function_tools_is_invalid() {
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            for choice in [
+                serde_json::json!("required"),
+                serde_json::json!({"type": "function", "name": "missing"}),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model", "input": "Say hello", "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
+                let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+                let error = crate::engines::ValidateRequest::validate(&chat).unwrap_err();
+                assert!(error.to_string().contains("tool_choice"));
+                assert!(error.to_string().contains("tools"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_choice_with_function_tools_is_preserved() {
+        for choice in ["auto", "none", "required"] {
+            let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
+                "model": "test-model", "input": "Say hello", "tool_choice": choice,
+                "tools": [{"type": "function", "name": "hello"}]
+            }))
+            .unwrap();
+            let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+            assert_eq!(chat.inner.tools.as_ref().unwrap()[0].function.name, "hello");
+            assert_eq!(
+                serde_json::to_value(chat.inner.tool_choice).unwrap(),
+                choice
+            );
+        }
+    }
+
+    #[test]
     fn test_top_level_and_namespace_function_tools_conversion() {
         let mut req = make_response_with_input("hello");
         req.inner.tools = Some(
@@ -4299,6 +4400,53 @@ mod tests {
         let retention = resp.inner.prompt_cache_retention;
         assert_eq!(retention, Some(PromptCacheRetention::InMemory));
         assert_eq!(resp.inner.safety_identifier.as_deref(), Some("user-abc"));
+    }
+
+    /// Verify serialized unary usage defaults missing cache token counts to zero
+    /// and preserves supplied cached and cache-write token counts.
+    #[test]
+    fn test_response_usage_defaults_and_preserves_cache_write_tokens() {
+        use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
+
+        for (prompt_tokens_details, expected_cached_tokens, expected_cache_write_tokens) in [
+            (None, 0, 0),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    ..Default::default()
+                }),
+                3,
+                0,
+            ),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    cache_write_tokens: Some(7),
+                    ..Default::default()
+                }),
+                3,
+                7,
+            ),
+        ] {
+            let mut chat_resp = make_chat_resp_with_text("hello");
+            chat_resp.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 13,
+                completion_tokens: 2,
+                total_tokens: 15,
+                prompt_tokens_details,
+                completion_tokens_details: None,
+            });
+            let response =
+                chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(
+                json["usage"]["input_tokens_details"],
+                serde_json::json!({
+                    "cached_tokens": expected_cached_tokens,
+                    "cache_write_tokens": expected_cache_write_tokens,
+                }),
+            );
+        }
     }
 
     /// Validate the JSON wire shape of NvResponse matches the OpenResponses
