@@ -360,7 +360,7 @@ pub(crate) async fn host_replica_channels(
     ReplicaIngress,
 )> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
-    let event_sender = if publishes_outbound {
+    let (event_sender, local_publisher_id) = if publishes_outbound {
         let (event_sender, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
         let publisher_cancellation_token = cancellation_token.clone();
         let event_publisher = EventPublisher::for_endpoint_with_transport(
@@ -369,6 +369,7 @@ pub(crate) async fn host_replica_channels(
             transport_kind,
         )
         .await?;
+        let local_publisher_id = event_publisher.publisher_id();
         match active_sequence_event_wire_format(transport_kind) {
             ActiveSequenceEventWireFormat::Singleton => {
                 tokio::spawn(run_replica_singleton_publisher(
@@ -385,15 +386,16 @@ pub(crate) async fn host_replica_channels(
                 ));
             }
         }
-        Some(event_sender)
+        (Some(event_sender), Some(local_publisher_id))
     } else {
-        None
+        (None, None)
     };
 
     let (inbound_tx, inbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
     let ingress = ReplicaIngress {
         endpoint: endpoint.clone(),
         inbound_tx: inbound_tx.clone(),
+        local_publisher_id,
         cancellation_token,
     };
     Ok((
@@ -414,6 +416,9 @@ pub(crate) async fn host_replica_channels(
 pub(crate) struct ReplicaIngress {
     endpoint: Endpoint,
     inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
+    /// This replica's own outbound publisher; the direct-ZMQ fan-in skips it
+    /// rather than receiving and decoding events it would discard as echoes.
+    local_publisher_id: Option<u64>,
     cancellation_token: CancellationToken,
 }
 
@@ -426,6 +431,7 @@ impl ReplicaIngress {
                 self.endpoint,
                 self.inbound_tx,
                 direct.rcvhwm,
+                self.local_publisher_id,
                 self.cancellation_token,
             )
             .await
@@ -806,6 +812,70 @@ mod tests {
         ));
 
         drop(publisher);
+        cancel.cancel();
+        distributed.shutdown();
+        Ok(())
+    }
+
+    /// A publishing replica does not subscribe to its own outbound stream, but
+    /// still receives events from other publishers on the endpoint.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn replica_ingress_skips_own_outbound_publisher() -> Result<()> {
+        let runtime = dynamo_runtime::Runtime::from_current()?;
+        let distributed = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await?;
+        let endpoint = distributed
+            .namespace(format!("replica-ingress-self-{}", uuid::Uuid::new_v4()))?
+            .component("workers")?
+            .endpoint("generate");
+        let cancel = CancellationToken::new();
+        let (mut channels, ingress) =
+            host_replica_channels(&endpoint, 1, true, cancel.child_token()).await?;
+        let outbound = channels
+            .outbound
+            .clone()
+            .expect("publishing replica has an outbound sender");
+        ingress.start().await;
+
+        let peer = ActiveSequenceEventPublisher::for_endpoint(&endpoint, 16).await?;
+        let mut received = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !received.iter().any(|id| id == "peer-mark") {
+                outbound.try_send(ActiveSequenceEvent {
+                    request_id: "own-event".to_string(),
+                    worker: WorkerWithDpRank::new(42, 0),
+                    data: ActiveSequenceEventData::MarkPrefillCompleted,
+                    router_id: 1,
+                    lora_name: None,
+                })?;
+                peer.mark_prefill_completed("peer-mark".to_string(), 42, 0)?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                while let Ok(event) = channels.inbound_rx.try_recv() {
+                    received.push(event.request_id);
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        // Give late own events 250ms of silence to arrive before judging.
+        while let Ok(Some(event)) = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            channels.inbound_rx.recv(),
+        )
+        .await
+        {
+            received.push(event.request_id);
+        }
+        assert!(
+            received.iter().all(|id| id == "peer-mark"),
+            "replica received its own outbound events: {received:?}"
+        );
+
+        drop(peer);
         cancel.cancel();
         distributed.shutdown();
         Ok(())
