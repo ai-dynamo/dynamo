@@ -431,6 +431,12 @@ pub mod llm {
     pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
         "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
 
+    /// Skip OpenAI strict function-tool schema preflight for legacy clients.
+    /// Request schemas and strictness are preserved; basic tool validation and
+    /// downstream processor/backend constraints remain active.
+    pub const DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: &str =
+        "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
+
     /// Master switch for the frontend's HTTP admin API surface.
     /// The admin API is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
@@ -1168,6 +1174,7 @@ mod tests {
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+            llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,

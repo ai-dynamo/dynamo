@@ -13,8 +13,9 @@ use dynamo_llm::{
 };
 use dynamo_runtime::{
     config::environment_names::llm::{
-        DYN_DISABLE_FRONTEND_NVEXT, DYN_ENABLE_ANTHROPIC_API,
-        DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+        DYN_DISABLE_FRONTEND_NVEXT, DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
+        DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+        DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
     },
     error::{DynamoError, ErrorType as DynamoErrorType},
 };
@@ -33,10 +34,11 @@ mod scripted_chat_engine;
 use http_harness::{HarnessService, MODEL, load_agent_fixture};
 use scripted_chat_engine::{Script, ScriptedChatEngine};
 
-const BASE_ENV: [(&str, Option<&str>); 3] = [
+const BASE_ENV: [(&str, Option<&str>); 4] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
     (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
+    (DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, None),
 ];
 
 fn nvext_disabled_env() -> Vec<(&'static str, Option<&'static str>)> {
@@ -396,6 +398,156 @@ async fn strict_tool_schema_rejected_before_dispatch() {
                 &[(ErrorType::Validation, 6), (ErrorType::Internal, 0)],
             );
         }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_compatibility_preserves_submitted_functions_across_adapters() {
+    let missing_required_parameters = json!({
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "default": 5}
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    });
+    let legacy_parameters = json!({
+        "type": "object",
+        "properties": {
+            "value": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+            "options": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "default": 5}}
+            }
+        },
+        "required": []
+    });
+
+    let mut legacy_requests = strict_tool_requests(json!({
+        "name": "search", "strict": true, "parameters": legacy_parameters
+    }))
+    .to_vec();
+    legacy_requests.push((
+        "/v1/messages",
+        json!({
+            "model": MODEL, "max_tokens": 64,
+            "messages": [{"role": "user", "content": "ping"}],
+            "tools": [{
+                "name": "search", "strict": true,
+                "input_schema": legacy_parameters
+            }]
+        }),
+    ));
+    let cases = [
+        (
+            strict_tool_requests(json!({
+                "name": "search", "strict": true,
+                "parameters": missing_required_parameters
+            }))
+            .to_vec(),
+            missing_required_parameters,
+            "must include property 'limit'",
+        ),
+        (legacy_requests, legacy_parameters, "additionalProperties"),
+    ];
+    let accepted_request_count = cases
+        .iter()
+        .map(|(requests, _, _)| requests.len() * 2)
+        .sum::<usize>();
+    let script = load_agent_fixture("text.sse").await.unwrap();
+
+    for setting in [None, Some("0"), Some("1")] {
+        let mut env = BASE_ENV;
+        env.iter_mut()
+            .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
+            .unwrap()
+            .1 = setting;
+        temp_env::async_with_vars(env, async {
+            let scripts = if setting == Some("1") {
+                vec![script.clone(); accepted_request_count]
+            } else {
+                Vec::new()
+            };
+            let svc = HarnessService::start(scripts).await;
+            for (requests, parameters, rejection_message) in &cases {
+                for (path, body) in requests {
+                    for stream in [false, true] {
+                        let mut body = (*body).clone();
+                        body["stream"] = json!(stream);
+                        let response = post_json(&svc, path, body).await;
+                        if setting != Some("1") {
+                            if *path == "/v1/messages" {
+                                assert_anthropic_error(
+                                    response,
+                                    ExpectedError::Validation,
+                                    rejection_message,
+                                )
+                                .await;
+                            } else {
+                                assert_openai_error(
+                                    response,
+                                    ExpectedError::Validation,
+                                    rejection_message,
+                                )
+                                .await;
+                            }
+                            assert!(svc.engine.take_requests().await.is_empty());
+                            continue;
+                        }
+
+                        assert_eq!(response.status(), reqwest::StatusCode::OK);
+                        bounded(response.bytes()).await.unwrap();
+                        let requests = svc.engine.take_requests().await;
+                        assert_eq!(requests.len(), 1);
+                        let tools = requests[0].inner.tools.as_ref().unwrap();
+                        assert_eq!(tools.len(), 1);
+                        assert_eq!(tools[0].function.name, "search");
+                        assert_eq!(tools[0].function.strict, Some(true));
+                        assert_eq!(tools[0].function.parameters.as_ref(), Some(parameters));
+                    }
+                }
+            }
+            assert_eq!(svc.engine.remaining_scripts().await, 0);
+            svc.shutdown().await;
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_compatibility_retains_basic_validation() {
+    let mut env = BASE_ENV;
+    env.iter_mut()
+        .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
+        .unwrap()
+        .1 = Some("1");
+    temp_env::async_with_vars(env, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        for (function, message) in [
+            (
+                json!({"name": "invalid name", "strict": true, "parameters": {}}),
+                "invalid name",
+            ),
+            (
+                json!({"name": "search", "strict": true, "parameters": []}),
+                "must be a JSON Schema object",
+            ),
+        ] {
+            for (path, body) in strict_tool_requests(function) {
+                for stream in [false, true] {
+                    let mut body = body.clone();
+                    body["stream"] = json!(stream);
+                    let response = post_json(&svc, path, body).await;
+                    assert_openai_error(response, ExpectedError::Validation, message).await;
+                }
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;
     })
     .await;
