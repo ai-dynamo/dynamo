@@ -13,6 +13,7 @@
 *.fatbin            binary
 *.mp4               binary
 *.woff2             binary -eol
+*.binpb             binary
 
 # Exclude test data files from linguist language detection
 lib/llm/tests/data/** linguist-vendored

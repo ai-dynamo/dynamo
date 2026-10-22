@@ -17,6 +17,7 @@ mod engine;
 mod handoff;
 mod model;
 mod standby;
+pub mod topology;
 
 /// The generated `openengine.v1` types, reused from the TensorRT-LLM sidecar.
 ///

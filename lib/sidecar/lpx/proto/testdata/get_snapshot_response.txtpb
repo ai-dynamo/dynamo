@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# proto-file: lpx/topology/v1/topology.proto
+# proto-message: lpx.topology.v1.GetSnapshotResponse
+#
+# A complete hybrid allocation: sparse partition IDs, a single-host partition
+# that owns sliding-window attention state, a two-host partition that executes
+# a chain with its member, and an address given as an IP literal. See
+# ../README.md for how get_snapshot_response.binpb is generated from this file.
+
+snapshot {
+  identity {
+    deployment: "0d4c7a9e-5b1f-4c38-9a62-3f1e2d7c8b90"
+    allocation: "llama-0-afd-0"
+    build: "main/llama3_2-1b-lpx-lp20/7a8a706a"
+  }
+  partitions {
+    partition_id: 1
+    execution {
+      node_count: 1
+      control {
+        host: "llama-0-afd-0-agt-0.llama-0.dynamo.svc.cluster.local"
+        port: 19877
+        protocol: PROTOCOL_HYDRA_CONTROL
+      }
+      state_ingress {
+        host: "llama-0-afd-0-agt-0.llama-0.dynamo.svc.cluster.local"
+        port: 19880
+        protocol: PROTOCOL_HYDRA_STATE
+      }
+    }
+  }
+  partitions {
+    partition_id: 4
+    execution {
+      node_count: 2
+      control {
+        host: "llama-0-afd-0-agt-1.llama-0.dynamo.svc.cluster.local"
+        port: 19877
+        protocol: PROTOCOL_HYDRA_CONTROL
+      }
+    }
+  }
+  partitions {
+    partition_id: 5
+    chain_member {
+      owner_partition_id: 4
+    }
+  }
+  partitions {
+    partition_id: 300
+    execution {
+      node_count: 1
+      control {
+        host: "10.0.3.17"
+        port: 19877
+        protocol: PROTOCOL_HYDRA_CONTROL
+      }
+    }
+  }
+}
