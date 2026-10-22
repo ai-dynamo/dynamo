@@ -809,7 +809,11 @@ impl Client {
         }
 
         self.routing_instances.report_instance_down(instance_id);
-        tracing::debug!("inhibiting instance {instance_id}");
+        tracing::debug!(
+            instance_id,
+            routing_event = "worker_inhibited",
+            "inhibiting instance"
+        );
     }
 
     /// Replace the set of overloaded instances reported by the worker monitor.
@@ -825,8 +829,8 @@ impl Client {
         self.routing_instances.overload_reconciliation_needed()
     }
 
-    /// Mark an instance overloaded immediately after a worker-scoped
-    /// `WorkerOverloaded` response. This is backpressure, not a fault, so it
+    /// Mark an instance overloaded immediately after a `WorkerOverloaded`
+    /// response for the whole worker. This is backpressure, not a fault, so it
     /// does not call `report_instance_down`. A fresh worker-monitor publication
     /// clears this hint early. Its bounded lease otherwise permits a recovery probe.
     pub fn mark_overloaded_immediate(&self, instance_id: u64) {
@@ -834,6 +838,7 @@ impl Client {
             .mark_overloaded_immediate(instance_id);
         tracing::debug!(
             instance_id,
+            routing_event = "worker_overloaded",
             "marking instance overloaded with a bounded backpressure lease"
         );
     }
