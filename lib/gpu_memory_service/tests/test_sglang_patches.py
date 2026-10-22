@@ -3,8 +3,9 @@
 
 """CPU-only tests for the SGLang GMS patches.
 
-Covers ModelRunner memory accounting and the torch_memory_saver hook_mode
-claim that decides whether GMS installs its own impl.
+Covers ModelRunner memory accounting, the XPU KV sizing probe rebind, and
+the torch_memory_saver hook_mode claim that decides whether GMS installs its
+own impl.
 """
 
 import sys
@@ -115,6 +116,77 @@ def test_patch_model_runner_skips_when_upstream_accounts(monkeypatch):
 
     assert runner.alloc_memory_pool() == 12.0
     assert runner.pre_model_load_memory == 12.0
+
+
+def _install_probe_modules(monkeypatch, free_gb):
+    """Fake the SGLang modules that define and from-import the probe."""
+
+    def get_available_gpu_memory(*args, **kwargs):
+        return free_gb
+
+    modules = {}
+    for name in (
+        "sglang.srt.utils.common",  # definition site
+        "sglang.srt.utils",  # `from .common import *` re-export
+        "sglang.srt.fake_consumer",  # an existing from-import binding
+    ):
+        module = ModuleType(name)
+        module.get_available_gpu_memory = get_available_gpu_memory
+        monkeypatch.setitem(sys.modules, name, module)
+        modules[name] = module
+
+    unrelated = ModuleType("sglang.srt.fake_unrelated")
+    unrelated.get_available_gpu_memory = lambda *args, **kwargs: -1.0
+    monkeypatch.setitem(sys.modules, unrelated.__name__, unrelated)
+    modules[unrelated.__name__] = unrelated
+
+    monkeypatch.setattr(patches, "_kv_cache_sizing_patched", False)
+    return get_available_gpu_memory, modules
+
+
+def test_kv_cache_sizing_rebinds_every_reference_on_xpu(monkeypatch):
+    """Every binding of the probe gets the GMS adjustment, not a fixed list.
+
+    Covers the definition site, a package re-export, an existing from-import
+    binding and a from-import executed after the patch. A different function
+    that happens to share the name is left alone.
+    """
+    original, modules = _install_probe_modules(monkeypatch, free_gb=10.0)
+    monkeypatch.setattr(gms_vmm, "get_vmm_device_type", lambda: VMMDeviceType.XPU)
+    impl = SimpleNamespace(preloaded_weights_bytes=0)
+    monkeypatch.setattr(patches, "get_gms_memory_saver_impl", lambda: impl)
+
+    patches.patch_kv_cache_sizing_for_gms()
+
+    late = {}
+    exec("from sglang.srt.utils import get_available_gpu_memory", late)
+    probes = [
+        m.get_available_gpu_memory
+        for n, m in modules.items()
+        if n != "sglang.srt.fake_unrelated"
+    ]
+    probes.append(late["get_available_gpu_memory"])
+    assert all(probe is not original for probe in probes)
+
+    # Writer / pre-load: nothing imported yet, so no adjustment.
+    assert [probe() for probe in probes] == [10.0] * len(probes)
+
+    # Reader after import: GMS-resident weights are subtracted everywhere.
+    impl.preloaded_weights_bytes = 2 << 30
+    assert [probe() for probe in probes] == [8.0] * len(probes)
+
+    assert modules["sglang.srt.fake_unrelated"].get_available_gpu_memory() == -1.0
+
+
+def test_kv_cache_sizing_is_noop_on_cuda(monkeypatch):
+    original, modules = _install_probe_modules(monkeypatch, free_gb=10.0)
+    monkeypatch.setattr(gms_vmm, "get_vmm_device_type", lambda: VMMDeviceType.CUDA)
+
+    patches.patch_kv_cache_sizing_for_gms()
+
+    for name, module in modules.items():
+        if name != "sglang.srt.fake_unrelated":
+            assert module.get_available_gpu_memory is original
 
 
 class _FakeGMSImpl:
