@@ -52,16 +52,8 @@ pub(super) async fn run_event_processor_loop<
                 };
                 let (event_batch, recovery_done) = match event_batch.into() {
                     super::PublisherInput::Events(events) => (events, None),
-                    super::PublisherInput::Recovery(events, done) => {
-                        // Finish any ordinary tail before entering the strict path.
-                        let mut output = Vec::new();
-                        batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
-                        publish_output(&publisher, worker_id, &output).await;
-                        (events, Some(done))
-                    }
+                    super::PublisherInput::Recovery(events, done) => (events, Some(done)),
                 };
-                // Recovery reuses batching and dedup, then applies with acknowledgements below.
-                let apply_indexer = if recovery_done.is_some() { None } else { local_indexer.clone() };
                 let mut output = Vec::new();
 
                 // Process the complete source list before returning to `select!` so
@@ -104,7 +96,7 @@ pub(super) async fn run_event_processor_loop<
                             batching_state
                                 .push(
                                     placement_event,
-                                    &apply_indexer,
+                                    &local_indexer,
                                     worker_id,
                                     &mut dedup,
                                     &mut output,
@@ -112,7 +104,7 @@ pub(super) async fn run_event_processor_loop<
                                 .await;
                         }
                         KvCacheEventData::Cleared => {
-                            batching_state.flush(&apply_indexer, worker_id, &mut dedup, &mut output).await;
+                            batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                             let event = placement_event.event;
                             dedup.clear_rank_domain(
                                 event.dp_rank,
@@ -120,7 +112,7 @@ pub(super) async fn run_event_processor_loop<
                                 EventDedupPolicy::RefCounted,
                             );
                             let applied = emit(
-                                &apply_indexer,
+                                &local_indexer,
                                 worker_id,
                                 storage_tier,
                                 residency_domain,
@@ -164,16 +156,15 @@ pub(super) async fn run_event_processor_loop<
                         Some(ms) => batching_state.is_timeout_elapsed(ms),
                     })
                 {
-                    batching_state.flush(&apply_indexer, worker_id, &mut dedup, &mut output).await;
+                    batching_state.flush(&local_indexer, worker_id, &mut dedup, &mut output).await;
                 }
                 if let Some(done) = recovery_done {
-                    let result = async {
-                        let indexer = local_indexer.as_ref().ok_or_else(|| anyhow::anyhow!("KV recovery requires a local indexer"))?;
-                        for event in &output {
-                            indexer.apply_recovery_event_with_buffer(event.clone()).await?;
-                        }
-                        Ok(())
-                    }.await;
+                    // Recovery applies events like live ingestion, then waits for the index to finish them.
+                    let result = tokio::select! {
+                        biased;
+                        _ = cancellation_token.cancelled() => Err(anyhow::anyhow!("KV event publisher cancelled during recovery")),
+                        result = flush_local_indexer(&local_indexer) => result,
+                    };
                     if let Err(error) = &result {
                         tracing::error!(%error, "KV recovery application failed; stopping KV event publisher");
                     }
@@ -197,6 +188,13 @@ pub(super) async fn run_event_processor_loop<
             }
         }
     }
+}
+
+async fn flush_local_indexer(local_indexer: &Option<Arc<LocalKvIndexer>>) -> anyhow::Result<()> {
+    let indexer = local_indexer
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("KV recovery requires a local indexer"))?;
+    Ok(indexer.flush_and_wait().await?)
 }
 
 async fn publish_output<P: RouterEventBatchSink>(

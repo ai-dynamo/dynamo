@@ -22,7 +22,7 @@ mod test_event_processing {
 
     #[test]
     fn test_publish_batch_preserves_optional_session_ids() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
             source: None,
@@ -30,6 +30,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            processor_handle: tokio::sync::Mutex::new(None),
         };
         publisher
             .publish_batch_with_session_ids(
@@ -54,7 +55,7 @@ mod test_event_processing {
                     .collect(),
             )
             .unwrap();
-        let batch = rx.try_recv().unwrap();
+        let batch = rx.try_recv().unwrap().into_events();
         assert_eq!(batch.len(), 3);
         for (event, session) in batch.into_iter().zip([Some("a"), Some("b"), None]) {
             let event = event.into_router_event().unwrap();
@@ -2434,11 +2435,15 @@ mod event_processor_tests {
     }
 
     #[tokio::test]
-    async fn recovery_ack_waits_for_local_application_and_propagates_failure() {
+    async fn recovery_ack_waits_for_the_index_like_live_ingestion() {
         use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
-        for is_failure in [false, true] {
+        for (is_rejected, is_offline) in [(false, false), (true, false), (false, true)] {
+            let indexer_cancel = CancellationToken::new();
+            if is_offline {
+                indexer_cancel.cancel();
+            }
             let indexer = Arc::new(LocalKvIndexer::new(
-                CancellationToken::new(),
+                indexer_cancel,
                 4,
                 Arc::new(KvIndexerMetrics::new_unregistered()),
                 16,
@@ -2456,8 +2461,8 @@ mod event_processor_tests {
                 DEFAULT_MAX_BATCH_BLOCKS,
             ));
             let (done, ack) = tokio::sync::oneshot::channel();
-            // A missing parent reaches the physical index but cannot be applied.
-            let parent = is_failure.then_some(999);
+            // A missing parent reaches the index and is rejected there, as on the live path.
+            let parent = is_rejected.then_some(999);
             tx.send(PublisherInput::Recovery(
                 local_gpu_batch(vec![stored_event(0, parent, 10, 0)]),
                 done,
@@ -2467,19 +2472,19 @@ mod event_processor_tests {
                 .await
                 .unwrap()
                 .unwrap();
-            if is_failure {
+            if is_offline {
                 assert!(result.is_err());
                 // The listener must still be able to publish its terminal status.
                 assert!(!cancel.is_cancelled());
             } else {
                 result.unwrap();
-                // No flush/sleep: acknowledgement means physical mutation finished,
+                // No flush/sleep: acknowledgement means the index finished the batch,
                 // even with an otherwise long publisher batching timeout.
                 let matches = indexer
                     .find_matches(vec![LocalBlockHash(10)])
                     .await
                     .unwrap();
-                assert!(!matches.scores.is_empty());
+                assert_eq!(matches.scores.is_empty(), is_rejected);
             }
             drop(tx);
             task.await.unwrap();

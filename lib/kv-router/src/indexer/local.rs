@@ -390,25 +390,12 @@ impl LocalKvIndexer {
         drop(unusable_snapshot);
     }
 
-    /// Applies one recovery event and reports its failure; ordinary admission stays asynchronous.
-    pub async fn apply_recovery_event_with_buffer(
-        &self,
-        event: RouterEvent,
-    ) -> Result<(), KvRouterError> {
-        let targets_primary = event
-            .targets_primary()
-            .map_err(|e| KvRouterError::Unsupported(e.to_string()))?;
-        let result = if matches!(event.event.data, KvCacheEventData::Cleared) {
-            self.apply_event_by_tier(&event).await
-        } else if targets_primary {
-            self.indexer.apply_event_and_wait(event.clone()).await
-        } else {
-            self.get_or_create_lower_tier_indexer(event.storage_tier)
-                .apply_event_and_wait(event.clone())
-                .await
-        };
-        result?;
-        self.record_event(event);
+    /// Wait until every admitted event has been applied on every tier; event errors stay logged.
+    pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
+        self.indexer.flush_and_wait().await?;
+        for indexer in self.all_lower_tier_indexers() {
+            indexer.flush_and_wait().await?;
+        }
         Ok(())
     }
 
