@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" width="760" height="480" role="img" aria-labelledby="title desc">
   <title id="title">trtllm-multinode-dp</title>
-  <desc id="desc">Planned TensorRT-LLM data parallelism across two nodes, not supported yet. Today the TensorRT-LLM sidecar registers one logical worker, rank 0, and rejects requests that target a nonzero DP rank. TensorRT-LLM places requests across its own attention-DP ranks inside the engine; Dynamo does not route to those ranks. The TensorRT-LLM sidecar does not publish KV events. The drawing shows the intended layout: a leader sidecar on node 0 that serves requests and a follower on node 1, with TensorRT-LLM on both nodes running collectives with each other.</desc>
+  <desc id="desc">Experimental TensorRT-LLM data parallelism across two nodes. The Dynamo Frontend selects an attention-DP rank and sends requests to the leader sidecar on node 0, which forwards the selected rank to OpenEngine when the engine advertises rank targeting. Sidecars on both nodes relay local KV events; the follower sidecar does not serve inference requests. TensorRT-LLM on both nodes dispatches requests between nodes and runs collectives with each other.</desc>
 
   <defs>
     <linearGradient id="green-fill" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -228,7 +228,7 @@
     }
   </style>
   <rect x="360" y="2" width="240" height="18" rx="9" class="pill-danger"/>
-  <text x="480" y="11" class="conn-label label-danger" dominant-baseline="central" style="font-size:11px;">PLANNED: NOT SUPPORTED YET</text>
+  <text x="480" y="11" class="conn-label label-danger" dominant-baseline="central" style="font-size:11px;">EXPERIMENTAL</text>
   <rect x="232" y="24" width="496" height="184" rx="14" fill="var(--surface-zone)" stroke="var(--border-zone)" stroke-width="1.0" stroke-dasharray="6 3" filter="url(#blue-glow)"/>
   <text x="242.0" y="37.5" class="zone-label" dominant-baseline="central" style="fill:var(--text-muted);text-anchor:start;font-size:11px;">Node 0</text>
   <rect x="232" y="272" width="496" height="184" rx="14" fill="var(--surface-zone)" stroke="var(--border-zone)" stroke-width="1.0" stroke-dasharray="6 3" filter="url(#blue-glow)"/>

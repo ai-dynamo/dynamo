@@ -91,4 +91,4 @@ node holds the remaining TP ranks.
 
 The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing.
 
-![Planned TensorRT-LLM data parallelism across two nodes, not supported yet. Today the TensorRT-LLM sidecar registers one logical worker, rank 0, and rejects requests that target a nonzero DP rank. TensorRT-LLM places requests across its own attention-DP ranks inside the engine; Dynamo does not route to those ranks.](../../../docs/fern/assets/img/sidecar-trtllm-multinode-dp.svg)
+![Experimental TensorRT-LLM data parallelism across two nodes. The Dynamo Frontend selects an attention-DP rank and sends requests to the leader sidecar on node 0, which forwards the selected rank to OpenEngine when the engine advertises rank targeting. Sidecars on both nodes relay local KV events; the follower sidecar does not serve inference requests.](../../../docs/fern/assets/img/sidecar-trtllm-multinode-dp.svg)
