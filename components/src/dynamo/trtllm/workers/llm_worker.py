@@ -539,9 +539,14 @@ async def init_llm_worker(
             ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         event_buffer_max_size = int(current_kv_config["event_buffer_max_size"])
 
-        # The polling publisher decodes KV cache manager v1 events only. Keep v1
-        # unless the user chose a manager explicitly.
-        current_kv_config.setdefault("use_kv_cache_manager_v2", False)
+        # The polling publisher decodes KV cache manager v1 events only.
+        use_v2 = current_kv_config.setdefault("use_kv_cache_manager_v2", False)
+        if use_v2 is not False:
+            raise ValueError(
+                f"kv_cache_config.use_kv_cache_manager_v2={use_v2!r} is not supported "
+                "with polled KV events; set it to false, or enable streaming KV "
+                "events via kv_cache_config.kv_events_config"
+            )
 
         # TRT-LLM enables block reuse by default; warn only when it is explicitly
         # disabled, since without reuse events the router has no cache overlap to
