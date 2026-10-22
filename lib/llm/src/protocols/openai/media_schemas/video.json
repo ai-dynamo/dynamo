@@ -258,7 +258,8 @@
               "null"
             ],
             "format": "int32",
-            "description": "The number of denoising steps. More steps usually lead to higher quality at the expense of slower inference."
+            "description": "The number of denoising steps, at least 1. More steps usually lead to higher quality at the expense of slower inference.",
+            "minimum": 1
           },
           "guidance_scale": {
             "type": [

@@ -3452,34 +3452,46 @@ impl AsyncEngine<SingleIn<NvCreateImageRequest>, ManyOut<Annotated<NvImagesRespo
     }
 }
 
-/// The frontend owns the `n` range rule (1 to 10). A value outside the range
+/// The frontend owns the `n` range rule (1 to 10) and the
+/// `nvext.num_inference_steps` lower bound. A value outside the range
 /// returns a 400 that states the rule. The engine does not see the request.
 #[tokio::test]
-async fn test_images_n_out_of_range_returns_400() {
+async fn test_images_out_of_range_values_return_400() {
     let (port, token, task) = start_images_service(Arc::new(UncalledImagesEngine {})).await;
 
-    let response = reqwest::Client::new()
-        .post(format!("http://localhost:{}/v1/images/generations", port))
-        .json(&serde_json::json!({
-            "model": "image-model",
-            "prompt": "a red apple",
-            "n": 0,
-        }))
-        .send()
-        .await
-        .unwrap();
+    for (body, rule) in [
+        (
+            serde_json::json!({"model": "image-model", "prompt": "a red apple", "n": 0}),
+            "n must be between 1 and 10",
+        ),
+        (
+            serde_json::json!({
+                "model": "image-model",
+                "prompt": "a red apple",
+                "nvext": {"num_inference_steps": 0},
+            }),
+            "num_inference_steps must be at least 1",
+        ),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("http://localhost:{}/v1/images/generations", port))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
 
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "an n outside 1-10 must return HTTP 400; got {status}, body: {text}"
-    );
-    assert!(
-        text.contains("n must be between 1 and 10"),
-        "expected the validation message to state the rule; got: {text}"
-    );
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{body} must return HTTP 400; got {status}, body: {text}"
+        );
+        assert!(
+            text.contains(rule),
+            "expected the validation message for {body} to state the rule; got: {text}"
+        );
+    }
 
     token.cancel();
     task.await.unwrap().unwrap();
@@ -3501,9 +3513,9 @@ impl AsyncEngine<SingleIn<NvCreateVideoRequest>, ManyOut<Annotated<NvVideosRespo
     }
 }
 
-/// The frontend owns the `seconds` and `nvext.fps` lower bounds. A value
-/// below 1 returns a 400 that states the rule. The engine does not see the
-/// request.
+/// The frontend owns the `seconds`, `nvext.fps`, and
+/// `nvext.num_inference_steps` lower bounds. A value below 1 returns a 400
+/// that states the rule. The engine does not see the request.
 #[tokio::test]
 async fn test_videos_non_positive_counts_return_400() {
     let (listener, port) = bind_random_port().await;
@@ -3533,6 +3545,14 @@ async fn test_videos_non_positive_counts_return_400() {
         (
             serde_json::json!({"model": "video-model", "prompt": "cat", "nvext": {"fps": 0}}),
             "fps must be at least 1",
+        ),
+        (
+            serde_json::json!({
+                "model": "video-model",
+                "prompt": "cat",
+                "nvext": {"num_inference_steps": 0},
+            }),
+            "num_inference_steps must be at least 1",
         ),
     ] {
         let response = reqwest::Client::new()

@@ -88,6 +88,7 @@ pub struct NvCreateImageRequest {
     pub input_reference: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(nested)]
     pub nvext: Option<NvExt>,
 
     /// Worker-boundary contract, not a public field: the frontend moves
@@ -551,6 +552,33 @@ mod tests {
                 message.contains("n must be between 1 and 10"),
                 "expected the error for {json} to state the rule; got: {message}"
             );
+        }
+    }
+
+    #[test]
+    fn image_request_num_inference_steps_bound() {
+        // Zero denoising steps is no generation. An absent value is the
+        // worker's default; 1 is the smallest valid value.
+        for (json, rule) in [
+            (r#"{"prompt":"a cat"}"#, None),
+            (
+                r#"{"prompt":"a cat","nvext":{"num_inference_steps":1}}"#,
+                None,
+            ),
+            (
+                r#"{"prompt":"a cat","nvext":{"num_inference_steps":0}}"#,
+                Some("num_inference_steps must be at least 1"),
+            ),
+        ] {
+            let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
+            match (ValidateRequest::validate(&req), rule) {
+                (Ok(()), None) => {}
+                (Err(err), Some(rule)) => assert!(
+                    err.to_string().contains(rule),
+                    "expected the error for {json} to state the rule; got: {err}"
+                ),
+                (result, rule) => panic!("{json}: expected {rule:?}, got {result:?}"),
+            }
         }
     }
 

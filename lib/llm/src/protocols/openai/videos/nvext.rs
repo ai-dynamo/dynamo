@@ -31,8 +31,10 @@ pub struct NvExt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_prompt: Option<String>,
 
-    /// The number of denoising steps. More steps usually lead to higher quality at the expense of slower inference.
+    /// The number of denoising steps, at least 1. More steps usually lead to higher quality at the expense of slower inference.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
+    #[validate(range(min = 1, message = "num_inference_steps must be at least 1"))]
     pub num_inference_steps: Option<i32>,
 
     /// The CFG scale. Higher values usually lead to more coherent output.

@@ -431,7 +431,7 @@ mod tests {
         // Absent counts are the worker's defaults; 1 is the smallest valid value.
         for json in [
             r#"{"prompt":"cat","model":"wan"}"#,
-            r#"{"prompt":"cat","model":"wan","seconds":1,"nvext":{"fps":1,"num_frames":1}}"#,
+            r#"{"prompt":"cat","model":"wan","seconds":1,"nvext":{"fps":1,"num_frames":1,"num_inference_steps":1}}"#,
         ] {
             let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
             assert!(
@@ -455,6 +455,10 @@ mod tests {
             (
                 r#"{"prompt":"cat","model":"wan","nvext":{"num_frames":-1}}"#,
                 "num_frames must be at least 1",
+            ),
+            (
+                r#"{"prompt":"cat","model":"wan","nvext":{"num_inference_steps":0}}"#,
+                "num_inference_steps must be at least 1",
             ),
         ] {
             let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();

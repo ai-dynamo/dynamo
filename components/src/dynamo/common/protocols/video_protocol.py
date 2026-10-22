@@ -61,9 +61,9 @@ class VideoNvExt(BaseModel):
     """
     A text description of the undesired video content.
     """
-    num_inference_steps: int | None = None
+    num_inference_steps: conint(ge=1) | None = None
     """
-    The number of denoising steps. More steps usually lead to higher quality at the expense of slower inference.
+    The number of denoising steps, at least 1. More steps usually lead to higher quality at the expense of slower inference.
     """
     guidance_scale: float | None = None
     """

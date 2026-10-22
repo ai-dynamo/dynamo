@@ -45,9 +45,9 @@ class ImageNvExt(BaseModel):
     """
     A text description of the undesired image(s).
     """
-    num_inference_steps: conint(ge=0) | None = None
+    num_inference_steps: conint(ge=1) | None = None
     """
-    The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference.
+    The number of denoising steps, at least 1. More denoising steps usually lead to a higher quality image at the expense of slower inference.
     """
     guidance_scale: float | None = None
     """
