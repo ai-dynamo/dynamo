@@ -136,7 +136,7 @@ runs:
         echo "run_compliance=${RUN_COMPLIANCE}" >> $GITHUB_OUTPUT
 
     - name: Initialize Dynamo Builder
-      uses: ai-dynamo/.github/.github/actions/init-dynamo-builder@dillon/ops-8928-enable-kvcr-ci-image-builds-using-shared-buildkit
+      uses: ai-dynamo/.github/.github/actions/init-dynamo-builder@e8cb76eeca91bbac2ab5c2702bd8bd629b20dd3a  # ai-dynamo/.github#9
       with:
         builder_name: ${{ inputs.builder_name }}
         flavor: general

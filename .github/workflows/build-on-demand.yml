@@ -160,7 +160,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Initialize Dynamo Builder
-        uses: ai-dynamo/.github/.github/actions/init-dynamo-builder@dillon/ops-8928-enable-kvcr-ci-image-builds-using-shared-buildkit
+        uses: ai-dynamo/.github/.github/actions/init-dynamo-builder@e8cb76eeca91bbac2ab5c2702bd8bd629b20dd3a  # ai-dynamo/.github#9
         with:
           builder_name: ${{ needs.init.outputs.builder_name }}
           flavor: general
