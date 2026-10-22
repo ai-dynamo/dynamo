@@ -21,10 +21,11 @@ package controller
 
 import (
 	"context"
-	"strconv"
+	"testing"
+	"time"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	. "github.com/onsi/ginkgo/v2"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,90 +34,121 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var _ = Describe("DynamoGraphDeploymentRequest v1beta2 controller", func() {
-	var reconciler *DynamoGraphDeploymentRequestV1beta2Reconciler
+// This test runs the controller under a real manager, so only the watch events (a Request edit, a Run
+// status update, a deleted Run) can make it reconcile. It fails if SetupWithManager loses the Owns
+// watch, an event predicate drops Run status updates, or the owner mapping breaks. It also covers the
+// API server and admission side: the Request is created model-only and admission supplies the image
+// and the hardware.
+func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
+	g := NewWithT(t)
+	env := sharedEnv.ForTest(t)
+	c := env.Client()
+	ctx := context.Background()
 
-	BeforeEach(func() {
-		reconciler = &DynamoGraphDeploymentRequestV1beta2Reconciler{Client: k8sClient}
+	env.StartManager(func(mgr ctrl.Manager) error {
+		return (&DynamoGraphDeploymentRequestV1beta2Reconciler{
+			Client:        mgr.GetClient(),
+			Config:        env.OperatorConfig(),
+			RuntimeConfig: env.RuntimeConfig(),
+		}).SetupWithManager(mgr)
 	})
 
-	reconcile := func(ctx context.Context, key types.NamespacedName) {
-		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-		Expect(err).NotTo(HaveOccurred())
+	const timeout = 30 * time.Second
+	const poll = 200 * time.Millisecond
+
+	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "watched", Namespace: env.Namespace()},
+		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+				Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
+			},
+		},
+	}
+	key := client.ObjectKeyFromObject(request)
+	getRequest := func(g Gomega) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
+		live := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+		g.Expect(c.Get(ctx, key, live)).To(Succeed())
+		return live
+	}
+	accepted := func(live *nvidiacomv1beta2.DynamoGraphDeploymentRequest) *metav1.Condition {
+		return meta.FindStatusCondition(live.Status.Conditions, DGDRAcceptedConditionV1beta2)
+	}
+	getRun := func(g Gomega, name string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+		run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
+		g.Expect(c.Get(ctx, types.NamespacedName{Namespace: env.Namespace(), Name: name}, run)).To(Succeed())
+		return run
 	}
 
-	It("Should create one Run per generation through the API server", func() {
-		ctx := context.Background()
-		dgdr := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-			ObjectMeta: metav1.ObjectMeta{Name: "v1beta2-run-per-generation", Namespace: envtestNamespace},
-			Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
-				NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
-					Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
-				},
-			},
-		}
+	t.Log("Creating the Request produces its first Run without a direct Reconcile call")
+	g.Expect(c.Create(ctx, request)).To(Succeed())
+	var firstName string
+	g.Eventually(func(g Gomega) {
+		live := getRequest(g)
+		g.Expect(live.Status.ActiveRunRef).NotTo(BeNil())
+		g.Expect(accepted(live)).NotTo(BeNil())
+		g.Expect(accepted(live).Status).To(Equal(metav1.ConditionTrue))
+		g.Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
+		firstName = live.Status.ActiveRunRef.Name
+	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
-		By("Creating a native v1beta2 request; admission supplies the image and the hardware")
-		Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-		defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
-		key := client.ObjectKeyFromObject(dgdr)
+	first := getRun(g, firstName)
+	g.Expect(metav1.IsControlledBy(first, getRequest(g))).To(BeTrue())
+	g.Expect(first.Spec.Hardware).NotTo(BeNil())
+	g.Expect(first.Spec.AISimulate.Image).To(Equal(controllerAISimulateImage))
+	g.Expect(first.Spec.AISimulate.VersionOverride).To(Equal("1.2.0"))
+	input, err := aisimulate.InputForRun(first)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(input).To(HaveKey("search_space"))
 
-		By("Reconciling creates the Run of generation 1")
-		reconcile(ctx, key)
-		live := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
-		Expect(k8sClient.Get(ctx, key, live)).Should(Succeed())
-		firstName := dgdr.Name + "-" + strconv.FormatInt(live.Generation, 10)
-		first := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: envtestNamespace, Name: firstName}, first)).Should(Succeed())
-		Expect(metav1.IsControlledBy(first, live)).To(BeTrue())
-		Expect(first.Spec.Hardware).NotTo(BeNil())
-		Expect(first.Spec.AISimulate.Image).To(Equal(controllerAISimulateImage))
-		Expect(first.Spec.AISimulate.VersionOverride).To(Equal("1.2.0"))
-		Expect(first.Spec.AISimulate.Parameters).NotTo(BeNil())
-
-		By("Reading the status the controller wrote through the status subresource")
-		Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
-		Expect(live.Status.ActiveRunRef).NotTo(BeNil())
-		Expect(live.Status.ActiveRunRef.Name).To(Equal(firstName))
-		condition := meta.FindStatusCondition(live.Status.Conditions, DGDRReconciledConditionV1beta2)
-		Expect(condition).NotTo(BeNil())
-		Expect(condition.Status).To(Equal(metav1.ConditionTrue))
-		Expect(live.Status.V1Beta1).To(BeNil())
-
-		By("Reconciling again creates nothing")
-		reconcile(ctx, key)
-		runs := &nvidiacomv1beta2.DynamoGraphDeploymentRunList{}
-		Expect(k8sClient.List(ctx, runs, client.InNamespace(envtestNamespace))).Should(Succeed())
-		Expect(runs.Items).To(HaveLen(1))
-
-		By("Changing the spec while the Run is active starts nothing and says why")
-		Expect(k8sClient.Get(ctx, key, live)).Should(Succeed())
+	t.Log("Editing the Request while its Run is active is reported and starts nothing")
+	g.Eventually(func(g Gomega) {
+		live := getRequest(g)
 		live.Spec.Model.Name = "Qwen/Qwen3-30B-A3B"
-		Expect(k8sClient.Update(ctx, live)).Should(Succeed())
-		reconcile(ctx, key)
-		Expect(k8sClient.List(ctx, runs, client.InNamespace(envtestNamespace))).Should(Succeed())
-		Expect(runs.Items).To(HaveLen(1))
-		Expect(k8sClient.Get(ctx, key, live)).Should(Succeed())
-		Expect(live.Generation).To(BeNumerically(">", 1))
-		condition = meta.FindStatusCondition(live.Status.Conditions, DGDRReconciledConditionV1beta2)
-		Expect(condition).NotTo(BeNil())
-		Expect(condition.Reason).To(Equal(dgdrReasonWaitingForActiveRun))
+		g.Expect(c.Update(ctx, live)).To(Succeed())
+	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
+	g.Eventually(func(g Gomega) {
+		live := getRequest(g)
+		condition := accepted(live)
+		g.Expect(condition).NotTo(BeNil())
+		g.Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+		g.Expect(condition.Reason).To(Equal(dgdrReasonWaitingForActiveRun))
+		g.Expect(condition.ObservedGeneration).To(Equal(live.Generation))
+	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
-		By("Finishing the first Run lets the next generation start")
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(first), first)).Should(Succeed())
-		first.Status.Phase = nvidiacomv1beta2.DGDRRunPhase(dgdrRunPhaseSucceeded)
-		Expect(k8sClient.Status().Update(ctx, first)).Should(Succeed())
-		reconcile(ctx, key)
+	t.Log("Only the Run status update wakes the Request: Completed releases the next generation")
+	g.Eventually(func(g Gomega) {
+		run := getRun(g, firstName)
+		run.Status.Phase = nvidiacomv1beta2.DGDRRunPhase("Succeeded")
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type:   nvidiacomv1beta2.DGDRRunConditionCompleted,
+			Status: metav1.ConditionTrue,
+			Reason: "Finished",
+		})
+		g.Expect(c.Status().Update(ctx, run)).To(Succeed())
+	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
-		Expect(k8sClient.Get(ctx, key, live)).Should(Succeed())
-		secondName := dgdr.Name + "-" + strconv.FormatInt(live.Generation, 10)
-		Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
-		Expect(live.Status.ActiveRunRef).NotTo(BeNil())
-		Expect(live.Status.ActiveRunRef.Name).To(Equal(secondName))
-		Expect(live.Status.RecentRunRefs).To(HaveLen(1))
-		Expect(live.Status.RecentRunRefs[0].Name).To(Equal(firstName))
-		second := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: envtestNamespace, Name: secondName}, second)).Should(Succeed())
-		Expect(second.Spec.Model.Name).To(Equal("Qwen/Qwen3-30B-A3B"))
-	})
-})
+	var secondName string
+	var secondUID types.UID
+	g.Eventually(func(g Gomega) {
+		live := getRequest(g)
+		g.Expect(live.Status.ActiveRunRef).NotTo(BeNil())
+		g.Expect(live.Status.ActiveRunRef.Name).NotTo(Equal(firstName))
+		g.Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
+		g.Expect(accepted(live).Status).To(Equal(metav1.ConditionTrue))
+		g.Expect(live.Status.RecentRunRefs).To(HaveLen(1))
+		g.Expect(live.Status.RecentRunRefs[0].Name).To(Equal(firstName))
+		second := getRun(g, live.Status.ActiveRunRef.Name)
+		g.Expect(second.Spec.Model.Name).To(Equal("Qwen/Qwen3-30B-A3B"))
+		secondName, secondUID = second.Name, second.UID
+	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
+
+	t.Log("Deleting the active Run wakes the Request through the owner mapping and it is recreated")
+	g.Expect(c.Delete(ctx, getRun(g, secondName))).To(Succeed())
+	g.Eventually(func(g Gomega) {
+		recreated := getRun(g, secondName)
+		g.Expect(recreated.UID).NotTo(Equal(secondUID))
+		live := getRequest(g)
+		g.Expect(live.Status.ActiveRunRef).NotTo(BeNil())
+		g.Expect(live.Status.ActiveRunRef.Name).To(Equal(secondName))
+	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
+}
