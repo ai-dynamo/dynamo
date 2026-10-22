@@ -1027,6 +1027,143 @@ async fn wait_for_service_ready(port: u16) {
 }
 
 #[tokio::test]
+async fn test_draining_http1_rejection_closes_keepalive_without_cutting_admitted_stream() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let scenario = async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .streaming_backend_error_check(BackendErrorCheck::Skip)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let card = ModelDeploymentCard::with_name_only("drain-model");
+        state
+            .manager()
+            .add_chat_completions_model(
+                "drain-model",
+                card.mdcsum(),
+                Arc::new(FirstTokenGateEngine {
+                    release: release.clone(),
+                }),
+            )
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        let server_cancel = cancel.clone();
+        let server =
+            tokio::spawn(async move { service.run_with_listener(server_cancel, listener).await });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .http1_only()
+            .build()
+            .unwrap();
+        let admitted = client
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "drain-model", "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::OK);
+        assert!(!admitted.headers().contains_key("connection"));
+
+        let mut connection = BufReader::new(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap(),
+        );
+        connection
+            .get_mut()
+            .write_all(b"HEAD /live HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut headers = String::new();
+        loop {
+            let mut line = String::new();
+            assert_ne!(connection.read_line(&mut line).await.unwrap(), 0);
+            headers.push_str(&line);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        assert!(!headers.to_ascii_lowercase().contains("connection: close"));
+
+        cancel.cancel();
+        while state.is_ready() {
+            tokio::task::yield_now().await;
+        }
+        connection
+            .get_mut()
+            .write_all(
+                concat!(
+                    "POST /v1/chat/completions HTTP/1.1\r\n",
+                    "Host: localhost\r\nContent-Type: application/json\r\n",
+                    "Content-Length: 2\r\n\r\n{}",
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut rejected = String::new();
+        timeout(
+            std::time::Duration::from_secs(1),
+            connection.read_to_string(&mut rejected),
+        )
+        .await
+        .expect("draining HTTP/1.1 connection stayed open after rejection")
+        .unwrap();
+        assert!(rejected.starts_with("HTTP/1.1 503"), "{rejected}");
+        assert!(
+            rejected
+                .to_ascii_lowercase()
+                .contains("connection: close\r\n"),
+            "{rejected}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(rejected.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["message"], "Service is not ready");
+        assert!(
+            !server.is_finished(),
+            "admitted stream must keep the frontend draining"
+        );
+
+        let http2 = reqwest::Client::builder()
+            .no_proxy()
+            .http2_prior_knowledge()
+            .build()
+            .unwrap()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(http2.version(), reqwest::Version::HTTP_2);
+        assert_eq!(http2.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!http2.headers().contains_key("connection"));
+        assert_eq!(
+            http2.json::<serde_json::Value>().await.unwrap()["message"],
+            "Service is not ready"
+        );
+
+        release.notify_one();
+        let body = admitted.text().await.unwrap();
+        assert!(body.contains("choice 0"), "{body}");
+        assert!(body.contains("data: [DONE]"), "{body}");
+        server.await.unwrap().unwrap();
+    };
+    timeout(std::time::Duration::from_secs(5), scenario)
+        .await
+        .expect("HTTP/1.1 drain regression timed out");
+}
+
+#[tokio::test]
 async fn test_sse_keep_alive_emits_comments_during_idle_stream() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
