@@ -18,6 +18,8 @@ use futures::{StreamExt, stream};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, Semaphore};
 
+#[path = "tests/backend_failure.rs"]
+mod backend_failure;
 #[path = "tests/native_abort.rs"]
 mod native_abort;
 #[path = "tests/preflight.rs"]
@@ -181,16 +183,13 @@ fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
     let response =
         super::acquire_admission(admission.clone(), 1, 2, dynamo_decisions::Dialect::Jev)
             .unwrap_err();
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.status(),
+        super::super::error::overload_status_code()
+    );
     assert_eq!(response.headers()["retry-after"], "1");
     drop(permit);
     assert!(super::acquire_admission(admission, 1, 2, dynamo_decisions::Dialect::Jev).is_ok());
-}
-
-#[test]
-fn candidate_tokenization_work_bounds_prompt_size() {
-    assert_eq!(super::encoding_prompt_limit(120, 10), 10);
-    assert_eq!(super::encoding_prompt_limit(11, 10), 0);
 }
 
 #[test]
@@ -264,6 +263,7 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
     let parent = Context::new(());
     let result = finish_branch(
         StartedBranch {
+            is_pinned: false,
             prepared: prepared_noul_branch(0),
             tracker,
             stream,
@@ -298,6 +298,7 @@ async fn finish_branch_stops_when_parent_is_cancelled() {
     parent_context.kill();
     let result = finish_branch(
         StartedBranch {
+            is_pinned: false,
             prepared: prepared_noul_branch(0),
             tracker,
             stream,
@@ -323,6 +324,7 @@ async fn cancelled_stream_completion_is_not_a_malformed_response() {
     });
     let result = finish_branch(
         StartedBranch {
+            is_pinned: false,
             prepared: prepared_noul_branch(0),
             tracker: Arc::new(RequestTracker::new()),
             stream: ResponseStream::new(Box::pin(stream), Context::new(()).context()),
@@ -348,6 +350,9 @@ enum EngineBehavior {
     PendingSiblings,
     RejectGenerate,
     RejectStream,
+    RejectPinned(dynamo_runtime::error::ErrorClass),
+    TransportFailure,
+    RemoveWorkerDuringFanout,
     NativeAbort { status: Option<u16>, branch: usize },
 }
 
@@ -364,6 +369,7 @@ struct TestEngine {
     observations: Mutex<Vec<ObservedBranch>>,
     started: Notify,
     sibling_started: Notify,
+    admissions: Option<tokio::sync::watch::Sender<Vec<u64>>>,
 }
 
 impl TestEngine {
@@ -373,6 +379,7 @@ impl TestEngine {
             observations: Mutex::new(Vec::new()),
             started: Notify::new(),
             sibling_started: Notify::new(),
+            admissions: None,
         })
     }
 }
@@ -409,6 +416,37 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap()
             .record_worker(worker_id, Some(3), "decode");
         self.started.notify_one();
+        if let EngineBehavior::RejectPinned(class) = self.behavior
+            && index > 0
+        {
+            return Err(dynamo_runtime::error::DynamoError::builder()
+                .class(class)
+                .message("private pinned worker detail")
+                .build()
+                .into());
+        }
+        if matches!(self.behavior, EngineBehavior::TransportFailure) {
+            let transport = std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "private transport detail",
+            );
+            let error = dynamo_runtime::error::DynamoError::from(
+                &transport as &(dyn std::error::Error + 'static),
+            );
+            return Ok(ResponseStream::new(
+                Box::pin(stream::iter([Annotated {
+                    data: None,
+                    id: None,
+                    event: Some("error".to_string()),
+                    comment: None,
+                    error: Some(error),
+                }])),
+                stream_context,
+            ));
+        }
+        if matches!(self.behavior, EngineBehavior::RemoveWorkerDuringFanout) && index == 1 {
+            self.admissions.as_ref().unwrap().send_replace(vec![99]);
+        }
         if matches!(
             self.behavior,
             EngineBehavior::RejectGenerate | EngineBehavior::RejectStream
@@ -708,21 +746,6 @@ async fn placement_mismatch_fails_with_unavailable_without_answers() {
     assert_eq!(body["detail"], "SGLang scoring worker is unavailable");
     assert!(parent.is_killed());
     assert_eq!(semaphore.available_permits(), 2);
-}
-
-#[tokio::test]
-async fn backend_overload_preserves_retry_status_and_releases_admission() {
-    for behavior in [EngineBehavior::RejectGenerate, EngineBehavior::RejectStream] {
-        let (response, parent, semaphore) =
-            dispatch_request(TestEngine::new(behavior), 2, "request").await;
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers()["retry-after"], "1");
-        let body = response_body(response).await;
-        assert!(body.get("answers").is_none());
-        assert!(!body.to_string().contains("private worker detail"));
-        assert!(parent.is_killed());
-        assert_eq!(semaphore.available_permits(), 2);
-    }
 }
 
 async fn assert_cancellation(behavior: EngineBehavior) {
