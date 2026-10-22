@@ -3707,6 +3707,7 @@ mod ownership_tests {
         }
 
         let enabled = card(|_| {});
+        assert!(enabled.is_systemone_serial_eligible());
         let unsupported: [fn(&mut ModelDeploymentCard); 9] = [
             |card| {
                 card.runtime_config
@@ -3737,6 +3738,7 @@ mod ownership_tests {
         ];
         for configure in unsupported {
             let unsupported = card(configure);
+            assert!(!unsupported.is_systemone_serial_eligible());
             assert_ne!(enabled.mdcsum(), unsupported.mdcsum());
             let feature_off = card(|card| {
                 configure(card);

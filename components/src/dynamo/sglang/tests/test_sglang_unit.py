@@ -1946,7 +1946,13 @@ def test_systemone_serial_capability_registration_gate(
 
 @pytest.mark.parametrize(
     ("installed", "expected"),
-    [("0.5.18", False), ("0.5.19", True), ("0.5.19+cu129", True), ("0.5.20", False)],
+    [
+        ("0.5.18", False),
+        ("0.5.19", True),
+        ("0.5.19+cu129", True),
+        ("0.5.20", False),
+        ("0.5.22", False),
+    ],
 )
 def test_systemone_serial_capability_version_gate(monkeypatch, installed, expected):
     if sglang_register is None:
@@ -1969,7 +1975,7 @@ def test_systemone_serial_capability_version_gate(monkeypatch, installed, expect
 @pytest.mark.asyncio
 @pytest.mark.parametrize("serial", [False, True])
 async def test_systemone_serial_capability_published_only_when_isolated(
-    monkeypatch, serial
+    monkeypatch, caplog, serial
 ):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -1999,15 +2005,17 @@ async def test_systemone_serial_capability_published_only_when_isolated(
     dynamo_args = SimpleNamespace(
         use_sglang_tokenizer=False, custom_jinja_template=None, model_source_uri=None
     )
-    assert await sglang_register._register_model_with_runtime_config(
-        engine=SimpleNamespace(),
-        endpoint=SimpleNamespace(),
-        server_args=server_args,
-        dynamo_args=dynamo_args,
-        worker_type=sglang_register.WorkerType.Aggregated,
-    )
+    with caplog.at_level(logging.INFO):
+        assert await sglang_register._register_model_with_runtime_config(
+            engine=SimpleNamespace(),
+            endpoint=SimpleNamespace(),
+            server_args=server_args,
+            dynamo_args=dynamo_args,
+            worker_type=sglang_register.WorkerType.Aggregated,
+        )
     assert published["sglang_generate"] == "true"
     assert published.get("sglang_systemone_serial_v1") == ("true" if serial else None)
+    assert ("including chat and completions" in caplog.text) is serial
 
 
 def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
