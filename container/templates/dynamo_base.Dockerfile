@@ -11,13 +11,19 @@
 FROM --platform=$BUILDPLATFORM golang:{{ context.dynamo.go_version }} AS go_tools_builder
 ARG TARGETARCH
 ARG NATS_VERSION
+ARG NATS_COMMIT
 ARG ETCD_VERSION
+ARG ETCD_COMMIT
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOTOOLCHAIN=local
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
 RUN git clone --depth 1 --branch "${NATS_VERSION}" https://github.com/nats-io/nats-server.git /src/nats && \
+    test "$(git -C /src/nats rev-parse HEAD)" = "${NATS_COMMIT}" && \
     cd /src/nats && go build -trimpath -o /out/nats-server .
 RUN git clone --depth 1 --branch "${ETCD_VERSION}" https://github.com/etcd-io/etcd.git /src/etcd && \
+    test "$(git -C /src/etcd rev-parse HEAD)" = "${ETCD_COMMIT}" && \
     cd /src/etcd && ./build.sh && \
     mkdir -p /out/etcd && cp bin/etcd bin/etcdctl bin/etcdutl /out/etcd/
 
@@ -40,6 +46,8 @@ WORKDIR /opt/dynamo
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     update-ca-certificates && rm -rf /var/lib/apt/lists/*
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
 
 {% if device == "cpu" %}
 RUN apt clean && apt-get update -y && \

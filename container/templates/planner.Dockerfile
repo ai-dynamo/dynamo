@@ -43,6 +43,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
 # Create dynamo user with group 0 for OpenShift compatibility.
 RUN useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
@@ -106,6 +108,14 @@ COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 
 
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
+
+ARG PLANNER_PYTHON_VERSION
+USER 0
+
+# Backport Python 3.13.17's ensurepip fix until NGC publishes the newer base.
+RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)"]
+COPY --from=planner_builder /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/ /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/
+RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil, subprocess, tempfile, venv; assert tuple(map(int, ensurepip.version().split('.'))) >= (26, 2, 2); assert len(list((pathlib.Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))) == 1; d = tempfile.mkdtemp(); venv.create(d, with_pip=True); subprocess.run([d + '/bin/python', '-m', 'pip', '--version'], check=True); shutil.rmtree(d)"]
 
 COPY --from=planner_builder /etc/group /etc/passwd /etc/
 COPY --from=planner_builder /bin/dash /bin/sh

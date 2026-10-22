@@ -84,6 +84,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ldconfig && \
     rm -f /usr/local/bin/etcd
 
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
 

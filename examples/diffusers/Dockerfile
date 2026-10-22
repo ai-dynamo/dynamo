@@ -6,6 +6,7 @@ FROM nvidia/cuda:13.1.1-devel-ubuntu24.04
 
 RUN apt-get update \
  && apt-get install -yq ca-certificates libucx0 python3-dev python3-pip python3-venv git protobuf-compiler curl ffmpeg libclang-dev \
+ && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
  && update-ca-certificates \
  && apt-get clean
 

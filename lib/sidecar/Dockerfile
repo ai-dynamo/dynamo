@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-yaml \
         wget \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -155,6 +156,7 @@ FROM ${BASE_IMAGE} AS runtime-base
 # The base ships its own uid-1000 `ubuntu` user, so drop it to free the uid.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && { userdel -r ubuntu 2>/dev/null || true; } \

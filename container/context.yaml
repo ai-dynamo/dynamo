@@ -38,7 +38,7 @@ dynamo:
   # the epp image carries) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
-  planner_build_image_tag: 3.13-slim
+  planner_build_image_tag: 3.13.17-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
   planner_runtime_image_tag: 3.13-v4.1.9
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
@@ -64,7 +64,9 @@ dynamo:
   go_version: "1.27.3"
 
   nats_version: v2.14.8
+  nats_commit: 3e47c8fa715b0e3b2feaeedc378c25fff88a966e
   etcd_version: v3.5.34
+  etcd_commit: 38e57443c51fc9a3cc6a943fa8ed10381f66ce5c
 
   nixl_ref: v1.3.2
   nixl_ucx_ref: v1.21.0

@@ -82,6 +82,8 @@ ENV PATH=/opt/uv/bin:${PATH}
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     update-ca-certificates && rm -rf /var/lib/apt/lists/*
 
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
 {% if device == "cuda" %}
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
