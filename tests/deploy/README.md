@@ -55,29 +55,3 @@ python -m pytest tests/deploy/test_deploy_efa_sglang.py \
 ```
 
 New operator deployment tests belong in this directory.
-
-### SGLang multinode sidecar acceptance
-
-Configure `lib/sidecar/sglang/deploy/multinode_tp.yaml` or
-`lib/sidecar/sglang/deploy/multinode_dp.yaml` with engine, sidecar, and frontend
-images available to your cluster. Both examples use two engine groups and
-require four GPUs on distinct nodes. DP-attention needs follower gRPC metadata
-and a sidecar compatible with the engine's attention-DP rank metadata.
-
-```bash
-pytest tests/deploy/test_sglang_multinode_sidecar.py \
-  --namespace <test-namespace> \
-  --sidecar-multinode-manifest <configured-manifest.yaml>
-```
-
-Run against an isolated platform with the Operator under test and Grove or
-LeaderWorkerSet. For Grove, set the test platform's
-`dynamo-operator.dynamo.groveTerminationDelay` to `3m`; the delay must allow engine
-startup, and the Helm default of four hours exceeds the test's ten-minute
-recovery deadline.
-The test creates and deletes the supplied DGD. It checks native
-launch and sidecar placement, inference on every DP rank, KV events from every
-sidecar, cache-aware routing, and recovery after deleting a follower Pod while
-preserving the other engine group's Pods. Repeat with component and role
-templates; the operator renderer tests cover both forms for prefill and decode
-components as well.
