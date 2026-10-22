@@ -91,6 +91,9 @@ pub enum PrefillError {
         #[source] Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     ),
 
+    #[error("Prefill execution failed: Prefill backend cancelled before completing the handoff")]
+    Cancelled,
+
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
 }
@@ -524,6 +527,7 @@ impl
                 session_affinity.as_ref().clone(),
             );
         }
+        let prefill_engine_ctx = prefill_context.context();
         let binding = match self.binding.load_full() {
             Some(binding) => binding,
             // The target was replaced after the gate above (a WorkerSet succession
@@ -691,7 +695,11 @@ impl
         };
         let decode = next.generate(context.map(|_| decode_req));
         match prefill_completion {
-            Some(completion) => completion.forward_decode(decode, engine_ctx, output).await,
+            Some(completion) => {
+                completion
+                    .forward_decode(decode, engine_ctx, output, prefill_engine_ctx)
+                    .await
+            }
             None => decode.await,
         }
     }
@@ -890,7 +898,7 @@ mod tests {
         }
     }
 
-    fn active_conditional_router() -> Arc<PrefillRouter> {
+    pub(super) fn active_conditional_router() -> Arc<PrefillRouter> {
         let (_activation_tx, activation_rx) = oneshot::channel();
         let router = PrefillRouter::new(
             activation_rx,
@@ -1172,6 +1180,7 @@ mod tests {
                     std::future::pending(),
                     Context::new(()).context(),
                     PrefillNeed::None,
+                    Context::new(()).context(),
                 )
                 .await
                 .unwrap_err();
