@@ -29,6 +29,7 @@ use crate::proto::envoy::service::ext_proc::v3::{
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
 use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
+use serde_json::value::RawValue;
 
 /// State machine phases for the ext_proc stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,13 +329,8 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             result.selected_prefill_endpoint.as_deref(),
         ));
 
-        // Rewrite the request body JSON for the backend.
-        // `strip_nvext` removes the client's Dynamo-only `nvext` (standalone,
-        // raw engines). `nvext.token_data` lets a Dynamo backend skip redundant
-        // tokenization. `cache_salt` is written only under the `NativeVllm`
-        // forwarding policy (see `CacheSaltForwarding`); `Preserve` leaves the
-        // body untouched. Only the rewrite path allocates a new body — otherwise
-        // the unchanged body is a cheap `Bytes` clone (no copy).
+        // Only the rewrite path allocates a new body; otherwise the unchanged
+        // body is a cheap `Bytes` clone.
         let cache_salt = match result.cache_salt_forwarding {
             CacheSaltForwarding::NativeVllm => result.cache_namespace.as_deref(),
             CacheSaltForwarding::Preserve => None,
@@ -859,22 +855,20 @@ fn validate_protocol_config(
     Err(Status::failed_precondition(detail))
 }
 
-/// Rewrite the request body JSON for the backend, in this order:
-/// - remove the client's top-level `nvext` when `strip_nvext` is set (see
-///   [`PickResult::strip_nvext`]): raw engines never read it and TensorRT-LLM
-///   rejects requests that carry it;
-/// - `nvext.token_data`: lets a Dynamo backend skip re-tokenization (re-creates
-///   `nvext` with only that field after a strip);
-/// - top-level `cache_salt` = `dynamo-cache-salt:` + namespace, only under
-///   [`CacheSaltForwarding::NativeVllm`]. Raw engines read the top-level
-///   field; `Preserve` backends (Dynamo runtime) skip this rewrite because
-///   their handler applies the tag itself.
+/// Rewrite the request body for the backend: drop the client's `nvext`
+/// (`strip_nvext`), add `nvext.token_data` (`token_ids`), and set the tagged
+/// top-level `cache_salt` (`cache_salt`), in that order.
 fn rewrite_forwarded_body(
     body: &[u8],
     strip_nvext: bool,
     token_ids: Option<&[u32]>,
     cache_salt: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
+    let Some(token_ids) = token_ids else {
+        return rewrite_top_level(body, strip_nvext, cache_salt);
+    };
+
+    // token_data lives inside `nvext`, so this path needs the parsed tree.
     let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
 
     let obj = parsed
@@ -885,36 +879,99 @@ fn rewrite_forwarded_body(
         obj.remove("nvext");
     }
 
-    if let Some(token_ids) = token_ids {
-        let nvext = obj
-            .entry("nvext")
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let nvext = obj
+        .entry("nvext")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
 
-        let nvext_obj = nvext
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
+    let nvext_obj = nvext
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
 
-        nvext_obj.insert(
-            "token_data".to_string(),
-            serde_json::Value::Array(
-                token_ids
-                    .iter()
-                    .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
-                    .collect(),
-            ),
-        );
-    }
+    nvext_obj.insert(
+        "token_data".to_string(),
+        serde_json::Value::Array(
+            token_ids
+                .iter()
+                .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
+                .collect(),
+        ),
+    );
 
     if let Some(cache_salt) = cache_salt {
-        // Top-level `cache_salt` is the canonical field native vLLM reads; the
-        // Dynamo tag keeps the namespace unambiguous in KV event extra_keys.
         obj.insert(
             "cache_salt".to_string(),
-            serde_json::Value::String(format!("{}{}", DYNAMO_CACHE_SALT_PREFIX, cache_salt)),
+            serde_json::Value::String(tagged_cache_salt(cache_salt)),
         );
     }
 
     Ok(serde_json::to_vec(&parsed)?)
+}
+
+/// Top-level members of a JSON object in document order, values borrowed
+/// verbatim from the input.
+struct TopLevel<'a>(Vec<(String, &'a RawValue)>);
+
+impl<'de> serde::Deserialize<'de> for TopLevel<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TopLevelVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TopLevelVisitor {
+            type Value = TopLevel<'de>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut members = Vec::with_capacity(map.size_hint().unwrap_or(16));
+                while let Some(entry) = map.next_entry::<String, &'de RawValue>()? {
+                    members.push(entry);
+                }
+                Ok(TopLevel(members))
+            }
+        }
+
+        deserializer.deserialize_map(TopLevelVisitor)
+    }
+}
+
+/// Strip-and-salt without parsing the body into a `Value` tree: every other
+/// top-level member is copied byte-for-byte.
+fn rewrite_top_level(
+    body: &[u8],
+    strip_nvext: bool,
+    cache_salt: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    let TopLevel(members) = serde_json::from_slice(body)?;
+    let mut out = Vec::with_capacity(body.len() + 64);
+    out.push(b'{');
+    for (key, value) in &members {
+        if (strip_nvext && key == "nvext") || (cache_salt.is_some() && key == "cache_salt") {
+            continue;
+        }
+        if out.len() > 1 {
+            out.push(b',');
+        }
+        serde_json::to_writer(&mut out, key)?;
+        out.push(b':');
+        out.extend_from_slice(value.get().as_bytes());
+    }
+    if let Some(cache_salt) = cache_salt {
+        if out.len() > 1 {
+            out.push(b',');
+        }
+        out.extend_from_slice(br#""cache_salt":"#);
+        serde_json::to_writer(&mut out, &tagged_cache_salt(cache_salt))?;
+    }
+    out.push(b'}');
+    Ok(out)
+}
+
+fn tagged_cache_salt(cache_salt: &str) -> String {
+    format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}")
 }
 
 /// Extract the "model" field from a JSON request body.
@@ -1742,10 +1799,7 @@ mod tests {
         assert!(rewrite_forwarded_body(body, false, Some(&[1]), None).is_err());
     }
 
-    /// Standalone raw-engine forwarding: the consumed `nvext` is removed (an
-    /// explicit `null` too, since `extra="forbid"` engines see the key), every
-    /// other field survives byte-for-byte in value, and the native salt is
-    /// still written at the top level.
+    /// `nvext` as an object or an explicit `null` is removed; the salt is still written.
     #[test]
     fn rewrite_forwarded_body_strips_nvext_for_raw_engines() {
         for body in [
@@ -1764,8 +1818,6 @@ mod tests {
         }
     }
 
-    /// Stripping happens first, so a later token_data injection re-creates
-    /// `nvext` holding only the EPP's own field, never the client's.
     #[test]
     fn rewrite_forwarded_body_strip_then_token_data_leaves_only_epp_fields() {
         let body = br#"{"model":"m","nvext":{"agent_hints":{"osl":32},"extra_fields":["x"]}}"#;
@@ -1777,14 +1829,56 @@ mod tests {
         assert_eq!(parsed["nvext"]["token_data"], serde_json::json!([7, 8]));
     }
 
-    /// `strip_nvext` on a body without `nvext` changes nothing but the
-    /// requested extensions (the standalone picker only sets it when the key
-    /// was present, so this is the defensive path).
     #[test]
     fn rewrite_forwarded_body_strip_without_nvext_is_a_no_op() {
         let body = br#"{"model":"m","messages":[]}"#;
         let modified = rewrite_forwarded_body(body, true, None, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
         assert_eq!(parsed, serde_json::json!({"model":"m","messages":[]}));
+    }
+
+    /// The borrowed path keeps member order and the exact bytes of untouched
+    /// values (whitespace, escapes, number formatting) and escaped keys.
+    #[test]
+    fn rewrite_top_level_copies_other_members_verbatim() {
+        let body = r#"{ "model" : "m", "messages": [ {"role":"user","content":"café \"q\""} ],"nvext":{"agent_hints":{"osl":32}}, "temperature": 1.0e0, "k\"y": true , "cache_salt": "client"}"#;
+
+        let out = rewrite_top_level(body.as_bytes(), true, Some("tenant-a")).unwrap();
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            r#"{"model":"m","messages":[ {"role":"user","content":"café \"q\""} ],"temperature":1.0e0,"k\"y":true,"cache_salt":"dynamo-cache-salt:tenant-a"}"#
+        );
+    }
+
+    /// Borrowed and parsed paths agree on everything the parsed path can do
+    /// without `token_ids`.
+    #[test]
+    fn rewrite_top_level_matches_parsed_rewrite() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"nvext":{"cache_salt":"x"},"cache_salt":"client","max_tokens":8}"#;
+        for (strip, salt) in [
+            (true, Some("t")),
+            (true, None),
+            (false, Some("t")),
+            (false, None),
+        ] {
+            let fast: serde_json::Value =
+                serde_json::from_slice(&rewrite_top_level(body, strip, salt).unwrap()).unwrap();
+            let mut parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+            let obj = parsed.as_object_mut().unwrap();
+            if strip {
+                obj.remove("nvext");
+            }
+            if let Some(salt) = salt {
+                obj.insert("cache_salt".into(), tagged_cache_salt(salt).into());
+            }
+            assert_eq!(fast, parsed, "strip={strip} salt={salt:?}");
+        }
+    }
+
+    #[test]
+    fn rewrite_top_level_rejects_non_object_body() {
+        assert!(rewrite_top_level(br#"["not", "an", "object"]"#, true, None).is_err());
+        assert!(rewrite_top_level(br#"not json"#, true, None).is_err());
     }
 }

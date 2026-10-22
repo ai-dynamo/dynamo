@@ -74,10 +74,8 @@ pub enum RendererProtocol {
     VllmRender,
     /// SGLang renderer's `/v1/chat/completions/render` endpoint; response shape `{"input_ids": [...]}`.
     SglangRenderer,
-    /// TensorRT-LLM's `/v1/chat/completions/render` endpoint, served by the
-    /// CPU-only `trtllm-render` process or by a `trtllm-serve` worker started
-    /// with `TRTLLM_ENABLE_RENDER_ENDPOINTS=1`; response is a `RenderedRequest`
-    /// whose `token_ids` field carries the prompt tokens.
+    /// TensorRT-LLM's `/v1/chat/completions/render` endpoint (`trtllm-render`, or
+    /// `trtllm-serve` with `TRTLLM_ENABLE_RENDER_ENDPOINTS=1`); response field `token_ids`.
     TrtllmRender,
 }
 

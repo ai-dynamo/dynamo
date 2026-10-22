@@ -63,9 +63,8 @@ pub enum CacheSaltForwarding {
     #[default]
     Preserve,
     /// Write `cache_salt = "dynamo-cache-salt:" + namespace` at the top level.
-    /// Raw engines (vLLM, SGLang, TensorRT-LLM all read the OpenAI-style
-    /// top-level `cache_salt`) have no Dynamo code in the request path to add
-    /// the marker, so the EPP must add it.
+    /// Raw engines read that field but have no Dynamo code in the request path
+    /// to add the marker, so the EPP must add it.
     NativeVllm,
 }
 
@@ -96,14 +95,9 @@ pub struct PickResult {
     pub cache_namespace: Option<String>,
     /// Body-encoding policy for `cache_namespace`.
     pub cache_salt_forwarding: CacheSaltForwarding,
-    /// Remove the client's top-level `nvext` object from the forwarded body.
-    /// Standalone pickers set this when the body carried one: the EPP has
-    /// consumed the Dynamo-only hints it needs (`agent_hints`, `cache_salt`),
-    /// and raw OpenAI engines either ignore the field (vLLM, SGLang) or reject
-    /// the whole request over it (TensorRT-LLM, `extra="forbid"`). Stripping
-    /// it uniformly gives every engine the same plain OpenAI body. Applied
-    /// before `token_ids` injection, which may re-create `nvext.token_data`.
-    /// Dynamo-runtime pickers leave it `false`: their workers read `nvext`.
+    /// Remove the client's top-level `nvext` from the forwarded body. Standalone
+    /// pickers set it: raw engines never read it, and TensorRT-LLM
+    /// (`extra="forbid"`) rejects requests that carry it.
     pub strip_nvext: bool,
     /// Booking id the picker recorded for this request's load reservation, if
     /// any. The server carries it on the per-stream context and hands it back to

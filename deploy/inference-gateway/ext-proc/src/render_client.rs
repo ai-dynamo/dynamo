@@ -1,31 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Protocol-dispatched HTTP client for the engines' chat render endpoints.
+//! HTTP client for the engines' `POST /v1/chat/completions/render` endpoints.
 //!
-//! vLLM, SGLang's renderer, and TensorRT-LLM all expose
-//! `POST /v1/chat/completions/render`: an OpenAI chat-completions body in, the
-//! prompt token IDs out. Transport, URL handling, bounded response reads, and
-//! error mapping are identical across them; the only difference is the name
-//! of the response field that carries the IDs (`token_ids` for vLLM and
-//! TensorRT-LLM, `input_ids` for SGLang's `GenerateRequest`). One client
-//! therefore serves every [`RendererProtocol`], and adding an engine with the
-//! same shape is a one-line change in [`RendererProtocol::token_ids_field`].
-//!
-//! The body is forwarded unchanged, so the renderer stays responsible for
-//! validating engine-specific fields and applying the chat template. All three
-//! renderers accept a body carrying Dynamo's `nvext` object: vLLM and SGLang
-//! ignore unknown fields, and TensorRT-LLM strips `nvext` before validation.
-//!
-//! The client sends no `Authorization` header, so it targets unauthenticated
-//! in-cluster renderers (a sidecar or an internal Service).
-//!
-//! Engine notes:
-//! - TensorRT-LLM echoes the request body in the response's `request` field,
-//!   so a success response is at least as large as the request it rendered.
-//!   Size `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` with that in mind.
-//! - SGLang returns a full `GenerateRequest`; everything but `input_ids` is
-//!   ignored.
+//! vLLM, SGLang's renderer, and TensorRT-LLM share the transport, URL handling,
+//! bounded reads, and error mapping; they differ only in the response field
+//! that carries the token IDs, selected by [`RendererProtocol`]. The request
+//! body is forwarded unchanged and no `Authorization` header is sent.
 
 use std::time::Duration;
 
@@ -43,17 +24,15 @@ use crate::render_http::{
 
 const CHAT_RENDER_PATH: &str = "/v1/chat/completions/render";
 
-/// Name of the response field that carries the rendered prompt token IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenIdsField {
-    /// `{"token_ids": [...]}` (vLLM's render response, TensorRT-LLM's `RenderedRequest`).
+    /// vLLM's render response and TensorRT-LLM's `RenderedRequest`.
     TokenIds,
-    /// `{"input_ids": [...]}` (SGLang's `GenerateRequest`).
+    /// SGLang's `GenerateRequest`.
     InputIds,
 }
 
 impl RendererProtocol {
-    /// The response field this protocol's renderer uses for the token IDs.
     fn token_ids_field(self) -> TokenIdsField {
         match self {
             RendererProtocol::VllmRender | RendererProtocol::TrtllmRender => {
@@ -64,7 +43,7 @@ impl RendererProtocol {
     }
 }
 
-/// A reusable client for a renderer's `/v1/chat/completions/render` endpoint.
+/// Pooled client for one renderer.
 #[derive(Clone, Debug)]
 pub struct RenderClient {
     client: Client,
@@ -75,11 +54,7 @@ pub struct RenderClient {
 }
 
 impl RenderClient {
-    /// Build a pooled HTTP client from the renderer's base URL.
-    ///
-    /// The base URL selects either a local sidecar (for example,
-    /// `http://127.0.0.1:8000`) or an external Service; any path prefix on it
-    /// is kept. The chat render path is appended by this client.
+    /// Any path prefix on `base_url` is kept; the render path is appended to it.
     pub fn new(
         protocol: RendererProtocol,
         base_url: &str,
@@ -120,15 +95,7 @@ impl RenderClient {
         })
     }
 
-    /// The renderer protocol this client speaks.
-    pub fn protocol(&self) -> RendererProtocol {
-        self.protocol
-    }
-
-    /// Forward an OpenAI chat-completions JSON body and return its prompt token IDs.
-    ///
-    /// The body is sent unchanged so the renderer remains responsible for
-    /// validating engine-specific request fields and applying the chat template.
+    /// Returns the prompt token IDs for an OpenAI chat-completions body.
     pub async fn render_chat(&self, request_body: Bytes) -> Result<Vec<u32>, RenderError> {
         let response = self
             .client
@@ -154,10 +121,8 @@ impl RenderClient {
     }
 }
 
-/// Extract the token IDs from a success body, ignoring every other field.
-///
-/// Typed per field name rather than parsed into a `serde_json::Value`, so a
-/// TensorRT-LLM response (which echoes the whole request) is not materialized.
+/// Typed per field so a TensorRT-LLM response, which echoes the whole request,
+/// is never parsed into a `Value`.
 fn parse_token_ids(field: TokenIdsField, body: &[u8]) -> Result<Vec<u32>, serde_json::Error> {
     #[derive(Deserialize)]
     struct TokenIds {
@@ -194,15 +159,13 @@ mod tests {
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
     const TEST_MAX_RESPONSE_BYTES: usize = 4096;
 
-    /// A Dynamo-style chat body: the EPP forwards `nvext` to the renderer as-is.
     const CHAT_BODY: &[u8] = br#"{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"hello"}],"nvext":{"agent_hints":{"osl":32}}}"#;
 
-    /// vLLM `/v1/chat/completions/render`: ids plus engine extras.
     fn vllm_fixture() -> Value {
         json!({"token_ids": [1, 2, 3], "features": {"ignored": true}})
     }
 
-    /// SGLang renderer: a full `GenerateRequest`.
+    /// SGLang returns its full `GenerateRequest`.
     fn sglang_fixture() -> Value {
         json!({
             "rid": "test-rid",
@@ -216,7 +179,7 @@ mod tests {
         })
     }
 
-    /// TensorRT-LLM `RenderedRequest`: ids, bookkeeping, and the echoed request.
+    /// TensorRT-LLM's `RenderedRequest` echoes the request it rendered.
     fn trtllm_fixture() -> Value {
         json!({
             "schema_version": 1,
@@ -234,7 +197,6 @@ mod tests {
         })
     }
 
-    /// Every protocol with its engine's representative response and expected ids.
     fn engine_fixtures() -> Vec<(RendererProtocol, Value, Vec<u32>)> {
         vec![
             (RendererProtocol::VllmRender, vllm_fixture(), vec![1, 2, 3]),
@@ -260,7 +222,6 @@ mod tests {
         (format!("http://{address}"), task)
     }
 
-    /// A renderer that always answers `response` and records what it received.
     fn fixture_router(response: Value) -> (Router, mpsc::UnboundedReceiver<(HeaderMap, Bytes)>) {
         let (request_tx, request_rx) = mpsc::unbounded_channel();
         let router = Router::new().route(
@@ -294,8 +255,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{protocol:?}: {e}"));
 
             assert_eq!(token_ids, expected, "{protocol:?}");
-            // The body, including Dynamo's `nvext`, reaches the renderer unchanged;
-            // the renderer, not the client, decides how to treat it.
             let (headers, body) = request_rx.recv().await.unwrap();
             assert_eq!(body, request, "{protocol:?}");
             assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
@@ -305,7 +264,6 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_another_engines_response_shape() {
-        // `token_ids` protocols must not accept SGLang's `input_ids`, and vice versa.
         for (protocol, fixture) in [
             (RendererProtocol::VllmRender, sglang_fixture()),
             (RendererProtocol::TrtllmRender, sglang_fixture()),
@@ -436,8 +394,6 @@ mod tests {
 
     #[tokio::test]
     async fn surfaces_renderer_validation_error_body() {
-        // TensorRT-LLM answers a body its request model rejects with an
-        // OpenAI-shaped 400; the status and body ride on the error for logging.
         let router = Router::new().route(
             CHAT_RENDER_PATH,
             post(|| async {

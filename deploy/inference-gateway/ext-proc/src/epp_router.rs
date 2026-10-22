@@ -83,8 +83,6 @@ struct TokenizeResult {
     strict_priority: Option<u32>,
     cache_namespace: Option<String>,
     expected_output_tokens: Option<u32>,
-    /// The body carried a top-level `nvext` (even `null`); the forwarded body
-    /// must not, see [`PickResult::strip_nvext`].
     strip_nvext: bool,
 }
 
@@ -139,8 +137,7 @@ impl EppRouter {
         // a valid chat request is caught by the renderer below.
         let hints: RoutingHints =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
-        // Presence of the key (object or `null`) is what the raw engines see;
-        // its contents are what the EPP consumes.
+        // An `extra="forbid"` engine rejects the key even when it is `null`.
         let strip_nvext = hints.nvext.is_some();
         let nvext = hints.nvext.as_ref().and_then(|n| n.as_ref());
         let priority_header = first_header(headers, HEADER_REQUEST_PRIORITY);
@@ -216,9 +213,6 @@ pub(crate) fn endpoint_in_subset(
 /// Unknown fields are ignored (no `deny_unknown_fields`).
 #[derive(Deserialize)]
 struct RoutingHints {
-    /// `None` when the key is absent, `Some(None)` for an explicit `null`,
-    /// `Some(Some(_))` for an object. Presence decides whether the forwarded
-    /// body needs the key removed; contents feed routing.
     #[serde(default, deserialize_with = "present")]
     nvext: Option<Option<RoutingNvExt>>,
     /// Native vLLM top-level `cache_salt`.
@@ -226,8 +220,7 @@ struct RoutingHints {
     cache_namespace: Option<String>,
 }
 
-/// Wrap a present value in `Some` so a missing key (serde default, `None`)
-/// stays distinguishable from an explicit `null` (`Some(None)`).
+/// Distinguishes a missing key (`None`) from an explicit `null` (`Some(None)`).
 fn present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     T: Deserialize<'de>,
@@ -409,9 +402,6 @@ impl EndpointPicker for EppRouter {
             cache_namespace,
             // Raw engines have no Dynamo handler to tag the salt; the EPP does.
             cache_salt_forwarding: CacheSaltForwarding::NativeVllm,
-            // The Dynamo-only `nvext` has been consumed above; raw engines
-            // either ignore it or (TensorRT-LLM) reject the request over it, so
-            // every engine gets the same plain OpenAI body.
             strip_nvext,
             // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),
@@ -644,16 +634,12 @@ mod tests {
     fn routing_hints_distinguish_absent_null_and_object_nvext() {
         let parse = |body: &str| serde_json::from_str::<RoutingHints>(body).unwrap();
 
-        // Absent: nothing to strip, nothing to read.
         let hints = parse(r#"{"model":"m","messages":[]}"#);
         assert!(hints.nvext.is_none());
 
-        // Explicit null: a raw engine with `extra="forbid"` still sees the key,
-        // so it must be stripped even though it carries no hints.
         let hints = parse(r#"{"model":"m","nvext":null}"#);
         assert!(matches!(hints.nvext, Some(None)));
 
-        // Object: stripped, and its hints are read.
         let hints = parse(r#"{"model":"m","nvext":{"agent_hints":{"osl":32},"cache_salt":"t"}}"#);
         let nvext = hints
             .nvext
