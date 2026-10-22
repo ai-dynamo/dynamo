@@ -22,6 +22,7 @@ pub(super) fn classify(finish: &Value) -> Option<DispatchError> {
             // Dynamo constructs the scoring request; a backend 4xx does not establish client fault.
             // Cancellation is determined by the parent context, not the native abort metadata.
             DispatchError {
+                public_message: "SGLang scoring worker is unavailable",
                 retry_after: true,
                 ..DispatchError::unavailable("native scoring worker aborted")
             }

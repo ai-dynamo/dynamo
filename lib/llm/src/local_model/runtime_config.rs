@@ -225,7 +225,6 @@ impl DecisionExecutionProfile {
         matches!(self, Self::VllmLiquidV1 | Self::VllmDiffusionV1)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn is_token_scoring(self) -> bool {
         matches!(self, Self::SglangSerialV1 | Self::VllmCausalV1)
     }

@@ -30,19 +30,27 @@ use super::{
 };
 use crate::{
     discovery::{SystemOneExecutionSelection, SystemOneSelectionError},
-    local_model::runtime_config::SGLANG_GENERATE_CAPABILITY,
+    local_model::runtime_config::DecisionExecutionProfile,
     protocols::{
         Annotated,
         common::{
             llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest, timing::RequestTracker,
         },
         sglang::{generate::SglangGenerateRequest, stream::SglangGenerateStream},
+        systemone::vllm::causal_scoring_request,
         systemone::{build_native_score_request, parse_candidate_scores},
     },
 };
 
 #[path = "systemone/abort.rs"]
 mod abort;
+
+#[path = "systemone/execution.rs"]
+mod execution;
+use execution::{
+    PreparedScoringRequest, measured_cached_tokens, read_vllm_branch, scoring_placement,
+};
+
 #[path = "systemone/response.rs"]
 mod response;
 use response::{attach_request_ids, decision_error, error};
@@ -66,11 +74,12 @@ fn metric_endpoint(dialect: Dialect) -> Endpoint {
 }
 
 struct PreparedBranch {
+    profile: DecisionExecutionProfile,
     index: usize,
     temperature: f64,
     prompt_ids: Vec<u32>,
     label_ids: Vec<u32>,
-    native: Option<SglangGenerateRequest>,
+    native: Option<PreparedScoringRequest>,
 }
 
 struct StartedBranch {
@@ -83,6 +92,7 @@ struct BranchResult {
     index: usize,
     answer: QuestionOutcome,
     input_tokens: usize,
+    output_tokens: usize,
     cached_tokens: Option<usize>,
     placement: Placement,
 }
@@ -114,7 +124,7 @@ impl DispatchError {
     fn unavailable(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            public_message: "SGLang scoring worker is unavailable",
+            public_message: "decision scoring worker is unavailable",
             detail: detail.into(),
             retry_after: false,
         }
@@ -123,7 +133,7 @@ impl DispatchError {
     fn malformed(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            public_message: "malformed SGLang scoring response",
+            public_message: "malformed decision scoring response",
             detail: detail.into(),
             retry_after: false,
         }
@@ -136,7 +146,7 @@ impl DispatchError {
         if super::metrics::request_was_rejected(cause) {
             return Self {
                 status: StatusCode::TOO_MANY_REQUESTS,
-                public_message: "SGLang scoring worker capacity is exhausted",
+                public_message: "decision scoring worker capacity is exhausted",
                 detail: "backend capacity exhausted".to_string(),
                 retry_after: true,
             };
@@ -246,7 +256,7 @@ async fn handle_request(
 
     let selection = match state
         .manager()
-        .get_systemone_execution_selection(&request.model, SGLANG_GENERATE_CAPABILITY)
+        .get_systemone_execution_selection(&request.model)
     {
         Ok(selection) => selection,
         Err(SystemOneSelectionError::NotFound) => {
@@ -256,14 +266,14 @@ async fn handle_request(
             return error(
                 dialect,
                 StatusCode::SERVICE_UNAVAILABLE,
-                "model has no eligible aggregate SGLang worker",
+                "model has no eligible aggregate decision worker",
             );
         }
         Err(SystemOneSelectionError::Unsupported) => {
             return error(
                 dialect,
                 StatusCode::BAD_REQUEST,
-                "model does not support aggregate SGLang scoring",
+                "model does not support aggregate decision scoring",
             );
         }
     };
@@ -383,6 +393,10 @@ fn prepare_branches(
     selection: &SystemOneExecutionSelection,
     max_input_tokens: usize,
 ) -> Result<Vec<PreparedBranch>, (StatusCode, String)> {
+    let (_, preprocessor) = selection.token_parts().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "invalid decision executor".into(),
+    ))?;
     let context_length = selection.card.effective_context_length() as usize;
     let mut total_input_tokens = 0_usize;
     let mut remaining_tokenization_work = MAX_TOKENIZATION_WORK;
@@ -403,8 +417,7 @@ fn prepare_branches(
             remaining_tokenization_work,
             rendered.labels.len(),
         ));
-        let (prompt_ids, label_ids, encoding_bytes) = selection
-            .preprocessor
+        let (prompt_ids, label_ids, encoding_bytes) = preprocessor
             .render_systemone_question(
                 &selection.canonical_model,
                 &rendered.content,
@@ -445,20 +458,40 @@ fn prepare_branches(
                 .map_err(|message| (StatusCode::UNPROCESSABLE_ENTITY, message))?;
         remaining_tokenization_work -= prompt_ids.len() * (rendered.labels.len() + 2);
         remaining_encoding_bytes -= encoding_bytes;
-        let native = build_native_score_request(&prompt_ids, &label_ids, "validation")
-            .and_then(|value| {
-                serde_json::from_value::<SglangGenerateRequest>(value).map_err(|cause| {
-                    crate::protocols::systemone::SystemOneError::CandidateScores(cause.to_string())
-                })
-            })
-            .map_err(|cause| {
-                tracing::error!(error = %cause, "failed to build System One native request");
-                (
+        let native = match selection.profile {
+            DecisionExecutionProfile::SglangSerialV1 => {
+                build_native_score_request(&prompt_ids, &label_ids, "validation")
+                    .and_then(|value| {
+                        serde_json::from_value::<SglangGenerateRequest>(value).map_err(|cause| {
+                            crate::protocols::systemone::SystemOneError::CandidateScores(
+                                cause.to_string(),
+                            )
+                        })
+                    })
+                    .map(Box::new)
+                    .map(PreparedScoringRequest::Sglang)
+            }
+            DecisionExecutionProfile::VllmCausalV1 => {
+                causal_scoring_request(prompt_ids.clone(), &label_ids, "validation")
+                    .map(Box::new)
+                    .map(PreparedScoringRequest::Vllm)
+            }
+            _ => {
+                return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal server error".to_string(),
-                )
-            })?;
+                    "invalid token decision profile".into(),
+                ));
+            }
+        }
+        .map_err(|cause| {
+            tracing::error!(error = %cause, "failed to build System One native request");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            )
+        })?;
         branches.push(PreparedBranch {
+            profile: selection.profile,
             index,
             temperature: request.temperature,
             prompt_ids,
@@ -561,6 +594,7 @@ async fn dispatch(
     };
     for result in results {
         usage.input_tokens += result.input_tokens as u64;
+        usage.output_tokens += result.output_tokens as u64;
         usage.cached_tokens = usage
             .cached_tokens
             .zip(result.cached_tokens)
@@ -616,25 +650,14 @@ async fn run_branch(
         .map_err(|_| {
             DispatchError::unavailable("selected worker revision is no longer available")
         })?;
-    let mut native = prepared
+    let native = prepared
         .native
         .take()
         .ok_or_else(|| DispatchError::malformed("native request was already consumed"))?;
-    native.cache_salt = Some(cache_salt);
     let branch_id = format!("{request_id}-{}", prepared.index);
-    let mut preprocessed = super::sglang_generate::preprocessed_request(
-        native,
-        &selection.canonical_model,
-        None,
-        &branch_id,
-    )
-    .map_err(|cause| DispatchError::malformed(format!("native request: {cause:#}")))?;
-    preprocessed
-        .routing
-        .get_or_insert_default()
-        .expected_output_tokens = Some(0);
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(prepared.prompt_ids.len(), None);
+    let mut preprocessed = native.compile(&selection, &branch_id, cache_salt, tracker.clone())?;
     if let Some(placement) = pinned {
         pin_to_placement(&mut preprocessed, placement);
     }
@@ -647,7 +670,10 @@ async fn run_branch(
         branch_context.kill();
         return Err(DispatchError::cancelled());
     }
-    let stream = run_until_killed(parent_context.as_ref(), selection.engine.generate(context))
+    let (engine, _) = selection
+        .token_parts()
+        .ok_or_else(|| DispatchError::malformed("invalid token decision executor"))?;
+    let stream = run_until_killed(parent_context.as_ref(), engine.generate(context))
         .await
         .ok_or_else(DispatchError::cancelled)?
         .map_err(|cause| DispatchError::backend(cause.as_ref()))?;
@@ -699,6 +725,15 @@ async fn read_branch(
     data_parallel_size: u32,
     parent_context: Arc<dyn AsyncEngineContext>,
 ) -> Result<BranchResult, DispatchError> {
+    if started.prepared.profile == DecisionExecutionProfile::VllmCausalV1 {
+        return read_vllm_branch(
+            started,
+            data_parallel_start_rank,
+            data_parallel_size,
+            parent_context,
+        )
+        .await;
+    }
     let StartedBranch {
         prepared,
         tracker,
@@ -739,25 +774,7 @@ async fn read_branch(
     }
     let terminal = terminal
         .ok_or_else(|| DispatchError::malformed("missing terminal SGLang scoring frame"))?;
-    let placement = tracker
-        .get_worker_info()
-        .and_then(|worker| {
-            worker
-                .decode_worker_id
-                .or(worker.prefill_worker_id)
-                .map(|worker_id| {
-                    resolve_dp_rank(
-                        worker.decode_dp_rank.or(worker.prefill_dp_rank),
-                        data_parallel_start_rank,
-                        data_parallel_size,
-                    )
-                    .map(|dp_rank| Placement { worker_id, dp_rank })
-                })
-        })
-        .flatten()
-        .ok_or_else(|| {
-            DispatchError::unavailable("Dynamo did not report an unambiguous scoring worker rank")
-        })?;
+    let placement = scoring_placement(&tracker, data_parallel_start_rank, data_parallel_size)?;
     let scores = parse_candidate_scores(&terminal, &prepared.label_ids)
         .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
     let answer = QuestionOutcome::Answer(
@@ -770,27 +787,10 @@ async fn read_branch(
         index: prepared.index,
         answer,
         input_tokens,
+        output_tokens: 0,
         cached_tokens,
         placement,
     })
-}
-
-fn measured_cached_tokens(
-    response: &serde_json::Value,
-    input_tokens: usize,
-) -> Result<Option<usize>, DispatchError> {
-    let Some(count) = response
-        .get("meta_info")
-        .and_then(|meta| meta.get("cached_tokens"))
-    else {
-        return Ok(None);
-    };
-    let count = count
-        .as_u64()
-        .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value <= input_tokens)
-        .ok_or_else(|| DispatchError::malformed("invalid cache-read token count"))?;
-    Ok(Some(count))
 }
 
 #[cfg(test)]
