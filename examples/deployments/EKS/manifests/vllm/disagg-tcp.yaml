@@ -45,7 +45,7 @@ spec:
             exec python3 -m dynamo.vllm \
              --model Qwen/Qwen3-0.6B \
              --disaggregation-mode decode \
-             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -93,7 +93,7 @@ spec:
             exec python3 -m dynamo.vllm \
              --model Qwen/Qwen3-0.6B \
              --disaggregation-mode prefill \
-             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
           envFrom:
           - secretRef:
               name: hf-token-secret

@@ -4,11 +4,11 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
-    backend::{Backend, ExecutionContext},
+    backend::ExecutionContext,
     engines::StreamingEngineAdapter,
     first_token::{FirstTokenNotifier, FirstTokenSource},
     model_type::{ModelInput, ModelType},
-    preprocessor::{BackendOutput, PreprocessedRequest},
+    preprocessor::PreprocessedRequest,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -20,8 +20,8 @@ use crate::{
 
 use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyOut, Operator, ResponseStream,
-    SegmentSource, ServiceBackend, SingleIn, Source, async_trait, network::Ingress,
+    AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyOut, ResponseStream, SingleIn,
+    async_trait, network::Ingress,
 };
 use dynamo_runtime::{DistributedRuntime, protocols::EndpointId};
 use futures::StreamExt;
@@ -140,19 +140,9 @@ pub async fn run(
                 None => engine,
             };
 
-            // Pre-processing is done ingress-side, so it should be already done.
-            let frontend = SegmentSource::<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-            >::new();
-            let backend = Backend::from_mdc(model.card()).into_operator();
-            let engine = ServiceBackend::from_engine(inner_engine);
-            let pipeline = frontend
-                .link(backend.forward_edge())?
-                .link(engine)?
-                .link(backend.backward_edge())?
-                .link_terminal(frontend)?;
-            let ingress = Ingress::for_pipeline(pipeline)?;
+            // The frontend owns tokenization and detokenization. Send raw engine
+            // output so distributed token workers exercise that same path.
+            let ingress = Ingress::for_engine(inner_engine)?;
 
             // The disaggregation role is carried by `worker_type`, not
             // `model_type`. Prefill workers register with an empty

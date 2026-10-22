@@ -70,6 +70,7 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.none,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
 ]
 
 _SERVER_START_TIMEOUT_SECONDS = 5.0

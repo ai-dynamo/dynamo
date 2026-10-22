@@ -17,6 +17,12 @@ from vllm.v1.worker.gpu_worker import Worker
 class GMSV1Worker(Worker):
     """Route vLLM allocator scopes to the selected GMS V1 backend."""
 
+    def _get_sleep_mode_backend(self):
+        # vLLM 0.30 uses a property; retained 0.29 images still use the method.
+        if hasattr(Worker, "sleep_mode_backend"):
+            return self.sleep_mode_backend
+        return super()._get_sleep_mode_backend()
+
     def init_device(self) -> None:
         model_config = self.vllm_config.model_config
         if not model_config.enable_sleep_mode:

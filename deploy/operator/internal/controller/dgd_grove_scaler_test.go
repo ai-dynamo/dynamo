@@ -23,12 +23,14 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -71,15 +73,16 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).
 		Build()
 
-	err := newGroveScaler(kubeClient).Reconcile(
+	_, err := newGroveScaler(kubeClient).Reconcile(
 		t.Context(),
-		dgd,
+		groveReconcileRequest{DGD: dgd},
 		map[string]*checkpoint.CheckpointInfo{
 			"gated": {
 				Enabled:       true,
 				StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 		},
+		false,
 	)
 	require.NoError(t, err)
 
@@ -172,7 +175,8 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 			WithRESTMapper(groveScaleRESTMapper()).
 			Build()
-		require.NoError(t, newGroveScaler(kubeClient).Reconcile(t.Context(), dgd, nil))
+		_, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, false)
+		require.NoError(t, err)
 	})
 
 	t.Run("other errors are propagated", func(t *testing.T) {
@@ -185,7 +189,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 				},
 			}).
 			Build()
-		err := newGroveScaler(kubeClient).Reconcile(t.Context(), dgd, nil)
+		_, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, false)
 		require.ErrorContains(t, err, "scale read failed")
 	})
 }
@@ -206,4 +210,60 @@ func groveScaleRESTMapper() meta.RESTMapper {
 		meta.RESTScopeNamespace,
 	)
 	return mapper
+}
+
+func TestGroveScaler_DeferredScaling(t *testing.T) {
+	for _, test := range []struct {
+		name                                     string
+		blocked, multinode, atDesired, forbidden bool
+		requested                                int32
+	}{
+		{name: "blocked standalone scale up", blocked: true, requested: 2},
+		{name: "blocked standalone scale down", blocked: true, requested: 0},
+		{name: "blocked scaling group scale up", blocked: true, multinode: true, requested: 2},
+		{name: "blocked scaling group scale down", blocked: true, multinode: true, requested: 0},
+		{name: "blocked but already at desired capacity", blocked: true, atDesired: true, requested: 2},
+		{name: "open gate resumes scaling", requested: 2},
+		{name: "unexpected admission failure retains retry", forbidden: true, requested: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Observe live capacity and the gate selected by workload synchronization")
+			dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"}, Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(test.requested)}}}})
+			var child client.Object
+			live := int32(1)
+			if test.atDesired {
+				live = test.requested
+			}
+			if test.multinode {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				child = &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-worker", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: live}}
+			} else {
+				child = &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-worker", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: live}}
+			}
+			writes := 0
+			funcs := groveScaleInterceptor(interceptor.Funcs{}, func() { writes++ })
+			denied := apierrors.NewForbidden(consts.PodCliqueGVR.GroupResource(), child.GetName(), errors.New("admission rejected scaling"))
+			if test.forbidden {
+				funcs.SubResourceUpdate = func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+					return denied
+				}
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithRESTMapper(groveScaleRESTMapper()).WithObjects(child).WithInterceptorFuncs(funcs).Build()
+
+			t.Log("Suppress writes while blocked and preserve unexpected API errors")
+			deferred, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil, test.blocked)
+			if test.forbidden {
+				require.ErrorIs(t, err, denied)
+				require.True(t, apierrors.IsForbidden(err))
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, test.blocked && !test.atDesired, deferred)
+			if test.blocked || test.atDesired || test.forbidden {
+				require.Zero(t, writes)
+			} else {
+				require.Equal(t, 1, writes)
+			}
+		})
+	}
 }

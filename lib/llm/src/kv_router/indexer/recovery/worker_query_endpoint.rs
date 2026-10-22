@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -21,7 +24,58 @@ use dynamo_runtime::{
     stream,
     traits::DistributedRuntimeProvider,
 };
-use tokio::sync::Semaphore;
+use futures::StreamExt;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+/// Maximum recovery queries served past the event buffer at once.
+///
+/// Concurrent misses share one in-flight tree dump inside `LocalKvIndexer`, so this bounds
+/// response copies rather than dumps: each permit lives until the response stream is
+/// dropped, covering the snapshot copy, its encoding, and the send.
+const MAX_CONCURRENT_TREE_DUMP_RESPONSES: usize = 8;
+
+/// State-agent status shared by its coordinator, listener, and query endpoint.
+///
+/// Lifecycle changes swap the snapshot. The outbound cursor advances once per
+/// ingress chunk, so it lives in an atomic instead: every `ArcSwap::store`
+/// walks all threads' debt lists, which is costly at one store per chunk.
+pub(crate) struct KvStateAgentStatusCell {
+    snapshot: ArcSwap<KvStateAgentStatus>,
+    /// Supersedes the snapshot's `outbound_cursor`, which `load` always overwrites.
+    outbound_cursor: AtomicU64,
+}
+
+impl KvStateAgentStatusCell {
+    pub(crate) fn new(status: KvStateAgentStatus) -> Self {
+        Self {
+            outbound_cursor: AtomicU64::new(status.outbound_cursor),
+            snapshot: ArcSwap::from_pointee(status),
+        }
+    }
+
+    pub(crate) fn load(&self) -> KvStateAgentStatus {
+        let mut status = KvStateAgentStatus::clone(&self.snapshot.load());
+        // Read after the snapshot: `store` advances the cursor before swapping,
+        // so this never trails the cursor of the snapshot just read.
+        status.outbound_cursor = self.outbound_cursor.load(Ordering::Acquire);
+        status
+    }
+
+    pub(crate) fn store(&self, status: KvStateAgentStatus) {
+        self.outbound_cursor
+            .store(status.outbound_cursor, Ordering::Release);
+        self.snapshot.store(Arc::new(status));
+    }
+
+    pub(crate) fn store_outbound_cursor(&self, cursor: u64) {
+        self.outbound_cursor.store(cursor, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> Arc<KvStateAgentStatus> {
+        self.snapshot.load_full()
+    }
+}
 
 /// Worker-side endpoint registration for Router -> LocalKvIndexer query service
 // Compatibility with v1.2 Worker-only publishers during v1.4 rolling upgrades.
@@ -51,14 +105,14 @@ pub(crate) async fn start_worker_kv_query_endpoint_with_status(
     worker_id: u64,
     dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
-    status: Option<Arc<ArcSwap<KvStateAgentStatus>>>,
+    status: Option<Arc<KvStateAgentStatusCell>>,
 ) -> anyhow::Result<StartedEndpoint> {
     let engine = Arc::new(WorkerKvQueryEngine {
         worker_id,
         dp_rank,
         local_indexer,
         status,
-        processing_semaphore: Semaphore::new(1),
+        processing_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TREE_DUMP_RESPONSES)),
     });
 
     let ingress = Ingress::for_engine(engine)?;
@@ -83,10 +137,9 @@ pub(super) struct WorkerKvQueryEngine {
     pub(super) worker_id: u64,
     pub(super) dp_rank: DpRank,
     pub(super) local_indexer: Arc<LocalKvIndexer>,
-    pub(super) status: Option<Arc<ArcSwap<KvStateAgentStatus>>>,
-    /// Semaphore limiting concurrent recovery request processing to 1.
-    /// Prevents multiple routers from overwhelming the worker with heavy tree dump operations.
-    pub(super) processing_semaphore: Semaphore,
+    pub(super) status: Option<Arc<KvStateAgentStatusCell>>,
+    /// Bounds in-flight tree dump responses to `MAX_CONCURRENT_TREE_DUMP_RESPONSES`.
+    pub(super) processing_semaphore: Arc<Semaphore>,
 }
 
 #[async_trait]
@@ -146,7 +199,7 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             // snapshot is immutable and cheap to clone, so dump backpressure
             // cannot be mistaken for agent death.
             return Ok(single_response(
-                WorkerKvQueryResponse::Status((**status).clone()),
+                WorkerKvQueryResponse::Status(status),
                 ctx.context(),
             ));
         }
@@ -287,17 +340,15 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
         }
 
         // Check if this request can likely be served from buffer (fast path).
-        // If not, acquire semaphore for tree dump (heavy operation).
+        // If not, acquire a permit for the tree dump response (heavy operation).
         let likely_buffer_read = self
             .local_indexer
             .likely_served_from_buffer(request.start_event_id);
 
-        let _maybe_permit = if !likely_buffer_read {
-            // Acquire semaphore permit before processing tree dump.
-            // This prevents multiple heavy tree dump operations from running concurrently
+        let permit = if !likely_buffer_read {
             let engine_ctx = ctx.context();
             let permit = tokio::select! {
-                result = self.processing_semaphore.acquire() => {
+                result = self.processing_semaphore.clone().acquire_owned() => {
                     result.map_err(|_| anyhow::anyhow!("Worker KV query semaphore closed"))?
                 }
                 _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
@@ -382,11 +433,22 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             };
         }
 
-        Ok(ResponseStream::new(
-            Box::pin(stream::iter(vec![response])),
-            ctx.context(),
-        ))
+        Ok(permit_guarded_response(response, permit, ctx.context()))
     }
+}
+
+/// Single-response stream that holds `permit`, if any, until the transport drops the
+/// stream after encoding and sending the response.
+fn permit_guarded_response(
+    response: WorkerKvQueryResponse,
+    permit: Option<OwnedSemaphorePermit>,
+    context: Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+) -> ManyOut<WorkerKvQueryResponse> {
+    let stream = stream::iter([response]).map(move |response| {
+        let _permit = &permit;
+        response
+    });
+    ResponseStream::new(Box::pin(stream), context)
 }
 
 fn recovery_response_cursor(response: &WorkerKvQueryResponse) -> Option<u64> {
@@ -529,6 +591,43 @@ mod tests {
             ),
             StableDpSlotId::new([4; 16], IdentitySource::Explicit),
         )
+    }
+
+    #[tokio::test]
+    async fn tree_dump_permit_is_held_until_response_stream_drops() {
+        let engine = WorkerKvQueryEngine {
+            worker_id: 7,
+            dp_rank: 0,
+            local_indexer: Arc::new(LocalKvIndexer::new(
+                tokio_util::sync::CancellationToken::new(),
+                4,
+                Arc::new(dynamo_kv_router::indexer::KvIndexerMetrics::new_unregistered()),
+                16,
+            )),
+            status: None,
+            processing_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TREE_DUMP_RESPONSES)),
+        };
+        let request = WorkerKvQueryRequest {
+            worker_id: 7,
+            dp_rank: 0,
+            start_event_id: None,
+            end_event_id: None,
+            supports_tree_dump_failed: true,
+            kind: WorkerKvQueryKind::Recovery,
+        };
+        let available = || engine.processing_semaphore.available_permits();
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(WorkerKvQueryResponse::TreeDump { .. })
+        ));
+        assert!(stream.next().await.is_none());
+        // The transport encodes and sends before dropping an exhausted stream.
+        assert_eq!(available(), MAX_CONCURRENT_TREE_DUMP_RESPONSES - 1);
+
+        drop(stream);
+        assert_eq!(available(), MAX_CONCURRENT_TREE_DUMP_RESPONSES);
     }
 
     #[test]

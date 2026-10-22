@@ -229,6 +229,128 @@ def test_pipeline_context_full():
     _round_trip_wire(msg)
 
 
+def test_batch_scheduling_data_full():
+    msg = pyd.BatchSchedulingData(
+        job_demands=[
+            pyd.BatchJobDemand(
+                observed_at_s=1_700_000_000.125,
+                pool_id="pool-a",
+                job_id="batch-123",
+                status="in_progress",
+                total_requests=1_000,
+                completed_requests=275,
+                failed_requests=25,
+                deadline_at_s=1_700_003_600.5,
+                work_class="chat-8k",
+                remaining_requests=700,
+            )
+        ],
+        pool_traffic=[
+            pyd.PoolTrafficDemand(
+                observed_at_s=1_700_000_001.25,
+                pool_id="pool-a",
+                online_offered_rps=90.5,
+                frontend_active_requests=3,
+            )
+        ],
+        dispatcher_feedback=[
+            pyd.BatchDispatcherFeedback(
+                observed_at_s=1_700_000_002.5,
+                pool_id="pool-a",
+                observation_window_s=30.0,
+                queued_requests=700,
+                inflight_requests=20,
+                actual_dispatch_rps=9.75,
+                applied_max_admission_rps=10.0,
+            )
+        ],
+    )
+
+    _round_trip_pyd(msg)
+    _round_trip_wire(msg)
+    observation = pyd.ObservationData(batch=msg)
+    _round_trip_pyd(observation)
+    _round_trip_wire(observation)
+
+
+def test_pool_traffic_active_requests_preserves_optional_presence():
+    missing = pyd.PoolTrafficDemand(pool_id="pool-a")
+    missing_proto = pydantic_to_proto(missing)
+    assert not missing_proto.HasField("frontend_active_requests")
+    assert proto_to_pydantic(missing_proto) == missing
+
+    idle = pyd.PoolTrafficDemand(pool_id="pool-a", frontend_active_requests=0)
+    idle_proto = pydantic_to_proto(idle)
+    assert idle_proto.HasField("frontend_active_requests")
+    assert idle_proto.frontend_active_requests == 0
+    assert proto_to_pydantic(idle_proto) == idle
+
+    busy = pyd.PoolTrafficDemand(pool_id="pool-a", frontend_active_requests=9)
+    assert _round_trip_pyd(busy) == busy
+
+
+def test_batch_job_demand_allows_counters_equal_to_total():
+    demand = pyd.BatchJobDemand(
+        total_requests=10,
+        completed_requests=8,
+        failed_requests=2,
+        remaining_requests=0,
+    )
+
+    assert proto_to_pydantic(pydantic_to_proto(demand)) == demand
+
+
+def test_batch_job_demand_rejects_counter_sum_above_total():
+    with pytest.raises(
+        ValueError,
+        match=r"completed_requests \+ failed_requests must not exceed total_requests",
+    ):
+        pyd.BatchJobDemand(
+            total_requests=10,
+            completed_requests=9,
+            failed_requests=2,
+            remaining_requests=-1,
+        )
+
+
+def test_batch_job_demand_proto_hydration_rejects_counter_sum_above_total():
+    wire_demand = pb.BatchJobDemand(
+        total_requests=10,
+        completed_requests=9,
+        failed_requests=2,
+        remaining_requests=-1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"completed_requests \+ failed_requests must not exceed total_requests",
+    ):
+        proto_to_pydantic(wire_demand)
+
+
+def test_batch_dispatcher_applied_cap_preserves_unset_vs_zero():
+    common = dict(
+        observed_at_s=1_700_000_000.0,
+        pool_id="pool-a",
+        observation_window_s=30.0,
+        queued_requests=100,
+        inflight_requests=5,
+        actual_dispatch_rps=0.0,
+    )
+
+    unreported = pydantic_to_proto(pyd.BatchDispatcherFeedback(**common))
+    assert not unreported.HasField("applied_max_admission_rps")
+
+    paused = pydantic_to_proto(
+        pyd.BatchDispatcherFeedback(**common, applied_max_admission_rps=0.0)
+    )
+    assert paused.HasField("applied_max_admission_rps")
+    assert paused.applied_max_admission_rps == 0.0
+    _round_trip_pyd(
+        pyd.BatchDispatcherFeedback(**common, applied_max_admission_rps=0.0)
+    )
+
+
 def test_prediction_data_optional_unset_vs_zero():
     """Critical invariant: optional float fields distinguish None
     ("no opinion") from 0.0 ("I assert zero"). Removing the

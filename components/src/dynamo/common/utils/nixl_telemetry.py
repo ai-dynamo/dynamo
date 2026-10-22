@@ -15,11 +15,16 @@ actually got, so nothing could name that port as a scrape target.
 This module deliberately imports no inference engine: the derivation is pure
 arithmetic over a base port and a rank index, and the callers that know how to
 find a rank index live in the per-backend packages.
+
+Only environment configuration is inspected here. NIXL can also read these
+settings from ``NIXL_CONFIG_FILE``, ``~/.nixl.cfg``, or ``/etc/nixl.cfg``;
+Dynamo cannot derive or declare per-rank ports from those files.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 
 MAX_PORT = 65535
@@ -28,7 +33,14 @@ NIXL_TELEMETRY_ENABLE_ENV = "NIXL_TELEMETRY_ENABLE"
 NIXL_TELEMETRY_EXPORTER_ENV = "NIXL_TELEMETRY_EXPORTER"
 NIXL_TELEMETRY_PROMETHEUS_PORT_ENV = "NIXL_TELEMETRY_PROMETHEUS_PORT"
 
-DEFAULT_NIXL_PROMETHEUS_PORT = 19090
+# NIXL's Prometheus exporter uses this port when no override is configured.
+DEFAULT_NIXL_PROMETHEUS_PORT = 9090
+
+# NIXL compares these tokens case-insensitively, without trimming whitespace.
+_NIXL_TRUE_VALUES = frozenset({"y", "1", "yes", "on", "true", "enable"})
+_NIXL_FALSE_VALUES = frozenset({"n", "0", "no", "off", "false", "disable"})
+
+_NIXL_UINT16 = re.compile(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)")
 
 # Keep in sync with DynamoMaxNixlPorts in deploy/operator/internal/consts/consts.go:
 # a rank deriving a port past the reserved range would bind a port nothing scrapes.
@@ -45,11 +57,7 @@ def configured_fixed_port(
     default: int | None = None,
     env: Mapping[str, str] | None = None,
 ) -> int | None:
-    """Return a configured fixed TCP port, ignoring disabled/invalid values.
-
-    Mirrors ``dynamo.vllm.backend_args._configured_fixed_port`` so that a value
-    this package accepts is exactly a value that package accepts.
-    """
+    """Return a configured fixed TCP port, ignoring disabled/invalid values."""
     environ = os.environ if env is None else env
     raw = environ.get(env_name)
     if raw is None:
@@ -61,18 +69,65 @@ def configured_fixed_port(
     return port if 0 < port <= MAX_PORT else None
 
 
+def _parse_nixl_uint16(env_name: str, raw: str) -> int:
+    """Parse one present value with NIXL's unsigned 16-bit syntax."""
+    # Unlike int(), NIXL rejects signs, whitespace, separators, and partial parses.
+    if _NIXL_UINT16.fullmatch(raw) is None:
+        raise ValueError(f"{env_name}={raw!r} is not a valid unsigned 16-bit integer")
+
+    is_hex = raw.startswith(("0x", "0X"))
+    digits = (raw[2:] if is_hex else raw).lstrip("0") or "0"
+    max_digits = format(MAX_PORT, "x") if is_hex else str(MAX_PORT)
+    if len(digits) > len(max_digits) or (
+        len(digits) == len(max_digits) and digits.lower() > max_digits
+    ):
+        raise ValueError(f"{env_name}={raw!r} is outside the range 0-{MAX_PORT}")
+    # Parse only the significant digits so Python's configurable integer-string
+    # limit cannot misclassify a valid value with many leading zeroes.
+    return int(digits, 16 if is_hex else 10)
+
+
+def _parse_nixl_bool(env_name: str, raw: str) -> bool:
+    """Parse one present value with NIXL's case-insensitive boolean syntax."""
+    normalized = raw.lower()
+    if normalized in _NIXL_TRUE_VALUES:
+        return True
+    if normalized in _NIXL_FALSE_VALUES:
+        return False
+    raise ValueError(f"{env_name}={raw!r} is not a boolean value recognized by NIXL")
+
+
 def nixl_prometheus_base_port(env: Mapping[str, str] | None = None) -> int | None:
-    """Return the base NIXL Prometheus port, or None when it is not in use."""
+    """Return the fixed Prometheus port selected by the NIXL environment.
+
+    ``None`` means this environment does not select the Prometheus exporter.
+    Invalid NIXL values raise, as they do during NIXL agent construction.
+    """
     environ = os.environ if env is None else env
-    enabled = environ.get(NIXL_TELEMETRY_ENABLE_ENV, "").strip().lower()
-    exporter = environ.get(NIXL_TELEMETRY_EXPORTER_ENV, "prometheus")
-    if enabled != "y" or exporter.strip().lower() != "prometheus":
+    enabled = environ.get(NIXL_TELEMETRY_ENABLE_ENV)
+    if enabled is None or not _parse_nixl_bool(NIXL_TELEMETRY_ENABLE_ENV, enabled):
         return None
-    return configured_fixed_port(
-        NIXL_TELEMETRY_PROMETHEUS_PORT_ENV,
-        default=DEFAULT_NIXL_PROMETHEUS_PORT,
-        env=environ,
+
+    exporter = environ.get(NIXL_TELEMETRY_EXPORTER_ENV, "")
+    # TODO: NIXL main also has a prometheus_mp exporter that shares this port
+    # variable but aggregates all ranks behind one endpoint. Add separate
+    # reservation semantics when Dynamo moves to a NIXL release containing it.
+    if exporter != "prometheus":
+        return None
+
+    raw_port = environ.get(NIXL_TELEMETRY_PROMETHEUS_PORT_ENV)
+    port = (
+        DEFAULT_NIXL_PROMETHEUS_PORT
+        if raw_port is None
+        else _parse_nixl_uint16(NIXL_TELEMETRY_PROMETHEUS_PORT_ENV, raw_port)
     )
+    if port == 0:
+        raise ValueError(
+            f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV}=0 asks NIXL for an ephemeral "
+            "port, which Dynamo cannot declare or configure as a scrape target. "
+            f"Set a fixed port between 1 and {MAX_PORT}."
+        )
+    return port
 
 
 def reserved_port_ranges(

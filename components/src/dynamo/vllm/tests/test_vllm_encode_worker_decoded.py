@@ -33,7 +33,10 @@ pytestmark = [
 
 
 def _handler(
-    *, frontend_decoding: bool, capacity_bytes: int = 1 << 20
+    *,
+    frontend_decoding: bool,
+    capacity_bytes: int = 1 << 20,
+    session_scoped_cache: bool = False,
 ) -> EncodeWorkerHandler:
     """Build a handler without running __init__.
 
@@ -45,6 +48,7 @@ def _handler(
     handler._enable_frontend_decoding = frontend_decoding
     handler._decoded_content_hash_warning_emitted = False
     handler.embedding_cache_manager = MultimodalEmbeddingCacheManager(capacity_bytes)
+    handler.image_loader = SimpleNamespace(session_scoped_cache=session_scoped_cache)
     return handler
 
 
@@ -208,6 +212,50 @@ def test_cache_key_for_decoded_image_uses_content_hash():
     )
 
     assert handler._image_cache_key(group_input) == "0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    ("frontend_decoding", "group_input"),
+    [
+        (False, MultiModalInput(image_url="https://example.com/a.png")),
+        (
+            True,
+            MultiModalInput(
+                image_decoded={
+                    "shape": [4, 4, 3],
+                    "content_hash": "0123456789abcdef",
+                }
+            ),
+        ),
+    ],
+    ids=["url", "frontend-decoded"],
+)
+def test_session_scope_partitions_encode_worker_embedding_keys(
+    frontend_decoding, group_input
+):
+    handler = _handler(
+        frontend_decoding=frontend_decoding,
+        session_scoped_cache=True,
+    )
+
+    first_key = handler._image_cache_key(group_input, "session-a")
+    second_key = handler._image_cache_key(group_input, "session-b")
+
+    assert first_key is not None
+    assert second_key is not None
+    assert first_key != second_key
+    assert handler._image_cache_key(group_input, "session-a") == first_key
+
+
+def test_session_scoped_encode_worker_embedding_cache_bypasses_without_scope():
+    handler = _handler(
+        frontend_decoding=False,
+        session_scoped_cache=True,
+    )
+    group_input = MultiModalInput(image_url="https://example.com/a.png")
+
+    assert handler._image_cache_key(group_input) is None
+    assert handler._image_cache_key(group_input, " ") is None
 
 
 def test_decoded_image_without_hash_is_unkeyed_and_warns_once(caplog):

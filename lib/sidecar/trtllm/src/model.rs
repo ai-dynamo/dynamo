@@ -21,7 +21,7 @@ impl ConfiguredModel {
         let mut runtime_data = HashMap::new();
         runtime_data.insert(
             "grpc_service".to_string(),
-            serde_json::Value::String("trtllm.TrtllmService".to_string()),
+            serde_json::Value::String("openengine.v1.Inference".to_string()),
         );
 
         EngineConfig {

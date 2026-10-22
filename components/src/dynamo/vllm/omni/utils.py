@@ -38,11 +38,41 @@ def resolve_stage_configs(
     )
     if hasattr(omni_config, "resolve_omni_config"):
         resolved = omni_config.resolve_omni_config(model, cli_overrides={}, **kwargs)
-        return resolved.config_path, list(resolved.stage_configs)
+        return resolved.config_path, [
+            _dynamo_stage_config(stage) for stage in resolved.stage_configs
+        ]
     path, stages, _ = omni_entrypoint_utils.load_and_resolve_stage_configs(
         model, stage_configs_path=None, kwargs={}, **kwargs
     )
     return path, list(stages)
+
+
+def _dynamo_stage_config(stage: Any) -> Any:
+    if not hasattr(stage, "stage_pipeline_config"):
+        return stage
+
+    from vllm_omni.config.resolver import _convert_dataclasses_to_dict
+    from vllm_omni.config.yaml_util import create_config
+    from vllm_omni.engine.stage_init_utils import _project_omni_stage_engine_args
+
+    return create_config(
+        _convert_dataclasses_to_dict(
+            {
+                "stage_id": stage.stage_id,
+                "stage_type": stage.stage_type.value,
+                "execution_type": stage.stage_pipeline_config.execution_type.value,
+                "engine_args": _project_omni_stage_engine_args(stage),
+                "runtime": stage.runtime_config,
+                "engine_input_source": stage.input_sources,
+                "default_sampling_params": stage.model_config.default_sampling_params,
+                "custom_process_input_func": stage.custom_process_input_func,
+                "requires_multimodal_data": stage.requires_multimodal_data,
+                "final_output": stage.final_output,
+                "final_output_type": stage.final_output_type,
+                "is_comprehension": stage.is_comprehension,
+            }
+        )
+    )
 
 
 def _coerce_dimension(value: Any, name: str) -> int:
@@ -130,9 +160,9 @@ def engine_model_stages(engine_client: Any) -> set[str]:
     if stage_configs:
         for cfg in stage_configs:
             engine_args = (
-                cfg.get("engine_args", {})
+                cfg.get("engine_args", cfg)
                 if isinstance(cfg, dict)
-                else getattr(cfg, "engine_args", {})
+                else getattr(cfg, "engine_args", cfg)
             )
             ms = (
                 engine_args.get("model_stage")
@@ -339,9 +369,13 @@ def build_image_generation_prompt(
 
 def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -> Any:
     """Build the rich prompt dict that processor functions (ar2diffusion etc.) read."""
+    negative_prompt = request.get("negative_prompt")
+    if negative_prompt is None:
+        # /v1/videos has no top-level negative_prompt; it arrives in nvext.
+        negative_prompt = nvext.get("negative_prompt")
     prompt = OmniTextPrompt(
         prompt=request.get("prompt", ""),
-        negative_prompt=request.get("negative_prompt", None),
+        negative_prompt=negative_prompt,
     )
     if request.get("multi_modal_data"):
         prompt["multi_modal_data"] = request["multi_modal_data"]
@@ -399,8 +433,13 @@ async def parse_omni_request(
                 fps=nvext.get("fps"),
                 default_fps=default_video_fps,
             )
-            engine_inputs = OmniTextPrompt(prompt=request.get("prompt", ""))
             original_prompt = build_original_prompt(request, nvext, height, width)
+            engine_inputs = OmniTextPrompt(prompt=request.get("prompt", ""))
+            # A diffusion stage 0 reads the negative prompt from its engine
+            # prompt; original_prompt only reaches the stages after it.
+            negative_prompt = original_prompt.get("negative_prompt")
+            if negative_prompt is not None:
+                engine_inputs["negative_prompt"] = negative_prompt
         else:
             engine_inputs = build_image_generation_prompt(
                 request.get("prompt", ""),

@@ -90,6 +90,64 @@ func TestResolveGPUShapeSeparatesEngineWidthFromReplicaCost(t *testing.T) {
 	}
 }
 
+func TestResolveGPUShapeUsesRoleTemplatesForEngineWidth(t *testing.T) {
+	leaderMain := gpuContainer(commonconsts.MainContainerName, "1")
+	workerMain := corev1.Container{
+		Name: commonconsts.MainContainerName,
+		Resources: corev1.ResourceRequirements{
+			Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+		},
+	}
+	workerPodSpec := corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{
+			Name:                      "gpu",
+			ResourceClaimTemplateName: ptr.To("worker-gpu"),
+		}},
+		Containers: []corev1.Container{workerMain},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "decode",
+		ComponentType: v1beta1.ComponentTypeDecode,
+		Multinode:     &v1beta1.MultinodeSpec{NodeCount: 3},
+		Roles: []v1beta1.ComponentRoleSpec{
+			{
+				Name:        v1beta1.ComponentRoleLeader,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{leaderMain}}},
+			},
+			{
+				Name:        v1beta1.ComponentRoleWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: workerPodSpec},
+			},
+		},
+	}
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-gpu", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name: "gpu",
+				Exactly: &resourcev1.ExactDeviceRequest{
+					DeviceClassName: "gpu.nvidia.com",
+					AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+					Count:           4,
+				},
+			}}},
+		}},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, resourcev1.AddToScheme(scheme))
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		template,
+		&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}},
+	).Build()
+
+	shape, err := ResolveGPUShape(t.Context(), reader, "default", component, []PodSpecMultiplicity{
+		{PodSpec: component.Roles[0].PodTemplate.Spec.DeepCopy(), Count: 1},
+		{PodSpec: component.Roles[1].PodTemplate.Spec.DeepCopy(), Count: 2},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, GPUShape{GPUsPerEngine: 9, GPUsPerReplica: 9}, shape)
+}
+
 func TestResolveGPUShapeUsesEffectiveInitPeakForReplicaCost(t *testing.T) {
 	restartAlways := corev1.ContainerRestartPolicyAlways
 	main := gpuContainer(commonconsts.MainContainerName, "4")
@@ -154,7 +212,7 @@ func TestResolveGroveGPUShapesIncludesUntypedAndMultinodeComponents(t *testing.T
 				}},
 			}}
 
-			shapes, err := ResolveGroveGPUShapes(t.Context(), nil, dgd, pcs)
+			shapes, err := ResolveGroveGPUShapes(t.Context(), nil, dgd, nil, pcs)
 			require.NoError(t, err)
 			assert.Equal(t, GPUShape{GPUsPerEngine: 2, GPUsPerReplica: 2}, shapes["custom"])
 			wantReplica := int64(8)
@@ -218,7 +276,7 @@ func TestResolveGroveGPUShapesPublishesExplicitZero(t *testing.T) {
 	require.NoError(t, resourcev1.AddToScheme(scheme))
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, deviceClass).Build()
 
-	shapes, err := ResolveGroveGPUShapes(t.Context(), reader, dgd, pcs)
+	shapes, err := ResolveGroveGPUShapes(t.Context(), reader, dgd, nil, pcs)
 	require.NoError(t, err)
 	assert.Equal(t, GPUShape{}, shapes["frontend"])
 }
@@ -302,7 +360,7 @@ func TestResolveGroveGPUShapesCountsInterPodSharedGPUsOnce(t *testing.T) {
 			}
 			pcs, err := GenerateGrovePodCliqueSet(
 				t.Context(),
-				dgd,
+				dgd, nil,
 				&configv1alpha1.OperatorConfiguration{
 					Discovery: configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
 					Infrastructure: configv1alpha1.InfrastructureConfiguration{
@@ -315,11 +373,12 @@ func TestResolveGroveGPUShapesCountsInterPodSharedGPUsOnce(t *testing.T) {
 				nil,
 				nil,
 				nil,
+				false,
 				nil,
 			)
 			require.NoError(t, err)
 
-			shapes, err := ResolveGroveGPUShapes(t.Context(), nil, dgd, pcs)
+			shapes, err := ResolveGroveGPUShapes(t.Context(), nil, dgd, nil, pcs)
 			require.NoError(t, err)
 			assert.Equal(t, GPUShape{GPUsPerEngine: 8, GPUsPerReplica: tt.wantReplica}, shapes["decode"])
 		})

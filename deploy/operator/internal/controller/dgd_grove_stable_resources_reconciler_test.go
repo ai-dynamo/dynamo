@@ -24,10 +24,14 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -190,7 +194,7 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 			t.Log("Reconcile the Grove stable resources")
 			ctx := context.Background()
 			reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
-			if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+			if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 				t.Fatalf("Reconcile returned an error: %v", err)
 			}
 
@@ -223,12 +227,94 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 	}
 }
 
+func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *testing.T) {
+	for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeDecode, v1beta1.ComponentTypePrefill} {
+		for _, tc := range []struct {
+			name   string
+			legacy bool
+			noType bool
+			labels map[string]string
+		}{
+			{name: "native"},
+			{name: "legacy", legacy: true},
+			{name: "type-from-pod-label", noType: true},
+			{name: "native-custom", labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: "custom"}},
+			{name: "legacy-custom", legacy: true, labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: "custom"}},
+			{name: "native-empty", labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: ""}},
+			{name: "legacy-empty", legacy: true, labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: ""}},
+		} {
+			t.Run(string(componentType)+"/"+tc.name, func(t *testing.T) {
+				t.Log("Build an elastic-EP leader and its existing workload labels")
+				component := newElasticEPComponent(elasticEPArgs)
+				component.ComponentType = componentType
+				component.PodTemplate.Spec.Containers[0].Image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0"
+				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"}
+				component.PodTemplate.Labels = tc.labels
+				if tc.noType {
+					component.ComponentType = ""
+					component.PodTemplate.Labels = map[string]string{commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker}
+				}
+				dgd := newElasticEPTestDGD(component)
+				reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
+				original := dgd.DeepCopy()
+				var previous *grovev1alpha1.PodCliqueSet
+				if tc.legacy {
+					previous = &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{
+						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent:        component.ComponentName,
+								commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
+								commonconsts.KubeLabelDynamoSubComponentType: string(componentType),
+							}}},
+						},
+					}}
+				}
+
+				t.Log("Render the actual Grove workload and reconcile its discovery and Ray Services")
+				config := &configv1alpha1.OperatorConfiguration{
+					Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+				}
+				pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, &commoncontroller.RuntimeConfig{}, nil, nil, nil, previous, false, nil)
+				require.NoError(t, err)
+				reconciler.config = config
+				_, err = reconciler.Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, pcs)
+				require.NoError(t, err)
+
+				t.Log("Verify both Services select the rendered leader without changing the source DGD")
+				podLabels := pcs.Spec.Template.Cliques[0].Labels
+				wantType := string(componentType)
+				if tc.legacy || tc.noType {
+					wantType = commonconsts.ComponentTypeWorker
+				}
+				require.Equal(t, wantType, podLabels[commonconsts.KubeLabelDynamoComponentType])
+				componentServiceName := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
+				for _, name := range []string{componentServiceName, dynamo.ElasticEPLeaderServiceName(componentServiceName)} {
+					service := &corev1.Service{}
+					require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: name}, service))
+					require.True(t, labels.SelectorFromSet(service.Spec.Selector).Matches(labels.Set(podLabels)),
+						"Service %s selector %v does not match rendered pod labels %v", name, service.Spec.Selector, podLabels)
+					require.Equal(t, podLabels[commonconsts.KubeLabelDynamoWorkerHash], service.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+					if tc.labels != nil {
+						require.Subset(t, service.Labels, tc.labels)
+					} else if tc.legacy {
+						require.Equal(t, string(componentType), service.Labels[commonconsts.KubeLabelDynamoSubComponentType])
+					} else {
+						require.NotContains(t, service.Labels, commonconsts.KubeLabelDynamoSubComponentType)
+					}
+				}
+				require.Equal(t, original, dgd)
+			})
+		}
+	}
+}
+
 func TestGroveStableResourcesReconcilerDeletesElasticEPLeaderServiceWhenEligibilityIsRemoved(t *testing.T) {
 	t.Log("Reconcile a single-pod elastic-EP component so the leader Service is created")
 	ctx := context.Background()
 	dgd := newElasticEPTestDGD(newElasticEPComponent(elasticEPArgs))
 	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
-	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("first Reconcile returned an error: %v", err)
 	}
 
@@ -242,7 +328,7 @@ func TestGroveStableResourcesReconcilerDeletesElasticEPLeaderServiceWhenEligibil
 
 	t.Log("Drop elastic EP from the component and reconcile again")
 	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm"}
-	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("second Reconcile returned an error: %v", err)
 	}
 
@@ -269,7 +355,7 @@ func TestGroveStableResourcesReconcilerLeavesAnUnownedNameCollisionAlone(t *test
 	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd, unowned)
 
 	t.Log("Reconcile a component that does not qualify, so it takes the delete path")
-	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("Reconcile returned an error: %v", err)
 	}
 
@@ -319,7 +405,7 @@ func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t 
 		events.NewFakeRecorder(100),
 		&configv1alpha1.OperatorConfiguration{},
 	)
-	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("Reconcile returned an error: %v", err)
 	}
 
@@ -342,13 +428,13 @@ func TestGroveStableResourcesReconcilerConvergesLeaderServiceAnnotations(t *test
 	dgd := newElasticEPTestDGD(newElasticEPComponent(elasticEPArgs))
 	dgd.Spec.Annotations = map[string]string{"example.com/note": "before"}
 	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
-	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("first Reconcile returned an error: %v", err)
 	}
 
 	t.Log("Edit the DGD annotation and reconcile again")
 	dgd.Spec.Annotations["example.com/note"] = "after"
-	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("second Reconcile returned an error: %v", err)
 	}
 

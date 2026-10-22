@@ -12,6 +12,7 @@
 //! in sync.
 
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass};
+use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -33,6 +34,55 @@ pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRe
         return error;
     }
     error
+}
+
+// Raised by `RoutedEngine.generate` when the routed pipeline reports that no
+// worker on the request's route can serve it yet (for example, prefill routing
+// is still activating). Python chat processors re-raise it unchanged, and
+// `map_python_exception` restores `ErrorClass::WorkerUnavailable` so the client
+// gets the intended HTTP 503 instead of a generic 500.
+pyo3::create_exception!(dynamo._core, WorkerUnavailable, DynamoException);
+
+/// Convert a routed-pipeline error to a Python exception, keeping the
+/// `WorkerUnavailable` class that the generic [`crate::to_pyerr`] would drop.
+pub fn routed_error_to_pyerr(err: anyhow::Error) -> PyErr {
+    if is_worker_unavailable(err.as_ref()) {
+        return WorkerUnavailable::new_err(err.to_string());
+    }
+    crate::to_pyerr(err)
+}
+
+fn is_worker_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        // `class()` normalizes `WorkerUnavailable` to `Unavailable`; the raw
+        // error type keeps the migratable worker-scoped distinction.
+        if cause
+            .downcast_ref::<DynamoError>()
+            .is_some_and(|error| error.error_type() == ErrorClass::WorkerUnavailable)
+        {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
+}
+
+pub(crate) fn worker_unavailable_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    if !err.is_instance_of::<WorkerUnavailable>(py) {
+        return None;
+    }
+    let message = err
+        .value(py)
+        .str()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(
+        DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .message(message)
+            .build(),
+    )
 }
 
 // Raised by the in-process `SelectionService` bindings for selector failures
@@ -104,6 +154,7 @@ macro_rules! define_dynamo_exceptions {
                 "SelectionServiceError",
                 m.py().get_type::<SelectionServiceError>(),
             )?;
+            m.add("WorkerUnavailable", m.py().get_type::<WorkerUnavailable>())?;
             $(
                 m.add(stringify!($name), m.py().get_type::<$name>())?;
             )*
@@ -132,7 +183,34 @@ define_dynamo_exceptions!(
     (Cancelled, BackendError::Cancelled),
     (EngineShutdown, BackendError::EngineShutdown),
     (StreamIncomplete, BackendError::StreamIncomplete),
+    (WorkerOverloaded, BackendError::WorkerOverloaded),
 );
+
+/// Preserve explicitly public validation errors across Rust-to-Python streams.
+/// Other errors retain the iterator's existing `ValueError` behavior; diagnostic
+/// text must never be promoted into a public `InvalidArgument` message.
+pub(crate) fn check_response_error<R>(response: Annotated<R>) -> PyResult<Annotated<R>> {
+    if response.is_error()
+        && let Some(message) = response
+            .error
+            .as_ref()
+            .and_then(public_invalid_request_message)
+    {
+        return Err(InvalidArgument::new_err(message.to_owned()));
+    }
+
+    response
+        .ok()
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+fn public_invalid_request_message(error: &DynamoError) -> Option<&str> {
+    if error.class() == ErrorClass::InvalidRequest {
+        error.public_message()
+    } else {
+        None
+    }
+}
 
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
@@ -216,6 +294,61 @@ mod tests {
     struct LegacyHttpError {
         code: u16,
         message: String,
+    }
+
+    #[test]
+    fn worker_unavailable_survives_class_normalization_and_context() {
+        let rejection = DynamoError::builder()
+            .class(ErrorClass::WorkerUnavailable)
+            .message("prefill routing is still activating")
+            .build();
+        // `class()` reports the normalized `Unavailable`; detection must not rely on it.
+        assert_eq!(rejection.class(), ErrorClass::Unavailable);
+        assert!(is_worker_unavailable(&rejection));
+
+        let wrapped = anyhow::Error::from(rejection).context("routed pipeline failed");
+        assert!(is_worker_unavailable(wrapped.as_ref()));
+
+        let pool_unavailable = DynamoError::builder()
+            .class(ErrorClass::Unavailable)
+            .message("no workers")
+            .build();
+        assert!(!is_worker_unavailable(&pool_unavailable));
+    }
+
+    #[test]
+    fn invalid_request_conversion_uses_only_public_message() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("private backend detail")
+            .public_message("Invalid JSON schema")
+            .build();
+        assert_eq!(
+            public_invalid_request_message(&error),
+            Some("Invalid JSON schema")
+        );
+
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("private validation detail")
+            .build();
+        assert_eq!(public_invalid_request_message(&error), None);
+    }
+
+    #[test]
+    fn other_error_classes_are_not_promoted_to_invalid_arguments() {
+        for class in [
+            ErrorClass::Internal,
+            ErrorClass::Cancelled,
+            ErrorClass::Unavailable,
+        ] {
+            let error = DynamoError::builder()
+                .class(class)
+                .diagnostic("private backend detail")
+                .public_message("Public error message")
+                .build();
+            assert_eq!(public_invalid_request_message(&error), None);
+        }
     }
 
     #[test]

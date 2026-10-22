@@ -43,13 +43,20 @@ pub enum RequestPhase {
     Aggregated,
 }
 
+impl RequestPhase {
+    /// Stable label value, shared by every metric labelled `phase`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RequestPhase::Prefill => "prefill",
+            RequestPhase::Decode => "decode",
+            RequestPhase::Aggregated => "aggregated",
+        }
+    }
+}
+
 impl std::fmt::Display for RequestPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RequestPhase::Prefill => write!(f, "prefill"),
-            RequestPhase::Decode => write!(f, "decode"),
-            RequestPhase::Aggregated => write!(f, "aggregated"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -264,6 +271,12 @@ impl RequestTracker {
 
     pub fn record_finish(&self) {
         *self.request_finish_time.lock() = Some(Instant::now());
+    }
+
+    pub(crate) fn record_finish_if_missing(&self) {
+        self.request_finish_time
+            .lock()
+            .get_or_insert_with(Instant::now);
     }
 
     /// Record KV cache hit information. Returns true if this was the first call.

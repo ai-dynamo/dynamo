@@ -234,7 +234,7 @@ Then copy the new recipe's manifest and apply again.
 
 This example deploys a disaggregated prefill/decode Dynamo Inference Graph that uses NIXL with the LIBFABRIC backend using [Elastic Fabric Adapter (EFA)](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) for high-throughput KV-cache transfer between workers.
 
-It targets `g7e.12xlarge` instances, which support GPUDirect RDMA, and uses the Dynamo EFA-enabled vLLM container `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-efa` that ships with the [EFA Installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-changelog.html) pre-installed.
+It targets `g7e.12xlarge` instances, which support GPUDirect RDMA, and uses the Dynamo EFA-enabled vLLM container `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-efa` that ships with the [EFA Installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-changelog.html) pre-installed.
 
 *Note: For a full list of EFA-supported instance types, see [the AWS EC2 Docs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html#efa-instance-types).*
 
@@ -245,7 +245,9 @@ It targets `g7e.12xlarge` instances, which support GPUDirect RDMA, and uses the 
 
 KV-cache transfer between workers uses [NIXL](https://github.com/ai-dynamo/nixl) with the LIBFABRIC backend. Enable it by passing the following argument to vLLM:
 
-`--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'`
+On prefill workers use: `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'`
+
+On decode workers use: `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'`
 
 *Note: On instance types without EFA support, NIXL's libfabric backend falls back to TCP automatically. However, vLLM's `NixlConnector` defaults to `cuda` as the buffer device, so you must add `"kv_buffer_device":"cpu"` to the `kv-transfer-config` argument for disaggregated serving to work without EFA.*
 

@@ -105,8 +105,8 @@ class HttpConfigBase(ConfigBase):
     # Per-backend semantics:
     #   httpx → ``Timeout.read`` (``connect`` / ``pool`` stay independent
     #           so a stuck handshake or saturated pool still fast-fails).
-    #   aiohttp → ``ClientTimeout.total`` (aiohttp has no separate read
-    #             component; the override caps the whole request).
+    #   aiohttp → ``ClientTimeout.total``: the override caps the whole
+    #             request. It does not change the caller's ``read_timeout``.
     per_call_timeout_override: Optional[float]
 
     # TCP+TLS-handshake budget in seconds. Independent of the per-call /
@@ -146,7 +146,7 @@ class HttpArgGroup(ArgGroup):
             default=100,
             arg_type=int,
             dest="max_connections",
-            help="Total pool size cap (httpx Limits.max_connections / aiohttp TCPConnector.limit).",
+            help="Pool size cap per connect-time policy (aiohttp TCPConnector.limit). The aiohttp client keeps one pool per connect-time policy outcome, at most three: one that may reach private addresses (DYN_MM_ALLOW_INTERNAL=1), one for strict direct fetches, and one for strict fetches through a trusted egress proxy (DYN_MM_TRUST_EGRESS_PROXY=1). The total can therefore reach three times this value.",
         )
         add_argument(
             g,

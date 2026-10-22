@@ -19,6 +19,7 @@ use super::{
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice, validate_metadata_upload_stop_strings,
 };
 
 mod aggregator;
@@ -30,7 +31,6 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateCompletionRequest,
 
     #[serde(flatten)]
@@ -49,18 +49,57 @@ pub struct NvCreateCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
 
+    /// Preserve matched stop strings and stop/EOS tokens in raw completion text.
+    /// Special-token decoding is still controlled by `skip_special_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_stop_trim: Option<bool>,
+
     /// Catch-all for unsupported fields - checked during validation
-    #[serde(flatten, default, skip_serializing)]
+    #[serde(
+        flatten,
+        default,
+        skip_serializing,
+        deserialize_with = "validate::deserialize_extra_fields"
+    )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = CompletionResponseSchema)]
     pub inner: dynamo_protocols::types::CreateCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+}
+
+/// Schema-only import for the wholly re-exported async-openai response type.
+/// Resolve this explicit slot with the version-pinned OpenAPI composer; it is
+/// not a claim that an arbitrary object is the completion response contract.
+struct CompletionResponseSchema;
+
+impl utoipa::PartialSchema for CompletionResponseSchema {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+        utoipa::openapi::schema::ObjectBuilder::new()
+            .extensions(Some(
+                [(
+                    "x-dynamo-schema-import",
+                    serde_json::json!({
+                        "crate": "async-openai",
+                        "type": "CreateCompletionResponse"
+                    }),
+                )]
+                .into_iter()
+                .collect(),
+            ))
+            .into()
+    }
+}
+
+impl ToSchema for CompletionResponseSchema {
+    fn name() -> std::borrow::Cow<'static, str> {
+        "async_openai.CreateCompletionResponse".into()
+    }
 }
 
 impl ContentProvider for dynamo_protocols::types::Choice {
@@ -444,6 +483,10 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
         self.return_tokens_as_token_ids
     }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
+        self.no_stop_trim
+    }
 }
 
 /// Implements `ValidateRequest` for `NvCreateCompletionRequest`,
@@ -467,6 +510,19 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
             get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_single_choice(
+            get_prompt_batch_size(&self.inner.prompt)
+                * self
+                    .inner
+                    .n
+                    .unwrap_or(1)
+                    .max(self.inner.best_of.unwrap_or(1)) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_stop_strings(
+            self.get_stop().is_some_and(|stop| !stop.is_empty()),
             self.nvext.as_ref(),
         )?;
         // none for stream
@@ -504,6 +560,33 @@ impl ValidateRequest for NvCreateCompletionRequest {
 #[cfg(test)]
 mod conversion_error_tests {
     use super::*;
+
+    #[test]
+    fn no_stop_trim_is_validated_and_carried_to_the_decoder() {
+        for no_stop_trim in [None, Some(false), Some(true)] {
+            let mut body =
+                serde_json::json!({"model": "test", "prompt": "hi", "skip_special_tokens": false});
+            if let Some(value) = no_stop_trim {
+                body["no_stop_trim"] = value.into();
+            }
+            let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+            ValidateRequest::validate(&request).unwrap();
+            let options = request.extract_output_options().unwrap();
+            assert_eq!(options.no_stop_trim, no_stop_trim);
+            assert_eq!(options.skip_special_tokens, Some(false));
+            let round_trip: common::OutputOptions =
+                serde_json::from_value(serde_json::to_value(options).unwrap()).unwrap();
+            assert_eq!(round_trip.no_stop_trim, no_stop_trim);
+        }
+        for value in [serde_json::json!("true"), serde_json::json!(1)] {
+            assert!(
+                serde_json::from_value::<NvCreateCompletionRequest>(serde_json::json!({
+                    "model": "test", "prompt": "hi", "no_stop_trim": value
+                }))
+                .is_err()
+            );
+        }
+    }
 
     /// `anyhow!("{e}")` builds a fresh error with no source, which drops the
     /// `DynamoError` and sends a caller error to `ErrorMessage::from_anyhow` as a 500.

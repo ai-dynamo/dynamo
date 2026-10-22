@@ -9,6 +9,34 @@ SPDX-License-Identifier: Apache-2.0
 - Keep chart-only grants in the manual section of the platform chart's
   `../helm/charts/platform/components/operator/templates/manager-rbac.yaml`.
 
+## Kubernetes API Documentation
+
+- `make generate-api-docs` generates
+  `docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md`
+  (relative to the repository root) from Go API types and comments, then runs
+  `docs/fern/scripts/gen_kubernetes_api.py` to render `full-api-reference.mdx`.
+  `make check` depends on this target and checks for uncommitted changes. Regenerate
+  and commit both generated files when their source changes; do not edit them by hand.
+- The sibling `dynamo-graph-deployment.mdx`,
+  `dynamo-graph-deployment-request.mdx`, and `dynamo-component-deployment.mdx`
+  pages are **manually maintained**. Neither generation command updates them,
+  and passing `make check` does not prove they match the API.
+- When changing API fields, defaults, validation, or controller/webhook behavior,
+  update the affected curated pages in the same PR. Check their spec, status,
+  nested types, examples, and compatibility notes against the Go source and
+  regenerated reference. Shared component fields belong in the DCD page; the
+  DGD page links there rather than duplicating the field inventory.
+- When introducing CRD/admission or platform chart breaking changes, or dependency
+  compatibility changes that require migration, update the platform README's
+  `Upgrading` section in the same PR. Edit
+  `../helm/charts/platform/README.md.gotmpl` and run `make generate-helm-docs`
+  from `deploy/operator`; do not edit the generated `README.md` by hand. Place
+  the note under the release that introduces the change and the appropriate
+  category, stating affected deployments, required actions, and behavior for
+  existing deployments. Verify release attribution against the code and dependencies.
+- Follow the [Kubernetes API reference authoring guide](../../docs/fern/templates/guidelines/kubernetes-api-reference.md)
+  for the source-of-truth order, page structure, and validation commands.
+
 ## Reconciliation and Admission Semantics
 
 - Reconciler state convergence must be level-based. Derive actions from desired

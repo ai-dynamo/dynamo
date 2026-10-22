@@ -35,6 +35,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -99,7 +100,9 @@ async fn apply_jail_transformation(
     NvCreateChatCompletionStreamResponse {
         inner: out.data.unwrap(),
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 

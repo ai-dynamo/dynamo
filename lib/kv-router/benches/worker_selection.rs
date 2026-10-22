@@ -14,8 +14,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
-    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerFilter,
-    WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
+    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
     WorkerSelectionPolicyError, WorkerSelector,
 };
@@ -54,7 +54,7 @@ impl WorkerFilter for KeepAllFilter {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidate: &WorkerCandidate,
+        _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(true)
     }
@@ -70,20 +70,25 @@ impl WorkerScorer for BenchScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let cache = candidate
-            .cache()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let uncached_blocks =
-            (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-        let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
-            + load.decode_cost_blocks()
-            + load.active_requests() as f64;
-        Ok((uncached_blocks + load_blocks) * candidate.preferred_taint_multiplier().unwrap_or(1.0))
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            let uncached_blocks =
+                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.decode_cost_blocks()
+                + load.active_requests() as f64;
+            *cost = (uncached_blocks + load_blocks)
+                * candidate.preferred_taint_multiplier().unwrap_or(1.0);
+        }
+        Ok(())
     }
 }
 
@@ -99,20 +104,24 @@ impl WorkerScorer for IgnoringPreferenceScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let cache = candidate
-            .cache()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let uncached_blocks =
-            (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-        let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
-            + load.decode_cost_blocks()
-            + load.active_requests() as f64;
-        Ok(uncached_blocks + load_blocks)
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            let uncached_blocks =
+                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.decode_cost_blocks()
+                + load.active_requests() as f64;
+            *cost = uncached_blocks + load_blocks;
+        }
+        Ok(())
     }
 }
 
@@ -145,8 +154,10 @@ fn fixture_with_preferred_taints(
     const PREFERRED_TAINTS: [&str; 4] = ["rack-a", "zone-a", "gpu-a", "node-a"];
     assert!(preferred_taint_count <= PREFERRED_TAINTS.len());
     let mut workers = HashMap::with_capacity(worker_count);
-    let mut effective_overlap_blocks = HashMap::with_capacity(worker_count);
-    let mut effective_cached_tokens = HashMap::with_capacity(worker_count);
+    let mut effective_overlap_blocks =
+        FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
+    let mut effective_cached_tokens =
+        FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
     let mut worker_loads = FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
 
     for worker_id in 0..worker_count as WorkerId {
@@ -225,7 +236,7 @@ fn worker_selection(c: &mut Criterion) {
             group.measurement_time(Duration::from_secs(5));
             group.sample_size(50);
 
-            for worker_count in [2, 32, 1_024, 10_000] {
+            for worker_count in [2, 32, 1_024, 2_048, 10_000] {
                 let (workers, request) = fixture(worker_count);
                 let selector = DefaultWorkerSelector::new(
                     Some(KvRouterConfig {
@@ -373,7 +384,7 @@ fn default_policy_wrapper(c: &mut Criterion) {
     for worker_count in [2, 32, 1_024] {
         let (workers, request) = fixture(worker_count);
         let direct = DefaultWorkerSelector::new(Some(config.clone()), "prefill");
-        let policy = WorkerSelectionPolicy::default(config.clone(), "prefill");
+        let policy = WorkerSelectionPolicy::reference(config.clone(), "prefill");
         group.throughput(Throughput::Elements(worker_count as u64));
 
         group.bench_with_input(
@@ -416,11 +427,49 @@ fn default_policy_wrapper(c: &mut Criterion) {
     group.finish();
 }
 
+fn worker_projection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("worker_projection");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+    for count in [32, 2_048] {
+        let (workers, request) = fixture(count);
+        let slots = dynamo_kv_router::ActiveSequencesMultiWorker::new(
+            dynamo_kv_router::NoopSequencePublisher,
+            16,
+            workers.keys().map(|&id| (id, (0, 1))).collect(),
+            false,
+            0,
+            "bench",
+        );
+        let now = tokio::time::Instant::now();
+        group.bench_function(BenchmarkId::new("allocate", count), |b| {
+            b.iter(|| black_box(slots.project_worker_loads(request.token_seq.as_deref(), now)))
+        });
+        #[cfg(feature = "bench")]
+        {
+            let mut projections = FxHashMap::default();
+            group.bench_function(BenchmarkId::new("reuse", count), |b| {
+                b.iter(|| {
+                    slots.bench_project_worker_loads_into(
+                        request.token_seq.as_deref(),
+                        now,
+                        &mut projections,
+                    );
+                    black_box(&projections);
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     worker_selection,
     custom_worker_selection,
     unused_preferred_taint_metadata,
-    default_policy_wrapper
+    default_policy_wrapper,
+    worker_projection
 );
 criterion_main!(benches);

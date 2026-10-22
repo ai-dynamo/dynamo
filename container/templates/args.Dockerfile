@@ -44,7 +44,6 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 {% endif %}
 
 # Build configuration
-ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
@@ -53,7 +52,7 @@ ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
 ARG LIBVPX_REF={{ context.dynamo.libvpx_ref }}
-{% if device == "cuda" -%}
+{% if device in ("cuda", "xpu") -%}
 ARG ENABLE_GPU_MEMORY_SERVICE={{ context[framework].enable_gpu_memory_service }}
 {% endif %}
 
@@ -94,6 +93,9 @@ ARG PLANNER_BUILD_IMAGE={{ context.dynamo.planner_build_image }}
 ARG PLANNER_BUILD_IMAGE_TAG={{ context.dynamo.planner_build_image_tag }}
 ARG PLANNER_RUNTIME_IMAGE={{ context.dynamo.planner_runtime_image }}
 ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
+# Planner-scoped interpreter — see context.yaml `planner_python_version` for
+# why this is not the global PYTHON_VERSION.
+ARG PLANNER_PYTHON_VERSION={{ context.dynamo.planner_python_version }}
 {% endif %}
 
 {% if framework == "vllm" -%}

@@ -8,7 +8,7 @@ import gc
 import logging
 import os
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import sglang as sgl
 from sglang.srt.managers.io_struct import (
@@ -24,6 +24,10 @@ from dynamo.common.snapshot.lifecycle import (
     configure_snapshot_capture_env,
 )
 from dynamo.sglang._compat import override_server_args, resolved_server_args
+from dynamo.sglang.capacity import sglang_dp_layout
+
+if TYPE_CHECKING:
+    from dynamo.sglang.args import Config
 
 logger = logging.getLogger(__name__)
 
@@ -31,18 +35,20 @@ logger = logging.getLogger(__name__)
 class _SGLangSnapshotLifecycle:
     """Adapt SGLang's native controls to the snapshot lifecycle interface."""
 
-    def __init__(self, engine: sgl.Engine):
+    def __init__(self, engine: sgl.Engine, release_tags: list[str] | None = None):
         self._tokenizer_manager = engine.tokenizer_manager
+        # None releases every memory region.
+        self._release_tags = release_tags
 
     async def pause(self) -> None:
         await self._tokenizer_manager.pause_generation(PauseGenerationReqInput())
         await self._tokenizer_manager.release_memory_occupation(
-            ReleaseMemoryOccupationReqInput(), None
+            ReleaseMemoryOccupationReqInput(tags=self._release_tags), None
         )
 
     async def resume(self) -> None:
         await self._tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(), None
+            ResumeMemoryOccupationReqInput(tags=self._release_tags), None
         )
         await self._tokenizer_manager.continue_generation(ContinueGenerationReqInput())
 
@@ -75,6 +81,7 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
 
     from sglang.srt.environ import envs
 
+    num_dp_ranks, _ = sglang_dp_layout(server_args)
     warmup_args: dict[str, Any] = {
         "sampling_params": {
             "temperature": DUMMY_WARMUP_TEMPERATURE,
@@ -82,14 +89,12 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
         }
     }
     if server_args.skip_tokenizer_init:
-        warmup_args["input_ids"] = [
-            DUMMY_WARMUP_INPUT_IDS for _ in range(server_args.dp_size)
-        ]
-        if server_args.dp_size == 1:
+        warmup_args["input_ids"] = [DUMMY_WARMUP_INPUT_IDS for _ in range(num_dp_ranks)]
+        if num_dp_ranks == 1:
             warmup_args["input_ids"] = warmup_args["input_ids"][0]
     else:
-        warmup_args["prompt"] = [DUMMY_WARMUP_PROMPT] * server_args.dp_size
-        if server_args.dp_size == 1:
+        warmup_args["prompt"] = [DUMMY_WARMUP_PROMPT] * num_dp_ranks
+        if num_dp_ranks == 1:
             warmup_args["prompt"] = warmup_args["prompt"][0]
 
     if server_args.debug_tensor_dump_input_file:
@@ -114,15 +119,15 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
                 "max_new_tokens": DUMMY_WARMUP_MAX_NEW_TOKENS,
                 "ignore_eos": True,
             },
-            "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
+            "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * num_dp_ranks,
             # This is a hack to ensure fake transfer is enabled during
             # prefill warmup and each DP rank has a unique room.
             "bootstrap_room": [
-                i * (DUMMY_BOOTSTRAP_ROOM_RANGE // server_args.dp_size)
+                i * (DUMMY_BOOTSTRAP_ROOM_RANGE // num_dp_ranks)
                 + (i % server_args.tp_size)
-                for i in range(server_args.dp_size)
+                for i in range(num_dp_ranks)
             ],
-            "input_ids": [DUMMY_DISAGG_WARMUP_INPUT_IDS] * server_args.dp_size,
+            "input_ids": [DUMMY_DISAGG_WARMUP_INPUT_IDS] * num_dp_ranks,
         }
 
     warmup_timeout = envs.SGLANG_WARMUP_TIMEOUT.get()
@@ -141,7 +146,7 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
 
 
 async def prepare_snapshot_engine(
-    server_args,
+    config: "Config",
 ) -> EngineSnapshotController[sgl.Engine] | None:
     """Single entry point for Dynamo Snapshot integration.
 
@@ -160,6 +165,8 @@ async def prepare_snapshot_engine(
     if snapshot_config is None:
         return None
 
+    server_args = config.server_args
+
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
 
@@ -169,10 +176,12 @@ async def prepare_snapshot_engine(
     # on both the GMS V0 and V1 paths.
     snapshot_overrides = {"enable_forward_pass_metrics": False}
 
+    # GMS restores weights outside the checkpoint, so release every region.
+    # Otherwise release only the KV cache: weights stay on the GPU, where
+    # Snapshot captures them, instead of in a CPU backup in the CRIU image.
+    release_tags = None
     if os.environ.get("DYN_GMS_USE_V1") != "true":
         # Enable memory_saver so GPU memory can be released for CRIU.
-        # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
-        # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
         snapshot_overrides["enable_memory_saver"] = True
         try:
             from gpu_memory_service.integrations.sglang import is_gms_active
@@ -181,7 +190,7 @@ async def prepare_snapshot_engine(
         except ImportError:
             _using_gms = False
         if not _using_gms:
-            snapshot_overrides["enable_weights_cpu_backup"] = True
+            release_tags = ["kv_cache"]
 
     override_server_args(server_args, "dynamo.snapshot", **snapshot_overrides)
 
@@ -190,6 +199,7 @@ async def prepare_snapshot_engine(
     logger.info(
         f"SGLang engine loaded in {time.time() - start_time:.2f}s (snapshot mode)"
     )
+    config.validate_engine_server_args(engine.server_args)
     runtime_server_args = resolved_server_args(engine.server_args)
     await warmup_engine(engine, runtime_server_args)
 
@@ -197,7 +207,7 @@ async def prepare_snapshot_engine(
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        pause_controller=_SGLangSnapshotLifecycle(engine),
+        pause_controller=_SGLangSnapshotLifecycle(engine, release_tags),
         snapshot_config=snapshot_config,
     )
     if not await snapshot_controller.wait_for_restore():

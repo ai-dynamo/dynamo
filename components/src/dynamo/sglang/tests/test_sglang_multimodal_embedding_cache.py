@@ -18,6 +18,7 @@ from dynamo.common.http import (
     HttpStatusError,
     HttpTimeoutError,
 )
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -181,6 +182,47 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     assert torch.equal(full_embeddings2, full_embeddings)
 
 
+@pytest.mark.asyncio
+async def test_session_scope_partitions_image_embedding_keys(
+    cache_handler: MultimodalEncodeWorkerHandler,
+) -> None:
+    """The same image URL in separate sessions must use separate entries."""
+    cache_handler._session_scoped_cache = True
+    item = {"Url": "https://example.com/image.png"}
+
+    _, first_keys, _ = await cache_handler._prepare_image_inputs(
+        [item], cache_scope="session-a"
+    )
+    _, second_keys, _ = await cache_handler._prepare_image_inputs(
+        [item], cache_scope="session-b"
+    )
+    _, first_keys_again, _ = await cache_handler._prepare_image_inputs(
+        [item], cache_scope="session-a"
+    )
+
+    assert first_keys[0] is not None
+    assert second_keys[0] is not None
+    assert first_keys[0] != second_keys[0]
+    assert first_keys_again == first_keys
+
+
+@pytest.mark.asyncio
+async def test_session_scoped_image_embedding_cache_bypasses_without_scope(
+    cache_handler: MultimodalEncodeWorkerHandler,
+) -> None:
+    """Missing scope must not produce an image embedding-cache key."""
+    cache_handler._session_scoped_cache = True
+    item = {"Url": "https://example.com/image.png"}
+
+    _, missing_keys, _ = await cache_handler._prepare_image_inputs([item])
+    _, blank_keys, _ = await cache_handler._prepare_image_inputs(
+        [item], cache_scope=" "
+    )
+
+    assert missing_keys == [None]
+    assert blank_keys == [None]
+
+
 def test_publish_cache_delta_delegates_to_publisher(
     cache_handler: MultimodalEncodeWorkerHandler,
 ) -> None:
@@ -309,11 +351,15 @@ async def test_encode_with_cache_reencodes_only_unkeyed_items(
 @pytest.mark.asyncio
 async def test_video_requests_reuse_cached_embeddings(
     cache_handler: MultimodalEncodeWorkerHandler,
+    monkeypatch,
 ) -> None:
     """Second identical video request should reuse cached embeddings."""
 
     video_url = "https://example.com/clip.mp4"
     video_token_id = cache_handler.video_token_id
+    video_bytes = b"video-bytes"
+    fetch = AsyncMock(return_value=video_bytes)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
 
     cache_handler.encoder.encode_mock.return_value = (
         torch.tensor([2, 3, 4]),
@@ -370,8 +416,9 @@ async def test_video_requests_reuse_cached_embeddings(
         outputs_second.append(item)
 
     cache_handler.encoder.encode_mock.assert_awaited_once_with(
-        [video_url], Modality.VIDEO
+        [video_bytes], Modality.VIDEO
     )
+    fetch.assert_awaited_once()
 
     assert outputs == [{"token_ids": [7]}]
     assert outputs_second == [{"token_ids": [7]}]
@@ -400,9 +447,13 @@ async def test_video_requests_reuse_cached_embeddings(
 @pytest.mark.asyncio
 async def test_video_request_skips_cache_key_when_cache_is_disabled(
     cache_handler: MultimodalEncodeWorkerHandler,
+    monkeypatch,
 ) -> None:
     video_url = "https://example.com/clip.mp4"
     video_token_id = cache_handler.video_token_id
+    video_bytes = b"video-bytes"
+    fetch = AsyncMock(return_value=video_bytes)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
     cache_handler._embedding_cache = None
     cache_handler._image_loader = None
     cache_handler._media_cache_key = Mock(
@@ -452,8 +503,9 @@ async def test_video_request_skips_cache_key_when_cache_is_disabled(
     assert outputs == [{"token_ids": [7]}]
     cache_handler._media_cache_key.assert_not_called()
     cache_handler.encoder.encode_mock.assert_awaited_once_with(
-        [video_url], Modality.VIDEO
+        [video_bytes], Modality.VIDEO
     )
+    fetch.assert_awaited_once()
 
 
 def test_aux_value_for_item_rejects_mismatched_batched_lists() -> None:
@@ -474,10 +526,13 @@ def test_aux_value_for_item_rejects_mismatched_batched_lists() -> None:
 @pytest.mark.asyncio
 async def test_video_cache_key_includes_sampling_config(
     cache_handler: MultimodalEncodeWorkerHandler,
+    monkeypatch,
 ) -> None:
     """Changing video sampling config should force a cache miss for the same URL."""
 
     video_url = "https://example.com/clip.mp4"
+    fetch = AsyncMock(return_value=b"video-bytes")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
     cache_handler.encoder.encode_mock.return_value = (
         torch.tensor([[2, 3, 4]]),
         torch.arange(24, dtype=torch.float32).reshape(6, 4),
@@ -502,6 +557,7 @@ async def test_video_cache_key_includes_sampling_config(
 
     assert first_key != second_key
     assert cache_handler.encoder.encode_mock.await_count == 2
+    assert fetch.await_count == 2
     assert cache_handler._embedding_cache.get(first_key) is not None
     assert cache_handler._embedding_cache.get(second_key) is not None
 
@@ -555,13 +611,35 @@ async def test_disabled_nvdec_without_software_decoder_is_actionable(
 async def test_disabled_nvdec_with_software_decoder_passes_urls(
     nvdec_handler, monkeypatch
 ) -> None:
-    """NVDEC off but a software decoder exists: URLs pass through unchanged
-    (SGLang fetches and decodes them itself, as before)."""
+    """NVDEC off but a software decoder exists: non-HTTP URLs pass through
+    unchanged for SGLang to decode."""
     monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
     monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
 
     out = await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
     assert out == [_INLINE_VIDEO]
+
+
+@pytest.mark.asyncio
+async def test_disabled_nvdec_fetches_remote_video_with_configured_limit(
+    nvdec_handler, monkeypatch
+) -> None:
+    """Remote URLs must not escape Dynamo's limit through SGLang's downloader."""
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    url = "https://example.com/clip.webm"
+    fetch = AsyncMock(return_value=b"video-bytes")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+
+    out = await nvdec_handler._build_encode_inputs([url], "VIDEO")
+
+    assert out == [b"video-bytes"]
+    fetch.assert_awaited_once_with(
+        url,
+        30.0,
+        policy=nvdec_handler._url_policy,
+        max_bytes=1024 * 1024,
+    )
 
 
 def test_nvdec_video_enabled_gating(nvdec_handler, monkeypatch) -> None:
