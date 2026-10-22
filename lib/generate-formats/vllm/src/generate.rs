@@ -16,7 +16,6 @@ use anyhow::Result;
 use base64::Engine as _;
 use dynamo_protocols::types::ChatCompletionTokenLogprob;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
@@ -154,20 +153,40 @@ pub struct StreamOptions {
     pub other: Map<String, Value>,
 }
 
-/// Sampling parameters with a complete typed vLLM Rust view and the original
-/// JSON object retained for backend forwarding.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct SamplingParams {
-    /// Original deserialized JSON object and the sole serialization source.
-    ///
-    /// Keeping this value preserves unknown future fields and the distinction
-    /// between omitted fields and fields explicitly set to `null` when the
-    /// request is forwarded to a version-matched worker.
-    raw: Value,
+// Declare types and parse in the same order: malformed-field precedence is part
+// of the existing HTTP contract. Retain raw JSON for exact backend forwarding.
+macro_rules! sampling_params {
+    ($($field:ident: $ty:ty),* $(,)?) => {
+        /// Typed routing/validation fields backed by the original sampling JSON.
+        #[allow(dead_code)]
+        #[derive(Debug, Clone)]
+        pub struct SamplingParams {
+            raw: Value,
+            $($field: $ty,)*
+        }
 
-    // Complete typed view of the fields supported by vLLM Rust. The frontend
-    // reads only the controls it needs; `raw` remains authoritative.
+        impl<'de> Deserialize<'de> for SamplingParams {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let raw = Value::deserialize(deserializer)?;
+                let object = raw.as_object().ok_or_else(|| {
+                    serde::de::Error::custom("sampling_params must be a JSON object")
+                })?;
+                Ok(Self {
+                    $($field: object.get(stringify!($field))
+                        .map(|value| serde_json::from_value::<$ty>(value.clone()))
+                        .transpose()
+                        .map_err(|error| serde::de::Error::custom(format!(
+                            "sampling_params.{}: {error}", stringify!($field)
+                        )))?
+                        .unwrap_or_default(),)*
+                    raw,
+                })
+            }
+        }
+    };
+}
+
+sampling_params! {
     temperature: Option<f32>,
     top_p: Option<f32>,
     top_k: Option<i32>,
@@ -187,9 +206,6 @@ pub struct SamplingParams {
     allowed_token_ids: Option<Vec<u32>>,
     bad_words: Option<Vec<String>>,
     logprob_token_ids: Option<Vec<u32>>,
-    /// Engine-owned nested shape. Dynamo does not interpret it, so keeping the
-    /// typed view opaque avoids duplicating version-specific vLLM validation.
-    structured_outputs: Option<Value>,
     skip_reading_prefix_cache: Option<bool>,
     skip_special_tokens: Option<bool>,
     vllm_xargs: Option<HashMap<String, Value>>,
@@ -204,10 +220,6 @@ impl SamplingParams {
         self.min_tokens
     }
 
-    pub fn ignore_eos(&self) -> bool {
-        self.ignore_eos
-    }
-
     pub fn logprobs(&self) -> Option<i32> {
         self.logprobs
     }
@@ -218,10 +230,6 @@ impl SamplingParams {
 
     pub fn skip_reading_prefix_cache(&self) -> Option<bool> {
         self.skip_reading_prefix_cache
-    }
-
-    pub fn as_value(&self) -> &Value {
-        &self.raw
     }
 
     pub(crate) fn project_sampling_options(&self) -> SamplingOptions {
@@ -277,81 +285,6 @@ impl Serialize for SamplingParams {
     {
         self.raw.serialize(serializer)
     }
-}
-
-impl<'de> Deserialize<'de> for SamplingParams {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = Value::deserialize(deserializer)?;
-        if !raw.is_object() {
-            return Err(serde::de::Error::custom(
-                "sampling_params must be a JSON object",
-            ));
-        }
-
-        let object = raw
-            .as_object()
-            .expect("sampling_params object checked above");
-        macro_rules! field {
-            ($name:ident) => {
-                sampling_field(object, stringify!($name)).map_err(serde::de::Error::custom)?
-            };
-        }
-
-        Ok(Self {
-            temperature: field!(temperature),
-            top_p: field!(top_p),
-            top_k: field!(top_k),
-            seed: field!(seed),
-            max_tokens: field!(max_tokens),
-            min_tokens: field!(min_tokens),
-            thinking_token_budget: field!(thinking_token_budget),
-            logprobs: field!(logprobs),
-            prompt_logprobs: field!(prompt_logprobs),
-            min_p: field!(min_p),
-            frequency_penalty: field!(frequency_penalty),
-            presence_penalty: field!(presence_penalty),
-            repetition_penalty: field!(repetition_penalty),
-            stop_token_ids: field!(stop_token_ids),
-            ignore_eos: sampling_field_or_default(object, "ignore_eos")
-                .map_err(serde::de::Error::custom)?,
-            logit_bias: field!(logit_bias),
-            allowed_token_ids: field!(allowed_token_ids),
-            bad_words: field!(bad_words),
-            logprob_token_ids: field!(logprob_token_ids),
-            structured_outputs: field!(structured_outputs),
-            skip_reading_prefix_cache: field!(skip_reading_prefix_cache),
-            skip_special_tokens: field!(skip_special_tokens),
-            vllm_xargs: field!(vllm_xargs),
-            raw,
-        })
-    }
-}
-
-fn sampling_field<T>(object: &Map<String, Value>, name: &str) -> Result<Option<T>, String>
-where
-    T: DeserializeOwned,
-{
-    object
-        .get(name)
-        .map(|value| serde_json::from_value::<Option<T>>(value.clone()))
-        .transpose()
-        .map(Option::flatten)
-        .map_err(|error| format!("sampling_params.{name}: {error}"))
-}
-
-fn sampling_field_or_default<T>(object: &Map<String, Value>, name: &str) -> Result<T, String>
-where
-    T: DeserializeOwned + Default,
-{
-    object
-        .get(name)
-        .map(|value| serde_json::from_value(value.clone()))
-        .transpose()
-        .map(Option::unwrap_or_default)
-        .map_err(|error| format!("sampling_params.{name}: {error}"))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -682,14 +615,13 @@ impl GenerateAggregator {
     }
 
     pub(crate) fn finish(self, options: GenerateResponseOptions) -> Result<GenerateResponse> {
-        let aggregator = self;
         let GenerateAggregator {
             request_id,
             choices,
             prompt_logprobs,
             kv_transfer_params,
             kv_transfer_params_from_engine_data: _,
-        } = aggregator;
+        } = self;
 
         let mut choices: Vec<GenerateResponseChoice> = choices
             .into_values()
@@ -706,23 +638,17 @@ impl GenerateAggregator {
             None
         };
 
+        anyhow::ensure!(
+            !choices.is_empty() && choices.iter().all(|choice| choice.finish_reason.is_some()),
+            "generate stream ended without a complete choice"
+        );
+
         Ok(GenerateResponse {
             request_id,
             choices,
             prompt_logprobs,
             kv_transfer_params,
         })
-    }
-}
-
-impl GenerateResponse {
-    /// A complete unary response has at least one terminal choice.
-    pub fn is_complete_unary(&self) -> bool {
-        !self.choices.is_empty()
-            && self
-                .choices
-                .iter()
-                .all(|choice| choice.finish_reason.is_some())
     }
 }
 

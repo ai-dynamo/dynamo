@@ -87,8 +87,6 @@ fn generate_request_preserves_unknown_sampling_fields() {
         Some(["blocked".to_string()].as_slice())
     );
     assert_eq!(req.sampling_params.min_tokens, None);
-    assert_eq!(req.sampling_params.as_value()["min_tokens"], Value::Null);
-    assert_eq!(req.sampling_params.as_value(), &raw_sampling);
     let back = serde_json::to_value(&req).expect("serialize");
     assert_eq!(back["sampling_params"], raw_sampling);
 }
@@ -214,10 +212,6 @@ fn generate_request_preserves_opaque_structured_outputs() {
     });
     let req: GenerateRequest = serde_json::from_value(raw.clone()).expect("deserialize");
 
-    assert_eq!(
-        req.sampling_params.structured_outputs.as_ref(),
-        Some(&raw["sampling_params"]["structured_outputs"])
-    );
     assert_eq!(
         serde_json::to_value(req).expect("serialize")["sampling_params"],
         raw["sampling_params"]
@@ -509,7 +503,6 @@ fn generate_response_accumulates_engine_deltas() {
             .expect("kv transfer params"),
         &json!({"connector": "x"})
     );
-    assert!(response.is_complete_unary());
 }
 
 #[test]
@@ -736,27 +729,25 @@ fn generate_response_prefers_engine_kv_metadata_over_later_fallback() {
 
 #[test]
 fn incomplete_engine_streams_are_not_complete_unary_responses() {
-    let empty = Vec::<LLMEngineOutput>::new();
-    let empty_response = aggregate(
-        empty,
-        "req-empty".to_string(),
-        GenerateResponseOptions::default(),
-    )
-    .expect("aggregate empty stream");
-    assert!(!empty_response.is_complete_unary());
-
-    let partial = [LLMEngineOutput {
-        token_ids: vec![100],
-        index: Some(0),
-        ..Default::default()
-    }];
-    let partial_response = aggregate(
-        partial,
-        "req-partial".to_string(),
-        GenerateResponseOptions::default(),
-    )
-    .expect("aggregate partial stream");
-    assert!(!partial_response.is_complete_unary());
+    for chunks in [
+        vec![],
+        vec![LLMEngineOutput {
+            token_ids: vec![100],
+            index: Some(0),
+            ..Default::default()
+        }],
+    ] {
+        let error = aggregate(
+            chunks,
+            "req-incomplete".to_string(),
+            GenerateResponseOptions::default(),
+        )
+        .expect_err("reject incomplete stream");
+        assert_eq!(
+            error.to_string(),
+            "generate stream ended without a complete choice"
+        );
+    }
 }
 
 #[test]

@@ -557,11 +557,6 @@ impl GenerateExchange for VllmExchange {
         let response = aggregator
             .finish(self.options)
             .map_err(|error| DynamoError::from(error.as_ref()))?;
-        if !response.is_complete_unary() {
-            return Err(DynamoError::msg(
-                "generate stream ended without a complete choice",
-            ));
-        }
         serde_json::to_value(response)
             .map(Some)
             .map_err(|error| DynamoError::msg(error.to_string()))
