@@ -124,8 +124,9 @@ graph after 1.5 has persisted it. Normal CI does not fetch or compile old operat
 
 `history/N` must come from an actual published stable upstream tag for operator N,
 not from `main` merely because its chart still reports N. `main` may already contain
-post-cut changes that no N user runs. The next-minor bump on `main` remains blocked
-until the released predecessor history has been captured and committed.
+post-cut changes that no N user runs. History may trail `main` by one released
+minor: the bump to N+1 can land before `history/N` is captured, but the bump to
+N+2 stays blocked until `history/N` is captured and committed.
 
 Use a dedicated checkout of the selected release tag. Fetch the tag from upstream,
 and carry only the reviewed test harness and fixture inventory into that checkout;
