@@ -101,6 +101,12 @@ class frontend_service:
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
     REQUESTS_STARTED_TOTAL = "requests_started_total"
+    # Admitted requests that have not produced an output token.
+    AWAITING_FIRST_TOKEN_REQUESTS = "awaiting_first_token_requests"
+    # Known prompt tokens in inflight requests, labeled by state.
+    INFLIGHT_INPUT_TOKENS = "inflight_input_tokens"
+    # Total known input tokens of admitted requests.
+    INPUT_TOKENS_TOTAL = "input_tokens_total"
     # Total number of terminal semantic request failures.
     FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
