@@ -2798,6 +2798,70 @@ class KvStateAttachmentOwner:
     async def close(self) -> None:
         ...
 
+class OfflineRouter:
+    """Native LocalScheduler using host-owned time, without an Endpoint.
+
+    Calls must stay on the constructing thread outside an active Tokio runtime.
+    The host supplies RadixTree overlaps, advances milliseconds, and explicitly
+    frees each booking. Roles, affinity composition and dispatch are host-owned.
+    """
+    def __init__(
+        self,
+        block_size: int,
+        num_workers: int,
+        dp_size: int,
+        num_gpu_blocks: int,
+        max_num_batched_tokens: Optional[int] = None,
+        router_config_json: str = "{}",
+        selector_seed: Optional[int] = None,
+    ) -> None: ...
+    def submit(
+        self,
+        request_id: str,
+        input_length: int,
+        max_output_tokens: int,
+        overlaps: OverlapScores,
+        local_block_hashes: List[int],
+        sequence_hashes: Optional[List[int]] = None,
+        tokens: Optional[List[int]] = None,
+        affinity_target: Optional[Tuple[int, int]] = None,
+        priority: float = 0,
+        strict_priority: int = 0,
+        policy_class: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None: ...
+    def poll(self) -> List[Tuple[str, int, int, int, int]]:
+        """Admitted (request ID, worker ID, DP rank, overlap blocks, best overlap blocks)."""
+        ...
+    def advance_clock(self, now_ms: float) -> None: ...
+    def cancel(self, request_id: str) -> bool: ...
+    def prefill_complete(self, request_id: str) -> None: ...
+    def free(self, request_id: str) -> None: ...
+    def add_worker(self, worker_id: int) -> None: ...
+    def remove_worker(self, worker_id: int) -> None: ...
+    def unregister_worker(self, worker_id: int) -> None: ...
+    @property
+    def pending_count(self) -> int: ...
+
+class SessionAffinity:
+    """Native session table. Advance time before acquiring, committing or releasing."""
+    def __init__(self, ttl_seconds: float) -> None: ...
+    def advance_clock(self, now_ms: float) -> None: ...
+    def try_acquire(self, key: str) -> Optional[AffinityHold]: ...
+    def commit(
+        self, hold: AffinityHold, worker_id: int, dp_rank: int
+    ) -> AffinityLease: ...
+
+class AffinityHold:
+    @property
+    def target(self) -> Optional[Tuple[int, int]]: ...
+    def release(self) -> None: ...
+
+class AffinityLease:
+    def release(self) -> None: ...
+
+def subagent_group_affinity_id(parent_session_id: str) -> str: ...
+
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.
