@@ -1509,7 +1509,7 @@ const (
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) error
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
@@ -1520,8 +1520,9 @@ func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	return nil
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) error {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
+	return nil
 }
 
 type MultinodeDeployer interface {
@@ -1909,14 +1910,10 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
-	// A shared SGLang TP template runs runtime only on the leader. Role templates own placement.
-	if nativeSidecar && numberOfNodes > 1 && role == RoleWorker && roleLaunchOwnership == roleLaunchOwnedByOperator {
-		workerSidecar, err := sglangSidecarNeedsWorker(GetMainContainer(component))
-		if err != nil {
-			return nil, err
-		}
-		if !workerSidecar {
-			podSpec.InitContainers = slices.DeleteFunc(podSpec.InitContainers, func(c corev1.Container) bool { return c.Name == commonconsts.RuntimeContainerName })
+	// Backends own pod-level launch details, including multinode runtime placement.
+	if !nativeSidecar || numberOfNodes > 1 {
+		if err := backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer); err != nil {
+			return nil, fmt.Errorf("failed to update pod spec for backend %s: %w", backendFramework, err)
 		}
 	}
 
@@ -1931,8 +1928,6 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 				break
 			}
 		}
-	} else {
-		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
 	}
 
 	if component.FrontendSidecar != nil {

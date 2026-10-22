@@ -318,8 +318,44 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Command = []string{"/launch.sh"}
 				return dgd
 			}(),
-			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: multinode SGLang sidecar requires an explicit python -m sglang.launch_server command; use complete leader and worker podTemplates for other launchers`},
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine SGLang topology: expected python -m sglang.launch_server; use complete leader and worker podTemplates`},
 		},
+		{
+			name: "sglang sidecar multinode accepts explicit DP with config",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Args = []string{"--config", "/engine.yaml", "--enable-dp-attention"}
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang sidecar multinode accepts TP model expansion",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Args = []string{"--model-path", "$(MODEL_PATH)", "--tp-size", "2"}
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang sidecar multinode accepts shell launch",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
+				main.Command = []string{"sh", "-c"}
+				main.Args = []string{`exec python3 -m sglang.launch_server --model-path "$MODEL_PATH" --enable-dp-attention`}
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang sidecar multinode rejects unresolved config topology",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Args = []string{"--config", "/engine.yaml"}
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine whether SGLang DP-attention is enabled by config files or expanded flags; declare --enable-dp-attention explicitly or use complete leader and worker podTemplates`},
+		},
+
 		{
 			name: "sglang sidecar multinode worker runtime needs version override",
 			deployment: func() runtime.Object {

@@ -601,3 +601,83 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 		}
 	}
 }
+
+func TestSGLangMultinodeSidecarLaunchForms(t *testing.T) {
+	tests := []struct {
+		name        string
+		command     []string
+		args        []string
+		dpAttention bool
+		wantError   string
+	}{
+		{name: "TP model expansion", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--model-path", "$(MODEL_PATH)"}},
+		{name: "TP value expansion", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--mem-fraction-static=$(MEM_FRACTION)"}},
+		{name: "DP model expansion", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--model-path", "$(MODEL_PATH)", "--enable-dp-attention"}, dpAttention: true},
+		{name: "DP config", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--config", "/engine.yaml", "--enable-dp-attention"}, dpAttention: true},
+		{name: "DP config equals", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--enable-dp-attention", "--config=/engine.yaml"}, dpAttention: true},
+		{name: "split Python command", command: []string{"/usr/bin/python3.12"}, args: []string{"-m", "sglang.launch_server", "--enable-dp-attention"}, dpAttention: true},
+		{name: "shell DP", command: []string{"bash", "-ec"}, args: []string{`exec python3 -m sglang.launch_server --model-path "$MODEL_PATH" --enable-dp-attention`}, dpAttention: true},
+		{name: "shell TP quoted model", command: []string{"sh", "-c"}, args: []string{`exec python3 -m sglang.launch_server --model-path "$MODEL_PATH"`}},
+		{name: "shell script in Command", command: []string{"sh", "-c", "python3 -m sglang.launch_server --enable-dp-attention"}, dpAttention: true},
+		{name: "shell quoted module and flag", command: []string{"sh", "-c"}, args: []string{`exec python3 -m 'sglang.launch_server' '--enable-dp-attention'`}, dpAttention: true},
+		{name: "shell comment is not a flag", command: []string{"sh", "-c"}, args: []string{"python3 -m sglang.launch_server # --enable-dp-attention"}},
+		{name: "shell value is not a flag", command: []string{"sh", "-c"}, args: []string{`python3 -m sglang.launch_server --served-model-name='model --enable-dp-attention'`}},
+		{name: "hidden config mode", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--config", "/engine.yaml"}, wantError: "cannot determine whether SGLang DP-attention"},
+		{name: "expanded flags", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"$(EXTRA_ARGS)"}, wantError: "cannot determine whether SGLang DP-attention"},
+		{name: "expanded flag name", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--enable-$(MODE)"}, wantError: "cannot determine whether SGLang DP-attention"},
+		{name: "shell expanded flags", command: []string{"sh", "-c"}, args: []string{"python3 -m sglang.launch_server $EXTRA_ARGS"}, wantError: "cannot determine whether SGLang DP-attention"},
+		{name: "shell unquoted model can add flags", command: []string{"sh", "-c"}, args: []string{"python3 -m sglang.launch_server --model-path $MODEL_PATH"}, wantError: "cannot determine whether SGLang DP-attention"},
+		{name: "shell unquoted equals value can add flags", command: []string{"sh", "-c"}, args: []string{"python3 -m sglang.launch_server --model-path=$MODEL_PATH"}, wantError: "cannot determine whether SGLang DP-attention"},
+		{name: "shell partially quoted expansion", command: []string{"sh", "-c"}, args: []string{`python3 -m sglang.launch_server --model-path "$MODEL_PATH"$EXTRA_ARGS""`}, wantError: "cannot determine whether SGLang DP-attention"},
+		{name: "shell quoted argument array", command: []string{"sh", "-c"}, args: []string{`python3 -m sglang.launch_server --model-path "$@"`}, wantError: "cannot determine whether SGLang DP-attention"},
+		{name: "invalid boolean assignment", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--enable-dp-attention=false"}, wantError: "--enable-dp-attention takes no value"},
+		{name: "opaque launcher", command: []string{"/launch.sh"}, wantError: "expected python -m sglang.launch_server"},
+		{name: "shell wrapper argument", command: []string{"sh", "-c"}, args: []string{`echo 'python3 -m sglang.launch_server --enable-dp-attention'`}, wantError: "expected a Python module launch"},
+		{name: "shell conditional", command: []string{"sh", "-c"}, args: []string{"if test -f /dp; then python3 -m sglang.launch_server --enable-dp-attention; else python3 -m sglang.launch_server; fi"}, wantError: "not shell control flow"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Author one component template and preserve it across both role renders")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "engine:custom", Command: tt.command, Args: tt.args}},
+					InitContainers: []corev1.Container{
+						{Name: "setup", Image: "setup:latest"},
+						{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+					},
+				}},
+			}
+			original := component.DeepCopy()
+
+			t.Log("Check placement and multinode flag injection agree for both providers")
+			for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
+				for _, role := range []Role{RoleLeader, RoleWorker} {
+					pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(1))
+					if tt.wantError != "" {
+						require.ErrorContains(t, err, tt.wantError)
+						continue
+					}
+					require.NoError(t, err)
+					wantInitContainers := 1
+					if role == RoleLeader || tt.dpAttention {
+						wantInitContainers = 2
+					}
+					require.Len(t, pod.InitContainers, wantInitContainers)
+					require.Equal(t, "setup", pod.InitContainers[0].Name)
+					launchArgs, err := pythonModuleArgs(&pod.Containers[0], "sglang.launch_server")
+					require.NoError(t, err)
+					var args []string
+					for _, arg := range launchArgs {
+						args = append(args, arg.Value)
+					}
+					require.True(t, hasArg(args, "--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500"))
+					require.True(t, hasArg(args, "--nnodes", "2"))
+					require.True(t, hasArg(args, "--node-rank", "$(DYNAMO_RANK)"))
+				}
+			}
+			require.Equal(t, original, component)
+		})
+	}
+}
