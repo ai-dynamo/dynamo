@@ -15,7 +15,9 @@ For the user-facing walkthrough, start with
 
 ## How the on-ramp works
 
-This on-ramp is available for aggregated serving only at this time.
+This on-ramp covers aggregated serving. `DYN_EPP_TOPOLOGY_MODE=disaggregated` builds role-scoped
+prefill and decode catalogs, but pair selection and the decode-sidecar handoff are not in place
+yet, so there is no disaggregated manifest here.
 
 Replace `<VLLM_IMAGE>` in `agg.yaml` with the vLLM image your platform uses, including its release
 tag or digest. Use a digest for reproducible deployments.
@@ -62,7 +64,8 @@ flowchart LR
 
 ## What Dynamo-managed GAIE adds
 
-- Disaggregated prefill/decode (Disaggregated serving is planned follow-up in the standalone mode.)
+- Disaggregated prefill/decode (standalone mode discovers and splits the two roles, but does not yet
+  select a prefill/decode pair.)
 - Operator-managed lifecycle for Workers, Services, `InferencePool`, and EPP resources.
 - Request migration, rejection, cancellation - overall admission control
 - Data parallelism (The standalone mode which targets DP=1.)
