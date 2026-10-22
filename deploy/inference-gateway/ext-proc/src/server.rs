@@ -773,7 +773,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
 /// Validate the gateway's `ProtocolConfiguration` against the protocol
 /// contract this EPP requires: `FULL_DUPLEX_STREAMED` on both body
-/// directions plus `send_body_without_waiting_for_header_response`.
+/// directions.
 ///
 /// **Request direction.** We build the `RequestHeaders` response only after
 /// receiving the request body, because:
@@ -783,12 +783,19 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 ///   * The chosen worker becomes the value of `x-dynamo-worker-instance-id` /
 ///     `x-gateway-destination-endpoint` in the `RequestHeaders` response.
 ///
-/// That ordering — header response *after* body — is only legal under
-/// `BodySendMode::FULL_DUPLEX_STREAMED` with
-/// `send_body_without_waiting_for_header_response = true`. Under any other
-/// mode Envoy waits for our header response before sending body chunks while
-/// we wait for body chunks before producing the header response, which
-/// silently deadlocks until the ext_proc timeout fires.
+/// That ordering — header response *after* body — needs the data plane to
+/// send the body without waiting for our header response.
+/// `BodySendMode::FULL_DUPLEX_STREAMED` always does: the data plane streams
+/// the body as it arrives, and the server may hold every response until it
+/// has the whole body. In the other modes the data plane can wait for our
+/// header response before sending body chunks while we wait for body chunks
+/// before producing the header response, which silently deadlocks until the
+/// ext_proc timeout fires.
+///
+/// `send_body_without_waiting_for_header_response` is not checked. Envoy
+/// applies it only to `STREAMED` mode, which this EPP rejects anyway, and
+/// ignores it in every other mode. agentgateway 1.3 and later report it as
+/// `false` alongside `FULL_DUPLEX_STREAMED`.
 ///
 /// **Response direction.** `response_body_mode` defaults to `NONE` in Envoy,
 /// which delivers no `ResponseBody` messages at all. Three behaviours depend
@@ -824,18 +831,15 @@ fn validate_protocol_config(
     let request_mode = BodySendMode::try_from(pc.request_body_mode).ok();
     let response_mode = BodySendMode::try_from(pc.response_body_mode).ok();
     let full_duplex = Some(BodySendMode::FullDuplexStreamed);
-    let flag_ok = pc.send_body_without_waiting_for_header_response;
 
-    if request_mode == full_duplex && response_mode == full_duplex && flag_ok {
+    if request_mode == full_duplex && response_mode == full_duplex {
         return Ok(());
     }
 
     let detail = format!(
-        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED, \
-         response_body_mode=FULL_DUPLEX_STREAMED and \
-         send_body_without_waiting_for_header_response=true; got \
-         request_body_mode={request_mode:?}, response_body_mode={response_mode:?}, \
-         send_body_without_waiting_for_header_response={flag_ok}. \
+        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED \
+         and response_body_mode=FULL_DUPLEX_STREAMED; got \
+         request_body_mode={request_mode:?}, response_body_mode={response_mode:?}. \
          The Rust EPP defers its RequestHeaders response until after it has tokenized \
          the body and selected a worker, and it reads response bodies to signal prefill \
          completion, parse token usage, and rewrite the model name."
@@ -843,7 +847,6 @@ fn validate_protocol_config(
     tracing::error!(
         request_body_mode = pc.request_body_mode,
         response_body_mode = pc.response_body_mode,
-        send_body_without_waiting = flag_ok,
         "ProtocolConfiguration mismatch — failing stream"
     );
     Err(Status::failed_precondition(detail))
@@ -1041,6 +1044,11 @@ mod tests {
 
         let full_duplex = BodySendMode::FullDuplexStreamed as i32;
         assert!(validate_protocol_config(&protocol_config(full_duplex, full_duplex, true)).is_ok());
+        // Envoy ignores send_body_without_waiting_for_header_response outside
+        // STREAMED mode, and agentgateway 1.3+ reports it as false.
+        assert!(
+            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false)).is_ok()
+        );
     }
 
     #[test]
@@ -1077,18 +1085,21 @@ mod tests {
     fn protocol_config_still_rejects_request_side_misconfiguration() {
         use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
 
+        // In these modes the data plane can hold the body until our header
+        // response, which we only send once the body has arrived.
         let full_duplex = BodySendMode::FullDuplexStreamed as i32;
-        assert!(
-            validate_protocol_config(&protocol_config(
-                BodySendMode::Streamed as i32,
-                full_duplex,
-                true
-            ))
-            .is_err()
-        );
-        assert!(
-            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false)).is_err()
-        );
+        for request_mode in [
+            BodySendMode::None,
+            BodySendMode::Streamed,
+            BodySendMode::Buffered,
+            BodySendMode::BufferedPartial,
+        ] {
+            let pc = protocol_config(request_mode as i32, full_duplex, true);
+            assert!(
+                validate_protocol_config(&pc).is_err(),
+                "request_body_mode={request_mode:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1518,6 +1529,23 @@ mod tests {
         assert_eq!(t.add.load(Ordering::SeqCst), 1);
         assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 0);
         assert_eq!(t.free.load(Ordering::SeqCst), 0);
+    }
+
+    /// agentgateway 1.3 and later put this `ProtocolConfiguration` on the first
+    /// message of every stream. The EPP must route the request rather than fail
+    /// the stream with FAILED_PRECONDITION.
+    #[tokio::test]
+    async fn test_agentgateway_protocol_config_is_routed() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        let t = Arc::new(Tracker::agg());
+        let full_duplex = BodySendMode::FullDuplexStreamed as i32;
+        let mut requests = stream();
+        requests[0].protocol_config = Some(protocol_config(full_duplex, full_duplex, false));
+        run_stream(&mut connect(t.clone()).await, requests).await;
+
+        assert_eq!(t.add.load(Ordering::SeqCst), 1);
+        assert_eq!(t.free.load(Ordering::SeqCst), 1);
     }
 
     /// Item 4 (queued disconnect / cancellation): when the ext-proc stream closes
