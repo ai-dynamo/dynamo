@@ -100,28 +100,17 @@ class GMSMemorySaverImpl:
     def region(
         self,
         tag: str,
-        enable_cpu_backup: bool = False,
-        enable_disk_backup: bool = False,
         **backup_options: object,
     ):
         """Use the tag's RW pool and publish pending weights after clean exit.
 
         GMS owns the allocation itself, so none of torch_memory_saver's
         ``enable_*_backup`` offload paths can be honoured. ``**backup_options``
-        absorbs flags added by newer torch_memory_saver releases (the ``region``
-        signature has grown over time) so that a version bump does not raise
-        ``TypeError`` from the entrypoint; any option actually turned on is
-        still rejected loudly below.
+        absorbs every such flag (the ``region`` signature has grown over time)
+        so that a torch_memory_saver bump does not raise ``TypeError`` from the
+        entrypoint; any option actually turned on is rejected loudly below.
         """
-        requested = [
-            name
-            for name, enabled in (
-                ("enable_cpu_backup", enable_cpu_backup),
-                ("enable_disk_backup", enable_disk_backup),
-                *backup_options.items(),
-            )
-            if enabled
-        ]
+        requested = [name for name, enabled in backup_options.items() if enabled]
         if requested:
             raise ValueError(
                 "SGLang with GMS does not support backing up allocations; "
@@ -183,7 +172,6 @@ class GMSMemorySaverImpl:
         stream,
         capture_error_mode,
         tag: str,
-        enable_cpu_backup: bool = False,
         **backup_options: object,
     ):
         # The old hybrid path could delegate this to torch_memory_saver, but

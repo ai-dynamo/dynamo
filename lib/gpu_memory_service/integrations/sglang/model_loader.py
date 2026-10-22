@@ -28,10 +28,10 @@ from gpu_memory_service.integrations.sglang.memory_saver import (
     get_gms_memory_saver_impl,
 )
 from gpu_memory_service.integrations.sglang.patches import (
-    patch_xpu_kv_cache_sizing_for_gms,
     patch_model_runner,
     patch_static_state_for_gms,
     patch_torch_memory_saver,
+    patch_xpu_kv_cache_sizing_for_gms,
 )
 from sglang.srt.model_loader.loader import BaseModelLoader
 
