@@ -10,6 +10,7 @@ import copy
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -370,6 +371,19 @@ def run_script(tmp_path, args, settings=None, extra_env=None, kubectl_body="exit
         ({"WORKERS": "0"}, "WORKERS must be a positive integer, not '0'"),
         ({"WARMUP_S": "-1"}, "WARMUP_S must be a whole number, not '-1'"),
         ({"KEEP": "yes"}, "KEEP must be 0 or 1, not 'yes'"),
+        ({"WORKLOAD": "agentic"}, "WORKLOAD is 'synthetic' or 'agentx', not 'agentic'"),
+        (
+            {"WORKLOAD": "agentx", "AGENTX_CONCURRENCIES": "64,0"},
+            "AGENTX_CONCURRENCIES must be positive integers, not '0'",
+        ),
+        (
+            {"WORKLOAD": "agentx", "AGENTX_DURATION_S": "15m"},
+            "AGENTX_DURATION_S must be a positive integer, not '15m'",
+        ),
+        (
+            {"WORKLOAD": "agentx", "AGENTX_TRACES": "all"},
+            "AGENTX_TRACES must be empty or a positive integer, not 'all'",
+        ),
     ],
 )
 def test_run_rejects_settings_that_cannot_work_before_touching_the_cluster(
@@ -389,6 +403,13 @@ def test_run_accepts_the_default_settings_and_reaches_preflight(tmp_path):
         "--context test-context -n test-namespace get dynamographdeployments"
         in calls.read_text()
     )
+
+
+def test_run_agentx_needs_no_synthetic_load_points(tmp_path):
+    settings = {"WORKLOAD": "agentx", "REQUEST_RATES": "", "CONCURRENCIES": ""}
+    result, _ = run_script(tmp_path, ["deploy", "a"], settings)
+    assert result.returncode == 1, result.stderr
+    assert "cannot list DGDs" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -435,6 +456,187 @@ def test_preflight_warns_about_agentgateway_before_1_2(tmp_path, image, warned):
     # preflight stops at the missing model cache, after the Gateway checks.
     assert "PVC model-cache is missing" in result.stderr, result.stderr
     assert ("opens a new TLS connection to the EPP" in result.stderr) == warned
+
+
+# The params.env that run.sh writes for an arm, with the default workload.
+BENCH_PARAMS = {
+    "ARM": "b-epp",
+    "ARM_HEADER": "test-namespace/qwen-b",
+    "MODEL": MODEL,
+    "GATEWAY_URL": "http://gateway.test:80",
+    "WORKLOAD": "synthetic",
+    "REQUEST_RATES": "100,200,400",
+    "CONCURRENCIES": "",
+    "ROUNDS": "1",
+    "ISL": "1024",
+    "OSL": "128",
+    "PREFIX_LENGTH": "512",
+    "NUM_PREFIXES": "256",
+    "DURATION_S": "60",
+    "WARMUP_S": "10",
+    "COOLDOWN_S": "0",
+    "SEED": "42",
+    "AGENTX_CONCURRENCIES": "512,2048,4096",
+    "AGENTX_DURATION_S": "900",
+    "AGENTX_DATASET": "semianalysis_cc_traces_weka_062126",
+    "AGENTX_MAX_CONTEXT": "128000",
+    "AGENTX_TRACES": "",
+    "SMOKE_TIMEOUT_S": "1",
+    "SERVER_METRICS_FORMATS": "json csv",
+}
+
+
+def run_bench(tmp_path, params):
+    """bench.sh with an aiperf that records each call, and no cluster.
+
+    The python3 on PATH runs one-liners and swallows the scripts bench.sh
+    pipes to it: the smoke request and the metrics snapshots. Returns the
+    result and the arm's results directory.
+    """
+    inputs, results, bin_dir = (
+        tmp_path / "bench",
+        tmp_path / "results",
+        tmp_path / "bin",
+    )
+    for directory in (inputs, results, bin_dir):
+        directory.mkdir()
+    settings = {**BENCH_PARAMS, **params}
+    (inputs / "params.env").write_text(
+        "".join(f"{name}={shlex.quote(value)}\n" for name, value in settings.items())
+    )
+    (inputs / "targets.tsv").write_text("")
+    (inputs / "server-metrics.txt").write_text("http://10.0.0.1:9090/metrics\n")
+    # run.sh has already collected, so bench.sh exits as soon as it is done.
+    (results / "COLLECTED").touch()
+    python = shlex.quote(sys.executable)
+    (bin_dir / "python3").write_text(
+        f'#!/bin/sh\nif [ "$1" = -c ]; then exec {python} "$@"; fi\ncat > /dev/null\n'
+    )
+    (bin_dir / "aiperf").write_text(
+        f"#!/bin/sh\nexec {python} - \"$@\" <<'EOF'\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "env = {k: v for k, v in os.environ.items() if k.startswith(('AIPERF_', 'HF_'))}\n"
+        "out = args[args.index('--artifact-dir') + 1]\n"
+        "json.dump({'args': args, 'env': env}, open(os.path.join(out, 'call.json'), 'w'))\n"
+        "EOF\n"
+    )
+    for script in ("python3", "aiperf"):
+        (bin_dir / script).chmod(0o755)
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "BENCH_INPUTS": str(inputs),
+        "BENCH_RESULTS": str(results),
+        # As in aiperf-job.yaml.
+        "HF_HUB_OFFLINE": "1",
+    }
+    result = subprocess.run(
+        ["bash", str(BENCH_DIR / "bench.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, results / settings["ARM"]
+
+
+def aiperf_calls(out):
+    """The aiperf call of each run, in the order bench.sh ran them."""
+    runs = [line.split("\t")[0] for line in (out / "runs.tsv").read_text().splitlines()]
+    return {run: json.loads((out / run / "call.json").read_text()) for run in runs}
+
+
+def test_bench_sweeps_synthetic_prompts_by_rate_and_concurrency(tmp_path):
+    result, out = run_bench(tmp_path, {"REQUEST_RATES": "4", "CONCURRENCIES": "8"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = aiperf_calls(out)
+    assert list(calls) == ["rps4_r0", "c8_r0"]
+    rate, closed = calls["rps4_r0"]["args"], calls["c8_r0"]["args"]
+    assert arg_value(rate, "--request-rate") == "4"
+    assert arg_value(rate, "--arrival-pattern") == "poisson"
+    # 60 s and 10 s of arrivals at 4 requests per second.
+    assert arg_value(rate, "--request-count") == "240"
+    assert arg_value(rate, "--warmup-request-count") == "40"
+    assert arg_value(rate, "--num-dataset-entries") == "280"
+    # The 1024-token prompt is a 512-token shared prefix and 512 tokens of its own.
+    assert arg_value(rate, "--synthetic-input-tokens-mean") == "512"
+    assert arg_value(rate, "--prefix-prompt-length") == "512"
+    assert arg_value(closed, "--concurrency") == "8"
+    assert arg_value(closed, "--request-count") == "500"
+    assert arg_value(closed, "--warmup-request-count") == "16"
+    for call in calls.values():
+        assert "--scenario" not in call["args"]
+        # The tokenizer comes from the model cache, offline.
+        assert call["env"] == {"HF_HUB_OFFLINE": "1"}
+
+
+def test_bench_replays_agentx_sessions_through_the_scenario(tmp_path):
+    params = {
+        "WORKLOAD": "agentx",
+        "AGENTX_CONCURRENCIES": "4,3000",
+        "AGENTX_DURATION_S": "60",
+        "AGENTX_TRACES": "2",
+        "ROUNDS": "2",
+    }
+    result, out = run_bench(tmp_path, params)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = aiperf_calls(out)
+    assert list(calls) == ["agentx4_r0", "agentx3000_r0", "agentx4_r1", "agentx3000_r1"]
+    for (run, call), seed in zip(calls.items(), ("42", "43", "44", "45")):
+        args = call["args"]
+        assert arg_value(args, "--scenario") == "inferencex-agentx-mvp"
+        assert (
+            arg_value(args, "--public-dataset") == "semianalysis_cc_traces_weka_062126"
+        )
+        assert arg_value(args, "--max-context-length") == "128000"
+        assert arg_value(args, "--num-dataset-entries") == "2"
+        assert arg_value(args, "--concurrency") == run.split("_")[0][len("agentx") :]
+        assert arg_value(args, "--benchmark-duration") == "60"
+        assert arg_value(args, "--random-seed") == seed
+        # 60 s is below the scenario's minimum of 900 s.
+        assert "--unsafe-override" in args
+        # The scenario sets the load and the lengths itself.
+        for flag in (
+            "--request-rate",
+            "--request-count",
+            "--warmup-request-count",
+            "--synthetic-input-tokens-mean",
+        ):
+            assert flag not in args
+        # aiperf takes any value of HF_HUB_OFFLINE as offline, so it is unset.
+        assert call["env"] == {
+            "HF_HOME": "/hf-cache",
+            # Twice the largest point, for the requests of subagents.
+            "AIPERF_HTTP_CONNECTION_LIMIT": "6000",
+            "AIPERF_DATASET_CONFIGURATION_TIMEOUT": "1800",
+            "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT": "1800",
+        }
+    command = (out / "agentx4_r0" / "command.txt").read_text()
+    assert command.startswith("env -u HF_HUB_OFFLINE HF_HOME=/hf-cache ")
+
+
+def test_agentx_hugging_face_home_is_the_jobs_scratch_volume():
+    # aiperf runs as a user that cannot write to the model cache, so the
+    # corpus goes to an emptyDir that the Job mounts where bench.sh points.
+    (job,) = load_docs("aiperf-job.yaml")
+    spec = job["spec"]["template"]["spec"]
+    volumes = {v["name"]: v for v in spec["volumes"]}
+    assert volumes["hf-cache"] == {"name": "hf-cache", "emptyDir": {}}
+    (container,) = spec["containers"]
+    mounts = {m["name"]: m["mountPath"] for m in container["volumeMounts"]}
+    assert f"HF_HOME={mounts['hf-cache']}\n" in (BENCH_DIR / "bench.sh").read_text()
+
+
+def test_bench_runs_full_length_agentx_without_overrides(tmp_path):
+    params = {"WORKLOAD": "agentx", "AGENTX_CONCURRENCIES": "8"}
+    result, out = run_bench(tmp_path, params)
+    assert result.returncode == 0, result.stdout + result.stderr
+    call = aiperf_calls(out)["agentx8_r0"]
+    assert arg_value(call["args"], "--benchmark-duration") == "900"
+    assert "--unsafe-override" not in call["args"]
+    assert "--num-dataset-entries" not in call["args"]
+    assert call["env"]["AIPERF_HTTP_CONNECTION_LIMIT"] == "2500"
 
 
 def test_plot_finds_aiperf_behind_pips_sh_launcher(tmp_path):

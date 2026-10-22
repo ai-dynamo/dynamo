@@ -166,6 +166,79 @@ Every run writes its own command to `command.txt`. The defaults work like this:
 - **Server token counts.** The mocker emits random token ids, which do not survive re-tokenizing,
   so aiperf counts tokens from the responses' `usage`.
 
+`WORKLOAD=agentx` replaces these prompts with recorded agentic sessions; see
+[Agentic sessions (AgentX)](#agentic-sessions-agentx).
+
+## Agentic sessions (AgentX)
+
+`WORKLOAD=agentx` runs aiperf's
+[InferenceX AgentX MVP scenario](https://docs.nvidia.com/aiperf/tutorials/datasets-inputs/inference-x-agent-x-mvp-benchmark)
+instead of synthetic prompts. It replays recorded Claude Code sessions: many turns, subagents,
+think time between turns, and contexts of tens to hundreds of thousands of tokens. Each turn reuses
+its session's earlier context, so a turn that the router sends away from the worker holding that
+context loses its cache. This workload therefore tests how well each arm keeps a session on its
+worker, which the synthetic prompts barely do, and its long prompts load the tokenizer of both
+routers far more.
+
+```bash
+# A smoke run: 2 workers per arm, 2 sessions replayed for 60 seconds.
+WORKERS=2 WORKLOAD=agentx AGENTX_CONCURRENCIES=2 AGENTX_DURATION_S=60 AGENTX_TRACES=2 ROUNDS=1 $B all
+
+# The benchmark: 512, 2048 and 4096 live sessions, 900 seconds each.
+WORKLOAD=agentx ROUNDS=1 FRONTEND_IMAGE=<frontend image> WORKER_IMAGE=<planner image> $B all
+```
+
+This is the first run of arm A with the default AgentX settings:
+
+```bash
+env -u HF_HUB_OFFLINE HF_HOME=/hf-cache AIPERF_HTTP_CONNECTION_LIMIT=8192 \
+  AIPERF_DATASET_CONFIGURATION_TIMEOUT=1800 AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=1800 \
+  aiperf profile --model Qwen/Qwen3-0.6B --tokenizer Qwen/Qwen3-0.6B \
+  --url http://inference-gateway.agentgateway-system.svc.cluster.local:80 \
+  --endpoint-type chat --streaming \
+  --header X-Gateway-Model-Name:Qwen/Qwen3-0.6B --header X-Dynamo-AB-Arm:<namespace>/qwen-a \
+  --scenario inferencex-agentx-mvp --public-dataset semianalysis_cc_traces_weka_062126 \
+  --max-context-length 128000 --concurrency 512 --benchmark-duration 900 \
+  --extra-inputs ignore_eos:true --use-server-token-count \
+  --random-seed 42 --no-gpu-telemetry \
+  --server-metrics <the /metrics URLs of the router and 4 worker pods> \
+  --server-metrics-formats json csv \
+  --artifact-dir /results/a-frontend/agentx512_r0 --ui none
+```
+
+- **The scenario sets the rules.** It replays each session's recorded think time and caps idle gaps
+  at 10 seconds. It tags the first turn of each session, so a replayed session never finds an
+  earlier play's cache. It warms each session up by replaying one turn with its full history, and it
+  rejects `--request-rate`: the load is a number of live sessions, `--concurrency`.
+- **Load points.** At 2048 workers, the default `AGENTX_CONCURRENCIES` of 512, 2048 and 4096 are
+  about a quarter of a session, one, and two per worker. At 4096, two long sessions can fill a
+  worker's KV cache, so the router has to trade cache hits against load. Subagents add requests
+  beyond `--concurrency`, so `bench.sh` raises aiperf's connection limit to twice the largest point.
+- **Closed loop.** Each session waits for its previous turn, so a slower arm sends fewer requests.
+  Compare throughput along with latency.
+- **Duration.** Each run lasts `AGENTX_DURATION_S`, 900 seconds by default, the scenario's minimum.
+  The default sweep, 3 points in 3 rounds, measures for about 2.3 hours per arm, so start with
+  `ROUNDS=1`. A shorter run adds `--unsafe-override`, and aiperf then marks it
+  `submission_valid: false`, a field this benchmark does not use.
+- **Context cap.** `AGENTX_MAX_CONTEXT`, 128,000 tokens as in the tutorial, drops every session
+  whose longest request exceeds it. The corpus's requests average about 219,000 input tokens, so
+  the cap keeps the shorter sessions. The mockers set no length limit, and each holds 16,384 KV
+  blocks of 16 tokens, 262,144 tokens, so one session up to the cap fits in a worker. To raise the
+  cap past that, raise `--num-gpu-blocks-override` in both manifests.
+- **The corpus.** `AGENTX_DATASET` names a date-pinned corpus, so every run replays the same
+  sessions. Each arm's aiperf pod downloads the corpus, 1.85 GB, and the tokenizer from Hugging
+  Face into a scratch volume, because aiperf's user cannot write to the model cache. The pod
+  therefore needs to reach huggingface.co, and its node needs room for the corpus.
+  `AGENTX_TRACES` keeps only the first sessions that fit the cap; use it for smoke runs only.
+- **Routing.** Both arms route each turn by KV overlap. `bench.sh` does not send aiperf's
+  `X-Dynamo-Session-ID` header, so session affinity plays no part.
+- **What to compare.** Besides TTFT, ITL and throughput, `usage_prompt_cache_read_tokens` in
+  `profile_export_aiperf.json` counts the prompt tokens served from a worker's prefix cache. It shows
+  how well each arm keeps sessions on their workers.
+
+Run directories are named `agentx<sessions>_r<round>`. The results compare the two arms with each
+other; they are not comparable with published AgentX results, which run real models.
+
 ## Prometheus metrics
 
 The bundle has two layers. Both come from the components' own `/metrics` endpoints:
@@ -303,6 +376,7 @@ Keep these limits in mind when reading the results:
 | `ORDER` | `a,b` | the order of the arms in `all` |
 | `KEEP` | `0` | `1` leaves the last arm deployed after `all` |
 | `RESULTS` | `benchmarks/results/gateway_epp_ab/<UTC time>` | results directory |
+| `WORKLOAD` | `synthetic` | `synthetic` prompts, or `agentx` sessions; see [Agentic sessions (AgentX)](#agentic-sessions-agentx) |
 | `REQUEST_RATES` | `100,200,400` | open-loop load points, in requests per second; set it empty to run only `CONCURRENCIES` |
 | `CONCURRENCIES` | none | closed-loop load points, measured after the request rates |
 | `ROUNDS` | `3` | repetitions of the whole sweep |
@@ -311,6 +385,11 @@ Keep these limits in mind when reading the results:
 | `DURATION_S`, `WARMUP_S` | `60`, `10` | seconds of arrivals measured, and of warmup, per open-loop point; `WARMUP_S=0` skips the warmup |
 | `COOLDOWN_S` | `10` | pause after each run |
 | `SEED` | `42` | seed of the first run |
+| `AGENTX_CONCURRENCIES` | `512,2048,4096` | `agentx`: live sessions, one run each |
+| `AGENTX_DURATION_S` | `900` | `agentx`: seconds per run; below 900 adds `--unsafe-override` |
+| `AGENTX_DATASET` | `semianalysis_cc_traces_weka_062126` | `agentx`: aiperf's name for the session corpus |
+| `AGENTX_MAX_CONTEXT` | `128000` | `agentx`: drops every session with a longer request |
+| `AGENTX_TRACES` | none | `agentx` smoke runs: replay only the first N sessions that fit |
 | `SAMPLE_WORKERS` | `4` | worker pods aiperf scrapes during each run |
 | `SERVER_METRICS_FORMATS` | `json csv` | aiperf's server-metrics formats; add `jsonl` for time series |
 | `READY_TIMEOUT` | `3600` | seconds to wait for each ramp step, the DGD, or the aiperf pod |
@@ -318,6 +397,9 @@ Keep these limits in mind when reading the results:
 | `SMOKE_TIMEOUT_S` | `600` | how long `bench.sh` retries its first request through the Gateway |
 | `BENCH_TIMEOUT` | `21600` | seconds to wait for the aiperf Job |
 | `AIPERF_PYTHON` | found from the `aiperf` command | `plot` only: a Python that can import aiperf |
+
+`agentx` ignores the settings of the synthetic workload: `REQUEST_RATES`, `CONCURRENCIES`, `ISL`,
+`OSL`, `PREFIX_LENGTH`, `NUM_PREFIXES`, `DURATION_S` and `WARMUP_S`.
 
 `run.sh` checks the workload settings before it touches the cluster, and exits with status 2 when
 one cannot work, such as a `PREFIX_LENGTH` that is not shorter than `ISL`.
@@ -336,6 +418,7 @@ tests fail if their workers differ.
 | Arm B fails with HTTP 500 at higher request rates, and arm A does not | The Gateway runs agentgateway before v1.2.0, which uses up the EPP's connections; see [Comparing the arms](#comparing-the-arms). Upgrade it with the installer. |
 | Every arm B request fails with HTTP 500 `ext_proc failed: no more response messages` | The Gateway runs agentgateway v1.3.0 or later. Its log shows `ext_proc response stream failed` with the EPP's protocol configuration error. Install v1.2.1 with the installer. |
 | A run's `console.log` shows errors or timeouts | The load point is past saturation, or the client ran short of CPU. Lower the rate, or give the aiperf pod a node of its own. |
+| An `agentx` run fails to load `semianalysis_cc_traces_weka_062126` | The aiperf pod cannot reach huggingface.co, or its node has no room for the 1.85 GB corpus. |
 | A snapshot reports fewer endpoints than expected | Some pods restarted or were not running. The archive holds an `.err` file for each failed endpoint. |
 | `run.sh` stops before collecting | The Job's pod keeps the results until a copy succeeds: `RESULTS=<dir> $B collect <arm>`. After that copy the pod exits and its results are gone. |
 

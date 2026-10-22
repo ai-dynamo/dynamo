@@ -64,11 +64,17 @@ spec:
           mountPath: /results
         - name: model-cache
           mountPath: /opt/models
+        # WORKLOAD=agentx downloads its session corpus here: aiperf's user
+        # cannot write to the model cache.
+        - name: hf-cache
+          mountPath: /hf-cache
       volumes:
       - name: bench
         configMap:
           name: qwen-ab-bench
       - name: results
+        emptyDir: {}
+      - name: hf-cache
         emptyDir: {}
       - name: model-cache
         persistentVolumeClaim:

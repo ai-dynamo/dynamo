@@ -44,7 +44,10 @@ ORDER=${ORDER:-a,b}
 KEEP=${KEEP:-0}
 RESULTS=${RESULTS:-$REPO_ROOT/benchmarks/results/gateway_epp_ab/$(date -u +%Y%m%dT%H%M%SZ)}
 
-# The workload, identical for both arms. An empty REQUEST_RATES leaves only CONCURRENCIES.
+# The workload, identical for both arms: synthetic prompts, or agentic sessions
+# (agentx) replayed by aiperf's InferenceX AgentX scenario.
+WORKLOAD=${WORKLOAD:-synthetic}
+# synthetic: an empty REQUEST_RATES leaves only CONCURRENCIES.
 REQUEST_RATES=${REQUEST_RATES-100,200,400}
 CONCURRENCIES=${CONCURRENCIES:-}
 ROUNDS=${ROUNDS:-3}
@@ -56,6 +59,13 @@ DURATION_S=${DURATION_S:-60}
 WARMUP_S=${WARMUP_S:-10}
 COOLDOWN_S=${COOLDOWN_S:-10}
 SEED=${SEED:-42}
+# agentx: live sessions per run, seconds per run, the corpus, the longest
+# session it keeps, and, for smoke runs, how many sessions it replays.
+AGENTX_CONCURRENCIES=${AGENTX_CONCURRENCIES:-512,2048,4096}
+AGENTX_DURATION_S=${AGENTX_DURATION_S:-900}
+AGENTX_DATASET=${AGENTX_DATASET:-semianalysis_cc_traces_weka_062126}
+AGENTX_MAX_CONTEXT=${AGENTX_MAX_CONTEXT:-128000}
+AGENTX_TRACES=${AGENTX_TRACES:-}
 SMOKE_TIMEOUT_S=${SMOKE_TIMEOUT_S:-600}
 SAMPLE_WORKERS=${SAMPLE_WORKERS:-4}
 SERVER_METRICS_FORMATS=${SERVER_METRICS_FORMATS:-json csv}
@@ -64,8 +74,10 @@ SERVER_METRICS_FORMATS=${SERVER_METRICS_FORMATS:-json csv}
 SETTINGS=(
   KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE AIPERF_IMAGE
   MODEL_CACHE_PVC IMAGE_PULL_SECRET GATEWAY_NAME GATEWAY_NAMESPACE READY_TIMEOUT SETTLE_SECONDS
-  BENCH_TIMEOUT ORDER KEEP REQUEST_RATES CONCURRENCIES ROUNDS ISL OSL PREFIX_LENGTH NUM_PREFIXES
-  DURATION_S WARMUP_S COOLDOWN_S SEED SMOKE_TIMEOUT_S SAMPLE_WORKERS SERVER_METRICS_FORMATS
+  BENCH_TIMEOUT ORDER KEEP WORKLOAD REQUEST_RATES CONCURRENCIES ROUNDS ISL OSL PREFIX_LENGTH
+  NUM_PREFIXES DURATION_S WARMUP_S COOLDOWN_S SEED AGENTX_CONCURRENCIES AGENTX_DURATION_S
+  AGENTX_DATASET AGENTX_MAX_CONTEXT AGENTX_TRACES SMOKE_TIMEOUT_S SAMPLE_WORKERS
+  SERVER_METRICS_FORMATS
 )
 
 FAILED_RUNS=0
@@ -113,17 +125,33 @@ validate_settings() {
   if ((PREFIX_LENGTH > 0 && NUM_PREFIXES > 0 && PREFIX_LENGTH >= ISL)); then
     invalid "PREFIX_LENGTH ($PREFIX_LENGTH) must be shorter than ISL ($ISL), which includes the prefix"
   fi
-  [[ -n $REQUEST_RATES || -n $CONCURRENCIES ]] || invalid "set REQUEST_RATES or CONCURRENCIES"
-  IFS=, read -ra values <<< "$REQUEST_RATES"
-  for value in "${values[@]}"; do
-    if ! [[ $value =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || ! awk -v rate="$value" 'BEGIN { exit !(rate > 0) }'; then
-      invalid "REQUEST_RATES must be positive numbers, not '$value'"
-    fi
-  done
-  IFS=, read -ra values <<< "$CONCURRENCIES"
-  for value in "${values[@]}"; do
-    [[ $value =~ ^[1-9][0-9]*$ ]] || invalid "CONCURRENCIES must be positive integers, not '$value'"
-  done
+  case $WORKLOAD in
+    synthetic)
+      [[ -n $REQUEST_RATES || -n $CONCURRENCIES ]] || invalid "set REQUEST_RATES or CONCURRENCIES"
+      IFS=, read -ra values <<< "$REQUEST_RATES"
+      for value in "${values[@]}"; do
+        if ! [[ $value =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || ! awk -v rate="$value" 'BEGIN { exit !(rate > 0) }'; then
+          invalid "REQUEST_RATES must be positive numbers, not '$value'"
+        fi
+      done
+      IFS=, read -ra values <<< "$CONCURRENCIES"
+      for value in "${values[@]}"; do
+        [[ $value =~ ^[1-9][0-9]*$ ]] || invalid "CONCURRENCIES must be positive integers, not '$value'"
+      done
+      ;;
+    agentx)
+      for name in AGENTX_DURATION_S AGENTX_MAX_CONTEXT; do
+        [[ ${!name} =~ ^[1-9][0-9]*$ ]] || invalid "$name must be a positive integer, not '${!name}'"
+      done
+      [[ -z $AGENTX_TRACES || $AGENTX_TRACES =~ ^[1-9][0-9]*$ ]] ||
+        invalid "AGENTX_TRACES must be empty or a positive integer, not '$AGENTX_TRACES'"
+      IFS=, read -ra values <<< "$AGENTX_CONCURRENCIES"
+      for value in "${values[@]}"; do
+        [[ $value =~ ^[1-9][0-9]*$ ]] || invalid "AGENTX_CONCURRENCIES must be positive integers, not '$value'"
+      done
+      ;;
+    *) invalid "WORKLOAD is 'synthetic' or 'agentx', not '$WORKLOAD'" ;;
+  esac
   [[ $KEEP == 0 || $KEEP == 1 ]] || invalid "KEEP must be 0 or 1, not '$KEEP'"
 }
 
@@ -260,6 +288,7 @@ write_params() {
     ARM_HEADER "$(arm_header "$1")" \
     MODEL "$MODEL" \
     GATEWAY_URL "$url" \
+    WORKLOAD "$WORKLOAD" \
     REQUEST_RATES "$REQUEST_RATES" \
     CONCURRENCIES "$CONCURRENCIES" \
     ROUNDS "$ROUNDS" \
@@ -271,6 +300,11 @@ write_params() {
     WARMUP_S "$WARMUP_S" \
     COOLDOWN_S "$COOLDOWN_S" \
     SEED "$SEED" \
+    AGENTX_CONCURRENCIES "$AGENTX_CONCURRENCIES" \
+    AGENTX_DURATION_S "$AGENTX_DURATION_S" \
+    AGENTX_DATASET "$AGENTX_DATASET" \
+    AGENTX_MAX_CONTEXT "$AGENTX_MAX_CONTEXT" \
+    AGENTX_TRACES "$AGENTX_TRACES" \
     SMOKE_TIMEOUT_S "$SMOKE_TIMEOUT_S" \
     SERVER_METRICS_FORMATS "$SERVER_METRICS_FORMATS"
 }
