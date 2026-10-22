@@ -34,7 +34,7 @@ use dynamo_llm::protocols::common::extensions::{
 };
 use serde::Deserialize;
 
-use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     resolve_cache_namespace,
@@ -61,6 +61,7 @@ pub(crate) fn requested_policy_class(
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
     renderer: RenderClient,
+    renderer_protocol: RendererProtocol,
     reflector: Arc<PodDiscovery>,
     selector: Arc<Selector>,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
@@ -110,6 +111,7 @@ impl EppRouter {
         // ready immediately and returns 503 per-request until capacity appears.
         Ok(Self {
             renderer,
+            renderer_protocol: cfg.renderer_protocol,
             reflector,
             selector,
             _adapter: adapter,
@@ -155,6 +157,7 @@ impl EppRouter {
             nvext.and_then(|n| n.cache_namespace.as_deref()),
             hints.cache_namespace.as_deref(),
         );
+        check_cache_salt_support(self.renderer_protocol, cache_namespace.as_deref())?;
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
             .renderer
@@ -479,11 +482,31 @@ impl<R: ReservationReleaser> Drop for ReservationGuard<R> {
     }
 }
 
+/// Client-visible reason a salted request is refused on a TensorRT-LLM pool.
+pub const CACHE_SALT_UNSUPPORTED_MESSAGE: &str = "cache_salt is not supported with TensorRT-LLM \
+     workers: TensorRT-LLM KV events carry no salt, so salted requests cannot be routed; remove \
+     x-tenant-id, nvext.cache_salt, and cache_salt";
+
+/// TensorRT-LLM's streaming KV events carry no cache salt, so the index could
+/// neither credit the salted request nor keep its blocks from being credited to
+/// unsalted ones. Refuse up front instead of routing blind.
+fn check_cache_salt_support(
+    protocol: RendererProtocol,
+    cache_namespace: Option<&str>,
+) -> Result<(), TokenizeError> {
+    match (protocol, cache_namespace) {
+        (RendererProtocol::TrtllmRender, Some(_)) => Err(TokenizeError::UnsupportedCacheSalt),
+        _ => Ok(()),
+    }
+}
+
 /// Why tokenizing a request for routing failed. Kept typed so the picker can map
 /// each cause to the correct HTTP status instead of collapsing everything to 400.
 enum TokenizeError {
     /// The request body could not be parsed — a genuine client (400) error.
     InvalidBody(serde_json::Error),
+    /// The request carries a cache salt the configured engine cannot route (400).
+    UnsupportedCacheSalt,
     /// The renderer call failed; the specific variant decides the status.
     Render(RenderError),
 }
@@ -497,6 +520,9 @@ impl TokenizeError {
             // internals, so it is safe to surface as a 400.
             TokenizeError::InvalidBody(e) => {
                 PickError::InvalidRequest(format!("invalid request body: {e}"))
+            }
+            TokenizeError::UnsupportedCacheSalt => {
+                PickError::InvalidRequest(CACHE_SALT_UNSUPPORTED_MESSAGE.to_string())
             }
             TokenizeError::Render(e) => {
                 tracing::warn!(request_id, error = %e, "Tokenization render failed");
@@ -628,6 +654,27 @@ mod tests {
             map(StatusCode::SERVICE_UNAVAILABLE),
             PickError::TokenizerUnavailable
         ));
+    }
+
+    #[test]
+    fn salted_requests_are_refused_only_on_trtllm_pools() {
+        assert!(matches!(
+            check_cache_salt_support(RendererProtocol::TrtllmRender, Some("tenant-a")),
+            Err(TokenizeError::UnsupportedCacheSalt)
+        ));
+        assert!(check_cache_salt_support(RendererProtocol::TrtllmRender, None).is_ok());
+        assert!(check_cache_salt_support(RendererProtocol::VllmRender, Some("tenant-a")).is_ok());
+        assert!(
+            check_cache_salt_support(RendererProtocol::SglangRenderer, Some("tenant-a")).is_ok()
+        );
+
+        // Surfaces as a client 400 carrying the reason.
+        match TokenizeError::UnsupportedCacheSalt.into_pick_error("req-1") {
+            PickError::InvalidRequest(message) => {
+                assert_eq!(message, CACHE_SALT_UNSUPPORTED_MESSAGE)
+            }
+            other => panic!("expected InvalidRequest, got {other}"),
+        }
     }
 
     #[test]

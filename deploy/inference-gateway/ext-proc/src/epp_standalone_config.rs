@@ -76,6 +76,8 @@ pub enum RendererProtocol {
     SglangRenderer,
     /// TensorRT-LLM's `/v1/chat/completions/render` endpoint (`trtllm-render`, or
     /// `trtllm-serve` with `TRTLLM_ENABLE_RENDER_ENDPOINTS=1`); response field `token_ids`.
+    /// Requests carrying a cache salt are refused with 400: TensorRT-LLM's KV
+    /// events carry no salt, so the index cannot route them.
     TrtllmRender,
 }
 

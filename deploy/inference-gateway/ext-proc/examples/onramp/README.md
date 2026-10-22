@@ -96,4 +96,8 @@ flowchart LR
    a cache namespace applies, writes the engine's native top-level `cache_salt`.
    This is the same for every engine: vLLM and SGLang would ignore `nvext`,
    TensorRT-LLM would reject the request over it, so every worker receives the
-   same plain OpenAI body.
+   same plain OpenAI body. With `trtllm-render`, a request that carries a cache
+   salt (`x-tenant-id`, `nvext.cache_salt`, or `cache_salt`) is rejected with
+   HTTP 400 before rendering: TensorRT-LLM's KV events do not carry the salt, so
+   the EPP could neither credit the salted request nor keep its blocks from
+   being credited to unsalted ones.
