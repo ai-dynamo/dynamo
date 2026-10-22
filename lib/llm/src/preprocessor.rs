@@ -6993,6 +6993,10 @@ impl OpenAIPreprocessor {
             let thinking = dynamo_renderer::thinking_bool_from_args(chat_template_args.as_ref());
             return match family {
                 "gemma4" => thinking != Some(true),
+                // Spark's template cannot disable reasoning, so keep generated
+                // reasoning separate instead of folding it into visible content.
+                // `muse_spark_open` resolves to the canonical `muse_spark` family here.
+                "muse_spark" => false,
                 "deepseek_v4" | "deepseek_v41" => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
                 }

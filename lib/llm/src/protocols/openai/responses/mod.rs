@@ -49,6 +49,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse};
+#[cfg(test)]
+use super::tools::custom_input;
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
@@ -1186,15 +1188,22 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         let fallback_names = ToolNameMap::new(&inner_tools, Some(&resp.inner.input));
-        let history_tool_names = messages
+        let mut history_tool_names: HashMap<String, Vec<String>> = HashMap::new();
+        // Backends may restart call IDs each turn. Preserve each occurrence's
+        // identity rather than renaming all earlier calls to the last one.
+        for call in messages
             .iter()
             .filter_map(|message| match message {
                 ChatCompletionRequestMessage::Assistant(message) => message.tool_calls.as_ref(),
                 _ => None,
             })
             .flatten()
-            .map(|call| (call.id.clone(), call.function.name.clone()))
-            .collect();
+        {
+            history_tool_names
+                .entry(call.id.clone())
+                .or_default()
+                .push(call.function.name.clone());
+        }
         let tool_choice_name = match &tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(choice)) => {
                 Some(choice.function.name.clone())

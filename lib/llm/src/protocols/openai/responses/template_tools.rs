@@ -3,6 +3,7 @@
 
 //! Native template metadata and custom/client-search protocol adaptation.
 
+use super::super::tools::custom_input_or_raw;
 use super::*;
 
 #[derive(Clone, Debug, Default)]
@@ -17,7 +18,7 @@ pub struct ResponsesToolContext {
         HashMap<usize, MessagePhase>,
     )>,
     pub history_phases: HashMap<usize, MessagePhase>,
-    pub(super) history_tool_names: HashMap<String, String>,
+    pub(super) history_tool_names: HashMap<String, Vec<String>>,
     pub(super) tool_choice_name: Option<String>,
     pub(super) selected_tools: Option<HashSet<(Option<String>, String)>>,
 }
@@ -169,17 +170,6 @@ pub(super) fn qualified_name(name: &str, namespace: Option<&str>) -> String {
         Some(ns) => format!("{ns}.{name}"),
         None => name.to_owned(),
     }
-}
-
-pub(super) fn custom_input(arguments: &str) -> anyhow::Result<String> {
-    let value: serde_json::Value = serde_json::from_str(arguments)?;
-    value
-        .get(CUSTOM_TOOL_INPUT_ARG)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Custom tool arguments must contain a string input parameter")
-        })
 }
 
 fn convert_template_tools(
@@ -383,14 +373,18 @@ impl NvCreateChatCompletionRequest {
                 names.encode(namespace, leaf)
             }
         };
+        let mut occurrences: HashMap<&str, usize> = HashMap::new();
         for message in &mut self.inner.messages {
             if let ChatCompletionRequestMessage::Assistant(message) = message {
                 for call in message.tool_calls.iter_mut().flatten() {
+                    let occurrence = occurrences.entry(&call.id).or_default();
                     let original = context
                         .history_tool_names
                         .get(&call.id)
+                        .and_then(|names| names.get(*occurrence))
                         .unwrap_or(&call.function.name);
                     call.function.name = resolve(original);
+                    *occurrence += 1;
                 }
             }
         }
@@ -569,7 +563,13 @@ impl ResponseParams {
                 }
             }
         }
-        found.unwrap_or_else(|| (emitted.into(), None, false))
+        found.unwrap_or_else(|| {
+            (
+                decoded_name.to_owned(),
+                decoded_namespace.map(str::to_owned),
+                false,
+            )
+        })
     }
 
     pub(super) fn tool_output(
@@ -581,15 +581,17 @@ impl ResponseParams {
         status: OutputStatus,
     ) -> anyhow::Result<OutputItem> {
         if self.is_client_search(emitted) {
-            let arguments = if arguments.is_empty() && status == OutputStatus::InProgress {
-                serde_json::json!({})
-            } else {
-                serde_json::from_str(arguments)?
+            let arguments = match serde_json::from_str::<serde_json::Value>(arguments) {
+                Ok(value) if value.is_object() => value,
+                _ if status == OutputStatus::Incomplete
+                    || (arguments.is_empty() && status == OutputStatus::InProgress) =>
+                {
+                    // A truncated search has no executable argument object.
+                    serde_json::json!({})
+                }
+                Ok(_) => anyhow::bail!("Client tool search arguments must be an object"),
+                Err(error) => return Err(error.into()),
             };
-            anyhow::ensure!(
-                arguments.is_object(),
-                "Client tool search arguments must be an object"
-            );
             return Ok(serde_json::from_value(
                 serde_json::json!({"type":"tool_search_call","id":item_id,"call_id":call_id,"execution":"client","arguments":arguments,"status":status}),
             )?);
@@ -599,7 +601,9 @@ impl ResponseParams {
             let input = if arguments.is_empty() && status == OutputStatus::InProgress {
                 String::new()
             } else {
-                custom_input(arguments)?
+                // Keep malformed model output as caller input, matching Chat.
+                // Truncated calls retain their raw text and incomplete status.
+                custom_input_or_raw(arguments)
             };
             // The upstream custom output type is non_exhaustive, so construct
             // it through its wire representation rather than a struct literal.

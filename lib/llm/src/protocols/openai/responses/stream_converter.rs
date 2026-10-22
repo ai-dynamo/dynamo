@@ -496,6 +496,13 @@ impl ResponseStreamConverter {
         match &chunk.message_boundary {
             Some(super::super::chat_completions::MessageBoundary::Start(phase)) => {
                 self.close_current_message(events);
+                // A new assistant message follows a closed tool message. Finish
+                // its calls before publishing later commentary or final text.
+                self.append_pending_function_call_done_events(
+                    events,
+                    OutputStatus::Completed,
+                    false,
+                );
                 self.message_phase = Some(*phase);
                 self.start_message(events);
             }

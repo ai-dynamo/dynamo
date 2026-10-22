@@ -484,6 +484,13 @@ pub(super) fn validate_runtime_config(
                 && configured_boundary != StructuralTagReasoningBoundary::Backend,
             "Muse Spark structural tags require grammar-owned reasoning; enable vLLM structured_outputs_config.enable_in_reasoning and use reasoning_boundary=auto or structural_tag"
         );
+        anyhow::ensure!(
+            !runtime_config
+                .structural_tag
+                .as_ref()
+                .is_some_and(|config| config.tool_arguments_any_order),
+            "Muse Spark does not support structural_tag.tool_arguments_any_order"
+        );
     }
     let reasoning_boundary =
         resolve_reasoning_boundary(configured_boundary, backend_excludes_reasoning)

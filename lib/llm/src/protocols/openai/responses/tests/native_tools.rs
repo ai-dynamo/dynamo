@@ -235,14 +235,16 @@ fn custom_tool_unary_output_and_history_preserve_verbatim_freeform_payload() {
     let rendered = formatter(TEMPLATE).render(&chat).unwrap();
     assert!(rendered.contains("<atem:parameter name=\"input\">*** Begin Patch"));
     assert!(rendered.contains("<|start|>tool fs.apply_patch<|message|>"));
-    assert!(
+    let fallback = serde_json::to_value(
         unary_tool_response(
             &response_params(&response),
             "fs.apply_patch",
-            json!({"input":42})
+            json!({"input":42}),
         )
-        .is_err()
-    );
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fallback["output"][0]["input"], r#"{"input":42}"#);
 }
 
 #[test]

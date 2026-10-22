@@ -33,6 +33,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .responses_history import responses_history_recipients
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -902,6 +903,14 @@ def preprocess_chat_request(
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
+    # Materialization copied caller-owned messages. Restore Responses phases by
+    # assistant ordinal, including tool-only messages, before template rendering.
+    recipients = responses_history_recipients(request.get("responses_history_phases"))
+    for index, message in enumerate(
+        m for m in messages if m.get("role") == "assistant"
+    ):
+        if recipient := recipients.get(str(index)):
+            message["recipient"] = recipient
 
     # Generation mode is independent of whether the client wants reasoning
     # separated into reasoning_content or retained in content.

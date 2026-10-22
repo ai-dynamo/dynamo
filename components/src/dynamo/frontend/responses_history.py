@@ -25,17 +25,23 @@ _HISTORY_PREAMBLE = """{%- set _dynamo_phases = PHASE_MAP -%}
 """
 
 
+def responses_history_recipients(
+    history_phases: list[str | None] | None,
+) -> dict[str, str]:
+    recipients = {"commentary": "commentary", "final_answer": "user"}
+    return {
+        str(index): recipients[phase]
+        for index, phase in enumerate(history_phases or [])
+        if phase in recipients
+    }
+
+
 def responses_history_template(
     chat_template: str | None,
     history_phases: list[str | None] | None,
     resolve_template: Callable[[], str | None],
 ) -> str | None:
-    recipients = {"commentary": "commentary", "final_answer": "user"}
-    phases = {
-        str(index): recipients[phase]
-        for index, phase in enumerate(history_phases or [])
-        if phase in recipients
-    }
+    phases = responses_history_recipients(history_phases)
     if not phases:
         return chat_template
     # Keep the renderer's processor/tokenizer/template-variant precedence.

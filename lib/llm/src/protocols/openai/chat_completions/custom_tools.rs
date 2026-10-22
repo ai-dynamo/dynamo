@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Keep Chat custom-tool API identity outside the function-oriented engine path.
 
+use super::super::tools::{custom_input, custom_input_or_raw};
 use super::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse,
@@ -21,26 +22,6 @@ pub(crate) struct ChatCustomToolAdapter {
     single_tool_call: bool,
     // Choices may interleave, and tool indices restart independently per choice.
     pending: BTreeMap<(u32, u32), String>,
-}
-
-fn custom_input(arguments: &str) -> anyhow::Result<String> {
-    let value: serde_json::Value = serde_json::from_str(arguments)?;
-    value
-        .get(dynamo_protocols::types::CUSTOM_TOOL_INPUT_ARG)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Custom tool arguments must contain a string input parameter")
-        })
-}
-
-fn custom_input_or_raw(arguments: &str) -> String {
-    custom_input(arguments).unwrap_or_else(|_| {
-        // Model output is application input, not an adapter failure. Keep valid
-        // siblings and let the caller validate malformed output, as with functions.
-        tracing::warn!("Custom tool output lacks a string input wrapper; returning raw arguments");
-        arguments.to_owned()
-    })
 }
 
 impl ChatCustomToolAdapter {
