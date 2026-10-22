@@ -75,7 +75,11 @@ func ValidateDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpe
 				allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "the leader template must declare runtime to select sidecar mode"))
 			}
 		} else if main := GetMainContainer(component); main != nil {
-			if _, err := readSGLangLaunchArgs(main); err != nil {
+			launch, err := readSGLangLaunchArgs(main)
+			if err == nil {
+				_, err = sglangWorkerRoleRequiresRuntimeContainer(launch, component.GetNumberOfNodes())
+			}
+			if err != nil {
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("podTemplate", "spec", "containers"), err.Error()))
 			}
 		}
