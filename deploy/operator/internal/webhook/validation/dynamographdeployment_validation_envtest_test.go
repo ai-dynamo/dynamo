@@ -321,12 +321,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine SGLang topology: expected python -m sglang.launch_server; use complete leader and worker podTemplates`},
 		},
 		{
-			name: "sglang sidecar multinode accepts explicit DP with config",
+			name: "sglang sidecar multinode rejects config hiding publisher placement",
 			deployment: func() runtime.Object {
 				dgd := sglangMultinodeDGDForAdmission(t, false, false, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Args = []string{"--config", "/engine.yaml", "--enable-dp-attention"}
 				return dgd
 			}(),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine SGLang publisher topology from config files or expanded flags; use complete leader and worker podTemplates`},
 		},
 		{
 			name: "sglang sidecar multinode accepts TP model expansion",
@@ -342,7 +343,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd := sglangMultinodeDGDForAdmission(t, false, false, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
 				main.Command = []string{"sh", "-c"}
-				main.Args = []string{`exec python3 -m sglang.launch_server --model-path "$MODEL_PATH" --enable-dp-attention`}
+				main.Args = []string{`exec python3 -m sglang.launch_server --model-path "$MODEL_PATH" --tp-size 2 --attn-dp-size 2 --kv-events-config '{"publisher":"zmq"}'`}
 				return dgd
 			}(),
 		},
@@ -353,7 +354,48 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Args = []string{"--config", "/engine.yaml"}
 				return dgd
 			}(),
-			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine whether SGLang DP-attention is enabled by config files or expanded flags; declare --enable-dp-attention explicitly or use complete leader and worker podTemplates`},
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine SGLang publisher topology from config files or expanded flags; use complete leader and worker podTemplates`},
+		},
+
+		{
+			name: "sglang sidecar canonical attention DP",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
+				main.Args = append(main.Args, "--attn-dp-size", "2")
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang sidecar canonical attention DP long equals alias",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
+				main.Args = append(main.Args, "--attention-data-parallel-size=2")
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang sidecar rejects mixed follower publishers",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				component := betaWorkerComponent(dgd)
+				component.Multinode.NodeCount = 4
+				main := &component.PodTemplate.Spec.Containers[0]
+				main.Args = append(main.Args, "--tp-size", "16")
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: SGLang topology has mixed publisher and non-publisher followers (2 of 4 nodes publish KV events); a shared worker template cannot place runtime selectively; use a topology where every follower publishes or only the leader publishes`},
+		},
+		{
+			name: "sglang sidecar rejects expanded canonical attention DP",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
+				main.Args = append(main.Args, "--attn-dp-size=$(DP)")
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: --attn-dp-size must be a literal positive integer; use complete leader and worker podTemplates for dynamic topology`},
 		},
 
 		{
@@ -4906,7 +4948,7 @@ func sglangMultinodeDGDForAdmission(t *testing.T, alpha, roles, dp bool) runtime
 	component.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 	main := &component.PodTemplate.Spec.Containers[0]
 	main.Command = []string{"python3", "-m", "sglang.launch_server"}
-	main.Args = []string{"--model-path", "model", "--tp-size", "2"}
+	main.Args = []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`}
 	if dp {
 		main.Args = append(main.Args, "--enable-dp-attention", "--dp-size", "2")
 	}
