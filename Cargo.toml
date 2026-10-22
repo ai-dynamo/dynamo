@@ -13,6 +13,7 @@ members = [
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
+    "lib/global-discovery-client",
     "lib/router-plugins/catalog",
     "lib/router-plugins/builtin",
     "examples/router/custom-policy-example/soft-pin-repin",
