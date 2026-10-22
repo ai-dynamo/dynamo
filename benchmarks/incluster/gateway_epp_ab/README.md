@@ -221,10 +221,11 @@ env -u HF_HUB_OFFLINE HF_HOME=/hf-cache AIPERF_HTTP_CONNECTION_LIMIT=8192 \
   `ROUNDS=1`. A shorter run adds `--unsafe-override`, and aiperf then marks it
   `submission_valid: false`, a field this benchmark does not use.
 - **Context cap.** `AGENTX_MAX_CONTEXT`, 128,000 tokens as in the tutorial, drops every session
-  whose longest request exceeds it. The corpus's requests average about 219,000 input tokens, so
-  the cap keeps the shorter sessions. The mockers set no length limit, and each holds 16,384 KV
-  blocks of 16 tokens, 262,144 tokens, so one session up to the cap fits in a worker. To raise the
-  cap past that, raise `--num-gpu-blocks-override` in both manifests.
+  whose longest request, prompt plus output, exceeds it. That keeps 78 of the corpus's 393
+  sessions, the shortest fifth: half of them peak above 226,000 tokens. The mockers set no length
+  limit, and each holds 16,384 KV blocks of 16 tokens, 262,144 tokens, so two sessions at the cap
+  fit in one worker. A cap of 262,144 keeps 220 sessions, but then one session can fill a worker's
+  KV cache, so raise `--num-gpu-blocks-override` in both manifests as well.
 - **The corpus.** `AGENTX_DATASET` names a date-pinned corpus, so every run replays the same
   sessions. Each arm's aiperf pod downloads the corpus, 1.85 GB, and the tokenizer from Hugging
   Face into a scratch volume, because aiperf's user cannot write to the model cache. The pod
