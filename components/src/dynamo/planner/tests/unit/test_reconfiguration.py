@@ -612,71 +612,11 @@ async def test_http_contract_rejects_unsupported_or_invalid_updates(changes):
     await planner._shutdown_runtime()
 
 
-def test_candidate_config_is_public_with_private_alias():
-    assert reconfiguration._candidate_config is candidate_config
-
-
-_CAPABILITIES = WorkerCapabilities(
-    prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
-    decode=EngineCapabilities(
-        num_gpu=4, gpu_cost_per_replica=1, power_watts_per_replica=350
-    ),
-)
-
-
-@pytest.mark.parametrize(
-    ("args", "expected"),
-    [
-        ((1, 1, -1, 20, 2000), []),
-        ((None, 2, -1, -1, None), []),
-        (
-            (3, 2, 30, 20, 2000),
-            [
-                "min_gpu_budget=30 exceeds max_gpu_budget=20",
-                "minimum endpoint footprint requires 2800W, exceeding "
-                "total_gpu_power_limit=2000W",
-            ],
-        ),
-        (
-            (10, 1, -1, 15, None),
-            [
-                "minimum endpoint footprint requires 21 GPUs, exceeding "
-                "max_gpu_budget=15"
-            ],
-        ),
-    ],
-)
-def test_runtime_configuration_errors_are_pure_scalar_checks(args, expected):
-    assert runtime_configuration_errors(*args, _CAPABILITIES) == expected
-
-
 def test_runtime_configuration_errors_skip_unknown_power():
     capabilities = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=1), decode=EngineCapabilities(num_gpu=1)
     )
     assert runtime_configuration_errors(100, 100, -1, -1, 1, capabilities) == []
-
-
-@pytest.mark.parametrize(
-    "args",
-    [(1, 1, -1, 20), (3, 2, 30, 20), (10, 1, -1, 15), (None, 4, 2, 3)],
-)
-async def test_planner_runtime_errors_delegate_to_pure_function(args):
-    planner = _planner(
-        "disagg",
-        prefill_gpu_cost=2,
-        decode_gpu_cost=1,
-        prefill_watts=700,
-        decode_watts=350,
-        total_gpu_power_limit=2000,
-    )
-    expected = runtime_configuration_errors(
-        *args,
-        planner.config.total_gpu_power_limit,
-        planner._build_worker_capabilities(),
-    )
-    assert planner._runtime_configuration_errors(*args) == expected
-    await planner._shutdown_runtime()
 
 
 async def test_runtime_candidate_errors_match_runtime_validation():

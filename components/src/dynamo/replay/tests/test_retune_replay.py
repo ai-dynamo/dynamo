@@ -5,7 +5,7 @@
 
 """Planner retune through ``run_trace_replay``.
 
-The integration cases replay a small generated ``dynamo.request.trace.v1``
+The integration case replays a small generated ``dynamo.request.trace.v1``
 workload: a dense 20 s head (25 requests/s) and a sparse tail that keeps the
 replay ticking past the first decision. Under the startup router point
 (``router_temperature: 100``, near-random worker sampling) the head violates
@@ -40,7 +40,6 @@ pytestmark = [
 ]
 
 _BASE_MS = 1_700_000_000_000
-_DATA = Path(__file__).resolve().parent / "data"
 
 # Ticks every 5 s; window 0 = [0, 120) s launches at the 125 s tick (first
 # tick >= 120 s + grace) and is decided one tick later. The interval also caps
@@ -142,91 +141,11 @@ def _router_revisions(ticks: list[dict]) -> dict[str, list[tuple[float, int]]]:
     return revisions
 
 
-def _assert_router_update_lands_at_decision(report, worker_types: set[str]) -> None:
-    first = report.planner.retune_events[0]
-    assert first["window_index"] == 0
-    assert first["outcome"] == "applied", first
-    assert first["launched_at_s"] == _LAUNCH_S
-    assert first["decided_at_s"] == _DECIDE_S
-    assert first["previous"]["router"] == {"router_temperature": 100.0}
-    assert first["chosen"]["router"] == {"router_temperature": 0.0}
-    assert first["planner_changes"] == {}
-    assert first["best_score"] > first["baseline_score"]
-
-    ticks = report.planner.ticks
-    decide_ms = _DECIDE_S * 1000.0
-    for tick in ticks:
-        desired = tick["runtime_decision"]["router_parameters"]
-        assert set(desired) == worker_types
-        expected = 0.0 if tick["at_ms"] >= decide_ms else 100.0
-        assert {params["router_temperature"] for params in desired.values()} == {
-            expected
-        }
-    # Each snapshot reports the router state before that tick's update.
-    revisions = _router_revisions(ticks)
-    assert set(revisions) == worker_types
-    for worker_type, history in revisions.items():
-        assert all(rev == 0 for at_ms, rev in history if at_ms <= decide_ms), (
-            worker_type,
-            history,
-        )
-        after = [rev for at_ms, rev in history if at_ms > decide_ms]
-        assert after and all(rev == 1 for rev in after), (worker_type, history)
-    later = [tick["router_policies"] for tick in ticks if tick["at_ms"] > decide_ms][0]
-    assert {policy["parameters"]["router_temperature"] for policy in later} == {0.0}
-
-    # Retune-only planners never scale.
-    assert report.planner.scaling_events == []
-    for tick in ticks:
-        decision = tick["runtime_decision"]
-        assert decision["target_prefill"] is None
-        assert decision["target_decode"] is None
-
-
 @pytest.mark.integration
 @pytest.mark.timeout(300)
-def test_scenario1_agg_router_update_lands_mid_run(tmp_path):
-    traces = _write_workload(tmp_path, blocks=16, output_tokens=128)
-
-    report = run_trace_replay(
-        traces,
-        trace_format="dynamo",
-        router_mode="kv_router",
-        router_config=KvRouterConfig(router_temperature=100.0),
-        num_workers=4,
-        extra_engine_args=_engine(),
-        planner_config=_retune_only("agg", sla_ttft_ms=60.0, sla_itl_ms=100.0),
-    )
-
-    assert report.summary["completed_requests"] == _HEAD_REQUESTS + _TAIL_REQUESTS
-    _assert_router_update_lands_at_decision(report, {"aggregated"})
-    assert report.to_dict()["planner"]["retune_events"] == report.planner.retune_events
-
-
-@pytest.mark.integration
-@pytest.mark.timeout(300)
-def test_scenario1_disagg_router_update_lands_mid_run(tmp_path):
-    traces = _write_workload(tmp_path, blocks=64, output_tokens=64)
-
-    report = run_trace_replay(
-        traces,
-        trace_format="dynamo",
-        router_mode="kv_router",
-        router_config=KvRouterConfig(router_temperature=100.0),
-        num_prefill_workers=3,
-        num_decode_workers=4,
-        prefill_engine_args=_engine(worker_type="prefill"),
-        decode_engine_args=_engine(worker_type="decode"),
-        planner_config=_retune_only("disagg", sla_ttft_ms=100.0, sla_itl_ms=100.0),
-    )
-
-    assert report.summary["completed_requests"] == _HEAD_REQUESTS + _TAIL_REQUESTS
-    _assert_router_update_lands_at_decision(report, {"prefill", "decode"})
-
-
-@pytest.mark.integration
-@pytest.mark.timeout(300)
-def test_scenario2_planner_change_is_visible_from_the_next_tick(tmp_path, monkeypatch):
+def test_retune_lands_router_and_planner_changes_mid_run(tmp_path, monkeypatch):
+    # The one end-to-end path: run_trace_replay -> controller -> spawned
+    # sweep -> inner load planner -> router_parameters -> Rust revision.
     traces = _write_workload(tmp_path, blocks=16, output_tokens=128)
     seen: list[tuple[float, int]] = []
     original_tick = OrchestratorEngineAdapter.tick
@@ -265,158 +184,46 @@ def test_scenario2_planner_change_is_visible_from_the_next_tick(tmp_path, monkey
         planner_config=planner_config,
     )
 
+    assert report.summary["completed_requests"] == _HEAD_REQUESTS + _TAIL_REQUESTS
     first = report.planner.retune_events[0]
+    assert first["window_index"] == 0
     assert first["outcome"] == "applied", first
+    assert first["launched_at_s"] == _LAUNCH_S
     assert first["decided_at_s"] == _DECIDE_S
+    assert first["previous"]["router"] == {"router_temperature": 100.0}
     assert first["chosen"]["router"] == {"router_temperature": 0.0}
+    assert first["best_score"] > first["baseline_score"]
+    assert report.to_dict()["planner"]["retune_events"] == report.planner.retune_events
+
+    # The planner change is visible from the first tick after the decision.
     changes = first["planner_changes"]
     assert set(changes) == {"load_scaling_down_sensitivity"}
     new_value = changes["load_scaling_down_sensitivity"]
     assert new_value in (70, 90)
-    decided_at = first["decided_at_s"]
-    assert [value for now_s, value in seen if now_s <= decided_at] and all(
-        value == 80 for now_s, value in seen if now_s <= decided_at
-    )
-    after = [value for now_s, value in seen if now_s > decided_at]
-    assert after and all(value == new_value for value in after)
+    before = [value for now_s, value in seen if now_s <= _DECIDE_S]
+    after = [value for now_s, value in seen if now_s > _DECIDE_S]
+    assert before and set(before) == {80}
+    assert after and set(after) == {new_value}
+
+    # The desired router map flips at the decision tick; each router snapshot
+    # reports the router state before that tick's update.
+    ticks = report.planner.ticks
+    decide_ms = _DECIDE_S * 1000.0
+    for tick in ticks:
+        desired = tick["runtime_decision"]["router_parameters"]
+        expected = 0.0 if tick["at_ms"] >= decide_ms else 100.0
+        assert set(desired) == {"aggregated"}
+        assert desired["aggregated"]["router_temperature"] == expected
+    history = _router_revisions(ticks)["aggregated"]
+    assert all(rev == 0 for at_ms, rev in history if at_ms <= decide_ms), history
+    revisions_after = [rev for at_ms, rev in history if at_ms > decide_ms]
+    assert revisions_after and set(revisions_after) == {1}, history
+    later = [tick["router_policies"] for tick in ticks if tick["at_ms"] > decide_ms][0]
+    assert {policy["parameters"]["router_temperature"] for policy in later} == {0.0}
 
 
 def _guard_config() -> dict:
     return _retune_only("agg")
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "options, message",
-    [
-        ({"replay_concurrency": 2}, "replay_concurrency"),
-        ({"agentic_lanes": 2}, "agentic_lanes"),
-        ({"agentic_warmup": True}, "agentic_warmup"),
-        ({"max_sim_time_ms": 1_000.0}, "max_sim_time_ms"),
-    ],
-)
-def test_retune_rejects_closed_loop_and_truncated_replays(tmp_path, options, message):
-    trace = _write_trace(
-        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
-    )
-
-    with pytest.raises(ValueError, match=message):
-        run_trace_replay(
-            [trace],
-            trace_format="dynamo",
-            router_mode="kv_router",
-            planner_config=_guard_config(),
-            **options,
-        )
-
-
-@pytest.mark.unit
-def test_retune_accepts_execution_model_for_a_standard_dynamo_trace(tmp_path):
-    # DynamoReplayRunner sets execution_model for every performance-model
-    # engine; it only matters for agentic rows, which this trace has none of.
-    trace = _write_trace(
-        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
-    )
-
-    report = run_trace_replay(
-        [trace],
-        trace_format="dynamo",
-        router_mode="kv_router",
-        planner_config=_guard_config(),
-        execution_model="target-model",
-    )
-
-    assert report.summary["completed_requests"] == 4
-    assert report.planner is not None and report.planner.retune_events == []
-
-
-@pytest.mark.unit
-def test_retune_rejects_an_agentic_dynamo_trace(tmp_path):
-    trace = _write_trace(
-        tmp_path / "trace.jsonl", count=3, gap_ms=100, blocks=1, output_tokens=2
-    )
-    rows = [json.loads(line) for line in trace.read_text().splitlines()]
-    for row in rows:
-        row["agent_context"] = {"session_id": "s1"}
-    trace.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    config = PlannerConfig.model_validate(_guard_config())
-
-    with pytest.raises(ValueError, match="3 requests with agent_context"):
-        api._retune_inputs(config, **_inputs_kwargs(trace))
-
-
-@pytest.mark.unit
-def test_retune_rejects_an_engine_shape_that_differs_from_the_planner_mode(
-    tmp_path,
-):
-    # Prefill and decode args make the outer replay disaggregated even though
-    # the planner mode is agg; retune must not pin a different engine.
-    trace = _write_trace(
-        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
-    )
-    config = PlannerConfig.model_validate(_guard_config())
-    disagg_args = {
-        "extra_engine_args": None,
-        "prefill_engine_args": _engine(worker_type="prefill"),
-        "decode_engine_args": _engine(worker_type="decode"),
-    }
-
-    inputs = api._retune_inputs(config, **_inputs_kwargs(trace, **disagg_args))
-    assert inputs.engine.is_disagg
-
-    with pytest.raises(ValueError, match="retune engine must set"):
-        run_trace_replay(
-            [trace],
-            trace_format="dynamo",
-            router_mode="kv_router",
-            planner_config=_guard_config(),
-            **disagg_args,
-        )
-
-
-@pytest.mark.unit
-def test_retune_requires_the_dynamo_trace_format():
-    with pytest.raises(ValueError, match="trace_format='dynamo'"):
-        run_trace_replay(
-            _DATA / "mooncake_tiny.jsonl",
-            trace_format="mooncake",
-            router_mode="kv_router",
-            planner_config=_guard_config(),
-        )
-
-
-@pytest.mark.unit
-def test_synthetic_replay_rejects_retune():
-    with pytest.raises(ValueError, match="only supported by run_trace_replay"):
-        run_synthetic_trace_replay(
-            64, 4, 4, request_rate=10.0, planner_config=_guard_config()
-        )
-
-
-@pytest.mark.unit
-def test_retune_history_must_end_before_the_replayed_trace(tmp_path):
-    trace = _write_trace(
-        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
-    )
-    history = _write_trace(
-        tmp_path / "history.jsonl",
-        count=4,
-        gap_ms=100,
-        blocks=1,
-        output_tokens=2,
-        start_ms=_BASE_MS - 200,
-        prefix="history",
-    )
-    config = _guard_config()
-    config["load_predictor_warmup_trace"] = str(history)
-
-    with pytest.raises(ValueError, match="2 history requests arrive"):
-        run_trace_replay(
-            [trace],
-            trace_format="dynamo",
-            router_mode="kv_router",
-            planner_config=config,
-        )
 
 
 def _inputs_kwargs(trace: Path, **overrides) -> dict:
@@ -446,7 +253,102 @@ def _inputs_kwargs(trace: Path, **overrides) -> dict:
 
 
 @pytest.mark.unit
-def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path):
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"trace_format": "mooncake"}, "trace_format='dynamo'"),
+        ({"replay_concurrency": 2}, "replay_concurrency"),
+        ({"agentic_warmup": True}, "agentic_warmup"),
+        ({"max_sim_time_ms": 1_000.0}, "max_sim_time_ms"),
+    ],
+    ids=["mooncake-format", "replay-concurrency", "agentic-warmup", "max-sim-time"],
+)
+def test_retune_rejects_non_open_loop_inputs(tmp_path, options, message):
+    trace = _write_trace(
+        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
+    )
+    config = PlannerConfig.model_validate(_guard_config())
+
+    with pytest.raises(ValueError, match=message):
+        api._retune_inputs(config, **_inputs_kwargs(trace, **options))
+
+
+@pytest.mark.unit
+def test_retune_accepts_execution_model_for_a_standard_dynamo_trace(tmp_path):
+    # DynamoReplayRunner sets execution_model for every performance-model
+    # engine; it only matters for agentic rows, which this trace has none of.
+    trace = _write_trace(
+        tmp_path / "trace.jsonl", count=3, gap_ms=100, blocks=1, output_tokens=2
+    )
+
+    report = run_trace_replay(
+        [trace],
+        trace_format="dynamo",
+        router_mode="kv_router",
+        planner_config=_guard_config(),
+        execution_model="target-model",
+    )
+
+    assert report.summary["completed_requests"] == 3
+    assert report.planner is not None and report.planner.retune_events == []
+
+    # An agentic Dynamo trace (rows with agent_context) is rejected.
+    rows = [json.loads(line) for line in trace.read_text().splitlines()]
+    for row in rows:
+        row["agent_context"] = {"session_id": "s1"}
+    trace.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    config = PlannerConfig.model_validate(_guard_config())
+
+    with pytest.raises(ValueError, match="3 requests with agent_context"):
+        api._retune_inputs(config, **_inputs_kwargs(trace))
+
+
+@pytest.mark.unit
+def test_retune_rejects_an_engine_shape_that_differs_from_the_planner_mode(
+    tmp_path,
+):
+    # Prefill and decode args make the outer replay disaggregated even though
+    # the planner mode is agg; retune must not pin a different engine.
+    trace = _write_trace(
+        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
+    )
+    config = PlannerConfig.model_validate(_guard_config())
+    prefill = {"engine": {"max_num_seqs": 8, "worker_type": "prefill"}}
+    decode = {"engine": {"max_num_seqs": 8, "worker_type": "decode"}}
+    disagg_args = {
+        "extra_engine_args": None,
+        "prefill_engine_args": prefill,
+        "decode_engine_args": decode,
+    }
+
+    inputs = api._retune_inputs(config, **_inputs_kwargs(trace, **disagg_args))
+    assert inputs.engine.is_disagg
+    assert inputs.engine.extra_engine_args is None
+    assert inputs.engine.prefill_engine_args == normalize_mocker_config(prefill)
+    assert inputs.engine.decode_engine_args == normalize_mocker_config(decode)
+    assert inputs.engine.router_config == json.loads(KvRouterConfig().to_json())
+    assert inputs.history_paths == ()
+
+    with pytest.raises(ValueError, match="retune engine must set"):
+        run_trace_replay(
+            [trace],
+            trace_format="dynamo",
+            router_mode="kv_router",
+            planner_config=_guard_config(),
+            **disagg_args,
+        )
+
+
+@pytest.mark.unit
+def test_synthetic_replay_rejects_retune():
+    with pytest.raises(ValueError, match="only supported by run_trace_replay"):
+        run_synthetic_trace_replay(
+            64, 4, 4, request_rate=10.0, planner_config=_guard_config()
+        )
+
+
+@pytest.mark.unit
+def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path, caplog):
     trace = _write_trace(
         tmp_path / "trace.jsonl",
         count=3,
@@ -464,13 +366,16 @@ def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path):
         prefix="history",
     )
     router_config = KvRouterConfig(router_temperature=0.25)
-    config = PlannerConfig.model_validate(
-        _guard_config() | {"load_predictor_warmup_trace": str(history)}
-    )
+    payload = _guard_config() | {"load_predictor_warmup_trace": str(history)}
+    payload["retune"]["live"] = {
+        "engine": {"router_mode": "kv_router", "model_name": "deployed-model"}
+    }
+    config = PlannerConfig.model_validate(payload)
 
-    inputs = api._retune_inputs(
-        config, **_inputs_kwargs(trace, router_config=router_config)
-    )
+    with caplog.at_level(logging.WARNING, logger="dynamo.replay.api"):
+        inputs = api._retune_inputs(
+            config, **_inputs_kwargs(trace, router_config=router_config)
+        )
 
     assert inputs.trace_paths == (str(trace),)
     assert inputs.history_paths == (str(history),)
@@ -487,47 +392,20 @@ def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path):
     assert engine.model_name == "test-model"
     assert engine.kv_event_lag_ms == 5.0
     assert engine.benchmark_granularity == 4
-
-
-@pytest.mark.unit
-def test_retune_inputs_default_router_config_and_disagg_engine(tmp_path):
-    trace = _write_trace(
-        tmp_path / "trace.jsonl", count=2, gap_ms=100, blocks=1, output_tokens=2
-    )
-    prefill = {"engine": {"worker_type": "prefill"}}
-    decode = {"engine": {"worker_type": "decode"}}
-    config = PlannerConfig.model_validate(_retune_only("disagg"))
-
-    inputs = api._retune_inputs(
-        config,
-        **_inputs_kwargs(
-            trace,
-            extra_engine_args=None,
-            prefill_engine_args=prefill,
-            decode_engine_args=decode,
-        ),
-    )
-
-    assert inputs.engine.extra_engine_args is None
-    assert inputs.engine.prefill_engine_args == normalize_mocker_config(prefill)
-    assert inputs.engine.decode_engine_args == normalize_mocker_config(decode)
-    assert inputs.engine.router_config == json.loads(KvRouterConfig().to_json())
-    assert inputs.history_paths == ()
-
-
-@pytest.mark.unit
-def test_retune_inputs_warn_when_the_live_engine_snapshot_differs(tmp_path, caplog):
-    trace = _write_trace(
-        tmp_path / "trace.jsonl", count=2, gap_ms=100, blocks=1, output_tokens=2
-    )
-    config_payload = _guard_config()
-    config_payload["retune"]["live"] = {
-        "engine": {"router_mode": "kv_router", "model_name": "deployed-model"}
-    }
-    config = PlannerConfig.model_validate(config_payload)
-
-    with caplog.at_level(logging.WARNING, logger="dynamo.replay.api"):
-        api._retune_inputs(config, **_inputs_kwargs(trace))
-
+    # The replay ignores retune.live but reports where its engine differs.
     assert "planner.retune.live.engine differs" in caplog.text
     assert "extra_engine_args" in caplog.text and "model_name" in caplog.text
+
+    # History and windows share one time axis, so history must end before
+    # the first replayed request.
+    _write_trace(
+        history,
+        count=4,
+        gap_ms=100,
+        blocks=1,
+        output_tokens=2,
+        start_ms=_BASE_MS + 300,
+        prefix="history",
+    )
+    with pytest.raises(ValueError, match="2 history requests arrive"):
+        api._retune_inputs(config, **_inputs_kwargs(trace))

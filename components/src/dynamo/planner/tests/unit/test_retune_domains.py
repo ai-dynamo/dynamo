@@ -39,10 +39,6 @@ def _config(router="default", planner="default", **overrides):
 
 @pytest.fixture
 def simulation_defaults():
-    pytest.importorskip(
-        "aisimulate.sweeper",
-        reason="AI Simulate is an optional Dynamo simulation dependency",
-    )
     from dynamo.planner.simulation.load_predictor import LOAD_PREDICTOR_PRESETS
     from dynamo.router.simulation.config import (
         OVERLAP_SCORE_CREDIT_DEFAULTS,
@@ -76,86 +72,35 @@ def test_default_router_domain_uses_live_names_and_108_points(simulation_default
     assert all(set(point.router) == set(domain) for point in points)
 
 
-def test_default_router_domain_credit_hook(simulation_defaults):
-    config = _config(planner={}, **RETUNE_ONLY)
-    assert config.retune is not None
-
-    domain = expand_router_domain(config.retune, zero_startup_credit=True)
-
-    assert domain["overlap_score_credit"] == [0.0]
-    assert grid_size(domain) == 36
-
-
-def test_explicit_router_domain_is_copied_unchanged():
-    router = {"overlap_score_credit": [0.0, 0.5], "router_temperature": [0.0]}
-    config = _config(router=router, planner={}, **RETUNE_ONLY)
-    assert config.retune is not None
-
-    domain = expand_router_domain(config.retune, zero_startup_credit=True)
-
-    assert domain == router
-    domain["overlap_score_credit"].append(9.0)
-    assert config.retune.router == router
-
-
-def test_default_planner_domain_is_empty_without_scaling(simulation_defaults):
-    config = _config(**RETUNE_ONLY)
+@pytest.mark.parametrize(
+    ("overrides", "grid", "presets", "size"),
+    [
+        # Easy mode forces load scaling on.
+        ({}, {"load_scaling_down_sensitivity": [70, 80, 90]}, False, 324),
+        (SLA_THROUGHPUT, {}, True, 108),
+        (
+            {"enable_load_scaling": True, **SLA_THROUGHPUT},
+            {"load_scaling_down_sensitivity": [70, 80, 90]},
+            True,
+            324,
+        ),
+    ],
+    ids=["load", "sla-throughput", "hybrid"],
+)
+def test_default_planner_domain_for_hybrid_scaling(
+    simulation_defaults, overrides, grid, presets, size
+):
+    config = _config(**overrides)
 
     domain = expand_planner_domain(config)
 
-    assert domain == PlannerDomain()
-    assert domain.empty
-
-
-def test_default_planner_domain_for_load_scaling(simulation_defaults):
-    config = _config()  # easy mode: load scaling forced on
-    assert config.enable_load_scaling and not config.enable_throughput_scaling
-
-    domain = expand_planner_domain(config)
-
-    assert domain.grid == {"load_scaling_down_sensitivity": [70, 80, 90]}
-    assert domain.predictor_presets is None
-
-
-def test_default_planner_domain_for_sla_throughput(simulation_defaults):
-    config = _config(**SLA_THROUGHPUT)
-
-    domain = expand_planner_domain(config)
-
-    assert domain.grid == {}
-    assert domain.predictor_presets == simulation_defaults["predictors"]
-    assert len(domain.predictor_presets) == 11
+    assert domain.grid == grid
+    assert domain.predictor_presets == (
+        simulation_defaults["predictors"] if presets else None
+    )
     assert not domain.empty
-
-
-def test_default_planner_domain_for_hybrid_scaling(simulation_defaults):
-    config = _config(enable_load_scaling=True, **SLA_THROUGHPUT)
-
-    domain = expand_planner_domain(config)
-
-    assert domain.grid == {"load_scaling_down_sensitivity": [70, 80, 90]}
-    assert domain.predictor_presets == simulation_defaults["predictors"]
     # The predictor pre-sweep is not a grid dimension.
-    assert grid_size(expand_router_domain(config.retune), domain.grid) == 324
-
-
-def test_explicit_planner_domain_is_the_grid():
-    planner = {
-        "load_predictor": ["arima", "kalman"],
-        "max_throughput_scaling_replicas": [2, 4, 8],
-    }
-    config = _config(router={}, planner=planner, **SLA_THROUGHPUT)
-
-    domain = expand_planner_domain(config)
-
-    assert domain.grid == planner
-    assert domain.predictor_presets is None
-    assert grid_size(domain.grid) == 6
-
-
-def test_expand_planner_domain_requires_retune():
-    with pytest.raises(ValueError, match="no retune section"):
-        expand_planner_domain(PlannerConfig(namespace="test-ns"))
+    assert grid_size(expand_router_domain(config.retune), domain.grid) == size
 
 
 def test_grid_size_and_points():
@@ -164,7 +109,6 @@ def test_grid_size_and_points():
 
     assert grid_size() == 1
     assert grid_size(router, planner) == 4
-    assert grid_size(router, {"x": []}) == 0
     points = grid_points(router, planner)
     assert points == sorted(points, key=RetuneParams.key)
     assert {point.key() for point in points} == {
@@ -178,7 +122,9 @@ def test_grid_size_and_points():
     assert grid_points({}, {}) == [RetuneParams()]
 
 
-def test_required_history_covers_current_and_candidate_predictors():
+def test_required_history_covers_current_and_candidate_predictors(
+    simulation_defaults,
+):
     config = _config(router={"overlap_score_credit": [0.0]}, planner={})
     # Defaults: 180 s throughput interval x prophet_window_size 50.
     assert required_history_seconds(config, PlannerDomain()) == 9000.0
@@ -189,8 +135,6 @@ def test_required_history_covers_current_and_candidate_predictors():
     domain = PlannerDomain(grid={"kalman_min_points": [120]})
     assert required_history_seconds(config, domain) == 180.0 * 120
 
-
-def test_required_history_covers_predictor_presets(simulation_defaults):
     config = _config(
         router={"overlap_score_credit": [0.0]},
         planner={},

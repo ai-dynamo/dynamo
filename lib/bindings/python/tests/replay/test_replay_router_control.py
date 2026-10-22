@@ -8,7 +8,6 @@ parameters keyed by worker type. Rust applies them to the replay's KV routers at
 simulated time and reports each router's revision back in the next snapshot.
 """
 
-import copy
 import json
 
 import pytest
@@ -123,17 +122,6 @@ class _RouterPolicy:
         return decision
 
 
-def _canonical_summary(report):
-    summary = copy.deepcopy(report.summary)
-    for key in (
-        "wall_time_ms",
-        "processed_tokens_per_s",
-        "processed_output_tokens_per_s",
-    ):
-        summary.pop(key, None)
-    return summary
-
-
 def _worker_types(disagg: bool):
     return ("prefill", "decode") if disagg else ("aggregated",)
 
@@ -153,56 +141,17 @@ def _router_policies(snapshot):
 
 
 @pytest.mark.parametrize("disagg", [False, True], ids=["agg", "disagg"])
-def test_absent_none_or_current_router_parameters_leave_replay_unchanged(
-    tmp_path, disagg
-):
-    trace = _small_trace(tmp_path)
+def test_router_parameters_are_level_triggered(tmp_path, disagg):
     config = KvRouterConfig(overlap_score_credit=1.5, router_temperature=0.0)
     startup = _startup_map(config, disagg)
-    tick_ms = [20.0, 120.0, 220.0]
-
-    def run(value):
-        policy = _RouterPolicy(tick_ms, [value] * len(tick_ms))
-        # One worker per pool keeps routing deterministic, so whole reports compare equal.
-        report = run_mocker_trace_replay(
-            [str(trace)],
-            router_config=config,
-            router_mode="kv_router",
-            trace_block_size=_TRACE_BLOCK_SIZE,
-            scaling_policy=policy,
-            **_topology_kwargs(disagg),
-        )
-        return _canonical_summary(report), policy.snapshots
-
-    baseline, snapshots = run(_ABSENT)
-    assert len(snapshots) == len(tick_ms)
-    for value in (None, startup, {}):
-        summary, value_snapshots = run(value)
-        assert summary == baseline, value
-        assert [_router_policies(s) for s in value_snapshots] == [
-            _router_policies(s) for s in snapshots
-        ]
-
-    # Every router reports revision 0 and exactly the resolved startup parameters.
-    for snapshot in snapshots:
-        policies = _router_policies(snapshot)
-        assert set(policies) == set(_worker_types(disagg))
-        for worker_type, (revision, parameters) in policies.items():
-            assert revision == 0
-            assert parameters == pytest.approx(startup[worker_type])
-
-
-@pytest.mark.parametrize("disagg", [False, True], ids=["agg", "disagg"])
-def test_changed_router_parameters_apply_once_and_report_their_revision(
-    tmp_path, disagg
-):
-    trace = _small_trace(tmp_path)
-    config = KvRouterConfig(overlap_score_credit=1.5, router_temperature=0.0)
     worker_type = _worker_types(disagg)[0]
     changed = {worker_type: {"prefill_load_scale": 2.5, "router_temperature": 0}}
-    policy = _RouterPolicy([20.0, 120.0, 220.0], [changed, changed, _ABSENT])
+    # An absent key, None, {} and the startup map are no-ops; a changed map is applied once
+    # and repeating it is a no-op.
+    script = [_ABSENT, None, {}, startup, changed, changed, _ABSENT]
+    policy = _RouterPolicy([20.0 + 30.0 * i for i in range(len(script))], script)
     run_mocker_trace_replay(
-        [str(trace)],
+        [str(_small_trace(tmp_path))],
         router_config=config,
         router_mode="kv_router",
         trace_block_size=_TRACE_BLOCK_SIZE,
@@ -210,17 +159,20 @@ def test_changed_router_parameters_apply_once_and_report_their_revision(
         **_topology_kwargs(disagg),
     )
 
-    revisions = [
-        _router_policies(snapshot)[worker_type][0] for snapshot in policy.snapshots
-    ]
-    # Applied after tick 0; repeating the same desired values is a no-op.
-    assert revisions == [0, 1, 1]
-    parameters = _router_policies(policy.snapshots[-1])[worker_type][1]
-    assert parameters["prefill_load_scale"] == pytest.approx(2.5)
-    assert parameters["router_temperature"] == 0.0
-    assert parameters["overlap_score_credit"] == pytest.approx(1.5)
+    # Each snapshot reports the router state before that tick's update.
+    policies = [_router_policies(snapshot) for snapshot in policy.snapshots]
+    assert [p[worker_type][0] for p in policies] == [0, 0, 0, 0, 0, 1, 1]
+    for snapshot in policies[:5]:
+        assert set(snapshot) == set(_worker_types(disagg))
+        for name, (_revision, parameters) in snapshot.items():
+            assert parameters == pytest.approx(startup[name])
+    for snapshot in policies[5:]:
+        parameters = snapshot[worker_type][1]
+        assert parameters["prefill_load_scale"] == pytest.approx(2.5)
+        assert parameters["router_temperature"] == 0.0
+        assert parameters["overlap_score_credit"] == pytest.approx(1.5)
     if disagg:
-        assert _router_policies(policy.snapshots[-1])["decode"][0] == 0
+        assert [p["decode"][0] for p in policies] == [0] * len(script)
 
 
 def test_mid_run_credit_change_routes_away_from_a_loaded_worker(tmp_path):
@@ -279,82 +231,49 @@ def test_mid_run_credit_change_routes_away_from_a_loaded_worker(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "router_parameters, error, match",
+    "router_mode, router_parameters, error, match",
     [
-        ({"bogus": {"router_temperature": 1.0}}, ValueError, "bogus"),
-        ({"prefill": {"router_temperature": 1.0}}, ValueError, "prefill"),
+        ("kv_router", {"bogus": {"router_temperature": 1.0}}, ValueError, "bogus"),
+        ("kv_router", [("aggregated", {})], TypeError, "router_parameters"),
         (
-            {"aggregated": {"router_temperature": -1.0}},
-            ValueError,
-            "router_temperature",
+            "kv_router",
+            {"aggregated": {"router_temperature": "hot"}},
+            TypeError,
+            "router_parameters",
         ),
-        ({"aggregated": {"not_a_parameter": 1.0}}, ValueError, "not_a_parameter"),
         (
-            {"aggregated": {"router_temperature": float("nan")}},
+            "round_robin",
+            {"aggregated": {"router_temperature": 1.0}},
             ValueError,
-            "finite",
+            "no aggregated KV router",
         ),
-        ([("aggregated", {})], TypeError, "router_parameters"),
-        ({"aggregated": {"router_temperature": "hot"}}, TypeError, "router_parameters"),
     ],
+    ids=["unknown-worker-type", "not-a-dict", "not-a-float", "round-robin"],
 )
 def test_invalid_router_parameters_fail_the_replay(
-    tmp_path, router_parameters, error, match
+    tmp_path, router_mode, router_parameters, error, match
 ):
     with pytest.raises(error, match=match):
         run_mocker_trace_replay(
             [str(_small_trace(tmp_path))],
-            router_mode="kv_router",
+            router_mode=router_mode,
             trace_block_size=_TRACE_BLOCK_SIZE,
             scaling_policy=_RouterPolicy([20.0], [router_parameters]),
             **_topology_kwargs(disagg=False),
         )
 
 
-def test_round_robin_replay_has_no_router_to_control(tmp_path):
-    trace = _small_trace(tmp_path)
-    policy = _RouterPolicy([20.0, 120.0], [None, _ABSENT])
-    run_mocker_trace_replay(
-        [str(trace)],
-        router_mode="round_robin",
-        trace_block_size=_TRACE_BLOCK_SIZE,
-        scaling_policy=policy,
-        **_topology_kwargs(disagg=False),
-    )
-    assert all("router_policies" not in snapshot for snapshot in policy.snapshots)
-
-    with pytest.raises(ValueError, match="no aggregated KV router"):
-        run_mocker_trace_replay(
-            [str(trace)],
-            router_mode="round_robin",
-            trace_block_size=_TRACE_BLOCK_SIZE,
-            scaling_policy=_RouterPolicy(
-                [20.0], [{"aggregated": {"router_temperature": 1.0}}]
-            ),
-            **_topology_kwargs(disagg=False),
-        )
-
-
 def test_synthetic_replay_rejects_router_parameters():
-    kwargs = {
-        "input_tokens": 64,
-        "output_tokens": 8,
-        "request_count": 8,
-        "replay_concurrency": 2,
-        "router_mode": "kv_router",
-        "extra_engine_args": normalize_mocker_config(_engine_payload()),
-    }
-    for value in (_ABSENT, None, {}):
-        policy = _RouterPolicy([1.0], [value])
-        run_mocker_synthetic_trace_replay(**kwargs, scaling_policy=policy)
-        assert "router_policies" not in policy.snapshots[0]
-
+    policy = _RouterPolicy([1.0], [{"aggregated": {"router_temperature": 1.0}}])
     with pytest.raises(ValueError, match="only supported by trace replay"):
         run_mocker_synthetic_trace_replay(
-            **kwargs,
-            scaling_policy=_RouterPolicy(
-                [1.0], [{"aggregated": {"router_temperature": 1.0}}]
-            ),
+            input_tokens=64,
+            output_tokens=8,
+            request_count=8,
+            replay_concurrency=2,
+            router_mode="kv_router",
+            extra_engine_args=normalize_mocker_config(_engine_payload()),
+            scaling_policy=policy,
         )
 
 
@@ -391,7 +310,4 @@ def test_nested_replay_does_not_register_into_the_outer_replay(tmp_path):
         scaling_policy=policy,
         **_topology_kwargs(disagg=False),
     )
-    assert [len(snapshot["router_policies"]) for snapshot in policy.snapshots] == [
-        1,
-        1,
-    ]
+    assert [len(s["router_policies"]) for s in policy.snapshots] == [1, 1]

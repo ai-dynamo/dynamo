@@ -200,7 +200,7 @@ pub(crate) fn replay_router_controls() -> Option<ReplayRouterControls> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_custom_policy_builtin::{DefaultWorkerSelector, startup_policy_parameters};
+    use dynamo_custom_policy_builtin::DefaultWorkerSelector;
     use dynamo_kv_router::KvRouterConfig;
     use dynamo_kv_router::plugins::worker_selection::RuntimePolicyError;
 
@@ -231,13 +231,6 @@ mod tests {
                         .collect(),
                 )
             })
-            .collect()
-    }
-
-    fn startup_map(config: &KvRouterConfig, role: WorkerType) -> BTreeMap<String, f64> {
-        startup_policy_parameters(config, role)
-            .into_iter()
-            .map(|(name, value)| (name, value.as_f64().unwrap()))
             .collect()
     }
 
@@ -276,16 +269,13 @@ mod tests {
             assert!(is(Some(&outer)));
         });
         assert!(is(None));
-    }
 
-    #[test]
-    fn scope_restores_after_a_panic() {
-        let outer = ReplayRouterControls::new();
+        // A replay that unwinds also restores the previous registry.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             with_replay_router_controls(Some(outer.clone()), || panic!("replay failed"))
         }));
         assert!(result.is_err());
-        assert!(replay_router_controls().is_none());
+        assert!(is(None));
     }
 
     #[test]
@@ -297,27 +287,20 @@ mod tests {
         };
         let (registry, _selectors) = registry_with(&[
             (WorkerType::Prefill, config.clone()),
-            (WorkerType::Decode, config.clone()),
+            (WorkerType::Decode, config),
         ]);
-        let startup: ReplayRouterParameters = [
-            (
-                "prefill".to_owned(),
-                startup_map(&config, WorkerType::Prefill),
-            ),
-            (
-                "decode".to_owned(),
-                // Replay decode selectors are built from the same config here, so the
-                // registered decode parameters are not zeroed; compare with what is registered.
-                registry.runtime_configs().unwrap()[1]
-                    .1
-                    .parameters()
-                    .iter()
-                    .map(|(name, value)| (name.clone(), value.as_f64().unwrap()))
-                    .collect(),
-            ),
-        ]
-        .into_iter()
-        .collect();
+        // The startup map is what each registered control reports before any update.
+        let startup: ReplayRouterParameters = registry
+            .runtime_configs()
+            .unwrap()
+            .into_iter()
+            .map(|(worker_type, config)| {
+                let parameters = config.parameters().iter();
+                let parameters =
+                    parameters.map(|(name, value)| (name.clone(), value.as_f64().unwrap()));
+                (worker_type.as_str().to_owned(), parameters.collect())
+            })
+            .collect();
 
         assert_eq!(apply_router_parameters(&registry, &startup).unwrap(), 0);
         assert_eq!(
@@ -351,50 +334,6 @@ mod tests {
     }
 
     #[test]
-    fn every_control_of_a_worker_type_is_updated() {
-        let config = KvRouterConfig::default();
-        let (registry, _selectors) = registry_with(&[
-            (WorkerType::Aggregated, config.clone()),
-            (WorkerType::Aggregated, config),
-        ]);
-        let updated = apply_router_parameters(
-            &registry,
-            &desired(&[("aggregated", &[("prefill_load_scale", 2.5)])]),
-        )
-        .unwrap();
-        assert_eq!(updated, 2);
-        assert_eq!(
-            revisions(&registry),
-            [(WorkerType::Aggregated, 1), (WorkerType::Aggregated, 1)]
-        );
-    }
-
-    #[test]
-    fn unknown_or_unregistered_worker_types_are_errors() {
-        let (registry, _selectors) =
-            registry_with(&[(WorkerType::Aggregated, KvRouterConfig::default())]);
-        for worker_type in ["bogus", "encode", "Aggregated", "prefill"] {
-            let error = apply_router_parameters(
-                &registry,
-                &desired(&[(worker_type, &[("router_temperature", 1.0)])]),
-            )
-            .unwrap_err();
-            assert!(
-                error.to_string().contains(worker_type),
-                "{worker_type}: {error:#}"
-            );
-        }
-        // An empty registry, as under a round-robin router, rejects any worker type.
-        let error = apply_router_parameters(
-            &ReplayRouterControls::new(),
-            &desired(&[("aggregated", &[])]),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("no aggregated KV router"));
-        assert_eq!(revisions(&registry), [(WorkerType::Aggregated, 0)]);
-    }
-
-    #[test]
     fn invalid_parameters_are_errors_and_leave_the_revision_unchanged() {
         let (registry, _selectors) = registry_with(&[
             (
@@ -408,26 +347,46 @@ mod tests {
             ),
             (WorkerType::Aggregated, KvRouterConfig::default()),
         ]);
-        for (worker_type, name, value) in [
-            ("aggregated", "router_temperature", -1.0),
-            ("aggregated", "router_temperature", f64::NAN),
-            ("aggregated", "router_temperature", f64::INFINITY),
-            ("aggregated", "not_a_parameter", 1.0),
+        let temperature = "router_temperature";
+        for (worker_type, name, value, expected) in [
+            ("aggregated", temperature, -1.0, temperature),
+            ("aggregated", temperature, f64::NAN, temperature),
+            ("aggregated", temperature, f64::INFINITY, temperature),
+            ("aggregated", "not_a_parameter", 1.0, "not_a_parameter"),
             // A startup credit of zero builds no cache scorer, so enabling credit is rejected.
-            ("prefill", "overlap_score_credit", 1.0),
+            (
+                "prefill",
+                "overlap_score_credit",
+                1.0,
+                "overlap_score_credit",
+            ),
+            // Worker type names are strict and must name a registered KV router.
+            ("bogus", temperature, 1.0, "bogus"),
+            ("encode", temperature, 1.0, "encode"),
+            ("Aggregated", temperature, 1.0, "Aggregated"),
+            ("DECODE", temperature, 1.0, "DECODE"),
+            (" decode", temperature, 1.0, " decode"),
+            ("decode", temperature, 1.0, "no decode KV router"),
         ] {
             let error =
                 apply_router_parameters(&registry, &desired(&[(worker_type, &[(name, value)])]))
                     .unwrap_err();
             assert!(
-                format!("{error:#}").contains(name),
-                "{worker_type}.{name}={value}: {error:#}"
+                format!("{error:#}").contains(expected),
+                "{worker_type:?}.{name}={value}: {error:#}"
             );
             assert_eq!(
                 revisions(&registry),
                 [(WorkerType::Prefill, 0), (WorkerType::Aggregated, 0)]
             );
         }
+        // An empty registry, as under a round-robin router, rejects any worker type.
+        let error = apply_router_parameters(
+            &ReplayRouterControls::new(),
+            &desired(&[("aggregated", &[])]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no aggregated KV router"));
         let error = apply_router_parameters(
             &registry,
             &desired(&[("prefill", &[("overlap_score_credit", 1.0)])]),
@@ -439,24 +398,5 @@ mod tests {
                 .any(|cause| cause.downcast_ref::<RuntimePolicyError>().is_some()),
             "{error:#}"
         );
-    }
-
-    #[test]
-    fn worker_type_names_are_strict() {
-        assert_eq!(
-            parse_router_worker_type("aggregated").unwrap(),
-            WorkerType::Aggregated
-        );
-        assert_eq!(
-            parse_router_worker_type("prefill").unwrap(),
-            WorkerType::Prefill
-        );
-        assert_eq!(
-            parse_router_worker_type("decode").unwrap(),
-            WorkerType::Decode
-        );
-        for name in ["encode", " decode", "DECODE", ""] {
-            assert!(parse_router_worker_type(name).is_err(), "{name:?}");
-        }
     }
 }

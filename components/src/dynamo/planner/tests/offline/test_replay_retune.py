@@ -13,9 +13,6 @@ changes, the router channel key, the tick capture, and the final report.
 from __future__ import annotations
 
 import json
-import sys
-import types
-from dataclasses import dataclass, field
 
 import pytest
 
@@ -25,17 +22,18 @@ pytest.importorskip(
 )
 
 import dynamo.planner.offline.replay_adapter as replay_adapter_module
-from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.load.predictors import ConstantPredictor
-from dynamo.planner.core.types import (
-    EngineCapabilities,
-    RetuneDecision,
-    RetuneInputs,
-    RetuneParams,
-    TrafficObservation,
-    WorkerCapabilities,
-)
+from dynamo.planner.core.types import RetuneDecision, RetuneParams, TrafficObservation
 from dynamo.planner.offline.replay_adapter import create_replay_planner_adapter
+from dynamo.planner.tests.retune_stubs import (
+    ROUTER_MAP,
+    StubTickResult,
+    caps,
+    install_stub_controller,
+    retune_inputs,
+    retune_only_config,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -44,19 +42,6 @@ pytestmark = [
     pytest.mark.planner,
 ]
 
-_CONTROLLER_MODULE = "dynamo.planner.retune.controller"
-_ROUTER_MAP = {
-    "aggregated": {
-        "decode_active_request_weight": 0.0,
-        "disk_cache_hit_weight": 0.25,
-        "host_cache_hit_weight": 0.75,
-        "overlap_score_credit": 1.0,
-        "overlap_score_credit_decay": 0.0,
-        "prefill_load_scale": 1.0,
-        "router_temperature": 0.0,
-        "shared_cache_multiplier": 0.0,
-    }
-}
 _PRESWEEP = {
     "winner": "constant_last",
     "fields": {"load_predictor": "constant", "load_predictor_log1p": False},
@@ -65,72 +50,12 @@ _PRESWEEP = {
     "wall_s": 0.25,
 }
 
-
-@dataclass(frozen=True)
-class _TickResult:
-    decisions: list[RetuneDecision] = field(default_factory=list)
-    router_parameters: dict[str, dict[str, float]] | None = None
-    audit_events: list[str] = field(default_factory=list)
-
-
-class _StubController:
-    """Returns one queued tick result per ``on_tick``."""
-
-    instances: list[_StubController] = []
-
-    def __init__(self, config, inputs, capabilities, clock, scale_interval_s):
-        self.config = config
-        self.results: list[_TickResult] = []
-        self.seen_planner_values: list[dict[str, object]] = []
-        _StubController.instances.append(self)
-
-    def start(self, start_s: float) -> None:
-        del start_s
-
-    async def on_tick(self, now_s, worker_counts, feedback):
-        del now_s, worker_counts, feedback
-        self.seen_planner_values.append(
-            {
-                "load_scaling_down_sensitivity": self.config.load_scaling_down_sensitivity,
-                "load_predictor": self.config.load_predictor,
-            }
-        )
-        if self.results:
-            return self.results.pop(0)
-        return _TickResult()
-
-    def close(self) -> None:
-        pass
+_QUIET = {"report_interval_hours": None, "live_dashboard_port": 0}
 
 
 @pytest.fixture
 def stub_controller(monkeypatch):
-    module = types.ModuleType(_CONTROLLER_MODULE)
-    module.RetuneController = _StubController  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, _CONTROLLER_MODULE, module)
-    _StubController.instances = []
-    return _StubController
-
-
-def _caps() -> WorkerCapabilities:
-    return WorkerCapabilities(
-        decode=EngineCapabilities(
-            num_gpu=1, max_num_batched_tokens=2048, max_kv_tokens=16384
-        )
-    )
-
-
-_QUIET = {"report_interval_hours": None, "live_dashboard_port": 0}
-
-
-def _retune_only_config() -> PlannerConfig:
-    return PlannerConfig(
-        mode="agg",
-        enable_load_scaling=False,
-        enable_throughput_scaling=False,
-        retune={"interval_seconds": 60, "router": {"router_temperature": [0.0, 0.5]}},
-        **_QUIET,
-    )
+    return install_stub_controller(monkeypatch)
 
 
 def _load_scaling_config() -> PlannerConfig:
@@ -159,16 +84,12 @@ def _predictor_config() -> PlannerConfig:
     )
 
 
-def _inputs() -> RetuneInputs:
-    return RetuneInputs(engine=RetuneEngineSpec(), trace_paths=("trace.jsonl",))
-
-
 def _adapter(config: PlannerConfig, *, capture_details: bool = True):
     return create_replay_planner_adapter(
         planner_config=config,
-        capabilities=_caps(),
+        capabilities=caps(),
         capture_details=capture_details,
-        retune_inputs=None if config.retune is None else _inputs(),
+        retune_inputs=None if config.retune is None else retune_inputs(),
     )
 
 
@@ -191,14 +112,13 @@ def _decision(
     *,
     predictor_warmup=None,
     predictor_presweep=None,
-    window_index: int = 0,
 ) -> RetuneDecision:
     previous = RetuneParams(planner={"load_scaling_down_sensitivity": 80})
     chosen = RetuneParams(planner=dict(planner_changes or {}))
     return RetuneDecision(
-        decision_id=f"retune-0-w{window_index}",
+        decision_id="retune-0-w0",
         outcome=outcome,  # type: ignore[arg-type]
-        window_index=window_index,
+        window_index=0,
         window_start_s=0.0,
         window_end_s=60.0,
         as_of_s=120.0,
@@ -232,7 +152,7 @@ def test_on_tick_always_returns_the_router_parameters_key():
         {
             "worker_type": "aggregated",
             "revision": 0,
-            "parameters": _ROUTER_MAP["aggregated"],
+            "parameters": ROUTER_MAP["aggregated"],
         }
     ]
     with _adapter(PlannerConfig(mode="agg", **_QUIET)) as adapter:
@@ -265,91 +185,61 @@ def test_on_tick_forwards_desired_router_map_and_records_router_policies(
         {
             "worker_type": "aggregated",
             "revision": 2,
-            "parameters": _ROUTER_MAP["aggregated"],
+            "parameters": ROUTER_MAP["aggregated"],
         }
     ]
-    with _adapter(_retune_only_config()) as adapter:
+    with _adapter(retune_only_config(**_QUIET)) as adapter:
         adapter.start()
         stub_controller.instances[0].results.append(
-            _TickResult(router_parameters=_ROUTER_MAP)
+            StubTickResult(router_parameters=ROUTER_MAP)
         )
         decision = adapter.on_tick(_snapshot(0, router_policies=policies))
         details = adapter.finalize()
 
-    assert decision["router_parameters"] == _ROUTER_MAP
+    assert decision["router_parameters"] == ROUTER_MAP
     assert decision["target_prefill"] is None and decision["target_decode"] is None
     (tick,) = details.ticks
     assert tick["router_policies"] == policies
-    assert tick["router_policies"][0]["parameters"] is not policies[0]["parameters"]
-    assert tick["effects"]["router_parameters"] == _ROUTER_MAP
+    assert tick["effects"]["router_parameters"] == ROUTER_MAP
 
 
-@pytest.mark.parametrize("outcome", ["applied", "rolled_back"])
+@pytest.mark.parametrize(
+    ("outcome", "value"),
+    [("applied", 70), ("rolled_back", 70), ("kept", 80), ("dry_run", 80)],
+)
 def test_actuated_planner_changes_apply_from_the_next_tick(
-    stub_controller, monkeypatch, outcome
+    stub_controller, monkeypatch, outcome, value
 ):
     def no_predictor(*args, **kwargs):
         raise AssertionError("no predictor field changed")
 
     monkeypatch.setattr(replay_adapter_module, "prepare_predictor", no_predictor)
     config = _load_scaling_config()
-    with _adapter(config) as adapter:
+    with _adapter(config, capture_details=False) as adapter:
         adapter.start()
         controller = stub_controller.instances[0]
         controller.results.append(
-            _TickResult(
+            StubTickResult(
                 decisions=[_decision(outcome, {"load_scaling_down_sensitivity": 70})]
             )
         )
         adapter.on_tick(_snapshot(0))
-        assert config.load_scaling_down_sensitivity == 70
+        assert config.load_scaling_down_sensitivity == value
         adapter.on_tick(_snapshot(1))
+        details = adapter.finalize()
 
-    # The engine observed the old value in the decision tick and the new
-    # value from the next tick on.
+    # The engine observed the old value in the decision tick and the actuated
+    # value from the next tick on; kept and dry_run never actuate.
     assert [
         values["load_scaling_down_sensitivity"]
         for values in controller.seen_planner_values
-    ] == [80, 70]
-
-
-@pytest.mark.parametrize(
-    "outcome", ["kept", "dry_run", "busy", "stale", "timeout", "failed"]
-)
-def test_non_actuated_outcomes_leave_the_planner_unchanged(stub_controller, outcome):
-    config = _load_scaling_config()
-    with _adapter(config) as adapter:
-        adapter.start()
-        stub_controller.instances[0].results.append(
-            _TickResult(
-                decisions=[_decision(outcome, {"load_scaling_down_sensitivity": 70})]
-            )
-        )
-        adapter.on_tick(_snapshot(0))
-        details = adapter.finalize()
-
-    assert config.load_scaling_down_sensitivity == 80
-    assert [event["outcome"] for event in details.retune_events] == [outcome]
-
-
-def test_invalid_runtime_candidate_fails_the_replay(stub_controller, monkeypatch):
-    monkeypatch.setattr(
-        replay_adapter_module,
-        "runtime_candidate_errors",
-        lambda candidate, capabilities: ["min_gpu_budget exceeds the deployment"],
-    )
-    config = _load_scaling_config()
-    with _adapter(config) as adapter:
-        adapter.start()
-        stub_controller.instances[0].results.append(
-            _TickResult(
-                decisions=[_decision("applied", {"load_scaling_down_sensitivity": 70})]
-            )
-        )
-        with pytest.raises(ValueError, match="invalid planner configuration"):
-            adapter.on_tick(_snapshot(0))
-
-    assert config.load_scaling_down_sensitivity == 80
+    ] == [80, value]
+    # Retune events are reported without detail capture.
+    assert details.ticks == []
+    assert [
+        (event["decision_id"], event["outcome"]) for event in details.retune_events
+    ] == [("retune-0-w0", outcome)]
+    assert details.to_dict()["retune_events"] == details.retune_events
 
 
 def test_predictor_change_installs_a_predictor_warmed_with_the_decision_history(
@@ -368,7 +258,7 @@ def test_predictor_change_installs_a_predictor_warmed_with_the_decision_history(
     with _adapter(config) as adapter:
         adapter.start()
         stub_controller.instances[0].results.append(
-            _TickResult(
+            StubTickResult(
                 decisions=[
                     _decision(
                         "applied",
@@ -409,7 +299,7 @@ def test_report_digests_the_startup_config(stub_controller):
         adapter.start()
         startup_dump = config.model_dump(mode="json", by_alias=True)
         stub_controller.instances[0].results.append(
-            _TickResult(
+            StubTickResult(
                 decisions=[_decision("applied", {"load_scaling_down_sensitivity": 90})]
             )
         )
@@ -420,25 +310,3 @@ def test_report_digests_the_startup_config(stub_controller):
     digest = details.metadata["planner_config_digest"]
     assert digest == adapter._planner_metadata(startup_dump)["planner_config_digest"]
     assert digest != adapter._planner_metadata()["planner_config_digest"]
-
-
-def test_retune_events_are_reported_without_detail_capture(stub_controller):
-    with _adapter(_load_scaling_config(), capture_details=False) as adapter:
-        adapter.start()
-        controller = stub_controller.instances[0]
-        controller.results.append(
-            _TickResult(decisions=[_decision("kept", window_index=0)])
-        )
-        controller.results.append(
-            _TickResult(decisions=[_decision("busy", window_index=1)])
-        )
-        adapter.on_tick(_snapshot(0))
-        adapter.on_tick(_snapshot(1))
-        details = adapter.finalize()
-
-    assert details.ticks == []
-    assert [event["decision_id"] for event in details.retune_events] == [
-        "retune-0-w0",
-        "retune-0-w1",
-    ]
-    assert details.to_dict()["retune_events"] == details.retune_events

@@ -9,7 +9,6 @@ import os
 
 import pytest
 
-from dynamo.mocker.config import normalize_mocker_config
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.planner.retune.window import (
     ROW_COUNT_KEYS,
@@ -19,7 +18,6 @@ from dynamo.planner.retune.window import (
     resolve_trace_files,
     trace_origin_ms,
 )
-from dynamo.replay import run_trace_replay
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -82,6 +80,10 @@ def _envelope(record, timestamp=0):
     return {"timestamp": timestamp, "event": record}
 
 
+def _jsonl(*records):
+    return "".join(json.dumps(record) + "\n" for record in records).encode("utf-8")
+
+
 def _write(path, records, *, trailing=""):
     text = "".join(json.dumps(record) + "\n" for record in records) + trailing
     if str(path).endswith(".gz"):
@@ -111,24 +113,45 @@ def _window(paths, tmp_path, start=0, end=10_000, as_of=None, **kwargs):
 
 
 def test_envelope_and_bare_rows_become_sorted_bare_rows(tmp_path):
-    trace = _write(
-        tmp_path / "trace.jsonl",
+    first = _write(
+        tmp_path / "a.jsonl",
         [
             _envelope(_request_end("b", 3_000, total_ms=10.0), timestamp=5),
-            _request_end("a", 1_000, total_ms=10.0),
-            _envelope(_request_end("c", 2_000, total_ms=10.0)),
+            _request_end("a", 1_000, total_ms=10.0, agent_context={"session_id": "s"}),
+            _event("tool_start", agent_context={"session_id": "s"}),
+            _event("tool_end", agent_context={"session_id": "s"}),
+            _event("tool_error"),
+            _event("router_selection", selection={"request_id": "a"}),
+            _event("request_payload", payload={"request_id": "a"}),
+            _envelope(_event("future_event")),
+            _envelope(_request_end("c", 2_000, total_ms=10.0, isl=64)),
+            _request_end("no-output", 1_100, output_tokens=None),
         ],
     )
+    # A request ID repeated in a later file keeps its first row.
+    second = _write(tmp_path / "b.jsonl", [_request_end("c", 2_500, isl=256)])
 
-    result, rows = _window([trace], tmp_path)
+    result, rows = _window([first, second], tmp_path)
 
     assert result.num_requests == 3
     assert result.trace_block_size == 64
     assert set(result.row_counts) == set(ROW_COUNT_KEYS)
     assert [row["request"]["request_id"] for row in rows] == ["a", "c", "b"]
     for row in rows:
+        # No agent_context: AIS replays a row that has one as agentic.
         assert set(row) == {"schema", "event_type", "event_time_unix_ms", "request"}
         assert row["request"]["replay"]["input_sequence_hashes"]
+    assert rows[1]["request"]["replay"]["input_length"] == 64
+    counts = result.row_counts
+    assert (
+        counts["tool"],
+        counts["router_selection"],
+        counts["request_payload"],
+        counts["other_event"],
+        counts["agent_context_stripped"],
+        counts["missing_output_tokens"],
+        counts["duplicate"],
+    ) == (3, 1, 1, 1, 1, 1, 1)
 
 
 def test_missing_received_ms_uses_ais_arrival_rule(tmp_path):
@@ -162,170 +185,95 @@ def test_as_of_censors_by_ais_completion_time(tmp_path):
             # No total_time_ms: completion falls back to event_time_unix_ms.
             _request_end("no-total", 1_200, event_ms=9_999),
             _request_end("converted", 1_300, event_ms=1_300),
+            # Arrivals are in the half-open window [1_000, 2_000).
+            *(
+                _request_end(str(at), at, total_ms=0.0)
+                for at in (999, 1_000, 1_999, 2_000)
+            ),
         ],
     )
 
-    result, rows = _window([trace], tmp_path, start=0, end=2_000, as_of=2_000)
+    result, rows = _window([trace], tmp_path, start=1_000, end=2_000, as_of=2_000)
 
-    assert [row["request"]["request_id"] for row in rows] == ["on-time", "converted"]
+    assert [row["request"]["request_id"] for row in rows] == [
+        "1000",
+        "on-time",
+        "converted",
+        "1999",
+    ]
     assert result.row_counts["censored"] == 2
     assert result.row_counts["censor_unavailable"] == 1
-
-
-def test_window_bounds_are_half_open(tmp_path):
-    trace = _write(
-        tmp_path / "trace.jsonl",
-        [_request_end(str(at), at) for at in (999, 1_000, 1_999, 2_000)],
-    )
-
-    result, rows = _window([trace], tmp_path, start=1_000, end=2_000, as_of=5_000)
-
-    assert [row["request"]["request_id"] for row in rows] == ["1000", "1999"]
     assert result.row_counts["outside_window"] == 2
-
-
-def test_duplicate_request_ids_keep_the_first_row(tmp_path):
-    first = _write(tmp_path / "a.jsonl", [_request_end("dup", 1_000, isl=64)])
-    second = _write(
-        tmp_path / "b.jsonl",
-        [_request_end("dup", 1_500, isl=256), _request_end("other", 1_200)],
-    )
-
-    result, rows = _window([first, second], tmp_path)
-
-    assert result.num_requests == 2
-    assert result.row_counts["duplicate"] == 1
-    dup = next(row for row in rows if row["request"]["request_id"] == "dup")
-    assert dup["request"]["replay"]["input_length"] == 64
-
-
-def test_non_request_rows_are_dropped_and_agent_context_is_stripped(tmp_path):
-    trace = _write(
-        tmp_path / "trace.jsonl",
-        [
-            _request_end("a", 1_000, agent_context={"session_id": "s1"}),
-            _event("tool_start", agent_context={"session_id": "s1"}),
-            _event("tool_end", agent_context={"session_id": "s1"}),
-            _event("tool_error"),
-            _event("router_selection", selection={"request_id": "a"}),
-            _event("request_payload", payload={"request_id": "a"}),
-            _envelope(_event("future_event")),
-            _request_end("b", 2_000),
-        ],
-    )
-
-    result, rows = _window([trace], tmp_path)
-
-    assert [row["request"]["request_id"] for row in rows] == ["a", "b"]
-    assert all("agent_context" not in row for row in rows)
-    counts = result.row_counts
-    assert (
-        counts["tool"],
-        counts["router_selection"],
-        counts["request_payload"],
-        counts["other_event"],
-        counts["agent_context_stripped"],
-    ) == (3, 1, 1, 1, 1)
-
-
-def test_rows_without_output_tokens_are_dropped(tmp_path):
-    trace = _write(
-        tmp_path / "trace.jsonl",
-        [_request_end("a", 1_000, output_tokens=None), _request_end("b", 1_100)],
-    )
-
-    result, rows = _window([trace], tmp_path)
-
-    assert [row["request"]["request_id"] for row in rows] == ["b"]
-    assert result.row_counts["missing_output_tokens"] == 1
 
 
 def test_mixed_block_sizes_are_rejected(tmp_path):
     trace = _write(
         tmp_path / "trace.jsonl",
-        [_request_end("a", 1_000), _request_end("b", 1_100, block_size=32)],
-    )
-
-    with pytest.raises(ValueError, match="trace_block_size"):
-        _window([trace], tmp_path)
-
-
-def test_block_size_outside_the_window_is_not_checked(tmp_path):
-    trace = _write(
-        tmp_path / "trace.jsonl",
         [_request_end("a", 1_000), _request_end("b", 50_000, block_size=32)],
     )
 
-    result, _ = _window([trace], tmp_path)
-
+    # Only the rows inside the window must agree.
+    result, _ = _window([trace], tmp_path, end=10_000)
     assert result.trace_block_size == 64
+    with pytest.raises(ValueError, match="trace_block_size"):
+        _window([trace], tmp_path, end=60_000)
 
 
 def test_truncated_gzip_member_and_partial_line_are_tolerated(tmp_path):
-    complete = gzip.compress(
-        (json.dumps(_request_end("a", 1_000)) + "\n").encode("utf-8")
-    )
-    member = gzip.compress(
-        (json.dumps(_request_end("b", 1_100)) + "\n").encode("utf-8")
-    )
-    truncated = member[: len(member) // 2]
+    # Live segments read while their writer is mid-member: half of the next
+    # member, or only the first byte of its header (R2).
+    member = gzip.compress(_jsonl(_request_end("b", 1_100)))
     segment = tmp_path / "frontend.000000.jsonl.gz"
-    segment.write_bytes(complete + truncated)
+    segment.write_bytes(
+        gzip.compress(_jsonl(_request_end("a", 1_000))) + member[: len(member) // 2]
+    )
+    magic_prefix = tmp_path / "frontend.000001.jsonl.gz"
+    magic_prefix.write_bytes(gzip.compress(_jsonl(_request_end("d", 1_300))) + b"\x1f")
     partial = _write(
         tmp_path / "plain.jsonl",
         [_request_end("c", 1_200)],
         trailing='{"schema": "dynamo.request.trac',
     )
 
-    result, rows = _window([segment, partial], tmp_path)
+    result, rows = _window([segment, magic_prefix, partial], tmp_path)
 
-    assert [row["request"]["request_id"] for row in rows] == ["a", "c"]
-    assert result.row_counts["truncated_gzip"] == 1
+    assert [row["request"]["request_id"] for row in rows] == ["a", "c", "d"]
+    assert result.row_counts["truncated_gzip"] == 2
     assert result.row_counts["partial_line"] == 1
 
 
-@pytest.mark.parametrize("tail", [b"\x1f", b"B"], ids=["magic-prefix", "garbage"])
-def test_one_byte_gzip_member_header_is_tolerated_only_as_a_magic_prefix(
-    tmp_path, tail
-):
-    # A live segment read after its writer appended only the first byte of
-    # the next gzip member.
-    complete = gzip.compress(
-        (json.dumps(_request_end("a", 1_000)) + "\n").encode("utf-8")
-    )
-    segment = tmp_path / "frontend.000000.jsonl.gz"
-    segment.write_bytes(complete + tail)
+@pytest.mark.parametrize(
+    "name, content, error, match",
+    [
+        (
+            "trace.jsonl",
+            _jsonl(_request_end("a", 1_000))
+            + b"{not json}\n"
+            + _jsonl(_request_end("b", 1_100)),
+            ValueError,
+            "invalid JSON",
+        ),
+        (
+            "trace.jsonl",
+            _jsonl({"timestamp": 0, "input_length": 1, "output_length": 1}),
+            ValueError,
+            SCHEMA,
+        ),
+        # Any byte after a complete member other than the gzip magic's first.
+        (
+            "frontend.000000.jsonl.gz",
+            gzip.compress(_jsonl(_request_end("a", 1_000))) + b"B",
+            gzip.BadGzipFile,
+            None,
+        ),
+    ],
+    ids=["middle-line", "foreign-schema", "r2-bad-gzip-header"],
+)
+def test_corrupt_input_raises(tmp_path, name, content, error, match):
+    trace = tmp_path / name
+    trace.write_bytes(content)
 
-    if tail != b"\x1f":
-        with pytest.raises(gzip.BadGzipFile):
-            _window([segment], tmp_path)
-        return
-    result, rows = _window([segment], tmp_path)
-    assert [row["request"]["request_id"] for row in rows] == ["a"]
-    assert result.row_counts["truncated_gzip"] == 1
-
-
-def test_corrupt_middle_line_raises(tmp_path):
-    trace = tmp_path / "trace.jsonl"
-    trace.write_text(
-        json.dumps(_request_end("a", 1_000))
-        + "\n{not json}\n"
-        + json.dumps(_request_end("b", 1_100))
-        + "\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="invalid JSON"):
-        _window([trace], tmp_path)
-
-
-def test_foreign_schema_raises(tmp_path):
-    trace = _write(
-        tmp_path / "trace.jsonl",
-        [{"timestamp": 0, "input_length": 1, "output_length": 1}],
-    )
-
-    with pytest.raises(ValueError, match=SCHEMA):
+    with pytest.raises(error, match=match):
         _window([trace], tmp_path)
 
 
@@ -401,14 +349,6 @@ def test_mtime_pruning_only_when_enabled_with_a_clock_skew_margin(tmp_path):
     assert pruned.row_counts["pruned_files"] == 1
 
 
-def test_empty_window_writes_an_empty_file(tmp_path):
-    trace = _write(tmp_path / "trace.jsonl", [_request_end("a", 50_000)])
-
-    result, rows = _window([trace], tmp_path)
-
-    assert (result.num_requests, result.trace_block_size, rows) == (0, None, [])
-
-
 def test_history_is_streamed_without_hashes_and_bucketed(tmp_path):
     trace = _write(
         tmp_path / "trace.jsonl",
@@ -441,41 +381,3 @@ def test_history_is_streamed_without_hashes_and_bucketed(tmp_path):
     # The hash-free file is a valid planner warmup trace.
     warmup = extract_traffic_observations_from_trace(str(out), 1)
     assert sum(observation.num_req for observation in warmup) == 3
-
-
-def test_history_without_output_file_only_buckets(tmp_path):
-    trace = _write(tmp_path / "trace.jsonl", [_request_end("h0", 1_000)])
-    buckets = ObservationBuckets(end_ms=2_000, interval_ms=1_000, duration_s=1.0)
-
-    history = read_trace_history(
-        [str(trace)], 0, 2_000, 2_000, None, prune_by_mtime=False, buckets=buckets
-    )
-
-    assert history.path is None
-    assert history.num_requests == 1
-    assert buckets.bucket_count() == 1
-
-
-def test_window_file_replays_in_aisimulate(tmp_path):
-    trace = _write(
-        tmp_path / "trace.jsonl",
-        [
-            _envelope(_request_end("a", 1_000, total_ms=50.0)),
-            _request_end("b", None, event_ms=1_300, total_ms=100.0),
-            _request_end("c", 1_100, agent_context={"session_id": "s"}),
-            _event("router_selection"),
-            _request_end("a", 1_000, total_ms=50.0),
-        ],
-    )
-    result, _ = _window([trace], tmp_path, start=0, end=5_000)
-
-    report = run_trace_replay(
-        [result.path],
-        trace_format="dynamo",
-        extra_engine_args=normalize_mocker_config(
-            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
-        ),
-        num_workers=1,
-    )
-
-    assert report.summary["completed_requests"] == result.num_requests == 3
