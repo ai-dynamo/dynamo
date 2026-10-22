@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_llm::admission_gate::{AdmissionEngine, WorkerAdmissionGate};
 use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagConfig, TOPOLOGY_TAINT_PREFIX,
@@ -474,6 +475,10 @@ pub struct Worker {
     lifecycle: Option<crate::metrics::LifecycleGauges>,
     /// Whether shutdown waits for the engine after discovery unregister.
     shutdown_policy: ShutdownPolicy,
+    /// This worker's backend admission gate, which its token pipeline admits
+    /// network requests through. Created as the worker serves, for its
+    /// component; anything else serving for this worker holds a clone.
+    admission_gate: WorkerAdmissionGate,
 }
 
 impl Worker {
@@ -501,7 +506,16 @@ impl Worker {
             publishers: None,
             lifecycle: None,
             shutdown_policy: ShutdownPolicy::GraceAndDrain,
+            admission_gate: WorkerAdmissionGate::default(),
         }
+    }
+
+    /// Admit this worker's requests through `admission_gate`, a handle its
+    /// caller also gave the worker's engine, so the engine's own registrations
+    /// size the gate the worker admits through rather than another.
+    pub fn with_admission_gate(mut self, admission_gate: WorkerAdmissionGate) -> Self {
+        self.admission_gate = admission_gate;
+        self
     }
 
     /// Lifecycle driver. Takes owned `self` — `Worker` is single-shot and
@@ -1120,14 +1134,22 @@ impl Worker {
                     DisaggregationMode::Encode => LifecycleOperationRole::Encode,
                     DisaggregationMode::Aggregated => LifecycleOperationRole::Worker,
                 };
-                let ingress =
-                    Ingress::for_engine_with_lifecycle_role(engine_adapter.clone(), lifecycle_role)
-                        .map_err(|e| {
-                            err(
-                                ErrorType::Backend(BackendError::Unknown),
-                                format!("ingress: {e}"),
-                            )
-                        })?;
+                // Network requests are admitted through this worker's gate
+                // before they reach the engine, sized by the model card it
+                // registered above; the local health-check probe below calls
+                // the adapter directly, outside admission.
+                let admission_gate = self.admission_gate.get_or_create(endpoint.component());
+                admission_gate.record_model_card(local_model.card());
+                let ingress = Ingress::for_engine_with_lifecycle_role(
+                    AdmissionEngine::new(admission_gate, engine_adapter.clone()),
+                    lifecycle_role,
+                )
+                .map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("ingress: {e}"),
+                    )
+                })?;
                 let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
                 (ingress, probe)
             }
