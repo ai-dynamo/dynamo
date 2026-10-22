@@ -87,6 +87,7 @@ const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
 export const RELEASES: Release[] = [
   {
     version: "v1.6.0",
+    notesHref: "/dynamo/dev/reference/releases/v1-6-0",
     date: "Oct 21, 2026",
     kind: "stable",
     github: `${GH}v1.6.0`,
@@ -1425,6 +1426,7 @@ export interface ReleaseStats {
    published 930/603/896, missing in both directions, so it cannot be trusted
    to fill the rest. Leave them absent unless a method reproduces all three. */
 export const RELEASE_STATS: Record<string, ReleaseStats> = {
+  "v1.6.0": { prs: 654, contributors: 148, breaking: 41, knownIssues: 15 },
   "v1.5.1": { breaking: 2, knownIssues: 2 },
   "v1.5.0": { prs: 658, contributors: 123, breaking: 44, knownIssues: 12 },
   "v1.4.0": { prs: 640, contributors: 127, firstTimers: 29, breaking: 51, knownIssues: 19 },
