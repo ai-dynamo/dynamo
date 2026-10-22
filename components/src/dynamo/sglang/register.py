@@ -130,7 +130,10 @@ def _supports_systemone_serial(
     output_type: ModelType,
     worker_type: WorkerType,
 ) -> bool:
-    """Admit only the qualified SGLang 0.5.19 isolated CUDA profile.
+    """Gate the serialized SGLang 0.5.19 execution profile.
+
+    CUDA is the qualified deployment; device support is not validated here,
+    and XPU remains unqualified.
 
     Serialization and disabled overlap apply to the entire worker, including
     chat and completions. Use dedicated decision workers for this low-throughput
