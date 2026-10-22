@@ -1,0 +1,487 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+    helm.sh/resource-policy: keep
+  name: dynamographdeploymentruns.nvidia.com
+spec:
+  group: nvidia.com
+  names:
+    kind: DynamoGraphDeploymentRun
+    listKind: DynamoGraphDeploymentRunList
+    plural: dynamographdeploymentruns
+    shortNames:
+      - dgdrrun
+    singular: dynamographdeploymentrun
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .status.phase
+          name: Phase
+          type: string
+        - jsonPath: .status.conditions[?(@.type=="Completed")].status
+          name: Completed
+          type: string
+        - jsonPath: .status.progress.candidates.published
+          name: Candidates
+          type: integer
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1beta2
+      schema:
+        openAPIV3Schema:
+          description: DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: |-
+                DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
+                Run creators resolve optional Request inputs before persisting the Run.
+              properties:
+                aisimulate:
+                  description: AISimulate selects the execution artifact and supplies native AISimulate input.
+                  properties:
+                    image:
+                      description: |-
+                        Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
+                        and execution defaults are resolved outside this API.
+                      minLength: 1
+                      type: string
+                    parameters:
+                      description: |-
+                        Parameters contains native AISimulate input. Field names and nesting use
+                        the upstream AISimulate JSON contract, including snake_case names.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    versionOverride:
+                      description: |-
+                        VersionOverride declares the AISimulate compatibility version when it
+                        cannot be inferred from the effective image.
+                      minLength: 1
+                      type: string
+                  type: object
+                backends:
+                  description: Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+                  items:
+                    description: Backend identifies an inference backend searched by AISimulate and used by generated candidates.
+                    enum:
+                      - vllm
+                      - sglang
+                      - trtllm
+                    type: string
+                  minItems: 1
+                  type: array
+                hardware:
+                  description: |-
+                    Hardware bounds the accelerator configurations evaluated by the search.
+                    Admission discovers any omitted hardware values from the cluster.
+                  properties:
+                    gpu:
+                      description: |-
+                        GPU describes accelerator identity and the maximum allocation per candidate.
+                        Omitted fields are resolved independently by admission.
+                      properties:
+                        budget:
+                          description: |-
+                            Budget is the maximum total number of GPUs one candidate may use.
+                            When omitted, admission derives the available GPU budget from the cluster.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        sku:
+                          description: |-
+                            SKU identifies the accelerator using the AISimulate hardware catalog name.
+                            When omitted, admission discovers the accelerator from the cluster.
+                          minLength: 1
+                          type: string
+                      type: object
+                  type: object
+                model:
+                  description: Model identifies the model whose deployment configurations are evaluated.
+                  properties:
+                    name:
+                      description: Name identifies the model in the syntax accepted by the selected backend.
+                      minLength: 1
+                      type: string
+                  required:
+                    - name
+                  type: object
+                objective:
+                  description: |-
+                    Objective defines scalar optimization or a multi-objective Pareto search.
+                    When omitted, the schema supplies the default Optimize mode and SLA;
+                    admission supplies the conditional scalar metric.
+                  properties:
+                    metric:
+                      description: |-
+                        Metric is the scalar target when mode is Optimize.
+                        When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
+                      enum:
+                        - Throughput
+                        - ThroughputPerGPU
+                        - ThroughputPerUser
+                        - TTFT
+                        - E2ELatency
+                        - Goodput
+                        - GoodputPerGPU
+                      type: string
+                    metrics:
+                      description: Metrics lists two or more distinct scalar targets when mode is Pareto.
+                      items:
+                        description: ObjectiveMetric is a metric optimized by AISimulate.
+                        enum:
+                          - Throughput
+                          - ThroughputPerGPU
+                          - ThroughputPerUser
+                          - TTFT
+                          - E2ELatency
+                          - Goodput
+                          - GoodputPerGPU
+                        type: string
+                      maxItems: 7
+                      minItems: 2
+                      type: array
+                      x-kubernetes-list-type: set
+                    mode:
+                      default: Optimize
+                      description: Mode selects scalar optimization or a Pareto search.
+                      enum:
+                        - Optimize
+                        - Pareto
+                      type: string
+                    sla:
+                      default:
+                        itlMs: 30
+                        ttftMs: 2000
+                      description: SLA defines per-request latency bounds used to calculate goodput.
+                      properties:
+                        e2eMs:
+                          description: E2EMs is an alternative end-to-end bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                        itlMs:
+                          description: ITLMs is the Inter-Token Latency bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                        ttftMs:
+                          description: TTFTMs is the Time To First Token bound in milliseconds.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                      type: object
+                      x-kubernetes-validations:
+                        - message: e2eMs cannot be combined with ttftMs or itlMs
+                          rule: '!has(self.e2eMs) || (!has(self.ttftMs) && !has(self.itlMs))'
+                  type: object
+                  x-kubernetes-validations:
+                    - message: Optimize accepts only metric; Pareto requires metrics
+                      rule: '!has(self.mode) || (self.mode == ''Optimize'' && !has(self.metrics)) || (self.mode == ''Pareto'' && !has(self.metric) && has(self.metrics))'
+                    - message: Goodput and GoodputPerGPU require at least one SLA bound
+                      rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                    - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound
+                      rule: '!(has(self.metrics) && self.metrics.exists(m, m in [''Goodput'', ''GoodputPerGPU''])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                recommendation:
+                  description: Recommendation controls bounded projection into DGDC resources.
+                  properties:
+                    maxCandidates:
+                      default: 1
+                      description: |-
+                        MaxCandidates is the maximum number of DGDCs owned by one run. Scalar
+                        candidates are ordered best first; Pareto candidates have no scalar rank.
+                        This field does not limit internal trials.
+                      format: int32
+                      maximum: 100
+                      minimum: 1
+                      type: integer
+                  type: object
+                workload:
+                  description: Workload defines the synthetic traffic model used for every candidate evaluation.
+                  properties:
+                    static:
+                      default:
+                        isl: 4000
+                        kvLoadRatio:
+                          - 0
+                          - 1
+                        osl: 1000
+                      description: |-
+                        Static defines one of AISimulate's synthetic workload shapes. When omitted,
+                        it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
+                        An explicit empty object opts out of this underlay.
+                      properties:
+                        concurrency:
+                          description: Concurrency is a fixed closed-loop in-flight request cap.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        isl:
+                          description: ISL is the input sequence length in tokens.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        kvLoadRatio:
+                          description: |-
+                            KVLoadRatio derives concurrency from candidate KV capacity. A two-value
+                            range requires a bounded AISimulate sweep.
+                          items:
+                            maximum: 1
+                            minimum: 0
+                            type: number
+                          maxItems: 2
+                          minItems: 1
+                          type: array
+                        numRequestRatio:
+                          description: NumRequestRatio sets request count relative to the selected load.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                        osl:
+                          description: OSL is the output sequence length in tokens.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        requestRate:
+                          description: RequestRate is a fixed open-loop arrival rate in requests per second.
+                          exclusiveMinimum: true
+                          minimum: 0
+                          type: number
+                      type: object
+                      x-kubernetes-validations:
+                        - message: at most one of requestRate, concurrency, or kvLoadRatio may be specified
+                          rule: '(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1'
+                  type: object
+              type: object
+              x-kubernetes-validations:
+                - message: model is required
+                  rule: has(self.model)
+            status:
+              description: DynamoGraphDeploymentRunStatus represents one search execution's observed state.
+              properties:
+                candidateRefs:
+                  description: |-
+                    CandidateRefs identifies the current bounded DGDC projection. List order
+                    represents rank, best first, for scalar searches.
+                  items:
+                    description: |-
+                      LocalObjectReference contains enough information to let you locate the
+                      referenced object inside the same namespace.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  type: array
+                completionTime:
+                  description: CompletionTime is present only after a terminal outcome.
+                  format: date-time
+                  type: string
+                conditions:
+                  description: Conditions contains standard Kubernetes conditions merged by type.
+                  items:
+                    description: Condition contains details for one aspect of the current state of this API Resource.
+                    properties:
+                      lastTransitionTime:
+                        description: |-
+                          lastTransitionTime is the last time the condition transitioned from one status to another.
+                          This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                        format: date-time
+                        type: string
+                      message:
+                        description: |-
+                          message is a human readable message indicating details about the transition.
+                          This may be an empty string.
+                        maxLength: 32768
+                        type: string
+                      observedGeneration:
+                        description: |-
+                          observedGeneration represents the .metadata.generation that the condition was set based upon.
+                          For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                          with respect to the current state of the instance.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      reason:
+                        description: |-
+                          reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                          Producers of specific condition types may define expected values and meanings for this field,
+                          and whether the values are considered a guaranteed API.
+                          The value should be a CamelCase string.
+                          This field may not be empty.
+                        maxLength: 1024
+                        minLength: 1
+                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                        type: string
+                      status:
+                        description: status of the condition, one of True, False, Unknown.
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                        type: string
+                      type:
+                        description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                        maxLength: 316
+                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                        type: string
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+                jobRef:
+                  description: JobRef identifies the controller-owned Job for this run.
+                  properties:
+                    name:
+                      description: Name is the resource name.
+                      type: string
+                    uid:
+                      description: UID is the resource UID.
+                      type: string
+                  required:
+                    - name
+                  type: object
+                lastProgressTime:
+                  description: |-
+                    LastProgressTime is the latest coarse-grained progress update or heartbeat.
+                    Writers should update it periodically, not for every evaluation.
+                  format: date-time
+                  type: string
+                phase:
+                  description: Phase is a concise presentation state. Conditions remain authoritative.
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                  type: string
+                progress:
+                  description: Progress contains branch-aware optimizer and evaluation outcome counters.
+                  properties:
+                    branches:
+                      description: Branches reports independently optimized AISimulate branches.
+                      items:
+                        description: BranchProgress reports progress for one independently optimized AISimulate branch.
+                        properties:
+                          name:
+                            description: Name is the executor-defined stable branch identifier.
+                            type: string
+                          rounds:
+                            description: Rounds reports optimizer progress for this branch.
+                            properties:
+                              completed:
+                                description: Completed is the number of finished rounds.
+                                format: int32
+                                type: integer
+                              total:
+                                description: Total is the number of planned rounds.
+                                format: int32
+                                type: integer
+                            required:
+                              - completed
+                              - total
+                            type: object
+                        required:
+                          - name
+                          - rounds
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
+                    candidates:
+                      description: Candidates reports bounded Kubernetes publication.
+                      properties:
+                        paretoFront:
+                          description: ParetoFront is the number of feasible points on the current Pareto front.
+                          format: int64
+                          type: integer
+                        published:
+                          description: Published is the number of Candidate resources currently referenced by this run.
+                          format: int32
+                          type: integer
+                      type: object
+                    evaluations:
+                      description: Evaluations reports unique candidate outcomes.
+                      properties:
+                        cacheHits:
+                          description: CacheHits is the number of evaluations satisfied from a prior result.
+                          format: int64
+                          type: integer
+                        failed:
+                          description: Failed is the number of evaluations that ended in an execution error.
+                          format: int64
+                          type: integer
+                        feasible:
+                          description: Feasible is the number of completed evaluations that satisfy all constraints.
+                          format: int64
+                          type: integer
+                        infeasible:
+                          description: Infeasible is the number of completed evaluations that violate at least one constraint.
+                          format: int64
+                          type: integer
+                        running:
+                          description: Running is the number of evaluations currently executing.
+                          format: int64
+                          type: integer
+                        scheduled:
+                          description: Scheduled is the number of unique evaluations accepted for execution.
+                          format: int64
+                          type: integer
+                        unsupported:
+                          description: Unsupported is the number of configurations rejected as unsupported before evaluation.
+                          format: int64
+                          type: integer
+                      type: object
+                  type: object
+                startTime:
+                  description: StartTime is when execution started.
+                  format: date-time
+                  type: string
+              type: object
+          required:
+            - spec
+          type: object
+          x-kubernetes-validations:
+            - message: spec is immutable
+              rule: '!has(oldSelf.spec) || self.spec == oldSelf.spec'
+      served: true
+      storage: true
+      subresources:
+        status: {}

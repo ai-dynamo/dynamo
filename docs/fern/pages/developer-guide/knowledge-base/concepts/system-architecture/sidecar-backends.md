@@ -94,7 +94,7 @@ podTemplate:
     - name: runtime
       image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
       command: [dynamo-vllm-sidecar]
-      args: [--grpc-endpoint, 127.0.0.1:50051]
+      args: [--grpc-endpoint, 127.0.0.1:30001]
       restartPolicy: Always
     containers:
     - name: main

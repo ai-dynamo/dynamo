@@ -377,11 +377,23 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Batch file upload limit in MiB, including multipart framing (default 202).
+    pub const DYN_BATCH_UPLOAD_BODY_LIMIT_MB: &str = "DYN_BATCH_UPLOAD_BODY_LIMIT_MB";
+
+    /// Concurrent batch uploads/downloads per frontend replica (default 4).
+    pub const DYN_BATCH_MAX_FILE_TRANSFERS: &str = "DYN_BATCH_MAX_FILE_TRANSFERS";
+
+    /// Maximum batch file transfer lifetime, including response consumption (default 600 seconds).
+    pub const DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS: &str = "DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS";
+
     /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
     pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
 
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
+
+    /// Maximum stalled downstream write time per connection (default 120 seconds).
+    pub const DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS: &str = "DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS";
 
     /// HTTP status code returned when the frontend rejects a request because
     /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
@@ -549,6 +561,10 @@ pub mod llm {
     /// wait up to the full delay, so larger values add longer stalls. Values that do
     /// not parse or are above 1000000 use the default.
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
+
+    /// Publish the serving-load streams the KV DC Relay aggregates: frontend
+    /// request load and router scheduler load. Off unless truthy.
+    pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
 
     /// Metrics configuration
     pub mod metrics {
@@ -729,6 +745,12 @@ pub mod llm {
         /// are recorded unredacted; avoid credential-bearing headers.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
+
+        /// Lowest-cost candidates retained per `router_selection` record. `0`
+        /// retains every scored candidate. The selected worker is always
+        /// retained. Default `16`.
+        pub const DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K: &str =
+            "DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K";
 
         /// S3 bucket for the S3 request-trace sink. Required when
         /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
@@ -1136,14 +1158,19 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB,
+            llm::DYN_BATCH_MAX_FILE_TRANSFERS,
+            llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS,
             llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,

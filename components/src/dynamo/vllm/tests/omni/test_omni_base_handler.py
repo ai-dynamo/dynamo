@@ -216,6 +216,17 @@ class TestDiffusionParallelConfigCoverage:
         )
         assert kwargs["enforce_eager"] is True
 
+    @pytest.mark.parametrize("stage_type", ["diffusion", None])
+    def test_guardrail_settings_reach_upstream_diffusion_config(self, stage_type):
+        config = _make_config()
+        config.diffusion.model_config = {"guardrails": False}
+
+        kwargs = _build_kwargs(config, stage_type=stage_type)
+        stages = StageConfigFactory.create_default_diffusion(kwargs)
+
+        assert stages[0]["engine_args"]["model_config"] == {"guardrails": False}
+        assert "no_guardrails" not in kwargs
+
     def test_diffusion_kwargs_preserved_when_stage_detection_is_deferred(self):
         config = _make_config()
         config.diffusion.enable_cpu_offload = True
@@ -247,6 +258,7 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(_make_config())
 
         for field in (
+            "model_config",
             "enable_layerwise_offload",
             "layerwise_num_gpu_layers",
             "vae_use_slicing",

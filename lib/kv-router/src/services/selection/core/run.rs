@@ -245,7 +245,16 @@ impl SelectionCore {
     /// through here.
     pub async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
         let mut lookup = None;
-        let result = self.run_selection_inner(operation, &mut lookup).await;
+        let result = match self.ensure_running() {
+            Err(error) => Err(error),
+            Ok(()) => tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => {
+                    Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown))
+                }
+                result = self.run_selection_inner(operation, &mut lookup) => result,
+            },
+        };
         SelectionRun { result, lookup }
     }
 
@@ -273,8 +282,6 @@ impl SelectionCore {
             return_routing_hashes,
             replay_id,
         } = operation;
-        self.ensure_running()?;
-
         let entry = self.ready_entry(&key)?;
         let book = admission.is_booking();
         let claim = match &admission {
@@ -432,30 +439,20 @@ impl SelectionCore {
         };
         // `booking` guards the booking until it is installed below: any early
         // return or drop before then frees it.
-        let scheduled = tokio::select! {
-            biased;
-            _ = self.cancel_token.cancelled() => {
-                return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
-            }
-            result = async {
-                if matches!(admission, SelectionAdmission::Advisory { .. }) {
-                    entry
-                        .scheduler
-                        .select_without_admission(schedule_request)
-                        .instrument(tracing::info_span!("kv_router.select_without_admission"))
-                        .await
-                        .map(|advisory| {
-                            (advisory.response, Some(advisory.selected_worker_load), None)
-                        })
-                } else {
-                    entry
-                        .scheduler
-                        .schedule_request_with_booking(schedule_request)
-                        .instrument(tracing::info_span!("kv_router.schedule"))
-                        .await
-                        .map(|(admitted, booking)| (admitted.response, None, booking))
-                }
-            } => result,
+        let scheduled = if matches!(admission, SelectionAdmission::Advisory { .. }) {
+            entry
+                .scheduler
+                .select_without_admission(schedule_request)
+                .instrument(tracing::info_span!("kv_router.select_without_admission"))
+                .await
+                .map(|advisory| (advisory.response, Some(advisory.selected_worker_load), None))
+        } else {
+            entry
+                .scheduler
+                .schedule_request_with_booking(schedule_request)
+                .instrument(tracing::info_span!("kv_router.schedule"))
+                .await
+                .map(|(admitted, booking)| (admitted.response, None, booking))
         };
         let (response, advisory_load, booking) = match scheduled {
             Ok(scheduled) => scheduled,
@@ -579,13 +576,7 @@ impl SelectionCore {
     ) -> Result<Option<Hold>, SelectionError> {
         let mut invalidations = 0;
         loop {
-            let acquired = tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
-                }
-                result = table.acquire(session_id, None) => result,
-            };
-            match acquired {
+            match table.acquire(session_id, None).await {
                 Ok(Hold::Bound { target, mut lease })
                     if !self.catalog.is_schedulable(target, key) =>
                 {

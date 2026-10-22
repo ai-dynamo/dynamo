@@ -186,7 +186,7 @@ class ThunderAgentRouterHandler:
             self._capacity.stop()
         logger.info("ThunderAgent Router shutdown complete")
 
-    async def generate(self, request: dict[str, Any]):
+    async def generate(self, request: dict[str, Any], context=None):
         if self._scheduler is None or self._kv_router is None:
             raise RuntimeError(
                 "ThunderAgentRouterHandler used before initialize() was called"
@@ -226,7 +226,8 @@ class ThunderAgentRouterHandler:
             )
             first_chunk = True
             async for chunk in await self._kv_router.generate_from_request(
-                preprocessed  # type: ignore[arg-type]
+                preprocessed,  # type: ignore[arg-type]
+                context=context,
             ):
                 if proof is not None:
                     if first_chunk:
@@ -283,7 +284,6 @@ class ThunderAgentRouterHandler:
 
         prompt_tokens_seen = 0
         completion_tokens_seen = 0
-        usage_completion_seen = False
         first_chunk = True
         selected_worker_id = None
         proof = (
@@ -306,7 +306,8 @@ class ThunderAgentRouterHandler:
         )
         try:
             async for chunk in await self._kv_router.generate_from_request(
-                preprocessed  # type: ignore[arg-type]
+                preprocessed,  # type: ignore[arg-type]
+                context=context,
             ):
                 # Cold start: admission had no MDC, so take the replica the engine used.
                 # Only a complete one is usable -- see assign_worker.
@@ -339,18 +340,20 @@ class ThunderAgentRouterHandler:
                     prompt_tokens_seen = int(
                         usage.get("prompt_tokens", prompt_tokens_seen)
                     )
-                    if isinstance(usage.get("completion_tokens"), int):
-                        completion_tokens_seen = int(usage["completion_tokens"])
-                        usage_completion_seen = True
                 token_ids_out = (
                     chunk.get("token_ids", []) if isinstance(chunk, dict) else []
                 )
                 if isinstance(token_ids_out, list) and token_ids_out:
-                    # Engine usage is authoritative if present; only the
-                    # token-id fallback path increments completion_tokens_seen.
-                    if not usage_completion_seen:
-                        completion_tokens_seen += len(token_ids_out)
+                    completion_tokens_seen += len(token_ids_out)
                     self._scheduler.record_output_tokens(program_id, len(token_ids_out))
+                # Intermediate usage can be sparse. Only a terminal report can
+                # replace the token count used when a stream is interrupted.
+                if (
+                    isinstance(usage, dict)
+                    and chunk.get("finish_reason")
+                    and isinstance(usage.get("completion_tokens"), int)
+                ):
+                    completion_tokens_seen = usage["completion_tokens"]
 
                 if proof is not None:
                     _inject_thunderagent_route_proof(chunk, proof)
