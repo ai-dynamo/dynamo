@@ -1782,9 +1782,10 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 ) (*corev1.PodSpec, error) {
 	nativeSidecar := componentSidecar != nil
 
-	// Start with base container generated per component type
+	// Resolve the Dynamo image separately from the role's native engine image.
 	annotations := GetPodTemplateAnnotations(component)
-	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure, componentSidecar)
+	runtimeImage := resolveDynamoRuntimeImage(component, componentSidecar)
+	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure, runtimeImage, nativeSidecar)
 	if err != nil {
 		return nil, err
 	}
@@ -1850,6 +1851,8 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 		}
 	}
+
+	// Main receives topology bindings in both combined-runtime and native-sidecar modes.
 	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
 
 	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership)
@@ -1913,17 +1916,12 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer, nativeSidecar)
 
-	// Runtime defaults apply only where a runtime container is actually declared.
-	if nativeSidecar {
-		for i := range podSpec.InitContainers {
-			if podSpec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
-				if err := mergeDynamoSidecarDefaults(&podSpec, componentContext); err != nil {
-					return nil, err
-				}
-				addMultinodeTopologyEnvVars(&podSpec.InitContainers[i], numberOfNodes, serviceName, multinodeDeployer, annotations)
-				break
-			}
+	// A declared sidecar receives Dynamo defaults and the same topology bindings as main.
+	if runtime := findRuntimeInitContainer(&podSpec); runtime != nil {
+		if err := mergeDynamoSidecarDefaults(runtime, componentContext); err != nil {
+			return nil, err
 		}
+		addMultinodeTopologyEnvVars(runtime, numberOfNodes, serviceName, multinodeDeployer, annotations)
 	}
 
 	if component.FrontendSidecar != nil {
@@ -2251,9 +2249,25 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1beta1.D
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
+// resolveDynamoRuntimeImage selects the role's sidecar image, falling back to the
+// component's sidecar for roles without runtime, or main in combined-runtime mode.
+// component must not be nil; componentSidecar is nil in combined-runtime mode.
+func resolveDynamoRuntimeImage(component *v1beta1.DynamoComponentDeploymentSharedSpec, componentSidecar *corev1.Container) string {
+	if runtime := GetDynamoSidecar(component); runtime != nil {
+		return runtime.Image
+	}
+	if componentSidecar != nil {
+		return componentSidecar.Image
+	}
+	if main := GetMainContainer(component); main != nil {
+		return main.Image
+	}
+	return ""
+}
+
 // generateComponentContext resolves Dynamo defaults independently of native engine images.
-// component must not be nil; componentSidecar is nil for integrated runtime mode.
-func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext, infrastructure configv1alpha1.InfrastructureConfiguration, componentSidecar *corev1.Container) (ComponentContext, error) {
+// component must not be nil. runtimeImage and nativeSidecar are resolved by the caller.
+func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext, infrastructure configv1alpha1.InfrastructureConfiguration, runtimeImage string, nativeSidecar bool) (ComponentContext, error) {
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
@@ -2261,19 +2275,8 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		workerHashSuffix = workerHash
 	}
 
-	runtime := GetDynamoSidecar(component)
-	if runtime == nil {
-		runtime = componentSidecar
-	}
-	if runtime == nil {
-		runtime = GetDynamoContainer(component)
-	}
-	var image string
-	if runtime != nil {
-		image = runtime.Image
-	}
 	var resolvedRuntimeVersion *runtimeversion.Version
-	if version, err := runtimeversion.Resolve(image, component.RuntimeVersionOverride); err == nil {
+	if version, err := runtimeversion.Resolve(runtimeImage, component.RuntimeVersionOverride); err == nil {
 		resolvedRuntimeVersion = &version
 	} else if component.RuntimeVersionOverride != "" {
 		return ComponentContext{}, fmt.Errorf("resolve runtime version override: %w", err)
@@ -2295,7 +2298,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	}
 
 	// A native sidecar owns the worker runtime identity.
-	if componentSidecar != nil {
+	if nativeSidecar {
 		componentContext.RuntimeContainerName = commonconsts.RuntimeContainerName
 	}
 	return componentContext, nil

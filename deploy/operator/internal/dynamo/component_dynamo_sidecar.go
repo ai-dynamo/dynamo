@@ -133,24 +133,25 @@ func dynamoSidecarBaseContainer(context ComponentContext) corev1.Container {
 	return container
 }
 
-// mergeDynamoSidecarDefaults merges defaults into the runtime init container.
+// findRuntimeInitContainer returns the declared sidecar, or nil when absent.
 // podSpec must not be nil.
-func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, context ComponentContext) error {
-	// Resolve the reserved init container while preserving all other pod-template entries.
-	const name = commonconsts.RuntimeContainerName
+func findRuntimeInitContainer(podSpec *corev1.PodSpec) *corev1.Container {
 	for i := range podSpec.InitContainers {
-		user := &podSpec.InitContainers[i]
-		if user.Name != name {
-			continue
+		if podSpec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
+			return &podSpec.InitContainers[i]
 		}
-
-		// User configuration overrides defaults, including entire probe handlers.
-		base := dynamoSidecarBaseContainer(context)
-		if err := mergeContainerByName(&base, user); err != nil {
-			return fmt.Errorf("merge runtime init container %q: %w", name, err)
-		}
-		podSpec.InitContainers[i] = base
-		return nil
 	}
-	return fmt.Errorf("runtime init container %q does not match any podTemplate init container", name)
+	return nil
+}
+
+// mergeDynamoSidecarDefaults merges defaults into the selected runtime init container.
+// runtime must point to the declared sidecar and must not be nil.
+func mergeDynamoSidecarDefaults(runtime *corev1.Container, context ComponentContext) error {
+	// User configuration overrides defaults, including entire probe handlers.
+	base := dynamoSidecarBaseContainer(context)
+	if err := mergeContainerByName(&base, runtime); err != nil {
+		return fmt.Errorf("merge runtime init container %q: %w", runtime.Name, err)
+	}
+	*runtime = base
+	return nil
 }

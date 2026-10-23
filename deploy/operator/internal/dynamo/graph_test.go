@@ -1399,7 +1399,7 @@ func TestGenerateComponentContext(t *testing.T) {
 				tt.numberOfNodes,
 				DiscoveryContext{Backend: tt.discoveryBackend, Mode: configv1alpha1.KubeDiscoveryModePod},
 				configv1alpha1.InfrastructureConfiguration{},
-				nil,
+				"", false,
 			)
 			require.NoError(t, err)
 
@@ -10046,7 +10046,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx, err := generateComponentContext(betaComponent(t, component), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{}, nil)
+	compCtx, err := generateComponentContext(betaComponent(t, component), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{}, "", false)
 	require.NoError(t, err)
 	assert.Equal(t, "abc123", compCtx.WorkerHashSuffix)
 
@@ -10054,7 +10054,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 	component2 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
 	}
-	compCtx2, err := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{}, nil)
+	compCtx2, err := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{}, "", false)
 	require.NoError(t, err)
 	assert.Empty(t, compCtx2.WorkerHashSuffix)
 
@@ -10063,7 +10063,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash},
 	}
-	compCtxLegacy, err := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{}, nil)
+	compCtxLegacy, err := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{}, "", false)
 	require.NoError(t, err)
 	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
@@ -10072,7 +10072,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeFrontend,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx3, err := generateComponentContext(betaComponent(t, component3), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{}, nil)
+	compCtx3, err := generateComponentContext(betaComponent(t, component3), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod}, configv1alpha1.InfrastructureConfiguration{}, "", false)
 	require.NoError(t, err)
 	assert.Empty(t, compCtx3.WorkerHashSuffix)
 }
@@ -10131,7 +10131,7 @@ func TestGenerateComponentContext_RuntimeVersion(t *testing.T) {
 				1,
 				DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod},
 				configv1alpha1.InfrastructureConfiguration{},
-				nil,
+				tt.image, false,
 			)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
