@@ -108,7 +108,8 @@ func TestRun_ReleasesRestrictedLeaseBeforeReturning(t *testing.T) {
 			case <-ctx.Done():
 				fixture.releaseStartup()
 				select {
-				case <-runDone:
+				case shutdownErr := <-runDone:
+					t.Logf("run returned after releasing blocked startup: %v", shutdownErr)
 				case <-time.After(time.Second):
 				}
 				t.Fatal("run did not bound restricted-mode startup shutdown")
@@ -230,7 +231,8 @@ func (s *runLeaseTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, fmt.Errorf("unexpected Kubernetes request: %s %s", req.Method, req.URL.Path)
 	}
 	if req.Body != nil {
-		defer req.Body.Close()
+		// The typed client sends an in-memory body whose close cannot fail.
+		defer func() { _ = req.Body.Close() }()
 	}
 
 	// Apply each request to the same fake API that startup and the test observe.
