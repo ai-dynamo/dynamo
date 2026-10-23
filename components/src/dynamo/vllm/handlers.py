@@ -36,6 +36,7 @@ import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -953,13 +954,20 @@ def build_sampling_params(
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
-    if (
-        model_max_len is not None
-        and provided_max_tokens is None
-        and sampling_params.max_tokens is not None
-    ):
-        remaining = max(1, model_max_len - input_length)
-        sampling_params.max_tokens = min(sampling_params.max_tokens, remaining)
+    if model_max_len is not None:
+        # vLLM caps prompt + output but rejects output alone above the model length.
+        if provided_max_tokens is not None and provided_max_tokens > model_max_len:
+            raise InvalidArgument(
+                f"max_tokens={provided_max_tokens} cannot be greater than "
+                f"max_model_len={model_max_len}. Please request fewer output tokens."
+            )
+        if sampling_params.max_tokens is not None:
+            sampling_params.max_tokens = get_max_tokens(
+                max_model_len=model_max_len,
+                max_tokens=sampling_params.max_tokens,
+                input_length=input_length,
+                default_sampling_params=default_sampling_params,
+            )
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -3914,12 +3922,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Log with the traceback here — this is the last frame that knows
             # which request and which encoder — then re-raise unchanged.
             #
-            # Deliberately not converted to `InvalidArgument`. The adapters
-            # raise `ValueError`/`TypeError` for genuine input faults, which the
-            # bindings already map to `Backend(InvalidArgument)` → 400 carrying
-            # the message, so the actionable case needs no help. Coercing the
-            # rest would relabel timeouts, CUDA faults, batcher shutdown and
-            # cancellations as client errors, suppressing retries — and since
+            # Deliberately not converted to `InvalidArgument`: adapter
+            # `ValueError`/`TypeError` map to 400, but with a generic
+            # body — only `InvalidArgument` carries its message to the client.
+            # Coercing the rest would relabel timeouts, CUDA faults, batcher shutdown
+            # and cancellations as client errors, suppressing retries — and since
             # `encode()` is co-batched, it could blame a caller for a failure
             # that originated in someone else's request.
             logger.exception("Request %s: CustomEncoder failed", request_id)

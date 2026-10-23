@@ -75,6 +75,34 @@ fn request_maps_sampling_stop_and_output_fields() {
 }
 
 #[test]
+fn visible_stop_tokens_stop_in_engine_and_stay_in_output() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids = Some(vec![7]);
+    req.stop_conditions.stop_token_ids_hidden = Some(vec![2, 200002]);
+    req.stop_conditions.stop_token_ids_visible = Some(vec![200012, 7]);
+    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    let stopping = proto.stopping.unwrap();
+    assert_eq!(stopping.include_stop_in_output, Some(true));
+    let stop_ids: Vec<_> = stopping
+        .conditions
+        .iter()
+        .filter_map(|condition| match condition.condition {
+            Some(pb::stop_condition::Condition::StopTokenId(id)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stop_ids, [2, 7, 200002, 200012]);
+}
+
+#[test]
+fn empty_visible_stop_tokens_leave_stop_trimming_on() {
+    let mut req = request();
+    req.stop_conditions.stop_token_ids_visible = Some(Vec::new());
+    let proto = build_generate_request(&req, "req", "model", None, AGG).expect("build");
+    assert_eq!(proto.stopping.unwrap().include_stop_in_output, None);
+}
+
+#[test]
 fn omitted_max_tokens_without_context_length_is_rejected() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
@@ -256,6 +284,75 @@ fn a_minimum_within_the_derived_budget_is_served() {
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.min_tokens, Some(8));
     assert_eq!(stopping.max_tokens, Some(64));
+}
+
+// Anonymous requests must not allocate native per-conversation cache state
+// unless the rank-hint contract requires an ID. Only this worker's leg counts.
+#[test]
+fn conversation_identity_follows_session_or_transmitted_rank_hint() {
+    use dynamo_backend_common::engine::RoutingHints;
+
+    for (mode, allow_dp_rank, dp_rank, prefill_dp_rank, expected) in [
+        (AGG, false, None, None, None),
+        (AGG, false, Some(0), None, None),
+        (AGG, true, None, None, None),
+        (AGG, true, Some(0), None, Some("req")),
+        (
+            DisaggregationMode::Prefill,
+            true,
+            None,
+            Some(1),
+            Some("req"),
+        ),
+        (
+            DisaggregationMode::Prefill,
+            true,
+            Some(1),
+            None,
+            Some("req"),
+        ),
+        (DisaggregationMode::Decode, true, None, Some(1), None),
+        (DisaggregationMode::Decode, true, Some(1), None, Some("req")),
+    ] {
+        for session_id in [None, Some(" "), Some(" session ")] {
+            let mut req = request();
+            req.routing = Some(RoutingHints {
+                dp_rank,
+                prefill_dp_rank,
+                ..Default::default()
+            });
+            req.agent_context = session_id.map(|session_id| {
+                serde_json::from_value(json!({"session_id": session_id})).unwrap()
+            });
+            let proto = build_generate_request_with_routing(
+                &req,
+                "req",
+                "model",
+                None,
+                mode,
+                allow_dp_rank,
+            )
+            .expect("build request");
+            let expected = if session_id == Some(" session ") {
+                Some("session")
+            } else {
+                expected
+            };
+            assert_eq!(
+                proto
+                    .extra
+                    .as_ref()
+                    .unwrap()
+                    .fields
+                    .get("conversation_id")
+                    .and_then(|value| value.kind.as_ref()),
+                expected
+                    .map(|value| prost_types::value::Kind::StringValue(value.to_string()))
+                    .as_ref(),
+                "mode={mode:?}, targeting={allow_dp_rank}, rank={dp_rank:?}, prefill_rank={prefill_dp_rank:?}",
+            );
+        }
+    }
 }
 
 /// Applies `mutate` to a baseline request and asserts `build_generate_request`

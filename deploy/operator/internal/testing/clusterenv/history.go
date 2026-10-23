@@ -14,14 +14,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	extensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// PrepareHistory must run on an exclusive test cluster before any admission or
-// controller is active. The returned cleanup is required even when setup fails.
+// PrepareHistory must run on an exclusive test cluster before candidate admission
+// or Dynamo controllers are active. The returned cleanup is required even when setup fails.
 func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][]unstructured.Unstructured) (func(context.Context) error, error) {
 	// Refuse to rewrite storage underneath an installed admission stack.
 	var mutating admissionv1.MutatingWebhookConfigurationList
@@ -72,7 +70,7 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 					errs = append(errs, c.Update(ctx, object))
 				}
 			}
-			err := c.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})
+			err := c.Delete(ctx, &corev1.Namespace{Name: namespace})
 			if !apierrors.IsNotFound(err) {
 				errs = append(errs, err)
 			}
@@ -82,10 +80,16 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 	}
 	required := map[string]map[string]bool{}
 	for namespace, objects := range snapshots {
-		if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}); err != nil {
+		if err := c.Create(ctx, &corev1.Namespace{Name: namespace}); err != nil {
 			return cleanup, err
 		}
 		namespaces = append(namespaces, namespace)
+
+		// Native controllers already run while predecessor workloads are reconstructed.
+		if err := blockQuota(ctx, c, workloadBlockQuota(namespace)); err != nil {
+			return cleanup, err
+		}
+
 		for _, object := range objects {
 			gvk := object.GroupVersionKind()
 			for _, crd := range crds.Items {
@@ -107,7 +111,7 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 		crd.Spec.Conversion = &extensions.CustomResourceConversion{Strategy: extensions.NoneConverter}
 		for i := range crd.Spec.Versions {
 			v := &crd.Spec.Versions[i]
-			v.Schema = &extensions.CustomResourceValidation{OpenAPIV3Schema: &extensions.JSONSchemaProps{Type: "object", XPreserveUnknownFields: ptr.To(true)}}
+			v.Schema = &extensions.CustomResourceValidation{OpenAPIV3Schema: &extensions.JSONSchemaProps{Type: "object", XPreserveUnknownFields: new(true)}}
 			v.DeprecationWarning = nil
 			v.Deprecated = false
 			v.Served = true
@@ -115,7 +119,7 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 		}
 		for version := range versions {
 			crd.Spec.Versions = append(crd.Spec.Versions, extensions.CustomResourceDefinitionVersion{
-				Name: version, Served: true, Schema: &extensions.CustomResourceValidation{OpenAPIV3Schema: &extensions.JSONSchemaProps{Type: "object", XPreserveUnknownFields: ptr.To(true)}},
+				Name: version, Served: true, Schema: &extensions.CustomResourceValidation{OpenAPIV3Schema: &extensions.JSONSchemaProps{Type: "object", XPreserveUnknownFields: new(true)}},
 				Subresources: &extensions.CustomResourceSubresources{Status: &extensions.CustomResourceSubresourceStatus{}},
 			})
 		}

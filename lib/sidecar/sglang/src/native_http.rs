@@ -231,6 +231,17 @@ impl Drop for AbortGuard<'_> {
     }
 }
 
+fn build_http_client(connect_timeout: Duration) -> Result<reqwest::Client, DynamoError> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        // Retire idle connections before SGLang's default 5s keep-alive closes them.
+        .pool_idle_timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|error| {
+            client::invalid_arg(format!("could not configure SGLang HTTP client: {error}"))
+        })
+}
+
 impl NativeHttp {
     pub(crate) fn discover(
         grpc_endpoint: &GrpcEndpoint,
@@ -264,12 +275,7 @@ impl NativeHttp {
         let endpoint = HttpEndpoint::from_grpc(grpc_endpoint, port).map_err(|error| {
             client::protocol_error(format!("invalid SGLang HTTP endpoint: {error}"))
         })?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(connect_timeout)
-            .build()
-            .map_err(|error| {
-                client::invalid_arg(format!("could not configure SGLang HTTP client: {error}"))
-            })?;
+        let client = build_http_client(connect_timeout)?;
         Ok(Some(Self {
             client,
             endpoint,
@@ -584,7 +590,9 @@ fn output(
         (None, Some(finish)) => decode_terminal(&response["meta_info"], finish),
         (None, None) => LLMEngineOutput::default(),
     };
-    output.engine_data = Some(serde_json::json!({"sglang_response": response}));
+    let mut engine_data = Map::new();
+    engine_data.insert("sglang_response".to_string(), response);
+    output.engine_data = Some(Value::Object(engine_data));
     if finished {
         output.disaggregated_params = prefill_handoff.take();
     }
@@ -682,8 +690,8 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, output, request, response_error,
-        response_has_output,
+        NativeHttp, NativeRequest, authentication_error, build_http_client, output, request,
+        response_error, response_has_output,
     };
     use crate::client::Discovery;
 
@@ -714,7 +722,7 @@ mod tests {
     fn native_http(port: u16) -> NativeHttp {
         let grpc = GrpcEndpoint::parse("127.0.0.1:30001", "test").unwrap();
         NativeHttp {
-            client: reqwest::Client::new(),
+            client: build_http_client(Duration::from_secs(1)).unwrap(),
             endpoint: HttpEndpoint::from_grpc(&grpc, port).unwrap(),
             max_event_bytes: MAX_EVENT_BYTES,
             abort_timeout: Duration::from_secs(1),
@@ -989,6 +997,27 @@ mod tests {
         .unwrap();
         assert_eq!(serde_json::to_value(grpc.trace_headers).unwrap(), expected);
         assert_eq!(http.body["external_trace_header"], expected);
+    }
+
+    #[test]
+    fn native_output_moves_expert_payload_into_envelope() {
+        let response = json!({
+            "meta_info": {"routed_experts": "A".repeat(65536)},
+            "unknown_field": [1, 2, 3]
+        });
+        let experts = response["meta_info"]["routed_experts"].as_str().unwrap();
+        let original_ptr = experts.as_ptr();
+        let (converted, finished) = output(response, false, &mut None);
+        assert!(!finished);
+        let response = &converted.engine_data.unwrap()["sglang_response"];
+        assert_eq!(
+            response["meta_info"]["routed_experts"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            original_ptr
+        );
+        assert_eq!(response["unknown_field"], json!([1, 2, 3]));
     }
 
     #[test]
