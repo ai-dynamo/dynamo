@@ -80,6 +80,24 @@ HTTP 403 when listing Pods, Planner warns and uses existing status/default fallb
 Grant Pod-list access to enable registered native names, models, and capabilities;
 other API errors still propagate.
 
+##### LPX model paths in every container
+
+**Change:** The operator sets the LPX model-path variables (`LPX_MODEL_PATH`, or
+`LPX_DRAFT_MODEL_PATH` and `LPX_TARGET_MODEL_PATH` for a speculative pair) in every
+regular and init container of every LPX role. Previously it set them only in `main`
+of the conductor role for LPU-only builds and of the agent role for hybrid builds.
+The operator's value replaces any value authored under these names.
+
+**Affected:** Every DGD with an LPX component: at least the agent template of an
+LPU-only build or the conductor template of a hybrid build gains these variables.
+
+**Action:** Plan for a one-time rollout of LPX workloads when upgrading to v1.7.0.
+No manifest change is needed unless a container sets one of these variables to its
+own value; rename that variable before upgrading.
+
+**Existing deployments:** Reconciliation rolls each LPX workload once without an
+authored manifest change.
+
 ### v1.6.0
 
 #### Runtime Compatibility
