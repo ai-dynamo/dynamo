@@ -807,6 +807,8 @@ class RetuneConfig(BaseModel):
     planner adapters (``RouterRetuneConfig``, ``PlannerRetuneConfig``), stored
     as written; ``retune.domains`` expands them into a grid keyed by live
     names. Either may be the literal ``"default"``; ``None`` searches nothing.
+    Under ``PlannerConfig.advisory`` a decision that would apply is recorded
+    as ``advisory`` and nothing is applied.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -900,10 +902,6 @@ class RetuneConfig(BaseModel):
         default=2,
         ge=1,
         description="Number of sweep worker processes.",
-    )
-    dry_run: bool = Field(
-        default=False,
-        description="Decide and record without actuating.",
     )
     router: Literal["default"] | dict[str, Any] | None = Field(
         default=None,
@@ -1387,7 +1385,9 @@ class PlannerConfig(BaseModel):
         ),
     )
 
-    # Advisory mode: compute and log decisions without executing scaling
+    # Advisory mode: compute, log and report scaling decisions without
+    # executing them, live and in planner-in-the-loop replay; replay records
+    # retune decisions (replay-only) the same way.
     advisory: bool = SLAPlannerDefaults.advisory
 
     # --- Power-aware budget (read-only caps; DGD-owned) ---

@@ -326,7 +326,7 @@ class RetuneParams:
 RetuneOutcome = Literal[
     "applied",
     "kept",
-    "dry_run",
+    "advisory",
     "busy",
     "stale",
     "timeout",
@@ -343,13 +343,16 @@ class RetuneDecision:
     ``request_id``. Times are planner-clock seconds: epoch seconds live,
     virtual seconds in replay. ``as_of_s`` is the censoring cutoff (the
     scheduled launch time). ``chosen`` equals ``previous`` unless the outcome
-    is ``applied`` or ``dry_run``. Hosts apply ``planner_changes`` when the
-    outcome is ``applied``. ``predictor_warmup`` is set iff
-    ``planner_changes`` replaces the load predictor; hosts warm the new
-    predictor with it. ``top`` holds up to five ``(params.key(), score)``
-    pairs, best first. ``sweep_wall_s`` is the sweep's wall-clock time and
-    ``decision_latency_s`` the delay the decision waited for after launch
-    (at least one tick; ``decided_at_s`` is the tick that observed it).
+    is ``applied`` or ``advisory``. Hosts apply ``planner_changes`` only when
+    the outcome is ``applied``; an ``advisory`` decision (planner advisory
+    mode) carries the changes it recommends and applies nothing. On an
+    ``applied`` decision ``predictor_warmup`` is set iff ``planner_changes``
+    replaces the load predictor, and hosts warm the new predictor with it;
+    it is ``None`` on every other outcome. ``top`` holds up to five
+    ``(params.key(), score)`` pairs, best first. ``sweep_wall_s`` is the
+    sweep's wall-clock time and ``decision_latency_s`` the delay the decision
+    waited for after launch (at least one tick; ``decided_at_s`` is the tick
+    that observed it).
     """
 
     decision_id: str

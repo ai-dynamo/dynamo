@@ -194,8 +194,9 @@ class NativePlannerBase:
 
             if self.config.advisory:
                 logger.info(
-                    "[ADVISORY] Planner started in advisory mode; "
-                    "scaling decisions will be logged but NOT executed."
+                    "[ADVISORY] Planner started in advisory mode; scaling "
+                    "decisions will be logged but NOT executed, and the "
+                    "deployment is never changed."
                 )
 
             if self.config.live_dashboard_port:

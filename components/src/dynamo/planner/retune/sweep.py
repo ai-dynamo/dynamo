@@ -648,13 +648,19 @@ def _run_sweep(
             # The inner planner is the current one, warmed from the recorded
             # history (the read task's warmup buckets) instead of the outer
             # run's own warmup trace, never retuned, and without diagnostics
-            # reports (one HTML file per candidate).
+            # reports (one HTML file per candidate). It always scales, even
+            # under an advisory outer planner: a candidate is scored on the
+            # replicas it would drive. Replay never runs batch scheduling, so
+            # it is off, which also drops the Redis settings an actuating
+            # planner would require.
             inner_base = {
                 **request.base_planner,
                 "retune": None,
                 "load_predictor_warmup_trace": None,
                 "report_interval_hours": None,
                 "live_dashboard_port": 0,
+                "advisory": False,
+                "batch_scheduling": {"enabled": False},
             }
         if presweep_interval is not None:
             presweep = _run_presweep(request, pool, inputs, *presweep_interval)

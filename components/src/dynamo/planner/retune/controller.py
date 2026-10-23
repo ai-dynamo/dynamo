@@ -114,7 +114,9 @@ class RetuneController:
     ``ValueError`` on any failure, except that E4 drops the planner grid
     points that do not validate or fit the deployment. ``config`` is the live
     config object the host mutates; the controller reads the searched planner
-    fields from it.
+    fields from it. Under ``config.advisory`` a decision that would apply is
+    recorded as ``advisory`` and leaves the desired state at the deployed
+    point.
     """
 
     def __init__(
@@ -199,7 +201,8 @@ class RetuneController:
         )
         logger.info(
             "retune enabled: interval=%ss grace=%ss %d grid points, router keys %s, "
-            "planner keys %s, predictor candidates %s, scoring SLA ttft=%sms itl=%sms",
+            "planner keys %s, predictor candidates %s, scoring SLA ttft=%sms itl=%sms, "
+            "advisory=%s",
             retune.interval_seconds,
             retune.grace_seconds,
             len(self._grid),
@@ -208,6 +211,7 @@ class RetuneController:
             [label for label, _ in self._predictor_candidates or ()],
             self._sla_ttft_ms,
             self._sla_itl_ms,
+            config.advisory,
         )
         if LOAD_SCALING_DOWN_SENSITIVITY in planner_domain.grid:
             logger.info(
@@ -678,8 +682,6 @@ class RetuneController:
                 reason="best candidate equals the current configuration",
                 **scores,
             )
-        if self._retune.dry_run:
-            return record("dry_run", chosen=chosen, **scores)
 
         predictor_warmup = None
         if planner_changes:
@@ -706,6 +708,14 @@ class RetuneController:
                     "failed", reason=f"predictor warmup rejected: {error}", **scores
                 )
             predictor_warmup = result.warmup_observations
+        if self._config.advisory:
+            # The decision an active planner would apply, after the same
+            # feasibility checks; nothing is applied, so the desired router
+            # and the pending planner changes stay at the deployed point and
+            # the next sweep searches from it again.
+            return record(
+                "advisory", chosen=chosen, planner_changes=planner_changes, **scores
+            )
         decision = record(
             "applied",
             chosen=chosen,
@@ -779,12 +789,17 @@ class RetuneController:
     def _log_decision(decision: RetuneDecision) -> None:
         logger.info(
             "retune decision %s: %s (baseline=%s best=%s requests=%d "
-            "planner_changes=%s reason=%s)",
+            "chosen=%s planner_changes=%s reason=%s)",
             decision.decision_id,
             decision.outcome,
             decision.baseline_score,
             decision.best_score,
             decision.num_requests,
+            (
+                decision.chosen.to_dict()
+                if decision.outcome in ("applied", "advisory")
+                else None
+            ),
             decision.planner_changes,
             decision.reason,
         )

@@ -158,6 +158,9 @@ def test_run_sweep_presweep_fixes_the_winner_into_non_baseline_candidates(tmp_pa
         "throughput_adjustment_interval_seconds": interval_s,
         "load_predictor_warmup_trace": "/outer/warmup.jsonl",
         "retune": {"interval_seconds": 100},
+        # An advisory outer planner; batch scheduling it could not replay.
+        "advisory": True,
+        "batch_scheduling": {"enabled": True},
     }
     request = sweep_request(
         [trace],
@@ -196,6 +199,9 @@ def test_run_sweep_presweep_fixes_the_winner_into_non_baseline_candidates(tmp_pa
     assert metrics["warmup"] == [2.0 + bucket for bucket in range(20)]
     assert metrics["retune"] is None
     assert metrics["reports"] == (None, 0)
+    # Inner planners always scale and never run batch scheduling.
+    assert metrics["advisory"] is False
+    assert metrics["batch_scheduling"] == {"enabled": False}
     # A predictor swap's warmup covers history and window at the throughput
     # interval, and the winner was prepared on it.
     observations = result.warmup_observations

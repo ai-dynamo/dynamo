@@ -151,6 +151,12 @@ def fake_evaluator(
             else [obs.num_req for obs in _read_observations(warmup_path)]
         ),
         "retune": None if base_planner is None else base_planner.get("retune", "?"),
+        "advisory": (
+            None if base_planner is None else base_planner.get("advisory", "?")
+        ),
+        "batch_scheduling": (
+            None if base_planner is None else base_planner.get("batch_scheduling", "?")
+        ),
         "reports": (
             None
             if base_planner is None

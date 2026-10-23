@@ -129,15 +129,19 @@ def _config(mode="agg", retune=None, **overrides):
     )
 
 
-def _s1(mode="agg", **retune):
+def _s1(mode="agg", *, advisory=False, **retune):
     return _config(
-        mode, retune, enable_load_scaling=False, enable_throughput_scaling=False
+        mode,
+        retune,
+        enable_load_scaling=False,
+        enable_throughput_scaling=False,
+        advisory=advisory,
     )
 
 
-def _s2(**retune):
+def _s2(*, advisory=False, **retune):
     retune = {"router": None, "planner": SENSITIVITY_GRID, **retune}
-    return _config("agg", retune, optimization_target="throughput")
+    return _config("agg", retune, optimization_target="throughput", advisory=advisory)
 
 
 def _engine(mode="agg", router_mode="kv_router", **router_config):
@@ -531,18 +535,80 @@ async def test_min_improvement_percentage_boundary(sweeps, best_score, outcome):
     assert decision.best_score == best_score
 
 
-async def test_dry_run_records_the_best_point_without_actuating(sweeps):
+async def test_advisory_records_the_best_point_without_actuating(sweeps):
     sweeps.default = _best_wins()
-    controller = _controller(_s1(dry_run=True))
+    controller = _controller(_s1(advisory=True))
 
     ticks = await _run(controller, 75)
 
     ((_, decision),) = _decisions(ticks)
-    assert decision.outcome == "dry_run"
+    assert decision.outcome == "advisory"
     assert decision.chosen == BEST and decision.previous == STARTUP
     assert decision.planner_changes == {}
+    assert decision.predictor_warmup is None
+    assert ("retune:advisory w=0") in [e for _, e in _events(ticks)]
     assert ticks[-1][1].router_parameters == _startup_map()
     assert controller.current_point() == STARTUP
+
+
+async def test_advisory_recommends_from_the_deployed_point_every_window(sweeps):
+    config = _s2(advisory=True)
+    sweeps.default = _scored(lambda c, _r: 2.0 if c.planner[LSD] == 70 else 1.0)
+    controller = _controller(config)
+
+    # Even a host that applied every applied decision changes nothing.
+    ticks = await _run(controller, 185, after_tick=_apply_planner_changes(config))
+
+    decisions = _decisions(ticks)
+    assert [(now, d.outcome, d.window_index) for now, d in decisions] == [
+        (70.0, "advisory", 0),
+        (130.0, "advisory", 1),
+    ]
+    for _, decision in decisions:
+        # The recommended changes, from the deployed value each time.
+        assert decision.previous == RetuneParams(planner={LSD: 80})
+        assert decision.chosen == RetuneParams(planner={LSD: 70})
+        assert decision.planner_changes == {LSD: 70}
+    # Neither the baseline nor the inner planner moved to the recommendation.
+    assert [request.baseline for request in sweeps.requests] == [
+        RetuneParams(planner={LSD: 80})
+    ] * 3
+    assert [request.base_planner[LSD] for request in sweeps.requests] == [80] * 3
+    assert all(request.base_planner["advisory"] is True for request in sweeps.requests)
+    assert config.load_scaling_down_sensitivity == 80
+    assert controller.current_point() == RetuneParams(planner={LSD: 80})
+
+
+async def test_advisory_predictor_recommendation_carries_no_warmup(sweeps):
+    config = _config(
+        "agg",
+        {"router": None, "planner": "default"},
+        optimization_target="sla",
+        enable_load_scaling=False,
+        enable_throughput_scaling=True,
+        throughput_adjustment_interval_seconds=10,
+        advisory=True,
+    )
+    presweep = _presweep("kalman_default_raw")
+    warmup = tuple(
+        TrafficObservation(duration_s=10.0, num_req=float(i), isl=1.0, osl=1.0)
+        for i in range(60)
+    )
+    sweeps.default = _scored(
+        lambda c, r: 1.0 if c == r.baseline else 2.0,
+        predictor_presweep=presweep,
+        warmup_observations=warmup,
+    )
+    controller = _controller(config)
+
+    ticks = await _run(controller, 70)
+
+    ((_, decision),) = _decisions(ticks)
+    assert decision.outcome == "advisory"
+    assert decision.planner_changes == {"load_predictor": "kalman"}
+    assert decision.predictor_warmup is None
+    assert decision.to_dict()["predictor_warmup"] is None
+    assert config.load_predictor == "arima"
 
 
 @pytest.mark.parametrize("mode", ["agg", "disagg"])
@@ -775,11 +841,13 @@ KALMAN_MIN_POINTS_60 = {
     ],
     ids=["kalman-needs-5", "kalman-min-points-60", "no-warmup"],
 )
+# Advisory recommends only what an active planner would apply.
+@pytest.mark.parametrize("advisory", [False, True], ids=["active", "advisory"])
 async def test_predictor_swap_with_too_short_a_warmup_fails(
-    sweeps, candidates, overrides, winner, labels, history_s, warmup_error
+    sweeps, candidates, overrides, winner, labels, history_s, warmup_error, advisory
 ):
     config = _sla_predictor_config(
-        {"load_predictor": {"preset": candidates}}, **overrides
+        {"load_predictor": {"preset": candidates}}, advisory=advisory, **overrides
     )
     # The pre-sweep winner is fixed into every non-baseline candidate; the
     # sweep prepared it on the warmup it returns.

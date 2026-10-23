@@ -18,6 +18,12 @@ an optional scaling component. Rust owns the drive loop:
         # parameters, and re-arms the next tick itself
       adapter.finalize() -> PlannerReplayDetails
 
+With ``PlannerConfig.advisory`` the adapter is the replay counterpart of a
+live advisory planner: every tick still runs, but the targets and router
+parameters handed to Rust are always ``None`` (unchanged), so the simulated
+deployment stays fixed, and the planner's recommendations are recorded in
+``recommended_scaling_events`` instead of ``scaling_events``.
+
 The tick engine is the builtin orchestrator path:
 ``OrchestratorEngineAdapter`` wrapping ``LocalPlannerOrchestrator`` +
 the builtin local-planner plugins. It preserves the planner's
@@ -211,9 +217,10 @@ class ReplayPlannerAdapter:
 
     # Set by ``start()``. Class-level immutable defaults keep partially
     # constructed adapters finalizable: ``finalize`` then reports no retune
-    # events and digests the current config.
+    # events or recommendations and digests the current config.
     _start_config_dump: Optional[dict[str, Any]] = None
     _retune_decisions: tuple[RetuneDecision, ...] = ()
+    _recommended_events: tuple[ScalingEvent, ...] = ()
 
     def __init__(
         self,
@@ -227,6 +234,13 @@ class ReplayPlannerAdapter:
         self._config = planner_config
         self._capabilities = capabilities
         self._is_disagg = planner_config.mode == "disagg"
+        if planner_config.advisory:
+            logger.warning(
+                "[ADVISORY] planner.advisory=true: the replay keeps the simulated "
+                "deployment fixed (no scaling, no retune changes) and only records "
+                "the planner's recommendations; set advisory: false to simulate "
+                "scaling"
+            )
 
         self._engine = engine
         self._warmup_observations = list(warmup_observations or [])
@@ -336,6 +350,9 @@ class ReplayPlannerAdapter:
         self._start_config_dump = self._planner_config_dump()
         self._pending_tick: ScheduledTick = self._engine.initial_tick(0.0)
         self._scaling_events: list[ScalingEvent] = []
+        self._recommended_events = ()
+        # Component -> the count last recommended away from the deployment.
+        self._last_recommended: dict[str, int] = {}
         self._retune_decisions = ()
         self._ticks: list[dict[str, Any]] = []
         self._total_ticks = 0
@@ -350,7 +367,8 @@ class ReplayPlannerAdapter:
         """Drive one planner tick from the runtime snapshot. Returns the scaling
         decision (absolute targets, ``None`` = unchanged), the next tick time in ms
         (``None`` = stop) and the desired router policy parameters (``None`` =
-        unchanged) for the Rust loop to apply and re-arm."""
+        unchanged) for the Rust loop to apply and re-arm. In advisory mode the
+        targets and router parameters are always ``None``."""
         tick = self._pending_tick
         tick_input = self._build_tick_input(tick, result)
         effects: PlannerEffects = self._run_sync(self._engine.tick(tick, tick_input))
@@ -379,7 +397,15 @@ class ReplayPlannerAdapter:
 
         target_prefill: Optional[int] = None
         target_decode: Optional[int] = None
-        if effects.scale_to is not None:
+        advisory = self._config.advisory
+        if advisory:
+            # Never set ``_scaling_target_*``: like a live advisory planner
+            # whose deployment never changes, the planner keeps seeing
+            # expected == current and no scaling in progress.
+            self._record_recommendations(
+                tick, effects, current_p, current_d, tick_input.now_s
+            )
+        elif effects.scale_to is not None:
             target_prefill, target_decode = self._compute_scale_decision(
                 effects, result, tick_input.now_s
             )
@@ -395,7 +421,7 @@ class ReplayPlannerAdapter:
             "next_tick_ms": next_tick_ms,
             # Level-triggered desired state; Rust patches only the diff
             # against each replay router at this tick's virtual time.
-            "router_parameters": effects.router_parameters,
+            "router_parameters": None if advisory else effects.router_parameters,
         }
         tick_ordinal = int(result["tick_ordinal"])
         if self._capture_details:
@@ -442,6 +468,12 @@ class ReplayPlannerAdapter:
         self._retune_decisions = (*self._retune_decisions, *decisions)
         capabilities = self._capabilities or WorkerCapabilities()
         for decision in decisions:
+            if decision.outcome == "applied" and self._config.advisory:
+                # The controller records ``advisory`` instead under advisory.
+                raise RuntimeError(
+                    f"retune decision {decision.decision_id} is applied, but the "
+                    "planner is in advisory mode"
+                )
             changes = decision.planner_changes
             if decision.outcome != "applied" or not changes:
                 continue
@@ -493,6 +525,10 @@ class ReplayPlannerAdapter:
                 None
                 if self._config.retune is None
                 else [decision.to_dict() for decision in self._retune_decisions]
+            ),
+            # Present (possibly empty) whenever the planner is advisory.
+            recommended_scaling_events=(
+                list(self._recommended_events) if self._config.advisory else None
             ),
         )
 
@@ -660,6 +696,7 @@ class ReplayPlannerAdapter:
             "benchmark_granularity": self._benchmark_granularity,
             "bootstrap": self._bootstrap_metadata,
             "details_captured": self._capture_details,
+            "advisory": self._config.advisory,
         }
 
     def close(self) -> None:
@@ -802,6 +839,61 @@ class ReplayPlannerAdapter:
                 )
             )
         return (target_p, target_d)
+
+    def _record_recommendations(
+        self,
+        tick: ScheduledTick,
+        effects: PlannerEffects,
+        current_p: int,
+        current_d: int,
+        now_s: float,
+    ) -> None:
+        """Record what an advisory planner recommends; never applies it.
+
+        An event marks each change of a component's recommended count away
+        from its deployed count (never ``from_count == to_count``). A decision
+        tick without ``scale_to`` holds the deployment, and a ``scale_to``
+        without a target for a role (the power-aware projection drops roles it
+        keeps) holds that role; a hold resets the recommendation, so a
+        recommendation repeated after a hold is recorded again.
+        """
+        scale = effects.scale_to
+        if scale is None:
+            if tick.run_load_scaling or tick.run_throughput_scaling:
+                self._last_recommended.clear()
+            return
+        if self._is_disagg:
+            roles = [
+                ("prefill", scale.num_prefill, current_p),
+                ("decode", scale.num_decode, current_d),
+            ]
+        else:
+            roles = [("agg", scale.num_decode, current_d)]
+        for component, target, current in roles:
+            target = current if target is None else target
+            last = self._last_recommended.get(component, current)
+            self._last_recommended[component] = target
+            if target in (current, last):
+                continue
+            direction = "scale_up" if target > current else "scale_down"
+            logger.info(
+                "[ADVISORY] Planner recommends %s: %d -> %d at t=%.1fs (%s, "
+                "not applied)",
+                component,
+                current,
+                target,
+                now_s,
+                direction,
+            )
+            self._recommended_events += (
+                ScalingEvent(
+                    at_s=now_s,
+                    component=component,
+                    from_count=current,
+                    to_count=target,
+                    reason=direction,
+                ),
+            )
 
     def _is_easy_mode(self) -> bool:
         """Easy-mode check routed via config — both paths honour this

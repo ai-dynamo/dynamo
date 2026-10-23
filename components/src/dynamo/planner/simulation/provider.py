@@ -89,10 +89,13 @@ _PREDICTOR_KEYS = frozenset(
 _PROVIDER_API_VERSION = 1
 _PLANNER_HOOK_API_VERSION = 1
 # Accepted by ``aisimulate predict`` only. ``retune`` is an opaque mapping that
-# ``PlannerConfig`` validates; a recommendation sweep has no use for either.
+# ``PlannerConfig`` validates; ``advisory`` replays with the deployment held
+# fixed and records the recommendations. A recommendation sweep has no use for
+# any of them.
 _RETUNE = "retune"
 _WARMUP_TRACE = "load_predictor_warmup_trace"
-_PREDICTION_ONLY_FIELDS = (_WARMUP_TRACE, _RETUNE)
+_ADVISORY = "advisory"
+_PREDICTION_ONLY_FIELDS = (_WARMUP_TRACE, _RETUNE, _ADVISORY)
 
 
 _HOOK = RuntimeHookSpec(
@@ -685,6 +688,11 @@ class DynamoPlannerSweepConfigProvider:
                     "with fixed replicas also set enable_load_scaling: false and "
                     "enable_throughput_scaling: false"
                 )
+            if config.get(_ADVISORY):
+                raise ValueError(
+                    "planner.advisory requires planner.policy: enabled: a "
+                    "disabled planner makes no recommendations"
+                )
             return AdapterReplaySpec(config={"policy": "disabled"})
         raw_sla = context.evaluation.get("sla")
         sla = raw_sla if isinstance(raw_sla, Mapping) else None
@@ -722,6 +730,12 @@ class DynamoPlannerSweepConfigProvider:
                 "planner.retune is not supported by aisimulate recommend: each "
                 "candidate replays a static planner configuration. Measure retune "
                 "with aisimulate predict instead"
+            )
+        if _ADVISORY in config:
+            raise ValueError(
+                "planner.advisory is not supported by aisimulate recommend: an "
+                "advisory candidate never scales, so it is scored on its starting "
+                "replicas. Replay recommendations with aisimulate predict instead"
             )
         public = PlannerRecommendationConfig.model_validate(config)
         policies = (

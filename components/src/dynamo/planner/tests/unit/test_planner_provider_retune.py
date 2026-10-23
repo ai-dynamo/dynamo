@@ -3,7 +3,8 @@
 # ruff: noqa: E402
 # Optional-dependency preflight must run before the simulation imports.
 
-"""``planner.retune`` and ``load_predictor_warmup_trace`` in ``aisimulate predict``."""
+"""``planner.retune``, ``load_predictor_warmup_trace`` and ``planner.advisory``
+in ``aisimulate predict``."""
 
 from __future__ import annotations
 
@@ -163,6 +164,37 @@ def test_disabled_policy_rejects_retune() -> None:
         create_provider().compile_prediction({"retune": _RETUNE}, _context())
 
 
+@pytest.mark.parametrize("advisory", [True, False])
+def test_advisory_passes_through_to_the_replay_host(advisory) -> None:
+    spec = create_provider().compile_prediction(
+        {"policy": "enabled", "advisory": advisory, "retune": _RETUNE}, _context()
+    )
+
+    assert _hook_config(spec)["advisory"] is advisory
+    assert _host_config(spec).advisory is advisory
+    assert spec.config["advisory"] is advisory
+
+
+def test_advisory_is_omitted_unless_written() -> None:
+    spec = create_provider().compile_prediction({"policy": "enabled"}, _context())
+
+    assert "advisory" not in _hook_config(spec)
+    assert _host_config(spec).advisory is False
+    assert "advisory" not in spec.config
+
+
+def test_disabled_policy_rejects_advisory() -> None:
+    with pytest.raises(ValueError, match="planner.advisory requires planner.policy"):
+        create_provider().compile_prediction(
+            {"policy": "disabled", "advisory": True}, _context()
+        )
+    # ``advisory: false`` is a no-op, so a shared config may set it with any
+    # policy, including the omitted (disabled) one.
+    for config in ({"policy": "disabled", "advisory": False}, {"advisory": False}):
+        spec = create_provider().compile_prediction(config, _context())
+        assert spec.config == {"policy": "disabled"}
+
+
 @pytest.mark.parametrize(
     "traffic, message",
     [
@@ -250,8 +282,8 @@ def test_warmup_trace_passes_through_resolved_against_the_working_directory(
         )
 
 
-def test_recommend_rejects_retune() -> None:
-    context = RecommendationAdapterContext(
+def _recommendation_context() -> RecommendationAdapterContext:
+    return RecommendationAdapterContext(
         engine={},
         traffic={},
         evaluation={},
@@ -264,7 +296,14 @@ def test_recommend_rejects_retune() -> None:
         ),
     )
 
+
+@pytest.mark.parametrize(
+    "field",
+    [{"retune": _RETUNE}, {"advisory": True}, {"advisory": False}],
+    ids=["retune", "advisory", "advisory-false"],
+)
+def test_recommend_rejects_prediction_only_fields(field) -> None:
     with pytest.raises(ValueError, match="not supported by aisimulate recommend"):
         create_provider().compile_recommendation(
-            {"policy": "enabled", "retune": _RETUNE}, context
+            {"policy": "enabled", **field}, _recommendation_context()
         )

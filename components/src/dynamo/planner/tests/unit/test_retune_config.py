@@ -81,6 +81,8 @@ def test_a_shared_retune_instance_is_never_modified():
         (RetuneConfig, {"interval_seconds": 600, "traffic_model": "open_loop"}),
         # Live-only inputs come with the live planner.
         (RetuneConfig, {"interval_seconds": 600, "live": {}}),
+        # Recommend-only retune is the planner-wide advisory mode.
+        (RetuneConfig, {"interval_seconds": 600, "dry_run": True}),
         (RetuneEngineSpec, {"unknown": 1}),
     ],
 )
@@ -765,7 +767,6 @@ def test_engine_spec_replay_kwargs_merge_router_overrides():
                 planner={**SENSITIVITY_OFF, LSD: {"choices": [70, 90]}},
                 timeout_seconds=300,
                 sla_ttft_ms=200,
-                dry_run=True,
             ),
             {"load_scaling_down_sensitivity": 70},
         ),

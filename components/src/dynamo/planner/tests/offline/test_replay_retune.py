@@ -130,7 +130,7 @@ def _decision(
         num_requests=12,
         num_candidates=3,
         previous=previous,
-        chosen=chosen if outcome in ("applied", "dry_run") else previous,
+        chosen=chosen if outcome in ("applied", "advisory") else previous,
         baseline_score=10.0,
         best_score=12.0,
         planner_changes=dict(planner_changes or {}),
@@ -216,9 +216,50 @@ def test_on_tick_forwards_desired_router_map_and_records_router_policies(
     assert details.to_dict()["retune_events"] == []
 
 
+def test_advisory_never_hands_rust_the_router_map(stub_controller):
+    policies = [
+        {
+            "worker_type": "aggregated",
+            "revision": 0,
+            "parameters": ROUTER_MAP["aggregated"],
+        }
+    ]
+    with _adapter(retune_only_config(advisory=True, **_QUIET)) as adapter:
+        adapter.start()
+        stub_controller.instances[0].results.append(
+            StubTickResult(router_parameters=ROUTER_MAP)
+        )
+        decision = adapter.on_tick(_snapshot(0, router_policies=policies))
+        details = adapter.finalize()
+
+    assert decision["router_parameters"] is None
+    (tick,) = details.ticks
+    assert tick["runtime_decision"]["router_parameters"] is None
+    assert tick["router_policies"] == policies
+    assert details.metadata["advisory"] is True
+    assert details.retune_events == []
+    assert details.recommended_scaling_events == []
+
+
+def test_an_applied_decision_under_advisory_fails_the_replay(stub_controller):
+    config = _load_scaling_config()
+    config.advisory = True
+    with _adapter(config, capture_details=False) as adapter:
+        adapter.start()
+        stub_controller.instances[0].results.append(
+            StubTickResult(
+                decisions=[_decision("applied", {"load_scaling_down_sensitivity": 70})]
+            )
+        )
+        with pytest.raises(RuntimeError, match="advisory mode"):
+            adapter.on_tick(_snapshot(0))
+
+    assert config.load_scaling_down_sensitivity == 80
+
+
 @pytest.mark.parametrize(
     ("outcome", "value"),
-    [("applied", 70), ("kept", 80), ("dry_run", 80)],
+    [("applied", 70), ("kept", 80), ("advisory", 80)],
 )
 def test_actuated_planner_changes_apply_from_the_next_tick(
     stub_controller, monkeypatch, outcome, value
@@ -242,7 +283,7 @@ def test_actuated_planner_changes_apply_from_the_next_tick(
         details = adapter.finalize()
 
     # The engine observed the old value in the decision tick and the actuated
-    # value from the next tick on; kept and dry_run never actuate.
+    # value from the next tick on; kept and advisory never actuate.
     assert [
         values["load_scaling_down_sensitivity"]
         for values in controller.seen_planner_values

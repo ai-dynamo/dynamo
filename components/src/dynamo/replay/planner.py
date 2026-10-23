@@ -215,7 +215,9 @@ def prepare_planner_replay(
     pinned engine) from the parsed planner config. It is required when the
     config sets ``retune``; only trace replay entry points that support
     retune provide one. ``warmup_observations``, when set, warm the load
-    predictor instead of the config's ``load_predictor_warmup_trace``.
+    predictor instead of the config's ``load_predictor_warmup_trace``. An
+    ``advisory`` config replays as a live advisory planner runs: the
+    deployment stays fixed and the recommendations are only recorded.
     """
 
     from dynamo.planner.config.planner_config import PlannerConfig
@@ -226,7 +228,6 @@ def prepare_planner_replay(
     )
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
-    planner_config.advisory = True
 
     if planner_config.mode == "agg":
         extra_engine_args = normalize_mocker_config(extra_engine_args)
