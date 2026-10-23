@@ -4,7 +4,9 @@
 """Unit tests for NIXL/POSIX staging restore planning."""
 
 import os
+import re
 import threading
+from pathlib import Path
 
 import pytest
 from _deps import HAS_GMS
@@ -17,6 +19,8 @@ if not HAS_GMS:
 
 from _fake_vmm import FakeVMM
 from blake3 import blake3
+from gpu_memory_service.common.vmm import VMMDeviceType
+from gpu_memory_service.snapshot.backends import pinned_host
 from gpu_memory_service.snapshot.backends.nixl import NixlTransferBackend
 from gpu_memory_service.snapshot.backends.nixl_common import (
     NixlFileGroup,
@@ -305,20 +309,120 @@ def test_staging_backend_rejects_same_length_mutation(monkeypatch, tmp_path):
         _restore_with_staging_backend(monkeypatch, tmp_path, b"abcdefgh", b"xbcdefgh")
 
 
-def test_pinned_copy_slot_skips_unsupported_host_register():
-    class HostRegisterUnsupportedVMM(FakeVMM):
-        def host_register(self, ptr, size):
-            raise RuntimeError(
-                "_sycl_vmm: register_host_memory not available (oneAPI too old)"
-            )
+_SYCL_UNSUPPORTED_REGISTER_MESSAGES = (
+    "_sycl_vmm: register_host_memory not available (oneAPI too old)",
+    "_sycl_vmm: device does not support host memory registration "
+    "(aspect::ext_oneapi_register_host_memory not advertised by this device).",
+)
 
-        def host_unregister(self, ptr):
-            raise AssertionError(
-                "host_unregister should be skipped when registration is unsupported"
-            )
 
-    slot = PinnedCopySlot(HostRegisterUnsupportedVMM())
+class _HostRegisterVMM(FakeVMM):
+    """Records host-register/stream calls; optionally fails host_register."""
 
-    assert slot._registered is False
+    def __init__(self, register_error=None):
+        super().__init__()
+        self.register_error = register_error
+        self.registered = []
+        self.unregistered = []
+        self.destroyed_streams = []
+
+    def host_register(self, ptr, size):
+        if self.register_error is not None:
+            raise self.register_error
+        self.registered.append((ptr, size))
+
+    def host_unregister(self, ptr):
+        self.unregistered.append(ptr)
+
+    def stream_destroy(self, stream):
+        self.destroyed_streams.append(stream)
+
+
+@pytest.fixture
+def freed_buffers(monkeypatch):
+    freed = []
+    free = pinned_host._free_aligned_buffer
+
+    def record_free(view, ptr):
+        freed.append(ptr)
+        free(view, ptr)
+
+    monkeypatch.setattr(pinned_host, "_free_aligned_buffer", record_free)
+    return freed
+
+
+def _use_device_type(monkeypatch, device_type):
+    monkeypatch.setattr(pinned_host, "get_vmm_device_type", lambda: device_type)
+
+
+def test_pinned_copy_slot_registers_on_cuda(monkeypatch, freed_buffers):
+    _use_device_type(monkeypatch, VMMDeviceType.CUDA)
+    vmm = _HostRegisterVMM()
+
+    slot = PinnedCopySlot(vmm, size=8192)
+    assert slot._registered is True
+    assert vmm.registered == [(slot.ptr, 8192)]
 
     slot.close()
+    assert vmm.unregistered == [slot.ptr]
+    assert vmm.destroyed_streams == ["fake_stream"]
+    assert freed_buffers == [slot.ptr]
+
+
+@pytest.mark.parametrize("message", _SYCL_UNSUPPORTED_REGISTER_MESSAGES)
+def test_pinned_copy_slot_skips_unsupported_host_register_on_xpu(
+    monkeypatch, freed_buffers, message
+):
+    _use_device_type(monkeypatch, VMMDeviceType.XPU)
+    vmm = _HostRegisterVMM(RuntimeError(message))
+
+    slot = PinnedCopySlot(vmm, size=8192)
+    assert slot._registered is False
+    assert freed_buffers == []
+
+    slot.close()
+    assert vmm.unregistered == []
+    assert vmm.destroyed_streams == ["fake_stream"]
+    assert freed_buffers == [slot.ptr]
+
+
+@pytest.mark.parametrize(
+    "device_type, register_error",
+    [
+        (VMMDeviceType.CUDA, RuntimeError(_SYCL_UNSUPPORTED_REGISTER_MESSAGES[0])),
+        (VMMDeviceType.XPU, RuntimeError("_sycl_vmm: register_host_memory failed")),
+        (VMMDeviceType.XPU, ValueError(_SYCL_UNSUPPORTED_REGISTER_MESSAGES[0])),
+    ],
+    ids=["cuda-matching-message", "xpu-other-runtime-error", "xpu-not-runtime-error"],
+)
+def test_pinned_copy_slot_cleans_up_and_fails_on_other_register_errors(
+    monkeypatch, freed_buffers, device_type, register_error
+):
+    _use_device_type(monkeypatch, device_type)
+    vmm = _HostRegisterVMM(register_error)
+
+    with pytest.raises(type(register_error)) as raised:
+        PinnedCopySlot(vmm, size=8192)
+
+    assert raised.value is register_error
+    assert vmm.unregistered == []
+    assert vmm.destroyed_streams == ["fake_stream"]
+    assert len(freed_buffers) == 1
+
+
+def test_unsupported_host_register_messages_match_sycl_vmm():
+    """The XPU fallback matches on _sycl_vmm's error text; catch drift in CI."""
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "common"
+        / "vmm"
+        / "_sycl_vmm"
+        / "sycl_vmm.cpp"
+    )
+    if not source.is_file():
+        pytest.skip(f"{source} is not available in this test image")
+
+    # Adjacent C++ string literals are concatenated, so join them first.
+    text = re.sub(r'"\s*"', "", source.read_text()).lower()
+    for message in pinned_host._UNSUPPORTED_HOST_REGISTER_MESSAGES:
+        assert message in text, f"{message!r} no longer raised by sycl_vmm.cpp"
