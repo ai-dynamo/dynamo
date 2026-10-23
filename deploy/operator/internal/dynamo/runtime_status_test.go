@@ -92,7 +92,7 @@ func TestResolveComponentRuntimeStatusFromRenderedTRTLLMLeader(t *testing.T) {
 		&v1beta1.DynamoComponentDeploymentSharedSpec{},
 		"decode",
 		&GroveMultinodeDeployer{},
-		staticContainerGPUCount(1),
+		staticContainerGPUCount(1), false,
 	))
 
 	status := ResolveComponentRuntimeStatus(&corev1.PodSpec{Containers: []corev1.Container{*container}}, nil)
