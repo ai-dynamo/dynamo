@@ -1534,7 +1534,6 @@ fn advance_scalar(
             }
             hint_source = None;
         }
-        // A missing edge dropped both above.
         let Some(owners) = owners else {
             return;
         };
