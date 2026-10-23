@@ -11,12 +11,13 @@ use std::collections::{HashMap, HashSet};
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
     InputContent, InputImageContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
-    InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
-    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
-    RefusalContent, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
-    ServiceTierResponses, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
-    ToolChoiceAllowed, ToolChoiceAllowedMode, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    InputTokenDetails, Instructions, Item, MessageItem, MessagePhase, NamespaceToolParamTool,
+    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
+    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent,
+    ReasoningTextContent, RefusalContent, Response, ResponseTextParam, ResponseUsage,
+    Role as ResponseRole, ServiceTierResponses, Status, SummaryPart,
+    TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
+    ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -433,6 +434,7 @@ struct PendingAssistant {
     pending_reasoning: String,
     tool_calls: Vec<ChatCompletionMessageToolCall>,
     touched: bool,
+    phase: Option<MessagePhase>,
 }
 
 impl PendingAssistant {
@@ -444,6 +446,27 @@ impl PendingAssistant {
         match self.content.as_mut() {
             Some(existing) => existing.push_str(text),
             None => self.content = Some(text.to_string()),
+        }
+    }
+
+    fn push_message(
+        &mut self,
+        text: &str,
+        phase: Option<MessagePhase>,
+        out: &mut Vec<ChatCompletionRequestMessage>,
+        phases: &mut Vec<(usize, MessagePhase)>,
+    ) {
+        if let Some(phase) = phase {
+            // Reasoning may belong to this message, but preceding visible text
+            // or tool calls must keep their own position in history.
+            if self.content.is_some() || !self.tool_calls.is_empty() {
+                std::mem::take(self).flush_into(out, phases);
+            }
+            self.phase = Some(phase);
+            self.push_text(text);
+            std::mem::take(self).flush_into(out, phases);
+        } else {
+            self.push_text(text);
         }
     }
 
@@ -459,9 +482,16 @@ impl PendingAssistant {
         self.tool_calls.push(call);
     }
 
-    fn flush_into(mut self, out: &mut Vec<ChatCompletionRequestMessage>) {
+    fn flush_into(
+        mut self,
+        out: &mut Vec<ChatCompletionRequestMessage>,
+        phases: &mut Vec<(usize, MessagePhase)>,
+    ) {
         if !self.touched {
             return;
+        }
+        if let Some(phase) = self.phase {
+            phases.push((out.len(), phase));
         }
         self.reasoning_segments.push(self.pending_reasoning);
 
@@ -517,6 +547,7 @@ impl PendingAssistant {
 fn convert_input_items_to_messages(
     items: &[InputItem],
     names: &ToolNameMap,
+    phases: &mut Vec<(usize, MessagePhase)>,
 ) -> Result<Vec<ChatCompletionRequestMessage>, anyhow::Error> {
     let mut messages = Vec::with_capacity(items.len());
     let mut pending = PendingAssistant::default();
@@ -526,7 +557,7 @@ fn convert_input_items_to_messages(
             InputItem::Item(inner_item) => match inner_item {
                 Item::Message(msg_item) => match msg_item {
                     MessageItem::Input(msg) => {
-                        std::mem::take(&mut pending).flush_into(&mut messages);
+                        std::mem::take(&mut pending).flush_into(&mut messages, phases);
                         let chat_msg = match msg.role {
                             InputRole::System | InputRole::Developer => {
                                 let text = convert_input_content_to_text(&msg.content);
@@ -569,7 +600,7 @@ fn convert_input_items_to_messages(
                             })
                             .collect::<Vec<_>>()
                             .join("");
-                        pending.push_text(&text);
+                        pending.push_message(&text, out_msg.phase, &mut messages, phases);
                     }
                 },
                 Item::FunctionCall(fc) => {
@@ -583,7 +614,7 @@ fn convert_input_items_to_messages(
                     });
                 }
                 Item::FunctionCallOutput(fco) => {
-                    std::mem::take(&mut pending).flush_into(&mut messages);
+                    std::mem::take(&mut pending).flush_into(&mut messages, phases);
                     let content = match &fco.output {
                         FunctionCallOutput::Text(text) => text.clone().into(),
                         FunctionCallOutput::Content(parts) => {
@@ -628,7 +659,7 @@ fn convert_input_items_to_messages(
                         "Skipping unsupported input item type during conversion: {:?}",
                         std::mem::discriminant(other)
                     );
-                    std::mem::take(&mut pending).flush_into(&mut messages);
+                    std::mem::take(&mut pending).flush_into(&mut messages, phases);
                 }
             },
             InputItem::EasyMessage(easy) => {
@@ -645,7 +676,7 @@ fn convert_input_items_to_messages(
                                 convert_input_content_to_text(parts)
                             }
                         };
-                        std::mem::take(&mut pending).flush_into(&mut messages);
+                        std::mem::take(&mut pending).flush_into(&mut messages, phases);
                         messages.push(ChatCompletionRequestMessage::System(
                             ChatCompletionRequestSystemMessage {
                                 content: ChatCompletionRequestSystemMessageContent::Text(text),
@@ -669,7 +700,7 @@ fn convert_input_items_to_messages(
                                 convert_input_content_to_user_content(parts)?
                             }
                         };
-                        std::mem::take(&mut pending).flush_into(&mut messages);
+                        std::mem::take(&mut pending).flush_into(&mut messages, phases);
                         messages.push(ChatCompletionRequestMessage::User(
                             ChatCompletionRequestUserMessage {
                                 content,
@@ -688,7 +719,7 @@ fn convert_input_items_to_messages(
                                 convert_input_content_to_text(parts)
                             }
                         };
-                        pending.push_text(&text);
+                        pending.push_message(&text, easy.phase, &mut messages, phases);
                     }
                 }
             }
@@ -698,7 +729,7 @@ fn convert_input_items_to_messages(
         }
     }
 
-    pending.flush_into(&mut messages);
+    pending.flush_into(&mut messages, phases);
 
     Ok(messages)
 }
@@ -928,6 +959,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             Some(&resp.inner.input),
         );
         let mut messages = Vec::new();
+        let mut assistant_message_phases = Vec::new();
 
         // Prepend instructions as system message if present
         if let Some(instructions) = &resp.inner.instructions {
@@ -951,7 +983,11 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 ));
             }
             InputParam::Items(items) => {
-                let item_messages = convert_input_items_to_messages(items, &names)?;
+                let item_messages =
+                    convert_input_items_to_messages(items, &names, &mut assistant_message_phases)?;
+                for (index, _) in &mut assistant_message_phases {
+                    *index += messages.len();
+                }
                 messages.extend(item_messages);
             }
         }
@@ -990,6 +1026,9 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                     })
                     .collect::<Vec<_>>()
                     .join("\n\n");
+                for (index, _) in &mut assistant_message_phases {
+                    *index -= leading_system_count - 1;
+                }
                 messages.drain(0..leading_system_count);
                 messages.insert(
                     0,
@@ -1065,6 +1104,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            assistant_message_phases,
         })
     }
 }
@@ -1215,6 +1255,7 @@ pub fn chat_completion_to_response(
     let names = params.tool_name_map();
     let allowed_names = params.allowed_backend_names(&names);
     let nvext = nv_resp.nvext.clone();
+    let assistant_messages = nv_resp.assistant_messages;
     let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
@@ -1225,6 +1266,22 @@ pub fn chat_completion_to_response(
 
     if let Some(choice) = choice {
         incomplete_reason = responses_incomplete_reason(choice.finish_reason);
+        let messages: Vec<_> = assistant_messages
+            .iter()
+            .filter(|message| message.choice_index == choice.index)
+            .collect();
+        let source_tool_ids: Vec<_> = if messages.is_empty() {
+            Vec::new()
+        } else {
+            choice
+                .message
+                .tool_calls
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|call| call.id.clone())
+                .collect()
+        };
 
         // Reasoning precedes tool calls so output order matches the decoded turn.
         if let Some(reasoning_text) = choice.message.reasoning_content
@@ -1281,7 +1338,62 @@ pub fn chat_completion_to_response(
             None => None,
         };
         let mut content = Vec::new();
-        if let Some(text) = content_text.filter(|text| !text.is_empty()) {
+        if !messages.is_empty() {
+            let text = content_text.as_deref().unwrap_or_default();
+            let mut parts = Vec::new();
+            let mut prefix = Vec::new();
+            for item in output.drain(..) {
+                if let OutputItem::FunctionCall(call) = &item {
+                    let order = source_tool_ids
+                        .iter()
+                        .position(|id| id == &call.call_id)
+                        .unwrap_or(source_tool_ids.len());
+                    parts.push((order * 2 + 1, item));
+                } else {
+                    prefix.push(item);
+                }
+            }
+            for message in &messages {
+                let text = text
+                    .get(message.start..message.end)
+                    .ok_or_else(|| anyhow::anyhow!("invalid assistant message text range"))?;
+                let order = message.after_tool_call_id.as_ref().map_or(0, |id| {
+                    source_tool_ids
+                        .iter()
+                        .position(|source| source == id)
+                        .map_or(source_tool_ids.len() * 2 + 2, |index| index * 2 + 2)
+                });
+                parts.push((
+                    order,
+                    OutputItem::Message(OutputMessage {
+                        id: format!("msg_{}", Uuid::new_v4().simple()),
+                        role: AssistantRole::Assistant,
+                        status: if message.complete {
+                            OutputStatus::Completed
+                        } else {
+                            OutputStatus::Incomplete
+                        },
+                        phase: message.phase.map(|phase| match phase {
+                            dynamo_parsers_v2::unified::MessagePhase::Commentary => {
+                                dynamo_protocols::types::responses::MessagePhase::Commentary
+                            }
+                            dynamo_parsers_v2::unified::MessagePhase::FinalAnswer => {
+                                dynamo_protocols::types::responses::MessagePhase::FinalAnswer
+                            }
+                        }),
+                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                            text: text.to_owned(),
+                            annotations: vec![],
+                            logprobs: Some(vec![]),
+                        })],
+                    }),
+                ));
+            }
+            parts.sort_by_key(|(order, _)| *order);
+            output = prefix;
+            output.extend(parts.into_iter().map(|(_, item)| item));
+        }
+        if let Some(text) = content_text.filter(|text| !text.is_empty() && messages.is_empty()) {
             content.push(OutputMessageContent::OutputText(OutputTextContent {
                 text,
                 annotations: vec![],
@@ -1328,7 +1440,8 @@ pub fn chat_completion_to_response(
     }
 
     let created_at = chat_resp.created as u64;
-    let status = if incomplete_reason.is_some() {
+    let incomplete_message = output.iter().any(|item| matches!(item, OutputItem::Message(message) if message.status == OutputStatus::Incomplete));
+    let status = if incomplete_reason.is_some() || incomplete_message {
         Status::Incomplete
     } else {
         Status::Completed
@@ -1341,7 +1454,11 @@ pub fn chat_completion_to_response(
             .rposition(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)));
         for (index, item) in output.iter_mut().enumerate() {
             match item {
-                OutputItem::Message(message) if Some(index) == terminal => {
+                OutputItem::Message(message)
+                    if Some(index) == terminal
+                        && (message.phase.is_none()
+                            || message.status != OutputStatus::Completed) =>
+                {
                     message.status = OutputStatus::Incomplete
                 }
                 OutputItem::FunctionCall(call) if Some(index) == terminal => {
@@ -3387,6 +3504,7 @@ mod tests {
     fn test_into_nvresponse_from_chat_response() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3443,6 +3561,7 @@ mod tests {
     fn test_response_with_tool_calls() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3517,6 +3636,7 @@ mod tests {
     #[test]
     fn test_response_with_namespaced_tool_call() {
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3753,6 +3873,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3790,6 +3911,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3819,6 +3941,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3845,6 +3968,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3998,6 +4122,7 @@ mod tests {
             ChatChoice, ChatCompletionMessageContent, ChatCompletionResponseMessage, FinishReason,
         };
         NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![ChatChoice {
                     index: 0,

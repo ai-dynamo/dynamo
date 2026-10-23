@@ -1617,8 +1617,11 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
-            .unwrap_or_default();
+        let mut json = match self.inner.typed_messages() {
+            Some(messages) => serde_json::to_value(messages),
+            None => serde_json::to_value(self.inner.messages()),
+        }
+        .unwrap_or_default();
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -9636,6 +9639,7 @@ mod tests {
         tool_choice: ChatCompletionToolChoiceOption,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                 .model("test")
                 .messages(vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -14249,6 +14253,25 @@ mod tests {
 {%- endif -%}\
 {%- endfor -%}\
 {%- if add_generation_prompt -%}{{ '<|im_start|>assistant\n' }}{%- endif -%}";
+
+    #[test]
+    fn normalized_request_preserves_responses_history_phases() {
+        use crate::protocols::openai::responses::NvCreateResponse;
+        let response: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model":"test", "input":[{"role":"assistant","content":"Checking.","phase":"commentary"}]
+        })).unwrap();
+        let request = crate::protocols::unified::UnifiedRequest::from(
+            NvCreateChatCompletionRequest::try_from(response).unwrap(),
+        );
+        let normalized = NormalizedArgsRequest {
+            inner: &request,
+            normalize_tool_call_args: true,
+            continue_final_message: false,
+        };
+        let messages = serde_json::to_value(normalized.messages()).unwrap();
+        assert_eq!(messages[0]["content"], "Checking.");
+        assert_eq!(messages[0]["phase"], "commentary");
+    }
 
     fn continue_request() -> NvCreateChatCompletionRequest {
         serde_json::from_value(serde_json::json!({

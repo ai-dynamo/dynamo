@@ -137,3 +137,10 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# DIS-3250: keep companion parser/renderer fixes and their public types on one source.
+[patch.crates-io]
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "f2781494d2144ce6afbbdfe98c2b75b6c5d2c614" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "f2781494d2144ce6afbbdfe98c2b75b6c5d2c614" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "f2781494d2144ce6afbbdfe98c2b75b6c5d2c614" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "f2781494d2144ce6afbbdfe98c2b75b6c5d2c614" }

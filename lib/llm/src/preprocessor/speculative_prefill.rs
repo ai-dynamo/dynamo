@@ -611,6 +611,7 @@ mod tests {
         });
 
         NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "mock-llama".to_string(),
                 messages,

@@ -48,6 +48,7 @@ pub struct AnthropicStreamConverter {
     // Text that arrived after a tool call. Tool blocks stream only once their
     // call is complete, so this text waits and streams in arrival order.
     pending_text: Vec<PendingText>,
+    message_sequence: usize,
     tool_blocks_flushed: bool,
     tool_flush_requested: bool,
     // Block index counter
@@ -61,6 +62,7 @@ pub struct AnthropicStreamConverter {
 /// Text that arrived after `after_calls` tool calls had started.
 struct PendingText {
     after_calls: usize,
+    message_sequence: usize,
     /// Each fragment with the cumulative usage when its chunk was processed.
     fragments: Vec<(String, AnthropicUsage)>,
 }
@@ -111,6 +113,7 @@ impl AnthropicStreamConverter {
             saw_backend_usage: false,
             tool_call_states: Vec::new(),
             pending_text: Vec::new(),
+            message_sequence: 0,
             tool_blocks_flushed: false,
             tool_flush_requested: false,
             next_block_index: 0,
@@ -186,13 +189,106 @@ impl AnthropicStreamConverter {
         }
     }
 
+    fn append_text(
+        &mut self,
+        text: &str,
+        usage_snapshot: &AnthropicUsage,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
+        if self.thinking_block_started && !self.thinking_block_closed {
+            self.thinking_block_closed = true;
+            // Emit signature delta to close the thinking block.
+            // The engine doesn't produce Anthropic-style cryptographic signatures,
+            // so we use "erased" (the standard placeholder per the Anthropic spec).
+            // When `api_context` is available and the original request had
+            // `thinking.thinking_type == "enabled"`, this is expected — the backend
+            // simply doesn't generate real signatures. If/when the backend starts
+            // returning real signatures, we can use the context to validate or
+            // pass them through instead of hardcoding "erased".
+            let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
+                index: self.thinking_block_index,
+                delta: AnthropicDelta::SignatureDelta {
+                    signature: "erased".to_string(),
+                },
+            };
+            events.push(self.serialize_event("content_block_delta", &sig_delta));
+
+            let block_stop = AnthropicStreamEvent::ContentBlockStop {
+                index: self.thinking_block_index,
+            };
+            events.push(make_sse_event("content_block_stop", &block_stop));
+        }
+
+        if self.text_block_closed || !self.tool_call_states.is_empty() {
+            // Text after a tool call streams after that call's block.
+            self.buffer_text(text, usage_snapshot);
+        } else {
+            // Emit content_block_start on first text
+            if !self.text_block_started {
+                self.text_block_started = true;
+                self.text_block_index = self.next_block_index;
+                self.next_block_index += 1;
+
+                let block_start = AnthropicStreamEvent::ContentBlockStart {
+                    index: self.text_block_index,
+                    content_block: AnthropicResponseContentBlock::Text {
+                        text: String::new(),
+                        citations: None,
+                    },
+                };
+                events.push(make_sse_event("content_block_start", &block_start));
+            }
+
+            if !text.is_empty() {
+                // Emit text delta
+                let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                    index: self.text_block_index,
+                    delta: AnthropicDelta::TextDelta {
+                        text: text.to_string(),
+                    },
+                };
+                events.push(self.serialize_event("content_block_delta", &block_delta));
+            }
+        }
+    }
+
+    pub(crate) fn append_message_boundary(
+        &mut self,
+        boundary: &crate::protocols::openai::chat_completions::AssistantMessageBoundary,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        if boundary.choice_index != 0 {
+            return;
+        }
+        if self.text_block_started && !self.text_block_closed {
+            events.push(make_sse_event(
+                "content_block_stop",
+                &AnthropicStreamEvent::ContentBlockStop {
+                    index: self.text_block_index,
+                },
+            ));
+            self.text_block_started = false;
+        }
+        if boundary.phase.is_some() {
+            self.message_sequence += 1;
+            self.append_text("", &self.usage.clone(), events);
+        }
+    }
+
     fn buffer_text(&mut self, text: &str, usage_snapshot: &AnthropicUsage) {
         let after_calls = self.tool_call_states.len();
         let fragment = (text.to_owned(), usage_snapshot.clone());
         match self.pending_text.last_mut() {
-            Some(pending) if pending.after_calls == after_calls => pending.fragments.push(fragment),
+            Some(pending)
+                if pending.after_calls == after_calls
+                    && pending.message_sequence == self.message_sequence =>
+            {
+                pending.fragments.push(fragment)
+            }
             _ => self.pending_text.push(PendingText {
                 after_calls,
+                message_sequence: self.message_sequence,
                 fragments: vec![fragment],
             }),
         }
@@ -566,60 +662,7 @@ impl AnthropicStreamConverter {
             if let Some(text) = content_text
                 && !text.is_empty()
             {
-                // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
-                if self.thinking_block_started && !self.thinking_block_closed {
-                    self.thinking_block_closed = true;
-                    // Emit signature delta to close the thinking block.
-                    // The engine doesn't produce Anthropic-style cryptographic signatures,
-                    // so we use "erased" (the standard placeholder per the Anthropic spec).
-                    // When `api_context` is available and the original request had
-                    // `thinking.thinking_type == "enabled"`, this is expected — the backend
-                    // simply doesn't generate real signatures. If/when the backend starts
-                    // returning real signatures, we can use the context to validate or
-                    // pass them through instead of hardcoding "erased".
-                    let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
-                        index: self.thinking_block_index,
-                        delta: AnthropicDelta::SignatureDelta {
-                            signature: "erased".to_string(),
-                        },
-                    };
-                    events.push(self.serialize_event("content_block_delta", &sig_delta));
-
-                    let block_stop = AnthropicStreamEvent::ContentBlockStop {
-                        index: self.thinking_block_index,
-                    };
-                    events.push(make_sse_event("content_block_stop", &block_stop));
-                }
-
-                if self.text_block_closed || !self.tool_call_states.is_empty() {
-                    // Text after a tool call streams after that call's block.
-                    self.buffer_text(text, &usage_snapshot);
-                } else {
-                    // Emit content_block_start on first text
-                    if !self.text_block_started {
-                        self.text_block_started = true;
-                        self.text_block_index = self.next_block_index;
-                        self.next_block_index += 1;
-
-                        let block_start = AnthropicStreamEvent::ContentBlockStart {
-                            index: self.text_block_index,
-                            content_block: AnthropicResponseContentBlock::Text {
-                                text: String::new(),
-                                citations: None,
-                            },
-                        };
-                        events.push(make_sse_event("content_block_start", &block_start));
-                    }
-
-                    // Emit text delta
-                    let block_delta = AnthropicStreamEvent::ContentBlockDelta {
-                        index: self.text_block_index,
-                        delta: AnthropicDelta::TextDelta {
-                            text: text.to_string(),
-                        },
-                    };
-                    events.push(self.serialize_event("content_block_delta", &block_delta));
-                }
+                self.append_text(text, &usage_snapshot, events);
             }
 
             // Handle tool call deltas

@@ -239,12 +239,19 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        for &(index, phase) in &self.assistant_message_phases {
+            if let Some(message) = messages_json.get_mut(index) {
+                message["phase"] = serde_json::to_value(phase).unwrap();
+            }
+        }
         Value::from_serialize(&messages_json)
     }
 
     fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        Some(self.inner.messages.as_slice())
+        self.assistant_message_phases
+            .is_empty()
+            .then_some(self.inner.messages.as_slice())
     }
 
     fn tools(&self) -> Option<Value> {

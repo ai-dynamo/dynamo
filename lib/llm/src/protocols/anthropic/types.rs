@@ -219,6 +219,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            assistant_message_phases: Vec::new(),
         })
     }
 }
@@ -784,6 +785,7 @@ pub fn chat_completion_to_anthropic_response(
     model: &str,
     api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
+    let assistant_messages = &chat_resp.assistant_messages;
     let single_tool = api_context.is_some_and(|ctx| ctx.disable_parallel_tool_use);
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
@@ -793,6 +795,23 @@ pub fn chat_completion_to_anthropic_response(
     let mut stop_sequence = None;
 
     if let Some(choice) = choice {
+        let messages: Vec<_> = assistant_messages
+            .iter()
+            .filter(|message| message.choice_index == choice.index)
+            .collect();
+        let source_tool_ids: Vec<_> = if messages.is_empty() {
+            Vec::new()
+        } else {
+            choice
+                .message
+                .tool_calls
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|call| call.id.clone())
+                .collect()
+        };
+        let mut tool_orders = Vec::new();
         // Only the token limit means that a call may have been cut off. The loop
         // below narrows this choice-level fact to the final call, which is the only
         // call that can have been interrupted by the limit.
@@ -830,6 +849,9 @@ pub fn chat_completion_to_anthropic_response(
                     emitted_id = %emitted_id,
                     "minting Anthropic tool_use id"
                 );
+                if !messages.is_empty() {
+                    tool_orders.push(call_index * 2 + 1);
+                }
                 content.push(AnthropicResponseContentBlock::ToolUse {
                     id: emitted_id,
                     name: tc.function.name,
@@ -880,14 +902,49 @@ pub fn chat_completion_to_anthropic_response(
                 );
                 Some("[multimodal content]".to_string())
             }
+            None if !messages.is_empty() => Some(String::new()),
             None => None,
         };
         if let Some(text) = text {
-            // Text goes after thinking block (if any)
-            content.push(AnthropicResponseContentBlock::Text {
-                text,
-                citations: None,
-            });
+            if !messages.is_empty()
+                && messages
+                    .iter()
+                    .all(|message| text.get(message.start..message.end).is_some())
+            {
+                let mut prefix = Vec::new();
+                let mut parts = Vec::new();
+                let mut orders = tool_orders.into_iter();
+                for item in content.drain(..) {
+                    if matches!(item, AnthropicResponseContentBlock::ToolUse { .. }) {
+                        parts.push((orders.next().expect("one order per tool block"), item));
+                    } else {
+                        prefix.push(item);
+                    }
+                }
+                for message in messages {
+                    let order = message.after_tool_call_id.as_ref().map_or(0, |id| {
+                        source_tool_ids
+                            .iter()
+                            .position(|source| source == id)
+                            .map_or(source_tool_ids.len() * 2 + 2, |index| index * 2 + 2)
+                    });
+                    parts.push((
+                        order,
+                        AnthropicResponseContentBlock::Text {
+                            text: text[message.start..message.end].to_owned(),
+                            citations: None,
+                        },
+                    ));
+                }
+                parts.sort_by_key(|(order, _)| *order);
+                content = prefix;
+                content.extend(parts.into_iter().map(|(_, item)| item));
+            } else {
+                content.push(AnthropicResponseContentBlock::Text {
+                    text,
+                    citations: None,
+                });
+            }
         }
     }
 
@@ -1500,6 +1557,7 @@ mod tests {
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1559,6 +1617,7 @@ mod tests {
         // cached tokens (11). Anthropic input_tokens must report only the
         // uncached portion (12 - 11 = 1), with cache_read reported separately.
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-cache".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1635,6 +1694,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-no-usage".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1675,6 +1735,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_does_not_emit_nvext() {
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -2786,6 +2847,7 @@ mod anthropic_types_tests {
             )
             .collect();
         let chat_resp = NvCreateChatCompletionResponse {
+            assistant_messages: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-wiring".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {

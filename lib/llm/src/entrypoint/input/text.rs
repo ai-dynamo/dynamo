@@ -110,6 +110,7 @@ async fn main_loop(
             .build()?;
 
         let req = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner,
             common: Default::default(),
             nvext: None,

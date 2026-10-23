@@ -4436,9 +4436,26 @@ async fn responses(
                     continue;
                 }
 
-                let Some(stream_resp) = annotated_chunk.data else {
+                match crate::protocols::openai::chat_completions::assistant_message_boundary(&annotated_chunk) {
+                    Ok(Some(boundary)) => converter.append_message_boundary(&boundary, &mut events),
+                    Ok(None) => {},
+                    Err(error) => {
+                        tracing::error!(error = %error, "Invalid assistant message boundary");
+                        producer_error_signal.set(ErrorType::Internal);
+                        producer_ctx.kill();
+                        backend_error = Some(ResponseError {
+                            misalignment: None,
+                            code: ResponseErrorCode::ServerError,
+                            message: "Invalid assistant message boundary".to_string(),
+                        });
+                        break;
+                    }
+                }
+                if annotated_chunk.data.is_none() {
+                    for event in events.drain(..) { yield event.map_err(axum::Error::new); }
                     continue;
-                };
+                }
+                let stream_resp = annotated_chunk.data.expect("checked response data");
 
                 let terminal_failure = converter.append_chunk_events(&stream_resp, &mut events);
                 if terminal_failure {
@@ -8401,6 +8418,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_empty_messages() {
         let request = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
@@ -8431,6 +8449,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_with_messages() {
         let request = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8684,6 +8703,7 @@ mod tests {
     fn test_bad_base_request_for_chatcompletion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8717,6 +8737,7 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8749,6 +8770,7 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8781,6 +8803,7 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8813,6 +8836,7 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8847,6 +8871,7 @@ mod tests {
 
         // Top Logprobs: Should be a positive integer between 0 and 20
         let request = NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(

@@ -54,6 +54,9 @@ pub struct ResponseStreamConverter {
     message_started: bool,
     message_output_index: u32,
     message_output_status: Option<OutputStatus>,
+    message_phase: Option<dynamo_parsers_v2::unified::MessagePhase>,
+    finished_messages: Vec<(u32, OutputMessage)>,
+    incomplete_message: bool,
     accumulated_text: String,
     accumulated_refusal: String,
     text_content_index: Option<u32>,
@@ -142,6 +145,9 @@ impl ResponseStreamConverter {
             message_started: false,
             message_output_index: 0,
             message_output_status: None,
+            message_phase: None,
+            finished_messages: Vec::new(),
+            incomplete_message: false,
             accumulated_text: String::new(),
             accumulated_refusal: String::new(),
             text_content_index: None,
@@ -168,12 +174,63 @@ impl ResponseStreamConverter {
         seq
     }
 
+    pub(crate) fn append_message_boundary(
+        &mut self,
+        boundary: &crate::protocols::openai::chat_completions::AssistantMessageBoundary,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        if boundary.choice_index != 0 {
+            return;
+        }
+        if self.message_started {
+            let status = if boundary.phase.is_none() || self.message_phase.is_none() {
+                OutputStatus::Completed
+            } else {
+                OutputStatus::Incomplete
+            };
+            self.incomplete_message |= status == OutputStatus::Incomplete;
+            self.message_output_status = Some(status);
+            self.close_open_message_item(events, status);
+            self.finished_messages
+                .push((self.message_output_index, self.message_output(status)));
+            self.message_started = false;
+            self.message_item_id.clear();
+            self.message_phase = None;
+            self.message_output_status = None;
+            self.accumulated_text.clear();
+            self.accumulated_refusal.clear();
+            self.text_content_index = None;
+            self.refusal_content_index = None;
+        }
+        if let Some(phase) = boundary.phase {
+            self.append_active_reasoning_done_events(events, OutputStatus::Completed);
+            self.message_phase = Some(phase);
+            self.message_output_status = None;
+            self.accumulated_text.clear();
+            self.accumulated_refusal.clear();
+            self.text_content_index = None;
+            self.refusal_content_index = None;
+            let index = self.append_message_part(
+                OutputContent::OutputText(OutputTextContent {
+                    text: String::new(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                }),
+                events,
+            );
+            self.text_content_index = Some(index);
+        }
+    }
+
     fn append_message_part(
         &mut self,
         part: OutputContent,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) -> u32 {
         if !self.message_started {
+            if self.message_item_id.is_empty() {
+                self.message_item_id = format!("msg_{}", Uuid::new_v4().simple());
+            }
             self.message_started = true;
             self.message_output_index = self.next_output_index;
             self.next_output_index += 1;
@@ -185,7 +242,14 @@ impl ResponseStreamConverter {
                         id: self.message_item_id.clone(),
                         content: vec![],
                         role: AssistantRole::Assistant,
-                        phase: None,
+                        phase: self.message_phase.map(|phase| match phase {
+                            dynamo_parsers_v2::unified::MessagePhase::Commentary => {
+                                dynamo_protocols::types::responses::MessagePhase::Commentary
+                            }
+                            dynamo_parsers_v2::unified::MessagePhase::FinalAnswer => {
+                                dynamo_protocols::types::responses::MessagePhase::FinalAnswer
+                            }
+                        }),
                         status: OutputStatus::InProgress,
                     }),
                 });
@@ -736,6 +800,12 @@ impl ResponseStreamConverter {
             }
 
             if self.message_started
+                && (self.message_phase.is_none()
+                    || self
+                        .function_call_items
+                        .iter()
+                        .filter_map(|call| call.output_index)
+                        .all(|index| index < self.message_output_index))
                 && matches!(
                     choice.finish_reason.as_ref(),
                     Some(FinishReason::Stop | FinishReason::ToolCalls | FinishReason::FunctionCall)
@@ -768,6 +838,7 @@ impl ResponseStreamConverter {
                     .iter()
                     .filter_map(|call| call.output_index)
                     .chain(self.message_started.then_some(self.message_output_index))
+                    .chain(self.finished_messages.iter().map(|(index, _)| *index))
                     .max()
             })
             .flatten();
@@ -848,6 +919,7 @@ impl ResponseStreamConverter {
             .iter()
             .filter_map(|call| call.output_index)
             .chain(self.message_started.then_some(self.message_output_index))
+            .chain(self.finished_messages.iter().map(|(index, _)| *index))
             .max()
     }
 
@@ -860,7 +932,7 @@ impl ResponseStreamConverter {
     }
 
     fn terminal_status(&self) -> Status {
-        if self.incomplete_reason.is_some() {
+        if self.incomplete_reason.is_some() || self.incomplete_message {
             Status::Incomplete
         } else {
             Status::Completed
@@ -900,7 +972,14 @@ impl ResponseStreamConverter {
             id: self.message_item_id.clone(),
             content: self.message_content(),
             role: AssistantRole::Assistant,
-            phase: None,
+            phase: self.message_phase.map(|phase| match phase {
+                dynamo_parsers_v2::unified::MessagePhase::Commentary => {
+                    dynamo_protocols::types::responses::MessagePhase::Commentary
+                }
+                dynamo_parsers_v2::unified::MessagePhase::FinalAnswer => {
+                    dynamo_protocols::types::responses::MessagePhase::FinalAnswer
+                }
+            }),
             status: self.message_output_status.unwrap_or(output_status),
         }
     }
@@ -908,7 +987,11 @@ impl ResponseStreamConverter {
     fn output_with_status(&self, output_status: OutputStatus) -> Vec<OutputItem> {
         let terminal_only =
             self.incomplete_reason.is_some() && output_status == OutputStatus::Incomplete;
-        let mut output = Vec::new();
+        let mut output: Vec<_> = self
+            .finished_messages
+            .iter()
+            .map(|(index, message)| (*index, OutputItem::Message(message.clone())))
+            .collect();
         for reasoning in &self.reasoning_items {
             output.push((
                 reasoning.output_index,
@@ -1019,6 +1102,13 @@ impl ResponseStreamConverter {
             return;
         }
 
+        if self.message_started
+            && self.message_phase.is_some()
+            && self.message_output_status.is_none()
+        {
+            self.incomplete_message = true;
+            self.message_output_status = Some(OutputStatus::Incomplete);
+        }
         let output_status = self.output_status();
         // Without a later output item, the response finish reason determines
         // whether the still-open reasoning item completed or was truncated.
@@ -1405,6 +1495,72 @@ mod tests {
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
         ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
     };
+
+    #[test]
+    fn visible_message_completion_requires_a_close_or_terminal_backend_stop() {
+        use crate::protocols::openai::chat_completions::AssistantMessageBoundary;
+        use dynamo_parsers_v2::MessagePhase;
+        for finish in [None, Some(FinishReason::Length), Some(FinishReason::Stop)] {
+            let mut conv = ResponseStreamConverter::new("test".into(), default_params());
+            let mut events = Vec::new();
+            conv.append_message_boundary(
+                &AssistantMessageBoundary {
+                    choice_index: 0,
+                    phase: Some(MessagePhase::Commentary),
+                },
+                &mut events,
+            );
+            conv.append_chunk_events(&text_chunk("Complete."), &mut events);
+            conv.append_message_boundary(
+                &AssistantMessageBoundary {
+                    choice_index: 0,
+                    phase: None,
+                },
+                &mut events,
+            );
+            conv.append_message_boundary(
+                &AssistantMessageBoundary {
+                    choice_index: 0,
+                    phase: Some(MessagePhase::FinalAnswer),
+                },
+                &mut events,
+            );
+            conv.append_chunk_events(&text_chunk("Partial"), &mut events);
+            if let Some(reason) = finish {
+                conv.append_chunk_events(&finish_chunk(reason), &mut events);
+            }
+            conv.append_end_events(&mut events);
+            let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+            assert_eq!(
+                response.status,
+                if finish == Some(FinishReason::Stop) {
+                    Status::Completed
+                } else {
+                    Status::Incomplete
+                }
+            );
+            let messages: Vec<_> = response
+                .output
+                .iter()
+                .filter_map(|item| {
+                    if let OutputItem::Message(message) = item {
+                        Some(message)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(messages[0].status, OutputStatus::Completed);
+            assert_eq!(
+                messages[1].status,
+                if finish == Some(FinishReason::Stop) {
+                    OutputStatus::Completed
+                } else {
+                    OutputStatus::Incomplete
+                }
+            );
+        }
+    }
 
     fn default_params() -> ResponseParams {
         ResponseParams::default()

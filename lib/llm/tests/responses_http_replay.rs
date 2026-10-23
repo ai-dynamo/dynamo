@@ -1495,3 +1495,118 @@ async fn input_tokens_path_normalizes_a_trailing_slash_parent() {
     )
     .await;
 }
+
+/// Replays the frontend's boundary annotation contract through the real HTTP
+/// converters. Native Harmony-to-annotation coverage lives with the v2 adapter.
+#[tokio::test]
+#[serial]
+async fn visible_message_boundaries_reach_responses_and_messages() {
+    use dynamo_llm::protocols::Annotated;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+    temp_env::async_with_vars(ENV, async {
+        let boundary = |phase: Value| Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation(
+            "dynamo_assistant_message", &json!({"choice_index":0,"phase":phase})
+        ).unwrap();
+        let content = |text: &str, finish: bool| Annotated::from_data(serde_json::from_value::<NvCreateChatCompletionStreamResponse>(json!({
+            "id":"phase-replay", "object":"chat.completion.chunk", "created":0,"model":MODEL,
+            "choices":[{"index":0,"delta":{"content":text},"finish_reason":if finish { json!("stop") } else { Value::Null }}]
+        })).unwrap());
+        let call = Annotated::from_data(serde_json::from_value::<NvCreateChatCompletionStreamResponse>(json!({
+            "id":"phase-replay","object":"chat.completion.chunk","created":0,"model":MODEL,
+            "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_lookup","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}],
+            "tool_call_completion":[{"choice_index":0,"tool_index":0,"complete":true}]
+        })).unwrap());
+        let script = vec![
+            boundary(json!("commentary")), content("Checking.", false), boundary(Value::Null),
+            boundary(json!("commentary")), boundary(Value::Null), call,
+            boundary(json!("final_answer")), content("Done.", false), boundary(Value::Null), content("", true)
+        ];
+        let svc = HarnessService::start([script.clone(),script.clone(),script.clone(),script.clone(),script]).await;
+        for endpoint in ["responses", "messages"] {
+            for streaming in [false, true] {
+                let body = if endpoint == "responses" {
+                    json!({"model":MODEL,"input":"ping","stream":streaming,"tools":[tool("lookup")]})
+                } else {
+                    json!({"model":MODEL,"messages":[{"role":"user","content":"ping"}],"max_tokens":64,"stream":streaming,"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]})
+                };
+                let response = reqwest::Client::new().post(format!("{}/v1/{endpoint}",svc.base_url))
+                    .header("anthropic-version","2023-06-01").json(&body).send().await.unwrap();
+                assert_eq!(response.status(),reqwest::StatusCode::OK,"{endpoint}, stream={streaming}");
+                if endpoint == "responses" {
+                    let value: Value = if streaming {
+                        let events = parse_responses_sse(&response.text().await.unwrap()).await.unwrap();
+                        serde_json::to_value(events).unwrap().as_array().unwrap().iter()
+                            .find_map(|event| event.get("data").filter(|data| data["type"]=="response.completed").map(|data| data["response"].clone()))
+                            .expect("completed response")
+                    } else { response.json().await.unwrap() };
+                    let output = value["output"].as_array().unwrap();
+                    assert_eq!(output.len(),4,"{value}");
+                    assert_eq!(output.iter().map(|item| item["type"].as_str().unwrap()).collect::<Vec<_>>(),["message","message","function_call","message"]);
+                    let output: Vec<_> = output.iter().filter(|item| item["type"]=="message").collect();
+                    let ids: std::collections::BTreeSet<_> = output.iter().map(|item| item["id"].as_str().unwrap()).collect();
+                    assert_eq!(ids.len(), output.len(), "each message needs its own identity");
+                    assert_eq!(output.iter().map(|item| item["phase"].as_str().unwrap()).collect::<Vec<_>>(),["commentary","commentary","final_answer"]);
+                    assert_eq!(output.iter().map(|item| item["content"][0]["text"].as_str().unwrap()).collect::<Vec<_>>(),["Checking.","","Done."]);
+                } else if streaming {
+                    let raw = response.text().await.unwrap();
+                    let starts: Vec<Value> = raw.lines().filter_map(|line| line.strip_prefix("data: "))
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .filter(|event| event["type"]=="content_block_start").collect();
+                    assert_eq!(starts.len(),4,"{raw}");
+                    assert_eq!(starts.iter().map(|event| event["content_block"]["type"].as_str().unwrap()).collect::<Vec<_>>(),["text","text","tool_use","text"]);
+                    assert!(!raw.contains("dynamo_assistant_message"));
+                } else {
+                    let value: Value = response.json().await.unwrap();
+                    assert_eq!(value["content"].as_array().unwrap().iter().filter(|block| block["type"]=="text").map(|block| block["text"].as_str().unwrap()).collect::<Vec<_>>(),["Checking.","","Done."]);
+                    assert!(value["content"].as_array().unwrap().iter().all(|block| block.get("phase").is_none()));
+                }
+            }
+        }
+        let response = reqwest::Client::new().post(format!("{}/v1/chat/completions", svc.base_url))
+            .json(&json!({"model":MODEL,"messages":[{"role":"user","content":"ping"}],"stream":true})).send().await.unwrap();
+        assert_eq!(response.status(),reqwest::StatusCode::OK);
+        let raw = response.text().await.unwrap();
+        assert!(!raw.contains("dynamo_assistant_message"));
+        let text: String = raw.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|value| value["choices"][0]["delta"]["content"].as_str().map(str::to_owned)).collect();
+        assert_eq!(text,"Checking.Done.");
+        svc.shutdown().await;
+    }).await;
+}
+
+/// Echo Responses output-shaped items through the HTTP request adapter and
+/// the real Harmony template. This catches phase loss in either conversion or
+/// the renderer's typed-message fast path, including index shifts from system
+/// message merging and empty repeated commentary messages.
+#[tokio::test]
+#[serial]
+async fn responses_history_phases_round_trip_to_harmony_prompt() {
+    use dynamo_renderer::{ChatTemplate, PromptFormatter};
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([load_agent_fixture("text.sse").await.unwrap()]).await;
+        let body = json!({
+            "model":MODEL, "stream":false, "instructions":"System",
+            "input":[
+                {"role":"developer","content":"Developer"},
+                {"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking.","annotations":[]}]},
+                {"type":"message","role":"assistant","phase":"commentary","content":[]},
+                {"role":"assistant","phase":"final_answer","content":"Done."},
+                {"role":"user","content":"Continue"}
+            ]
+        });
+        let response = post_responses(&svc, &body).await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        response.bytes().await.unwrap();
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(),1);
+        let request = &requests[0];
+        assert_eq!(request.inner.messages.len(),5);
+        let template: ChatTemplate = serde_json::from_value(json!({"chat_template":include_str!("fixtures/gpt_oss_message_loop.jinja")})).unwrap();
+        let formatter = PromptFormatter::from_parts(template, dynamo_renderer::ContextMixins::new(&[]), true).unwrap();
+        let PromptFormatter::OAI(formatter) = formatter;
+        let prompt = formatter.render(request).unwrap();
+        assert!(prompt.contains("<|start|>assistant<|channel|>commentary<|message|>Checking.<|end|><|start|>assistant<|channel|>commentary<|message|><|end|><|start|>assistant<|channel|>final<|message|>Done.<|end|><|start|>user<|message|>Continue<|end|>"), "{prompt}");
+        svc.shutdown().await;
+    }).await;
+}

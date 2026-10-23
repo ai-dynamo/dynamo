@@ -2893,6 +2893,7 @@ request_classifier:
                 serde_json::from_str(r#"[{"role":"user","content":"populate tokenizer cache"}]"#)
                     .unwrap();
             let request = NvCreateChatCompletionRequest {
+                assistant_message_phases: Vec::new(),
                 inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                     .model(adapter_card.name())
                     .messages(messages)

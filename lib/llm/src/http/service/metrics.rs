@@ -2887,6 +2887,11 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     reasoning_field: ReasoningField,
 ) -> Result<Option<Event>, axum::Error> {
     let mut annotated = annotated.0;
+    if annotated.event.as_deref()
+        == Some(crate::protocols::openai::chat_completions::ASSISTANT_MESSAGE_ANNOTATION)
+    {
+        return Ok(None);
+    }
     if let Some(data) = annotated.data.as_mut() {
         data.tool_call_completion.clear();
     }

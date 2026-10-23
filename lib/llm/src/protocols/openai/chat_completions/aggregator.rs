@@ -142,6 +142,7 @@ async fn parse_complete_tool_output(
 /// [`NvCreateChatCompletionResponse`]. This struct accumulates incremental responses
 /// from a streaming OpenAI API call into a complete final response.
 pub struct DeltaAggregator {
+    assistant_messages: Vec<super::AssistantMessageRange>,
     /// Unique identifier for the chat completion.
     id: String,
     /// Model name used for the chat completion.
@@ -426,6 +427,7 @@ impl DeltaAggregator {
     /// Creates a new, empty [`DeltaAggregator`] instance.
     pub fn new() -> Self {
         Self {
+            assistant_messages: Vec::new(),
             id: "".to_string(),
             model: "".to_string(),
             created: 0,
@@ -482,8 +484,67 @@ impl DeltaAggregator {
         require_explicit_tool_terminal: bool,
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         let mut aggregator = stream
-            .map(Annotated::into_data)
-            .try_fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
+            .map(Ok::<_, DynamoError>)
+            .try_fold(DeltaAggregator::new(), |mut aggregator, frame| async move {
+                if let Some(boundary) = super::assistant_message_boundary(&frame)? {
+                    let state = aggregator.choices.get(&boundary.choice_index);
+                    let offset = state.map_or(0, |choice| choice.text.len());
+                    if let Some(phase) = boundary.phase {
+                        if offset > 0
+                            && !aggregator
+                                .assistant_messages
+                                .iter()
+                                .any(|message| message.choice_index == boundary.choice_index)
+                        {
+                            aggregator
+                                .assistant_messages
+                                .push(super::AssistantMessageRange {
+                                    choice_index: boundary.choice_index,
+                                    phase: None,
+                                    start: 0,
+                                    end: offset,
+                                    complete: true,
+                                    after_tool_call_id: None,
+                                });
+                        }
+                        if let Some(message) = aggregator
+                            .assistant_messages
+                            .iter_mut()
+                            .rev()
+                            .find(|message| {
+                                message.choice_index == boundary.choice_index && message.phase.is_none()
+                            })
+                        {
+                            message.complete = true;
+                        }
+                        let after_tool_call_id = state.and_then(|choice| {
+                            choice
+                                .tool_call_chunks
+                                .values()
+                                .rev()
+                                .find_map(|call| call.id.clone())
+                        });
+                        aggregator
+                            .assistant_messages
+                            .push(super::AssistantMessageRange {
+                                choice_index: boundary.choice_index,
+                                phase: Some(phase),
+                                start: offset,
+                                end: offset,
+                                complete: false,
+                                after_tool_call_id,
+                            });
+                    } else if let Some(message) = aggregator
+                        .assistant_messages
+                        .iter_mut()
+                        .rev()
+                        .find(|message| message.choice_index == boundary.choice_index)
+                    {
+                        message.end = offset;
+                        message.complete = true;
+                    }
+                }
+                let delta = frame.into_data()?;
                 if let Some(delta) = delta {
                     aggregator.id = delta.inner.id;
                     aggregator.model = delta.inner.model;
@@ -533,7 +594,32 @@ impl DeltaAggregator {
                         if let Some(content) = &choice.delta.content {
                             match content {
                                 ChatCompletionMessageContent::Text(text) => {
+                                    let start = state_choice.text.len();
                                     state_choice.text.push_str(text);
+                                    if let Some(position) = aggregator
+                                        .assistant_messages
+                                        .iter()
+                                        .rposition(|message| message.choice_index == choice.index)
+                                    {
+                                        if aggregator.assistant_messages[position].complete && !text.is_empty() {
+                                            aggregator
+                                                .assistant_messages
+                                                .push(super::AssistantMessageRange {
+                                                    choice_index: choice.index,
+                                                    phase: None,
+                                                    start,
+                                                    end: state_choice.text.len(),
+                                                    complete: false,
+                                                    after_tool_call_id: state_choice
+                                                        .tool_call_chunks
+                                                        .values()
+                                                        .rev()
+                                                        .find_map(|call| call.id.clone()),
+                                                });
+                                        } else if !aggregator.assistant_messages[position].complete {
+                                            aggregator.assistant_messages[position].end = state_choice.text.len();
+                                        }
+                                    }
                                 }
                                 ChatCompletionMessageContent::Parts(parts) => {
                                     state_choice.content_parts.extend(parts.clone());
@@ -577,6 +663,26 @@ impl DeltaAggregator {
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
+                            if matches!(
+                                finish_reason,
+                                dynamo_protocols::types::FinishReason::Stop
+                                    | dynamo_protocols::types::FinishReason::ToolCalls
+                                    | dynamo_protocols::types::FinishReason::FunctionCall
+                            ) && let Some(message) = aggregator
+                                .assistant_messages
+                                .iter_mut()
+                                .rev()
+                                .find(|message| message.choice_index == choice.index)
+                            {
+                                let last_tool = state_choice
+                                    .tool_call_chunks
+                                    .values()
+                                    .rev()
+                                    .find_map(|call| call.id.clone());
+                                if message.phase.is_none() || message.after_tool_call_id == last_tool {
+                                    message.complete = true;
+                                }
+                            }
                         }
 
                         // Update logprobs
@@ -681,6 +787,13 @@ impl DeltaAggregator {
         }
         if let Some(family) = selected_unified_family {
             for choice in aggregator.choices.values_mut() {
+                if aggregator
+                    .assistant_messages
+                    .iter()
+                    .any(|message| message.choice_index == choice.index)
+                {
+                    continue; // The ordered frontend parser already owns this text and its ranges.
+                }
                 if choice.text.is_empty()
                     || choice
                         .tool_calls
@@ -884,6 +997,7 @@ impl DeltaAggregator {
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
+            assistant_messages: aggregator.assistant_messages,
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
                 created: aggregator.created,

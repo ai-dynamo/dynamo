@@ -150,6 +150,7 @@ mod tests {
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
+            assistant_message_phases: Vec::new(),
             inner: CreateChatCompletionRequest {
                 messages,
                 model: "test".to_string(),

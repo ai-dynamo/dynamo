@@ -831,6 +831,20 @@ async fn anthropic_messages(
                                 .as_ref()
                                 .map(anthropic_stream_error_body);
                         }
+                        match crate::protocols::openai::chat_completions::assistant_message_boundary(&annotated_chunk) {
+                            Ok(Some(boundary)) => {
+                                converter.append_message_boundary(&boundary, &mut events);
+                                for event in events.drain(..) { yield event.map_err(axum::Error::new); }
+                            },
+                            Ok(None) => {},
+                            Err(error) => {
+                                tracing::error!(error = %error, "Invalid assistant message boundary");
+                                saw_error = true;
+                                producer_error_signal.set(ErrorType::Internal);
+                                cancel_ctx.kill();
+                                break;
+                            }
+                        }
                         let Some(stream_resp) = annotated_chunk.data else {
                             if annotated_chunk.event.as_deref() == Some("error") {
                                 saw_error = true;

@@ -141,6 +141,12 @@ pub struct NvCreateChatCompletionRequest {
         deserialize_with = "validate::deserialize_extra_fields"
     )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
+
+    /// Responses history metadata, indexed into `inner.messages`. Chat's wire
+    /// type has no phase field; retain it until prompt rendering on the frontend.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub assistant_message_phases: Vec<(usize, dynamo_protocols::types::responses::MessagePhase)>,
 }
 
 impl NvCreateChatCompletionRequest {
@@ -276,10 +282,52 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
     }
 }
 
+/// Frontend-only ordered message evidence carried over the annotation transport.
+pub(crate) const ASSISTANT_MESSAGE_ANNOTATION: &str = "dynamo_assistant_message";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AssistantMessageBoundary {
+    pub choice_index: u32,
+    /// None is an explicit message end, not transport EOF.
+    pub phase: Option<dynamo_parsers_v2::unified::MessagePhase>,
+}
+
+pub(crate) fn assistant_message_boundary<T>(
+    frame: &Annotated<T>,
+) -> Result<Option<AssistantMessageBoundary>, dynamo_runtime::error::DynamoError> {
+    if frame.event.as_deref() != Some(ASSISTANT_MESSAGE_ANNOTATION) {
+        return Ok(None);
+    }
+    let payload = frame
+        .comment
+        .as_ref()
+        .and_then(|parts| parts.first())
+        .ok_or_else(|| {
+            dynamo_runtime::error::DynamoError::msg("missing assistant message annotation payload")
+        })?;
+    serde_json::from_str(payload).map(Some).map_err(|_| {
+        dynamo_runtime::error::DynamoError::msg("invalid assistant message annotation")
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssistantMessageRange {
+    pub choice_index: u32,
+    pub phase: Option<dynamo_parsers_v2::unified::MessagePhase>,
+    pub start: usize,
+    pub end: usize,
+    pub complete: bool,
+    pub after_tool_call_id: Option<String>,
+}
+
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionResponse {
+    /// Ranges refer to the corresponding choice's text, avoiding a second text buffer.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub assistant_messages: Vec<AssistantMessageRange>,
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]

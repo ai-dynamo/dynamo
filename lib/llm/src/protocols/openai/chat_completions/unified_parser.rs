@@ -712,6 +712,7 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 _ => UnifiedParserStartingState::None,
             },
         ),
+        "gpt_oss" => Ok(UnifiedParserStartingState::None),
         "muse_glimmer" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
@@ -1532,6 +1533,7 @@ impl QuotedControlMarkerProbe {
 /// streaming tool-call contract needs. One instance parses exactly one choice of one
 /// request, which is what gives per-stream isolation by construction.
 pub(crate) struct ChoiceState {
+    message_boundaries: HashMap<usize, Option<dynamo_parsers_v2::unified::MessagePhase>>,
     glm_native_input: Option<String>,
     incomplete_native_call: bool,
     family: String,
@@ -1593,7 +1595,14 @@ impl ChoiceState {
         // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
         // guided state at all.
         parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids: Vec::new(),
+            prompt_token_ids: if family == "gpt_oss"
+                && matches!(tool_output_mode, UnifiedToolOutputMode::Native)
+                && prefill.starting_state == UnifiedParserStartingState::None
+            {
+                dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+            } else {
+                Vec::new()
+            },
             starting_state: if prefill.prefix.is_some() {
                 UnifiedParserStartingState::None
             } else {
@@ -1612,7 +1621,9 @@ impl ChoiceState {
                 "prompt prefix emitted visible output"
             );
         }
+        parser.preserve_message_phases(true);
         Ok(Self {
+            message_boundaries: HashMap::new(),
             glm_native_input: (family == GLM47_UNIFIED_FAMILY
                 && matches!(&tool_output_mode, UnifiedToolOutputMode::Native))
             .then(String::new),
@@ -1643,6 +1654,7 @@ impl ChoiceState {
     #[cfg(test)]
     pub(crate) fn new_default(family: &str, tools: &[Tool]) -> anyhow::Result<Self> {
         Ok(Self {
+            message_boundaries: HashMap::new(),
             glm_native_input: (family == GLM47_UNIFIED_FAMILY).then(String::new),
             incomplete_native_call: false,
             family: family.to_string(),
@@ -1882,6 +1894,7 @@ impl ChoiceState {
     fn delta_to_choice(&mut self, index: u32, delta: UnifiedParserEvent) -> ChatChoiceStream {
         let mut choice = empty_choice(index);
         match delta {
+            UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd => {}
             UnifiedParserEvent::Text(text) => {
                 choice.delta.content = Some(ChatCompletionMessageContent::Text(text));
             }
@@ -1952,6 +1965,7 @@ impl ChoiceState {
         // with parser reasoning would erase the source envelope's event boundary.
         let source_positions = std::mem::take(&mut self.qwen_reasoning_event_positions);
         self.qwen_reasoning_choice_positions.clear();
+        self.message_boundaries.clear();
         let mut run = Vec::new();
         let mut projected = Vec::new();
         for (position, delta) in deltas.into_iter().enumerate() {
@@ -1968,8 +1982,21 @@ impl ChoiceState {
         }
         projected.extend(coalesce(run));
         let deltas = projected;
-        let envelope_position = (0..deltas.len())
-            .find(|position| !self.qwen_reasoning_choice_positions.contains(position));
+        for (position, delta) in deltas.iter().enumerate() {
+            match delta {
+                UnifiedParserEvent::MessageStart(phase) => {
+                    self.message_boundaries.insert(position, Some(*phase));
+                }
+                UnifiedParserEvent::MessageEnd => {
+                    self.message_boundaries.insert(position, None);
+                }
+                _ => {}
+            }
+        }
+        let envelope_position = (0..deltas.len()).find(|position| {
+            !self.qwen_reasoning_choice_positions.contains(position)
+                && !self.message_boundaries.contains_key(position)
+        });
         let mut original = original.clone();
         if let Some(original_calls) = original.delta.tool_calls.as_mut() {
             for call in original_calls {
@@ -2020,7 +2047,10 @@ impl ChoiceState {
                     choice.delta.tool_calls = Some(original_calls);
                 }
             }
-            if position + 1 == count && !self.qwen_reasoning_choice_positions.contains(&position) {
+            if position + 1 == count
+                && !self.qwen_reasoning_choice_positions.contains(&position)
+                && !self.message_boundaries.contains_key(&position)
+            {
                 choice.finish_reason = self.normalize_finish_reason(finish_reason);
             }
             choices.push(choice);
@@ -2029,7 +2059,8 @@ impl ChoiceState {
         if !choices.is_empty()
             && (envelope_position.is_none()
                 || (finish_reason.is_some()
-                    && self.qwen_reasoning_choice_positions.contains(&(count - 1))))
+                    && (self.qwen_reasoning_choice_positions.contains(&(count - 1))
+                        || self.message_boundaries.contains_key(&(count - 1)))))
         {
             let mut choice = empty_choice(index);
             if envelope_position.is_none() {
@@ -2357,6 +2388,7 @@ fn parse_complete_in_mode(
     let events = dynamo_parsers_v2::assemble(&output.events);
     for event in events {
         match event {
+            UnifiedEvent::MessageStart { .. } | UnifiedEvent::MessageEnd => {}
             UnifiedEvent::Text { text: chunk } => text.push_str(&chunk),
             UnifiedEvent::Reasoning { text: chunk } => {
                 if policy.reasoning_disabled {
@@ -2472,7 +2504,7 @@ fn take_qwen_reasoning_response(
     response.map_data(|data| Ok(Box::new(data)))
 }
 
-fn qwen_chunks_for_choices(
+fn stream_chunks_for_choices(
     state: &ChoiceState,
     record: &mut ChoiceRecord,
     choices: Vec<ChatChoiceStream>,
@@ -2481,7 +2513,16 @@ fn qwen_chunks_for_choices(
         .into_iter()
         .enumerate()
         .map(|(position, choice)| {
-            if state.qwen_reasoning_choice_positions.contains(&position) {
+            if let Some(phase) = state.message_boundaries.get(&position) {
+                let boundary = super::AssistantMessageBoundary {
+                    choice_index: choice.index,
+                    phase: *phase,
+                };
+                let frame =
+                    Annotated::from_annotation(super::ASSISTANT_MESSAGE_ANNOTATION, &boundary)
+                        .unwrap_or_else(|error| Annotated::from_error(error.to_string()));
+                FinishedStreamChunk::Source(frame)
+            } else if state.qwen_reasoning_choice_positions.contains(&position) {
                 FinishedStreamChunk::Source(take_qwen_reasoning_response(record))
             } else {
                 FinishedStreamChunk::Choice(choice)
@@ -2582,7 +2623,7 @@ fn finish_unterminated_choices(
                         flushed.extend(state.choices_for(&base, Vec::new(), true, Some(reason)));
                     }
                 }
-                chunks.extend(qwen_chunks_for_choices(state, record, flushed));
+                chunks.extend(stream_chunks_for_choices(state, record, flushed));
             }
             None => {
                 let pending_whitespace =
@@ -2978,7 +3019,7 @@ where
 
             let originals = std::mem::take(&mut chat.inner.choices);
             let mut emitted: Vec<ChatChoiceStream> = Vec::new();
-            let mut deferred_qwen_responses = Vec::new();
+            let mut deferred_source_responses = Vec::new();
             let mut qwen_source_metadata_deferred = false;
             for mut original in originals {
                 if already_parsed(&original) {
@@ -3198,10 +3239,10 @@ where
                             true,
                             None,
                         );
-                        for output in qwen_chunks_for_choices(&state, record, flushed) {
+                        for output in stream_chunks_for_choices(&state, record, flushed) {
                             match output {
                                 FinishedStreamChunk::Source(response) => {
-                                    deferred_qwen_responses.push((emitted.len(), response));
+                                    deferred_source_responses.push((emitted.len(), response));
                                 }
                                 FinishedStreamChunk::Choice(choice) => emitted.push(choice),
                             }
@@ -3254,10 +3295,10 @@ where
                             &empty_choice(original.index), deltas, true, None,
                         );
                         let record = records.entry(original.index).or_default();
-                        for output in qwen_chunks_for_choices(&state, record, flushed) {
+                        for output in stream_chunks_for_choices(&state, record, flushed) {
                             match output {
                                 FinishedStreamChunk::Source(response) => {
-                                    deferred_qwen_responses.push((emitted.len(), response));
+                                    deferred_source_responses.push((emitted.len(), response));
                                 }
                                 FinishedStreamChunk::Choice(choice) => emitted.push(choice),
                             }
@@ -3482,10 +3523,10 @@ where
                 }
                 let mut parsed = Vec::new();
                 let record = records.entry(original.index).or_default();
-                for output in qwen_chunks_for_choices(state, record, choices) {
+                for output in stream_chunks_for_choices(state, record, choices) {
                     match output {
                         FinishedStreamChunk::Source(response) => {
-                            deferred_qwen_responses.push((emitted.len() + parsed.len(), response));
+                            deferred_source_responses.push((emitted.len() + parsed.len(), response));
                         }
                         FinishedStreamChunk::Choice(choice) => parsed.push(choice),
                     }
@@ -3510,7 +3551,7 @@ where
                 response.error = None;
             }
 
-            if emitted.is_empty() && deferred_qwen_responses.is_empty() {
+            if emitted.is_empty() && deferred_source_responses.is_empty() {
                 continue;
             }
 
@@ -3520,15 +3561,15 @@ where
             // source chunk's classification without counting it twice.
             let last = emitted.len().checked_sub(1);
             let llm_metrics_position = fanout_llm_metrics_position(&emitted);
-            let mut deferred_qwen_responses = deferred_qwen_responses.into_iter().peekable();
+            let mut deferred_source_responses = deferred_source_responses.into_iter().peekable();
             for position in 0..=emitted.len() {
-                while deferred_qwen_responses
+                while deferred_source_responses
                     .peek()
                     .is_some_and(|(deferred_position, _)| *deferred_position == position)
                 {
-                    let (_, response) = deferred_qwen_responses
+                    let (_, response) = deferred_source_responses
                         .next()
-                        .expect("peeked Qwen response should be present");
+                        .expect("peeked source response should be present");
                     yield normalized_source_response(response, &states, &records);
                 }
                 let Some(choice) = emitted.get(position).cloned() else {
@@ -8272,6 +8313,7 @@ pub(crate) mod tests {
     #[test]
     fn a_failed_push_keeps_committed_events_before_recovered_bytes() {
         let mut state = ChoiceState {
+            message_boundaries: HashMap::new(),
             glm_native_input: None,
             incomplete_native_call: false,
             family: "test".to_string(),
@@ -12122,6 +12164,118 @@ pub(crate) mod tests {
             format!("{complete} The literal \"<tool_call>\" stays visible."),
         ] {
             assert_eq!(glm_unfinished_call(&input).unwrap(), None);
+        }
+    }
+    #[tokio::test]
+    async fn gpt_oss_message_boundaries_survive_streaming_and_aggregation() {
+        use super::super::aggregator::ChatCompletionAggregator;
+        use super::super::{NvCreateChatCompletionResponse, assistant_message_boundary};
+        let raw = concat!(
+            "<|start|>assistant<|channel|>commentary<|message|>Checking.<|end|>",
+            "<|start|>assistant<|channel|>commentary<|message|><|end|>",
+            "<|start|>assistant<|channel|>final<|message|>Done.<|return|>"
+        );
+        for width in [1, 13, raw.len()] {
+            let mut chunks: Vec<_> = raw
+                .as_bytes()
+                .chunks(width)
+                .map(|bytes| chunk(std::str::from_utf8(bytes).unwrap(), false))
+                .collect();
+            chunks.push(chunk("", true));
+            let parsed = apply_stream_with_policy(
+                stream::iter(chunks),
+                None,
+                GuidedToolConstraint::None,
+                UnifiedParserStartingState::None,
+                "gpt_oss",
+                true,
+                UnifiedRequestPolicy::default(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let boundaries: Vec<_> = parsed
+                .iter()
+                .filter_map(|frame| assistant_message_boundary(frame).unwrap())
+                .collect();
+            assert_eq!(boundaries.len(), 6, "width={width}");
+            assert_eq!(
+                boundaries
+                    .iter()
+                    .filter(|boundary| boundary.phase.is_some())
+                    .count(),
+                3
+            );
+            let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                stream::iter(parsed),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            let messages = &response.assistant_messages;
+            assert_eq!(messages.len(), 3);
+            let Some(ChatCompletionMessageContent::Text(text)) =
+                &response.inner.choices[0].message.content
+            else {
+                panic!("text response");
+            };
+            assert_eq!(text, "Checking.Done.");
+            let fragments: Vec<_> = messages
+                .iter()
+                .map(|message| &text[message.start..message.end])
+                .collect();
+            assert_eq!(fragments, ["Checking.", "", "Done."]);
+            assert!(messages.iter().all(|message| message.complete));
+        }
+    }
+    #[tokio::test]
+    async fn gpt_oss_unclosed_message_status_survives_unary_conversion() {
+        use super::super::NvCreateChatCompletionResponse;
+        use super::super::aggregator::ChatCompletionAggregator;
+        use crate::protocols::openai::responses::{ResponseParams, chat_completion_to_response};
+        use dynamo_protocols::types::responses::{OutputItem, OutputStatus, Status};
+        for finish in [None, Some(FinishReason::Length), Some(FinishReason::Stop)] {
+            let mut terminal = chunk("", false);
+            terminal.data.as_mut().unwrap().inner.choices[0].finish_reason = finish;
+            let parsed = apply_stream_with_policy(
+                stream::iter([
+                    chunk(
+                        "<|start|>assistant<|channel|>final<|message|>Partial",
+                        false,
+                    ),
+                    terminal,
+                ]),
+                None,
+                GuidedToolConstraint::None,
+                UnifiedParserStartingState::None,
+                "gpt_oss",
+                true,
+                UnifiedRequestPolicy::default(),
+            );
+            let response =
+                NvCreateChatCompletionResponse::from_annotated_stream(parsed, Default::default())
+                    .await
+                    .unwrap();
+            let response =
+                chat_completion_to_response(response, &ResponseParams::default(), None).unwrap();
+            assert_eq!(
+                response.inner.status,
+                if finish == Some(FinishReason::Stop) {
+                    Status::Completed
+                } else {
+                    Status::Incomplete
+                }
+            );
+            let OutputItem::Message(message) = &response.inner.output[0] else {
+                panic!("expected message")
+            };
+            assert_eq!(
+                message.status,
+                if finish == Some(FinishReason::Stop) {
+                    OutputStatus::Completed
+                } else {
+                    OutputStatus::Incomplete
+                }
+            );
         }
     }
 }
