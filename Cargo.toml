@@ -56,7 +56,7 @@ aisimulate-core = { version = "=0.13.0-dev.202610160000000073" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
-dynamo-llm = { path = "lib/llm", version = "1.6.0" }
+dynamo-llm = { path = "lib/llm", version = "1.6.0", default-features = false }
 dynamo-rl = { path = "lib/rl", version = "1.6.0" }
 dynamo-tokenizers = { version = "=3.1.1" }
 dynamo-renderer = { version = "=8.0.3" }
@@ -144,7 +144,7 @@ thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
 tokio = { version = "=1.54.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
-tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
+tokio-util = { version = "0.7.19", features = ["codec", "net", "rt", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 axum = { version = "=0.8.4", features = ["macros", "ws"] }
