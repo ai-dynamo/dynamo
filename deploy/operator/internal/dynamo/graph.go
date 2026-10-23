@@ -1554,12 +1554,14 @@ type MultinodeDeployer interface {
 	NeedsDNSWait() bool          // returns true if DNS wait is needed to launch multinode components
 }
 
-// BackendFactory creates backend instances based on the framework type
+// BackendFactory creates backend instances based on the framework type.
+// nativeSidecar reports Dynamo sidecar mode, where role templates own the engine launch.
 func BackendFactory(
 	backendFramework BackendFramework,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	parentGraphDeploymentName string,
 	roleLaunchOwnership roleLaunchOwnership,
+	nativeSidecar bool,
 ) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
@@ -1568,6 +1570,7 @@ func BackendFactory(
 		return &VLLMBackend{
 			ParentGraphDeploymentName: parentGraphDeploymentName,
 			roleLaunchOwnership:       roleLaunchOwnership,
+			nativeSidecar:             nativeSidecar,
 		}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
@@ -1870,7 +1873,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	}
 	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
 
-	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership)
+	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership, nativeSidecar)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}

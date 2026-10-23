@@ -182,9 +182,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
 			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
-		{name: "native sidecar beta rejects multinode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		{name: "native sidecar beta multinode requires role templates", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`}},
+		}), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "native sidecar alpha rejects gms create",
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
@@ -205,9 +205,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
 			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
-		{name: "native sidecar alpha rejects multinode", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		{name: "native sidecar alpha multinode requires role templates", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`}},
+		}), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "native sidecar requires engine main", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Name = "engine"
 		}), wantWebhookErrs: []string{`spec.podTemplate.spec.containers: Required value: main engine container is required for component "worker" with a runtime init container`}},
@@ -217,14 +217,23 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, and decode components`}},
 
 		// SGLang multinode sidecars resolve runtime compatibility independently of engine images.
-		{name: "sglang sidecar multinode alpha=False roles=False dp=False", deployment: sglangMultinodeDCDForAdmission(t, false, false, false), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=False roles=False dp=True", deployment: sglangMultinodeDCDForAdmission(t, false, false, true), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=False roles=True dp=False", deployment: sglangMultinodeDCDForAdmission(t, false, true, false)},
-		{name: "sglang sidecar multinode alpha=False roles=True dp=True", deployment: sglangMultinodeDCDForAdmission(t, false, true, true)},
-		{name: "sglang sidecar multinode alpha=True roles=False dp=False", deployment: sglangMultinodeDCDForAdmission(t, true, false, false), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=True roles=False dp=True", deployment: sglangMultinodeDCDForAdmission(t, true, false, true), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=True roles=True dp=False", deployment: sglangMultinodeDCDForAdmission(t, true, true, false)},
-		{name: "sglang sidecar multinode alpha=True roles=True dp=True", deployment: sglangMultinodeDCDForAdmission(t, true, true, true)},
+		{name: "sglang sidecar multinode alpha=False roles=False dp=False", deployment: multinodeSidecarDCDForAdmission(t, sglangBackendFramework, false, false, false), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=False roles=False dp=True", deployment: multinodeSidecarDCDForAdmission(t, sglangBackendFramework, false, false, true), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=False roles=True dp=False", deployment: multinodeSidecarDCDForAdmission(t, sglangBackendFramework, false, true, false)},
+		{name: "sglang sidecar multinode alpha=False roles=True dp=True", deployment: multinodeSidecarDCDForAdmission(t, sglangBackendFramework, false, true, true)},
+		{name: "sglang sidecar multinode alpha=True roles=False dp=False", deployment: multinodeSidecarDCDForAdmission(t, sglangBackendFramework, true, false, false), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=True roles=False dp=True", deployment: multinodeSidecarDCDForAdmission(t, sglangBackendFramework, true, false, true), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=True roles=True dp=False", deployment: multinodeSidecarDCDForAdmission(t, sglangBackendFramework, true, true, false)},
+		{name: "sglang sidecar multinode alpha=True roles=True dp=True", deployment: multinodeSidecarDCDForAdmission(t, sglangBackendFramework, true, true, true)},
+		// vLLM multinode sidecars follow the same explicit-role contract; dp selects hybrid-LB serving workers.
+		{name: "vllm sidecar multinode alpha=False roles=False dp=False", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, false, false, false), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "vllm sidecar multinode alpha=False roles=False dp=True", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, false, false, true), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "vllm sidecar multinode alpha=False roles=True dp=False", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, false, true, false)},
+		{name: "vllm sidecar multinode alpha=False roles=True dp=True", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, false, true, true)},
+		{name: "vllm sidecar multinode alpha=True roles=False dp=False", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, true, false, false), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "vllm sidecar multinode alpha=True roles=False dp=True", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, true, false, true), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "vllm sidecar multinode alpha=True roles=True dp=False", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, true, true, false)},
+		{name: "vllm sidecar multinode alpha=True roles=True dp=True", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, true, true, true)},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDCDForAdmission(t, false, nil)},
 		{name: "native sidecar beta update", oldDeployment: nativeDCDForAdmission(t, false, nil), deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -376,13 +385,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 role PodTemplates cannot bypass native sidecar restrictions",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = "trtllm"
 				setAlphaExplicitMultinodeRoleTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
 				dcd.Spec.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
 					Name: consts.RuntimeContainerName, Image: "runtime:1.5.0",
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`},
+			wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`},
 		},
 		{
 			name: "standalone v1alpha1 canonical lpx component is rejected",

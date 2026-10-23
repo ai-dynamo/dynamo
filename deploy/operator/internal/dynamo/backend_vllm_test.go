@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,58 @@ func TestVLLMBackendRoleTemplateLaunchAddsMPMasterPortToShellCommandOperand(t *t
 	))
 	require.Empty(t, container.Args)
 	require.Contains(t, container.Command[2], "--master-port "+commonconsts.VLLMMpMasterPort)
+}
+
+func TestVLLMBackendNativeSidecarMultinodePreservesRoleLaunch(t *testing.T) {
+	cases := []struct {
+		name       string
+		role       Role
+		runtime    bool
+		wantProbes bool
+	}{
+		{name: "leader keeps authored engine probes", role: RoleLeader, runtime: true, wantProbes: true},
+		{name: "serving worker keeps authored engine probes", role: RoleWorker, runtime: true, wantProbes: true},
+		{name: "compute-only worker loses engine probes", role: RoleWorker, runtime: false, wantProbes: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Author a sidecar role whose shell launch names the mp executor without a master port")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:   &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "vllm/vllm-openai:custom"}}}},
+			}
+			if tc.runtime {
+				component.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: commonconsts.RuntimeContainerName, Image: "runtime:1.6.0"}}
+			}
+			container := &corev1.Container{
+				Command:        []string{"/bin/sh", "-c"},
+				Args:           []string{`exec "$VLLM_RS" serve model --grpc-port 30001 -- --distributed-executor-backend mp --nnodes 2 --node-rank "${DYNAMO_RANK}"`},
+				StartupProbe:   &corev1.Probe{ProbeHandler: corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: 30001}}},
+				ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: 30001}}},
+				LivenessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: 30001}}},
+			}
+			original := container.DeepCopy()
+
+			t.Log("Apply the backend hook in sidecar mode")
+			backend := &VLLMBackend{ParentGraphDeploymentName: "graph", roleLaunchOwnership: roleLaunchOwnedByPodTemplate, nativeSidecar: true}
+			require.NoError(t, backend.UpdateContainer(container, 2, tc.role, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(1)))
+
+			t.Log("Verify the authored launch and environment survive and probes follow the runtime declaration")
+			require.Equal(t, original.Command, container.Command)
+			require.Equal(t, original.Args, container.Args)
+			require.Empty(t, container.Env)
+			if tc.wantProbes {
+				require.Equal(t, original.StartupProbe, container.StartupProbe)
+				require.Equal(t, original.ReadinessProbe, container.ReadinessProbe)
+				require.Equal(t, original.LivenessProbe, container.LivenessProbe)
+			} else {
+				require.Nil(t, container.StartupProbe)
+				require.Nil(t, container.ReadinessProbe)
+				require.Nil(t, container.LivenessProbe)
+			}
+		})
+	}
 }
 
 // TestShellQuotePOSIX_ArgvRoundTrip re-parses the quoted tokens through a real

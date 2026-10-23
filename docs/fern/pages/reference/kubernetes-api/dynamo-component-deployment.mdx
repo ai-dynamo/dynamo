@@ -164,9 +164,9 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    For SGLang multinode sidecar mode, declare `runtime` in the leader template. This selects native-engine defaults for the whole component, including workers without a sidecar. Declare `runtime` in the worker template only when each follower has a local KV publisher. LPX and other multinode backends do not yet support sidecar mode.
+    For SGLang and vLLM multinode sidecar mode, declare `runtime` in the leader template. This selects native-engine defaults for the whole component, including workers without a sidecar. Declare `runtime` in the worker template only when each worker Pod serves requests or relays KV events: SGLang DP-attention followers and vLLM hybrid-LB data-parallel nodes. LPX and TensorRT-LLM multinode do not yet support sidecar mode.
 
-    For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
+    For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For combined-runtime vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`; in sidecar mode the role templates own every launch flag, including `--master-port`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
 
     For LPX components, every declared role requires its own template. Agent and conductor templates are independent.
 
@@ -282,7 +282,7 @@ The operator leaves native sidecar `servedModelName` and `runtimeComponentName` 
 Upgrading the operator can roll existing sidecar workers whose backend was previously undetected. Review the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#native-sidecar-backend-inference) before upgrading.
 </Warning>
 
-This mode supports `worker`, `prefill`, and `decode` components. SGLang multinode is supported as described below. Other multinode backends, enabled checkpoint, GPU memory service, and failover remain unsupported. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
+This mode supports `worker`, `prefill`, and `decode` components. SGLang and vLLM multinode are supported as described below. TensorRT-LLM multinode, enabled checkpoint, GPU memory service, and failover remain unsupported. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
 
 The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.
 
@@ -298,13 +298,15 @@ podTemplate:
         restartPolicy: Always
 ```
 
-For SGLang multinode sidecar deployments, set `backendFramework: sglang` and supply complete leader and worker role `podTemplate` definitions. A component-level `podTemplate` is rejected for this mode. Define the engine commands, topology arguments, and sidecar placement in each role. The operator does not parse engine flags to infer sidecar placement.
+For SGLang and vLLM multinode sidecar deployments, set `backendFramework` to `sglang` or `vllm` and supply complete leader and worker role `podTemplate` definitions. A component-level `podTemplate` is rejected for this mode. Define the engine commands, topology arguments, and sidecar placement in each role. The operator does not parse engine flags to infer sidecar placement, and it does not inject executor or coordination flags.
 
 For DGDs with an operator origin version of 1.6.0 or later, the operator injects `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` for use in authored commands and arguments. Dynamo defaults apply only to declared `runtime` containers; engine images are not interpreted as Dynamo runtime versions. Combined-runtime deployments continue to support component templates and operator-generated multinode arguments, with the existing origin-version gate.
 
-Shared memory, compilation cache, provider startup ordering, and group management follow the existing multinode behavior. Worker `main` probes are removed; a worker's `runtime` keeps its independent sidecar probes. Prefill and decode components each render their own engine group. DP-attention requires an engine with follower gRPC metadata and a sidecar that understands that engine's attention-DP rank metadata.
+Shared memory, compilation cache, provider startup ordering, and group management follow the existing multinode behavior. SGLang worker `main` probes are removed. vLLM worker `main` probes are removed only when the worker template declares no `runtime` container; a serving data-parallel worker keeps its authored engine probes. A worker's `runtime` keeps its independent sidecar probes. Prefill and decode components each render their own engine group. SGLang DP-attention requires an engine with follower gRPC metadata and a sidecar that understands that engine's attention-DP rank metadata.
 
-Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
+vLLM multinode sidecar deployments support the multiprocessing executor, with `--nnodes`, `--node-rank $(DYNAMO_RANK)`, `--master-addr $(DYNAMO_LEADER_ADDRESS)`, and `--master-port` authored in both roles and a headless engine on each worker, and hybrid-LB data parallelism, where every node runs `vllm serve --grpc-port` for its local ranks with `--data-parallel-size-local` and `--data-parallel-start-rank` and its `runtime` registers only those ranks. The Ray executor and the vLLM wait-for-leader init container are not used in sidecar mode.
+
+Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples, including `multinode_tp.yaml` and `multinode_dp.yaml`.
 
 ## Runtime Version Compatibility
 

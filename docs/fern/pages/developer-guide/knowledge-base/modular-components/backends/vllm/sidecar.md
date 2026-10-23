@@ -73,13 +73,19 @@ One engine on one node, with one sidecar.
 ### Multi-Node TP
 
 One engine spans two nodes. Only the leader node has a sidecar; the follower
-node holds the remaining TP ranks.
+node holds the remaining TP ranks. On Kubernetes, see
+[`multinode_tp.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_tp.yaml),
+which authors explicit leader and worker role templates with the
+multiprocessing executor.
 
 ![When one vLLM engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../../../../assets/img/sidecar-vllm-multinode-tp.svg)
 
 ### Multi-Node DP
 
 Hybrid DP load balancing: each node runs vLLM for its local DP ranks plus a
-sidecar that serves requests. The frontend routes to either node.
+sidecar that serves requests. The frontend routes to either node. On Kubernetes,
+see [`multinode_dp.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml);
+each role runs `vllm serve --grpc-port` with `--data-parallel-hybrid-lb` for its
+local rank range.
 
 ![vLLM hybrid data parallelism across two nodes. The Dynamo Frontend router picks a DP rank and sends requests over the request plane to the Dynamo Sidecar on the node that owns that rank: node 0 serves DP ranks 0-1 and node 1 serves DP ranks 2-3.](../../../../../../assets/img/sidecar-vllm-multinode-dp.svg)
