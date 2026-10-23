@@ -65,40 +65,6 @@ def test_image_loader_uses_trtllm_configured_limit(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_completed_encoder_layout_skips_media_and_tokenization() -> None:
-    processor = MultimodalRequestProcessor(
-        model_type="multimodal",
-        model_dir="unused",
-        max_file_size_mb=10,
-        tokenizer=MagicMock(),
-    )
-    processor.image_loader.load_image_batch = AsyncMock()
-    params = SimpleNamespace(
-        multimodal={
-            "schema_version": 1,
-            "items": [],
-            "request_layout": {"prompt_token_ids": [3, 1, 4]},
-        }
-    )
-    request = {
-        "token_ids": [1],
-        "multi_modal_data": {
-            "image_url": [{"Url": "https://example.com/unused.jpg"}],
-        },
-    }
-
-    result = await processor.process_openai_request(
-        request,
-        embeddings=None,
-        ep_disaggregated_params=params,
-    )
-
-    assert result == {"prompt_token_ids": [3, 1, 4]}
-    processor.image_loader.load_image_batch.assert_not_awaited()
-    processor.tokenizer.decode.assert_not_called()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
     [
@@ -1264,3 +1230,31 @@ async def test_proxy_fault_is_an_error_payload_from_the_encode_worker(
         await EncodeHelper.read_embeddings_from_encode_response(
             responses[0], MagicMock()
         )
+
+
+@pytest.mark.asyncio
+async def test_completed_encoder_layout_skips_media_and_tokenization():
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    processor.image_loader.load_image_batch = AsyncMock()
+    params = SimpleNamespace(
+        multimodal={
+            "schema_version": 1,
+            "items": [],
+            "request_layout": {"prompt_token_ids": [3, 1, 4]},
+        }
+    )
+    request = {
+        "token_ids": [1],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/unused.jpg"}]},
+    }
+    result = await processor.process_openai_request(
+        request, embeddings=None, ep_disaggregated_params=params
+    )
+    assert result == {"prompt_token_ids": [3, 1, 4]}
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.tokenizer.decode.assert_not_called()

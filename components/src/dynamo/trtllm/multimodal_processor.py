@@ -382,7 +382,7 @@ class MultimodalRequestProcessor:
         Process OpenAI request and return multimodal data in TokensPrompt format.
 
         Supports three flows:
-        1. EPD Case 1: Encoder supplied a finalized request layout
+        1. EPD Case 1: Encoder fully processed (has _epd_processed_prompt)
         2. EPD Case 2: NIXL embeddings (embeddings parameter is not None)
         3. PD Flow: Rust pre-tokenized with direct media loading
 
@@ -393,19 +393,31 @@ class MultimodalRequestProcessor:
         }
         or for EPD Case 1:
         {
+            "prompt": str,
             "prompt_token_ids": List[int]
         }
 
         """
         self.previous_decoded_text = ""
 
-        # A completed backend layout is authoritative; no media loading or
-        # tokenizer round trip is needed on the prefill worker.
-        if ep_disaggregated_params is not None:
-            handoff = ep_disaggregated_params.multimodal
-            layout = handoff.get("request_layout") if handoff is not None else None
-            if layout is not None:
-                return {"prompt_token_ids": layout["prompt_token_ids"]}
+        handoff = getattr(ep_disaggregated_params, "multimodal", None)
+        layout = handoff.get("request_layout") if handoff is not None else None
+        if layout is not None:
+            return {"prompt_token_ids": layout["prompt_token_ids"]}
+
+        # EPD Flow Case 1: Encoder has fully processed the prompt
+        # The encode worker has done everything: vision encoding, prompt processing, tokenization
+        # Return the encoder's processed prompt and tokens directly
+        processed_prompt_from_encoder = request.get("_epd_processed_prompt")
+        if processed_prompt_from_encoder is not None:
+            logging.info("MM: Using fully processed prompt from encoder")
+            result = {"prompt": processed_prompt_from_encoder}
+            prompt_token_ids = request.get("_epd_prompt_token_ids")
+            if prompt_token_ids:
+                result["prompt_token_ids"] = prompt_token_ids
+            else:
+                logging.warning("MM: No prompt_token_ids from encoder")
+            return result
 
         # Initialize result in TokensPrompt format
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor

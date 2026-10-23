@@ -637,12 +637,12 @@ class TestMultimodalGuard:
         config.conversation_affinity = False
         return _ConcreteHandler(config)
 
-    async def _prepare(self, handler, request, prefill_metadata=None):
+    async def _prepare(self, handler, request, epd_metadata=None):
         return await handler._prepare_input_for_generation(
             request=request,
             embeddings=None,
             ep_disaggregated_params=None,
-            prefill_metadata=prefill_metadata or {},
+            epd_metadata=epd_metadata or {},
         )
 
     @pytest.mark.asyncio
@@ -680,7 +680,7 @@ class TestMultimodalGuard:
             "prefill_result": {
                 "disaggregated_params": {
                     "worker_id": 7,
-                    "_prefill_metadata": {"prompt_token_ids": [1, 2, 3]},
+                    "_epd_metadata": {"_prefill_prompt": "describe image"},
                 }
             },
         }
@@ -698,16 +698,19 @@ class TestMultimodalGuard:
         handler.disaggregation_mode = DisaggregationMode.DECODE
 
         request = {"token_ids": [1, 2, 3], "messages": [self.IMAGE_MESSAGE]}
-        prefill_metadata = {
-            "prompt_token_ids": [1, 2, 3],
+        epd_metadata = {
+            "_prefill_prompt": "describe image",
+            "_prefill_prompt_token_ids": [1, 2, 3],
         }
 
-        result = await self._prepare(handler, request, prefill_metadata)
+        result = await self._prepare(handler, request, epd_metadata)
+        assert result["prompt"] == "describe image"
         assert result["prompt_token_ids"] == [1, 2, 3]
+        assert result["multi_modal_data"] is None
 
 
 class TestPrefillPromptMetadata:
-    """Processed prompt IDs are owned by P and reused by D."""
+    """Tests for prompt metadata in the legacy prefill handoff."""
 
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
@@ -716,24 +719,28 @@ class TestPrefillPromptMetadata:
         config.conversation_affinity = False
         return _ConcreteHandler(config)
 
-    def _pack_metadata(self, request: dict, prompt_token_ids: list[int]) -> dict:
+    def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
         params = DisaggregatedParams(request_type="context_only")
         output = MagicMock(disaggregated_params=params)
-        result = SimpleNamespace(prompt_token_ids=prompt_token_ids)
+        result = MagicMock(prompt=prompt, prompt_token_ids=prompt_token_ids)
 
         return self._make_handler()._encode_and_pack_disaggregated_params(
             output,
+            params,
             request,
             result,
+            processed_input,
         )
 
     def test_text_only_prefill_omits_prompt_metadata(self):
         result = self._pack_metadata(
             request={"token_ids": [1, 2, 3]},
+            processed_input=[1, 2, 3],
+            prompt="text prompt",
             prompt_token_ids=[1, 2, 3],
         )
 
-        assert "_prefill_metadata" not in result
+        assert "_epd_metadata" not in result
 
     def test_multimodal_prefill_preserves_prompt_metadata(self):
         result = self._pack_metadata(
@@ -743,41 +750,34 @@ class TestPrefillPromptMetadata:
                     "image_url": [{"Url": "http://example.com/image.jpg"}]
                 },
             },
+            processed_input={"prompt": "describe image"},
+            prompt="raw prompt",
             prompt_token_ids=[1, 2, 3],
         )
 
-        assert result["_prefill_metadata"] == {
-            "prompt_token_ids": [1, 2, 3],
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt": "describe image",
+            "_prefill_prompt_token_ids": [1, 2, 3],
         }
 
-    def test_epd_prefill_forwards_backend_layout_and_decode_state(self) -> None:
-        params = DisaggregatedParams(
-            request_type="context_only",
-            multimodal={
-                "schema_version": 1,
-                "items": [],
-                "request_layout": {"prompt_token_ids": [4, 5, 6]},
-                "decode_inputs": {"model_state": "prefill-owned-handle"},
+    def test_epd_prefill_preserves_encoder_metadata(self):
+        result = self._pack_metadata(
+            request={
+                "token_ids": [1, 2, 3],
+                "_epd_processed_prompt": "encoder prompt",
+                "_epd_prompt_token_ids": [1, 2, 3],
             },
-        )
-        output = SimpleNamespace(disaggregated_params=params)
-        request = {"token_ids": [1, 2, 3]}
-        result = self._make_handler()._encode_and_pack_disaggregated_params(
-            output, request, SimpleNamespace(prompt_token_ids=[4, 5, 6])
+            processed_input={"prompt": "encoder prompt"},
+            prompt="engine prompt",
+            prompt_token_ids=[4, 5, 6],
         )
 
-        assert result["multimodal"] == params.multimodal
-        assert "_prefill_metadata" not in result
-        incoming = {"disaggregated_params": result}
-        snapshot = deepcopy(incoming)
-        (
-            decoded,
-            metadata,
-        ) = self._make_handler()._decode_disaggregated_params_from_prefill(incoming)
-        assert metadata == {"prompt_token_ids": [4, 5, 6]}
-        assert decoded.request_type == "generation_only"
-        assert decoded.multimodal == params.multimodal
-        assert incoming == snapshot
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt": "encoder prompt",
+            "_prefill_prompt_token_ids": [4, 5, 6],
+            "_epd_processed_prompt": "engine prompt",
+            "_epd_prompt_token_ids": [4, 5, 6],
+        }
 
 
 class TestDisaggRequestId:
@@ -2061,3 +2061,39 @@ def test_trtllm_handler_matches_shared():
     )
     assert wrapper_lp == direct_lp
     assert wrapper_top == direct_top
+
+
+def test_versioned_prefill_forwards_owned_state_without_legacy_markers(monkeypatch):
+    @dataclass
+    class Params:
+        multimodal: dict
+        opaque_state: bytes | None = None
+        request_type: str = "context_only"
+
+    monkeypatch.setattr(
+        "dynamo.trtllm.request_handlers.handler_base.DisaggregatedParams", Params
+    )
+    params = Params(
+        multimodal={
+            "schema_version": 1,
+            "items": [],
+            "request_layout": {"prompt_token_ids": [4, 5, 6]},
+            "decode_inputs": {"model_state": "prefill-owned-handle"},
+        }
+    )
+    handler = TestPrefillPromptMetadata()._make_handler()
+    result = handler._encode_and_pack_disaggregated_params(
+        SimpleNamespace(disaggregated_params=params),
+        None,
+        {"token_ids": [1, 2, 3]},
+        SimpleNamespace(prompt_token_ids=[4, 5, 6]),
+    )
+    assert result["multimodal"] == params.multimodal
+    assert "_epd_metadata" not in result
+    incoming = {"disaggregated_params": result}
+    snapshot = deepcopy(incoming)
+    decoded, metadata = handler._decode_disaggregated_params_from_prefill(incoming)
+    assert metadata == {"prompt_token_ids": [4, 5, 6]}
+    assert decoded.request_type == "generation_only"
+    assert decoded.multimodal == params.multimodal
+    assert incoming == snapshot

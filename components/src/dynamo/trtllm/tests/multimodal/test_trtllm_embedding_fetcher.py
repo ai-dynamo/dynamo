@@ -3,8 +3,10 @@
 
 """Unit tests for fetch_embeddings_from_encoder."""
 
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
@@ -34,6 +36,7 @@ pytestmark = [
 
 def create_mock_encode_client(
     embeddings: list[torch.Tensor],
+    processed_prompt: str = "prompt",
     prompt_token_ids: list[int] | None = None,
 ) -> AsyncMock:
     """Create mock encode client that returns embeddings via CUDA IPC handles."""
@@ -42,21 +45,12 @@ def create_mock_encode_client(
         def data(self):
             return {
                 "ep_disaggregated_params": {
-                    "multimodal": {
-                        "schema_version": 1,
-                        "items": [
-                            {
-                                "item_ref": ["image", i],
-                                "embeddings": {"multimodal_embedding": f"h{i}"},
-                                "output_embedding_length": tensor.shape[0],
-                            }
-                            for i, tensor in enumerate(embeddings)
-                        ],
-                        "request_layout": {
-                            "prompt_token_ids": prompt_token_ids or [1, 2, 3]
-                        },
-                    }
+                    "multimodal_embedding_handles": [
+                        f"h{i}" for i in range(len(embeddings))
+                    ]
                 },
+                "processed_prompt": processed_prompt,
+                "prompt_token_ids": prompt_token_ids or [1, 2, 3],
             }
 
     async def mock_round_robin(req: dict[str, Any], context=None) -> Any:
@@ -102,7 +96,7 @@ class TestFetchEmbeddingsFromEncoder:
             )
 
         assert len(result) == 2
-        assert request == {"messages": []}
+        assert "_epd_processed_prompt" not in request
 
     @pytest.mark.asyncio
     async def test_all_cached_no_request_sent(self, encoder_cache):
@@ -203,12 +197,13 @@ class TestFetchEmbeddingsFromEncoder:
 
     @pytest.mark.asyncio
     async def test_no_cache_returns_disaggregated_params(self):
-        """Full-request layouts stay in the handoff without mutating the request."""
+        """No cache: returns DisaggregatedParams directly, request updated with metadata."""
         request: dict[str, Any] = {"messages": []}
 
         # Pass one embedding so mock generates one handle (DisaggregatedParams requires non-empty handles)
         mock_client = create_mock_encode_client(
             [torch.ones(10, 256)],
+            processed_prompt="test <image>",
             prompt_token_ids=[10, 20],
         )
 
@@ -217,8 +212,8 @@ class TestFetchEmbeddingsFromEncoder:
         )
 
         assert isinstance(result, DisaggregatedParams)
-        assert result.multimodal["request_layout"]["prompt_token_ids"] == [10, 20]
-        assert request == {"messages": []}
+        assert request["_epd_processed_prompt"] == "test <image>"
+        assert request["_epd_prompt_token_ids"] == [10, 20]
 
     @pytest.mark.asyncio
     async def test_empty_urls_raises_error(self, encoder_cache):
@@ -227,3 +222,56 @@ class TestFetchEmbeddingsFromEncoder:
 
         with pytest.raises(ValueError, match="image_urls must not be empty"):
             await fetch_embeddings_from_encoder([], {}, mock_client, encoder_cache)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("versioned", [False, True])
+async def test_encoder_export_keeps_legacy_backend_fallback(monkeypatch, versioned):
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    @dataclass
+    class Params:
+        multimodal: dict
+        opaque_state: bytes | None = None
+
+    loader = SimpleNamespace(load_image_batch=AsyncMock(return_value=[object()]))
+    monkeypatch.setattr(EncodeHelper, "_get_image_loader", staticmethod(lambda: loader))
+    legacy = DisaggregatedParams(
+        multimodal_embedding_handles=[{"tensor_size": [2, 16]}],
+        multimodal_hashes=[[1] * 8],
+    )
+    result = SimpleNamespace(disaggregated_params=legacy)
+    payload = {
+        "schema_version": 1,
+        "items": [],
+        "request_layout": {"prompt_token_ids": [1, 99, 99]},
+    }
+    if versioned:
+        result.export_multimodal_handoff = lambda: Params(multimodal=payload)
+    engine = SimpleNamespace(llm=SimpleNamespace(generate=Mock(return_value=[result])))
+    tokenizer = SimpleNamespace(decode=Mock(return_value="legacy-prompt"))
+    responses = [
+        response
+        async for response in EncodeHelper._process_full_epd_flow(
+            [1],
+            ["https://example.com/image.png"],
+            tokenizer,
+            "unused",
+            "unused",
+            engine,
+        )
+    ]
+    assert len(responses) == 1
+    response = responses[0]
+    if versioned:
+        assert response["ep_disaggregated_params"]["multimodal"] == payload
+        assert "processed_prompt" not in response
+        assert "prompt_token_ids" not in response
+        tokenizer.decode.assert_not_called()
+    else:
+        assert (
+            response["ep_disaggregated_params"]["multimodal_embedding_handles"]
+            == legacy.multimodal_embedding_handles
+        )
+        assert response["processed_prompt"] == "legacy-prompt"
+        assert response["prompt_token_ids"] == [1]

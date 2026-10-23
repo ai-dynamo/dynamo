@@ -193,17 +193,19 @@ For high-performance multimodal inference, Dynamo supports a standalone encoder 
 In the full E/P/D flow:
 
 1. **Encode Worker**: Runs TRT-LLM's `MultimodalEncoder.generate()` to process image URLs through the vision encoder and projector
-2. **Prefill Worker**: Imports encoded items and the finalized request layout from `disaggregated_params.multimodal`, then generates KV cache without repeating media preprocessing
+2. **Prefill Worker**: Uses encoded items to generate KV cache; reuses the finalized request layout when the backend provides the versioned handoff
 3. **Decode Worker**: Uses the KV cache, processed prompt IDs, and model-required state retained by prefill
 
 The encode worker uses TRT-LLM's `MultimodalEncoder` class (which inherits from `BaseLLM`) and only requires the model path and batch size - no KV cache configuration is needed since it only runs the vision encoder + projector.
 
 ### Backend Handoff Contract
 
-The standalone image-URL path requires a TensorRT-LLM revision exposing
-`DisaggregatedParams.multimodal` with `schema_version: 1`, and the matching
-Dynamo adapter. Deploy encode, prefill, and decode workers with matching
-versions; the former flat E/P embedding/hash/mrope fields are no longer used.
+The standalone image-URL path supports both backend contracts. When TensorRT-LLM
+exposes `result.export_multimodal_handoff()`, Dynamo opts into the versioned
+`DisaggregatedParams.multimodal` payload with `schema_version: 1`. Older backends
+continue to use their existing flat embedding/hash/mRoPE fields and prompt
+metadata. The existing pinned backend remains usable through this fallback.
+Deploy encode, prefill, and decode workers with matching backend versions.
 
 The payload carries ordered encoded items and an optional finalized
 `request_layout`. Each item includes named tensor handles, its output row
@@ -213,12 +215,16 @@ The image-URL path still uses the existing CUDA IPC transport and requires
 co-located GPUs; this schema does not add cross-host tensor transfer. The
 separate embedding-file path keeps its existing NIXL transport.
 
-For P/D, prefill exports only its own model-required decode state. Dynamo does
-not restore encoder-owned handles after prefill. Ordinary P/D also forwards
+For versioned P/D, prefill exports only its own model-required decode state;
+Dynamo forwards that state without restoring encoder-owned handles. Legacy
+P/D retains its existing adapter behavior. Ordinary P/D also forwards
 processed prompt IDs so decode can skip media processing. Per-URL embedding
 cache hits continue to use the external-embedding path; a cached subset never
 reuses a whole-request layout. These changes do not enable additional standalone
 encoder models, video, or audio modalities.
+
+The legacy format is not deprecated by this change. Its removal requires a later
+announced transition after backend releases and external consumers have migrated.
 
 ### How to Launch
 
@@ -455,7 +461,7 @@ await register_model(
 |----------------|---------|---------------|
 | **Frontend → Prefill** | Request with image URL or .safetensors embedding path | No |
 | **Prefill → Encode (Image URL)** | Request with image URL | No |
-| **Encode → Prefill (Image URL)** | `ep_disaggregated_params.multimodal`: encoded item handles and optional finalized request layout | No |
+| **Encode → Prefill (Image URL)** | Existing flat params/prompt metadata, or opt-in `ep_disaggregated_params.multimodal` with an optional finalized layout | No |
 | **Prefill → Encode (Embedding Path)** | Request with .safetensors embedding file path | No |
 | **Encode → Prefill (Embedding Path)** | NIXL readable metadata + shape/dtype + auxiliary data | Yes (Embeddings tensor via RDMA) |
 | **Prefill → Decode** | `disaggregated_params`: KV state and P-owned decode inputs/layout; processed IDs for ordinary P/D | Configurable (KV cache: NIXL default, UCX optional) |

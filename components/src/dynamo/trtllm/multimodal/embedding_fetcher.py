@@ -69,6 +69,7 @@ async def fetch_embeddings_from_encoder(
             lambda req: _remote_encode_full_epd(
                 req,
                 encode_client,
+                update_request_for_decode=False,
                 trace_context=trace_context,
             ),
         )
@@ -77,6 +78,7 @@ async def fetch_embeddings_from_encoder(
         return await _remote_encode_full_epd(
             request,
             encode_client,
+            update_request_for_decode=True,
             trace_context=trace_context,
         )
 
@@ -84,6 +86,7 @@ async def fetch_embeddings_from_encoder(
 async def _remote_encode_full_epd(
     request: Dict[str, Any],
     encode_client: Any,
+    update_request_for_decode: bool = True,
     trace_context=None,
 ) -> DisaggregatedParams:
     """
@@ -92,10 +95,11 @@ async def _remote_encode_full_epd(
     Args:
         request: Request dict
         encode_client: Client to call remote encode worker
+        update_request_for_decode: If True, store EPD metadata in request
         trace_context: Optional Dynamo context for OTel trace propagation
 
     Returns:
-        DisaggregatedParams with canonical multimodal item results
+        DisaggregatedParams with multimodal_embedding_handles
 
     Raises:
         RuntimeError: If encode worker returns invalid response
@@ -117,6 +121,13 @@ async def _remote_encode_full_epd(
     params_dict = encode_response["ep_disaggregated_params"]
     if params_dict is None:
         raise RuntimeError("ep_disaggregated_params is None.")
+
+    # Store EPD metadata in request for decode worker (only when not using cache)
+    if update_request_for_decode:
+        if "processed_prompt" in encode_response:
+            request["_epd_processed_prompt"] = encode_response["processed_prompt"]
+        if "prompt_token_ids" in encode_response:
+            request["_epd_prompt_token_ids"] = encode_response["prompt_token_ids"]
 
     return DisaggregatedParams(**params_dict)
 
@@ -217,10 +228,15 @@ async def _fetch_embeddings_with_cache(
         )
 
     # Extract handles from disaggregated params
-    handles = ep_disaggregated_params.get_multimodal_embedding_handles()
+    handoff = getattr(ep_disaggregated_params, "multimodal", None)
+    handles = (
+        ep_disaggregated_params.get_multimodal_embedding_handles()
+        if handoff is not None
+        else getattr(ep_disaggregated_params, "multimodal_embedding_handles", None)
+    )
     if not handles:
         raise RuntimeError(
-            "fetch_embeddings_with_cache: No encoded item handles in multimodal handoff"
+            "fetch_embeddings_with_cache: No multimodal_embedding_handles in ep_disaggregated_params"
         )
 
     # Extract tensors from CUDA IPC handles

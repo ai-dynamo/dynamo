@@ -296,12 +296,15 @@ class EncodeHelper:
 
     @staticmethod
     async def _process_full_epd_flow(
-        prompt_token_ids_from_request: list[int],
-        image_urls: list[str],
-        engine: Any,
+        prompt_token_ids_from_request: list,
+        image_urls: list,
+        tokenizer,
+        model_dir: str,
+        model_type: str,
+        engine,
         mm_processor_kwargs: Optional[dict] = None,
         cache_scope: str | None = None,
-    ) -> AsyncGenerator[dict, None]:
+    ):
         """
         Process image URLs via TRT-LLM's MultimodalEncoder (full EPD flow).
 
@@ -311,12 +314,15 @@ class EncodeHelper:
         Args:
             prompt_token_ids_from_request: token IDs from the request (Rust preprocessor)
             image_urls: List of image URLs to process
+            tokenizer: Tokenizer for decoding prompt_token_ids_from_request
+            model_dir: Path to model directory (unused; kept for API compatibility)
+            model_type: Model type string (unused; kept for API compatibility)
             engine: TensorRTLLMEngine with MultimodalEncoder
             mm_processor_kwargs: Optional model-specific preprocessing options
             cache_scope: Optional frontend-derived image-cache isolation scope
 
         Yields:
-            Response with encoded items and optional finalized request layout
+            Response with ep_disaggregated_params, processed_prompt, and prompt_token_ids
         """
         # Load images with shared ImageLoader (async, same as multimodal_processor PD flow).
         image_items = [{"Url": u} for u in image_urls]
@@ -349,7 +355,17 @@ class EncodeHelper:
             yield {"ep_disaggregated_params": None}
             return
 
-        ep_disaggregated_params = encoder_outputs[0].disaggregated_params
+        result = encoder_outputs[0]
+        # Opt in only when the backend exposes the versioned export API.
+        # Older backends keep their existing output and prompt metadata below.
+        export_handoff = getattr(result, "export_multimodal_handoff", None)
+        if export_handoff is not None:
+            handoff = export_handoff()
+            if handoff is not None:
+                encoded_params = DisaggregatedParamsCodec.encode(handoff)
+                yield {"ep_disaggregated_params": asdict(encoded_params)}
+                return
+        ep_disaggregated_params = result.disaggregated_params
         if ep_disaggregated_params is None:
             logging.error(
                 "ENCODE WORKER: encoder_outputs[0].disaggregated_params is None"
@@ -357,10 +373,36 @@ class EncodeHelper:
             yield {"ep_disaggregated_params": None}
             return
 
-        if not ep_disaggregated_params.has_multimodal_embeddings:
-            raise RuntimeError("Encode worker returned no multimodal item results")
+        if ep_disaggregated_params.multimodal_embedding_handles is None:
+            logging.warning(
+                "ENCODE WORKER: ep_disaggregated_params.multimodal_embedding_handles is None"
+            )
+
+        # Prepare for network transfer
         encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
-        yield {"ep_disaggregated_params": asdict(encoded_params)}
+        params_dict = asdict(encoded_params)
+
+        # Extract processed prompt (includes <image> tokens) for prefill/decode consistency.
+        # NOTE: processed_prompt will contain template/placeholder tokens
+        # (e.g. <image>, [INST], etc.). Adding special tokens here can change
+        # token alignment across EPD stages (prefill/decode), so we explicitly
+        # avoid adding them.
+        processed_prompt = None
+        if tokenizer is not None:
+            processed_prompt = tokenizer.decode(
+                prompt_token_ids_from_request, skip_special_tokens=False
+            )
+
+        logging.debug(
+            "ENCODE WORKER: Extracted processed_prompt (len=%s)",
+            len(processed_prompt) if processed_prompt is not None else None,
+        )
+
+        yield {
+            "ep_disaggregated_params": params_dict,
+            "processed_prompt": processed_prompt,
+            "prompt_token_ids": prompt_token_ids_from_request,
+        }
 
     @staticmethod
     async def process_encode_request(
@@ -387,7 +429,7 @@ class EncodeHelper:
         Yields:
             Response dictionary based on the flow:
             - Embedding-path flow: nixl_readable_metadata + shape/dtype + auxiliary_data
-            - Full EPD flow: ep_disaggregated_params with the canonical multimodal handoff
+            - Full EPD flow: ep_disaggregated_params + processed_prompt + prompt_token_ids
         """
         if multimodal_processor is None:
             yield {"error": "No multimodal_processor configured on encode worker"}
@@ -443,6 +485,9 @@ class EncodeHelper:
             async for response in EncodeHelper._process_full_epd_flow(
                 token_ids,  # type: ignore
                 image_urls,
+                tokenizer,
+                model_dir,
+                model_type,
                 engine,
                 mm_processor_kwargs=epd_mm_kwargs,
                 cache_scope=image_cache_scope_from_request(request),
