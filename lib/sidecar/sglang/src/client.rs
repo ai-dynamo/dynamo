@@ -375,10 +375,11 @@ impl Pool {
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
         let pool = connect_pool(uri, *cfg, deadline, false).await?;
-        let channels: Vec<Channel> = (0..pool.len()).map(|_| pool.next_channel()).collect();
         Ok(Self {
-            control: client_from_channel(channels[0].clone()),
-            streams: channels.into_iter().map(GenerateClient::new).collect(),
+            control: client_from_channel(pool.next_channel()),
+            streams: (0..pool.len())
+                .map(|_| GenerateClient::new(pool.next_channel()))
+                .collect(),
             next: AtomicUsize::new(0),
         })
     }

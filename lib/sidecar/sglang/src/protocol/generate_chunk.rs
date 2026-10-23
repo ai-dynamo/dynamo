@@ -30,7 +30,7 @@ fn meta_key_index(key: &[u8]) -> Option<usize> {
 
 /// `pb::GenerateResponse` as the sidecar decodes it from the Generate stream.
 /// `text` is skipped: the sidecar never sets `return_text`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub(crate) struct GenerateChunk {
     pub(crate) output_ids: Vec<i32>,
     pub(crate) meta_info: MetaInfo,
@@ -38,7 +38,7 @@ pub(crate) struct GenerateChunk {
 }
 
 /// The [`META_KEYS`] entries of a response's `meta_info`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub(crate) struct MetaInfo([Option<String>; META_KEYS.len()]);
 
 impl MetaInfo {
@@ -73,13 +73,13 @@ impl MetaInfo {
 }
 
 #[cfg(test)]
-impl FromIterator<(String, String)> for MetaInfo {
-    fn from_iter<I: IntoIterator<Item = (String, String)>>(entries: I) -> Self {
+impl<'a> FromIterator<(&'a str, String)> for MetaInfo {
+    fn from_iter<I: IntoIterator<Item = (&'a str, String)>>(entries: I) -> Self {
         let mut meta = Self::default();
         for (key, value) in entries {
-            if let Some(index) = meta_key_index(key.as_bytes()) {
-                meta.0[index] = Some(value);
-            }
+            let index = meta_key_index(key.as_bytes())
+                .unwrap_or_else(|| panic!("meta_info key `{key}` is not in META_KEYS"));
+            meta.0[index] = Some(value);
         }
         meta
     }

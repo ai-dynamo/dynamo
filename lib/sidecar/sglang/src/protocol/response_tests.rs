@@ -15,10 +15,7 @@ fn assert_protocol_error(error: DynamoError) {
 #[test]
 fn malformed_terminal_is_rejected() {
     assert!(terminal_from_meta(&MetaInfo::default(), 4, 0, &StopConditions::default()).is_err());
-    let meta = MetaInfo::from_iter([(
-        "finish_reason".to_string(),
-        json!({"type": "mystery"}).to_string(),
-    )]);
+    let meta = MetaInfo::from_iter([("finish_reason", json!({"type": "mystery"}).to_string())]);
     assert!(terminal_from_meta(&meta, 4, 0, &StopConditions::default()).is_err());
 }
 
@@ -26,14 +23,14 @@ fn malformed_terminal_is_rejected() {
 fn terminal_engine_data_handles_prompt_logprob_encodings() {
     let meta = MetaInfo::from_iter([
         (
-            "input_token_logprobs".to_string(),
+            "input_token_logprobs",
             json!([[null, 10, null], [-0.2, 11, "b"]]).to_string(),
         ),
         (
-            "input_top_logprobs".to_string(),
+            "input_top_logprobs",
             json!([null, [[-0.3, 12, "c"]]]).to_string(),
         ),
-        ("routed_experts".to_string(), json!([1, 2]).to_string()),
+        ("routed_experts", json!([1, 2]).to_string()),
     ]);
     let data = engine_data_from_meta(&meta, true).unwrap().unwrap();
     let prompt = data["prompt_logprobs"].as_array().unwrap();
@@ -44,11 +41,11 @@ fn terminal_engine_data_handles_prompt_logprob_encodings() {
 
     let legacy = MetaInfo::from_iter([
         (
-            "input_token_logprobs".to_string(),
+            "input_token_logprobs",
             json!([[-0.1, 10, "a"], [-0.2, 11, "b"]]).to_string(),
         ),
         (
-            "input_top_logprobs".to_string(),
+            "input_top_logprobs",
             json!([[[-0.3, 12, "c"]], []]).to_string(),
         ),
     ]);
@@ -60,11 +57,11 @@ fn terminal_engine_data_handles_prompt_logprob_encodings() {
 
     let mismatched = MetaInfo::from_iter([
         (
-            "input_token_logprobs".to_string(),
+            "input_token_logprobs",
             json!([[null, 10, null], [-0.2, 11, "b"]]).to_string(),
         ),
         (
-            "input_top_logprobs".to_string(),
+            "input_top_logprobs",
             json!([[[-0.3, 12, "c"]], []]).to_string(),
         ),
     ]);
@@ -73,10 +70,8 @@ fn terminal_engine_data_handles_prompt_logprob_encodings() {
 
 #[test]
 fn prompt_logprobs_are_terminal_only() {
-    let meta = MetaInfo::from_iter([(
-        "input_token_logprobs".to_string(),
-        json!([[-0.1, 10, "a"]]).to_string(),
-    )]);
+    let meta =
+        MetaInfo::from_iter([("input_token_logprobs", json!([[-0.1, 10, "a"]]).to_string())]);
     assert!(engine_data_from_meta(&meta, false).unwrap().is_none());
 }
 
@@ -105,7 +100,7 @@ fn token_count_metadata_accepts_only_unsigned_in_range_integers() {
         ("null", None),
         ("invalid", None),
     ] {
-        let meta = MetaInfo::from_iter([("prompt_tokens".to_string(), raw.to_string())]);
+        let meta = MetaInfo::from_iter([("prompt_tokens", raw.to_string())]);
         assert_eq!(meta_u32(&meta, "prompt_tokens"), expected, "{raw}");
     }
 }
@@ -123,7 +118,7 @@ fn object_and_scalar_finish_reasons_preserve_usage_and_user_string() {
         (json!({"type": "length"}), FinishReason::Length, None),
         (json!({"type": "cancelled"}), FinishReason::Cancelled, None),
     ] {
-        let meta = MetaInfo::from_iter([("finish_reason".to_string(), finish.to_string())]);
+        let meta = MetaInfo::from_iter([("finish_reason", finish.to_string())]);
         let terminal = terminal_from_meta(&meta, 4, 3, &StopConditions::default()).unwrap();
         assert_eq!(terminal.finish_reason, Some(expected));
         assert_eq!(terminal.stop_reason, stop);
@@ -145,7 +140,7 @@ fn terminal_errors_preserve_backend_category_and_details() {
     ] {
         for kind in ["abort", "error"] {
             let meta = MetaInfo::from_iter([(
-                "finish_reason".to_string(),
+                "finish_reason",
                 json!({
                     "type": kind, "message": "generation failed", "status_code": status,
                     "err_type": "NativeError",
@@ -173,7 +168,7 @@ fn terminal_errors_preserve_backend_category_and_details() {
 #[test]
 fn malformed_terminal_metadata_has_protocol_error_category() {
     for raw in ["invalid", "null", "{}", "{\"type\":12}", "\"unknown\""] {
-        let meta = MetaInfo::from_iter([("finish_reason".to_string(), raw.to_string())]);
+        let meta = MetaInfo::from_iter([("finish_reason", raw.to_string())]);
         assert_protocol_error(
             terminal_from_meta(&meta, 4, 0, &StopConditions::default()).unwrap_err(),
         );
@@ -184,11 +179,11 @@ fn malformed_terminal_metadata_has_protocol_error_category() {
 fn selected_and_top_logprobs_preserve_positions_ranks_and_token_rendering() {
     let meta = MetaInfo::from_iter([
         (
-            "output_token_logprobs".to_string(),
+            "output_token_logprobs",
             json!([[-0.1, 10, "a"], [-0.2, 11, null]]).to_string(),
         ),
         (
-            "output_top_logprobs".to_string(),
+            "output_top_logprobs",
             json!([[[-0.1, 10, "a"], [-0.3, 12, "c"]], [[-0.2, 11, null]]]).to_string(),
         ),
     ]);
@@ -226,7 +221,7 @@ fn absent_and_selected_only_logprobs_do_not_synthesize_candidates() {
     assert!(selected.is_none());
     assert!(top.is_none());
     let meta = MetaInfo::from_iter([(
-        "output_token_logprobs".to_string(),
+        "output_token_logprobs",
         json!([[-0.1, 10, "a"]]).to_string(),
     )]);
     let (selected, top) = extract_logprobs(&meta, false).unwrap();
@@ -242,8 +237,7 @@ fn malformed_selected_and_top_logprob_entries_are_rejected() {
         json!([[null, 10, "a"]]),
         json!([["bad", 10, "a"]]),
     ] {
-        let meta =
-            MetaInfo::from_iter([("output_token_logprobs".to_string(), selected.to_string())]);
+        let meta = MetaInfo::from_iter([("output_token_logprobs", selected.to_string())]);
         assert_protocol_error(extract_logprobs(&meta, false).unwrap_err());
     }
     for top in [
@@ -256,10 +250,10 @@ fn malformed_selected_and_top_logprob_entries_are_rejected() {
     ] {
         let meta = MetaInfo::from_iter([
             (
-                "output_token_logprobs".to_string(),
+                "output_token_logprobs",
                 json!([[-0.1, 10, "a"]]).to_string(),
             ),
-            ("output_top_logprobs".to_string(), top.to_string()),
+            ("output_top_logprobs", top.to_string()),
         ]);
         assert_protocol_error(extract_logprobs(&meta, false).unwrap_err());
     }
@@ -269,11 +263,11 @@ fn malformed_selected_and_top_logprob_entries_are_rejected() {
 fn prompt_selected_token_wins_duplicate_candidate_and_accepts_null_sentinel() {
     let meta = MetaInfo::from_iter([
         (
-            "input_token_logprobs".to_string(),
+            "input_token_logprobs",
             json!([null, [-0.2, 11, "b"]]).to_string(),
         ),
         (
-            "input_top_logprobs".to_string(),
+            "input_top_logprobs",
             json!([null, [[-0.9, 11, "wrong"], [-0.3, 12, "c"]]]).to_string(),
         ),
     ]);
@@ -297,8 +291,8 @@ fn prompt_metadata_rejects_misaligned_or_malformed_positions() {
         (json!([null, [-0.2, 11, "b"]]), json!([null, [null]])),
     ] {
         let meta = MetaInfo::from_iter([
-            ("input_token_logprobs".to_string(), selected.to_string()),
-            ("input_top_logprobs".to_string(), top.to_string()),
+            ("input_token_logprobs", selected.to_string()),
+            ("input_top_logprobs", top.to_string()),
         ]);
         assert_protocol_error(engine_data_from_meta(&meta, true).unwrap_err());
     }
@@ -307,8 +301,8 @@ fn prompt_metadata_rejects_misaligned_or_malformed_positions() {
 #[test]
 fn prompt_opt_in_does_not_suppress_independent_routed_experts() {
     let meta = MetaInfo::from_iter([
-        ("input_token_logprobs".to_string(), json!([[]]).to_string()),
-        ("routed_experts".to_string(), json!([[1, 2]]).to_string()),
+        ("input_token_logprobs", json!([[]]).to_string()),
+        ("routed_experts", json!([[1, 2]]).to_string()),
     ]);
     assert_eq!(
         engine_data_from_meta(&meta, false).unwrap(),
@@ -316,8 +310,8 @@ fn prompt_opt_in_does_not_suppress_independent_routed_experts() {
     );
     assert!(engine_data_from_meta(&meta, true).is_err());
     let meta = MetaInfo::from_iter([
-        ("input_token_logprobs".to_string(), "[]".to_string()),
-        ("routed_experts".to_string(), json!([[1, 2]]).to_string()),
+        ("input_token_logprobs", "[]".to_string()),
+        ("routed_experts", json!([[1, 2]]).to_string()),
     ]);
     assert_eq!(
         engine_data_from_meta(&meta, true).unwrap(),
@@ -333,7 +327,7 @@ fn prompt_opt_in_does_not_suppress_independent_routed_experts() {
 #[test]
 fn user_stop_tokens_are_preserved_and_system_stop_tokens_are_hidden() {
     let meta = MetaInfo::from_iter([(
-        "finish_reason".to_string(),
+        "finish_reason",
         json!({"type": "stop", "matched": 128001}).to_string(),
     )]);
     for (user_ids, hidden_ids, expected) in [
