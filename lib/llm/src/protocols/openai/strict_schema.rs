@@ -6,9 +6,6 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow};
 use dynamo_protocols::types::FunctionObject;
-use dynamo_runtime::config::{
-    env_is_truthy, environment_names::llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
-};
 use serde_json::{Map, Value};
 
 // OpenAI's documented composition exclusions, plus `oneOf` (the API answers
@@ -34,8 +31,11 @@ const TYPES: &[&str] = &[
     "null", "boolean", "object", "array", "number", "integer", "string",
 ];
 
-pub(super) fn validate_strict_function(function: &FunctionObject) -> Result<()> {
-    if function.strict != Some(true) || env_is_truthy(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION) {
+pub(super) fn validate_strict_function(
+    function: &FunctionObject,
+    skip_strict_schema_validation: bool,
+) -> Result<()> {
+    if function.strict != Some(true) || skip_strict_schema_validation {
         return Ok(());
     }
     let Some(schema) = &function.parameters else {
@@ -598,52 +598,55 @@ mod tests {
 
     #[test]
     fn activation_and_absent_parameters() {
-        temp_env::with_var_unset(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, || {
-            for strict in [None, Some(false), Some(true)] {
-                let mut function = FunctionObject {
-                    name: "search".into(),
-                    description: None,
-                    parameters: None,
-                    strict,
-                };
-                validate_strict_function(&function).unwrap();
-                function.parameters = Some(json!({}));
-                assert_eq!(
-                    validate_strict_function(&function).is_err(),
-                    strict == Some(true)
-                );
-            }
-        });
+        for strict in [None, Some(false), Some(true)] {
+            let mut function = FunctionObject {
+                name: "search".into(),
+                description: None,
+                parameters: None,
+                strict,
+            };
+            validate_strict_function(&function, false).unwrap();
+            function.parameters = Some(json!({}));
+            assert_eq!(
+                validate_strict_function(&function, false).is_err(),
+                strict == Some(true)
+            );
+            validate_strict_function(&function, true).unwrap();
+        }
     }
 
     #[test]
     fn oversized_function_names_are_bounded_in_diagnostics() {
-        temp_env::with_var_unset(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, || {
-            let name = "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH + 1000);
-            let error = validate_strict_function(&FunctionObject {
+        let name = "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH + 1000);
+        let error = validate_strict_function(
+            &FunctionObject {
                 name: name.clone(),
                 description: None,
                 parameters: Some(json!({"type": "object"})),
                 strict: Some(true),
-            })
-            .unwrap_err()
-            .to_string();
-            assert!(!error.contains(&name));
-            assert!(error.contains(&format!(
-                "'{}...':",
-                "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH)
-            )));
-            let short = "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH);
-            let error = validate_strict_function(&FunctionObject {
+            },
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains(&name));
+        assert!(error.contains(&format!(
+            "'{}...':",
+            "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH)
+        )));
+        let short = "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH);
+        let error = validate_strict_function(
+            &FunctionObject {
                 name: short.clone(),
                 description: None,
                 parameters: Some(json!({"type": "object"})),
                 strict: Some(true),
-            })
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains(&format!("'{short}':")));
-        });
+            },
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&format!("'{short}':")));
     }
 
     #[test]

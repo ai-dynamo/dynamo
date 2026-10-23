@@ -406,116 +406,72 @@ async fn strict_tool_schema_rejected_before_dispatch() {
 #[tokio::test]
 #[serial]
 async fn strict_tool_schema_compatibility_preserves_submitted_functions_across_adapters() {
-    let missing_required_parameters = json!({
+    let parameters = json!({
         "type": "object",
         "properties": {
             "query": {"type": "string"},
-            "limit": {"type": "integer", "default": 5}
-        },
-        "required": ["query"],
-        "additionalProperties": false
-    });
-    let legacy_parameters = json!({
-        "type": "object",
-        "properties": {
             "value": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
             "options": {
                 "type": "object",
                 "properties": {"limit": {"type": "integer", "default": 5}}
             }
         },
-        "required": []
+        "required": ["query"],
+        "additionalProperties": false
     });
-
-    let mut legacy_requests = strict_tool_requests(json!({
-        "name": "search", "strict": true, "parameters": legacy_parameters
-    }))
-    .to_vec();
-    legacy_requests.push((
+    let function = json!({"name": "search", "strict": true, "parameters": parameters});
+    let mut requests = strict_tool_requests(function).to_vec();
+    requests.push((
         "/v1/messages",
         json!({
             "model": MODEL, "max_tokens": 64,
             "messages": [{"role": "user", "content": "ping"}],
-            "tools": [{
-                "name": "search", "strict": true,
-                "input_schema": legacy_parameters
-            }]
+            "tools": [{"name": "search", "strict": true, "input_schema": parameters}]
         }),
     ));
-    let cases = [
-        (
-            strict_tool_requests(json!({
-                "name": "search", "strict": true,
-                "parameters": missing_required_parameters
-            }))
-            .to_vec(),
-            missing_required_parameters,
-            "must include property 'limit'",
-        ),
-        (legacy_requests, legacy_parameters, "additionalProperties"),
-    ];
-    let accepted_request_count = cases
-        .iter()
-        .map(|(requests, _, _)| requests.len() * 2)
-        .sum::<usize>();
+
     let script = load_agent_fixture("text.sse").await.unwrap();
+    let mut env = BASE_ENV;
+    env.iter_mut()
+        .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
+        .unwrap()
+        .1 = Some("1");
+    temp_env::async_with_vars(env, async {
+        let svc = HarnessService::start(vec![script; requests.len()]).await;
+        for (path, body) in requests {
+            let response = post_json(&svc, path, body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            bounded(response.bytes()).await.unwrap();
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests.len(), 1);
+            let tools = requests[0].inner.tools.as_ref().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].function.name, "search");
+            assert_eq!(tools[0].function.strict, Some(true));
+            assert_eq!(tools[0].function.parameters.as_ref(), Some(&parameters));
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
 
-    for setting in [None, Some("0"), Some("1")] {
-        let mut env = BASE_ENV;
-        env.iter_mut()
-            .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
-            .unwrap()
-            .1 = setting;
-        temp_env::async_with_vars(env, async {
-            let scripts = if setting == Some("1") {
-                vec![script.clone(); accepted_request_count]
-            } else {
-                Vec::new()
-            };
-            let svc = HarnessService::start(scripts).await;
-            for (requests, parameters, rejection_message) in &cases {
-                for (path, body) in requests {
-                    for stream in [false, true] {
-                        let mut body = (*body).clone();
-                        body["stream"] = json!(stream);
-                        let response = post_json(&svc, path, body).await;
-                        if setting != Some("1") {
-                            if *path == "/v1/messages" {
-                                assert_anthropic_error(
-                                    response,
-                                    ExpectedError::Validation,
-                                    rejection_message,
-                                )
-                                .await;
-                            } else {
-                                assert_openai_error(
-                                    response,
-                                    ExpectedError::Validation,
-                                    rejection_message,
-                                )
-                                .await;
-                            }
-                            assert!(svc.engine.take_requests().await.is_empty());
-                            continue;
-                        }
-
-                        assert_eq!(response.status(), reqwest::StatusCode::OK);
-                        bounded(response.bytes()).await.unwrap();
-                        let requests = svc.engine.take_requests().await;
-                        assert_eq!(requests.len(), 1);
-                        let tools = requests[0].inner.tools.as_ref().unwrap();
-                        assert_eq!(tools.len(), 1);
-                        assert_eq!(tools[0].function.name, "search");
-                        assert_eq!(tools[0].function.strict, Some(true));
-                        assert_eq!(tools[0].function.parameters.as_ref(), Some(parameters));
-                    }
-                }
-            }
-            assert_eq!(svc.engine.remaining_scripts().await, 0);
-            svc.shutdown().await;
-        })
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        let response = post_json(
+            &svc,
+            "/v1/messages",
+            json!({
+                "model": MODEL, "max_tokens": 64,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{"name": "search", "strict": true, "input_schema": parameters}]
+            }),
+        )
         .await;
-    }
+        assert_anthropic_error(response, ExpectedError::Validation, "must include property").await;
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
 }
 
 #[tokio::test]

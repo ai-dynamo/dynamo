@@ -7,7 +7,10 @@ use dynamo_protocols::types::{
     ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_runtime::config::{
-    env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+    env_is_truthy,
+    environment_names::llm::{
+        DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+    },
 };
 use serde_json::Value;
 
@@ -753,6 +756,8 @@ pub fn validate_tools(
         );
     }
 
+    let skip_strict_schema_validation =
+        !tools.is_empty() && env_is_truthy(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
     for (i, tool) in tools.iter().enumerate() {
         if tool.function.name.len() > MAX_FUNCTION_NAME_LENGTH {
             anyhow::bail!(
@@ -787,7 +792,10 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
-        super::strict_schema::validate_strict_function(&tool.function)?;
+        super::strict_schema::validate_strict_function(
+            &tool.function,
+            skip_strict_schema_validation,
+        )?;
     }
     Ok(())
 }

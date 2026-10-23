@@ -32,7 +32,10 @@ use dynamo_protocols::types::{
     ImageUrl, ReasoningContent, ReasoningEffort as ChatReasoningEffort, ResponseFormat,
     ServiceTier as ChatServiceTier,
 };
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
+use dynamo_runtime::{
+    config::{env_is_truthy, environment_names::llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION},
+    protocols::annotated::AnnotationsProvider,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -839,9 +842,14 @@ fn convert_tools_and_choice(
         .map(|tools| convert_tools(tools, names))
         .transpose()?
         .unwrap_or_default();
+    let skip_strict_schema_validation =
+        !converted_tools.is_empty() && env_is_truthy(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
     for tool in &converted_tools {
-        super::strict_schema::validate_strict_function(&tool.function)
-            .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
+        super::strict_schema::validate_strict_function(
+            &tool.function,
+            skip_strict_schema_validation,
+        )
+        .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
     }
 
     let converted_choice = match tool_choice {
@@ -1450,8 +1458,6 @@ mod tests {
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent, ImageDetail,
     };
-
-    use dynamo_runtime::config::environment_names::llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 
     use super::*;
     use crate::protocols::common::StopConditionsProvider;
