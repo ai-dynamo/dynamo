@@ -23,24 +23,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-# NIXL environment variables
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
-    CARGO_TARGET_DIR=/opt/dynamo/target
-
-ENV LD_LIBRARY_PATH=\
-${NIXL_LIB_DIR}:\
-${NIXL_PLUGIN_DIR}:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-${LD_LIBRARY_PATH}
-
-# Copy ucx and nixl libs
-COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
-COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+ENV CARGO_TARGET_DIR=/opt/dynamo/target
 
 # Always copy FFmpeg so libs are available for Rust checks in CI.
 # libvpx.so* is included because the in-tree ffmpeg is built with --enable-libvpx,
@@ -115,15 +98,28 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# Install NIXL wheel only (pre-built C++ binary, not buildable from source).
-RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
+
+# NIXL from PyPI (all targets). The meta package requires both CUDA backends,
+# so install the backend first and the meta package with --no-deps.
+ARG NIXL_REF
+ARG CUDA_MAJOR
+RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip install "nixl-cu${CUDA_MAJOR}==${NIXL_REF#v}" && \
+    uv pip install --no-deps "nixl==${NIXL_REF#v}" && \
+    uv pip show nixl "nixl-cu${CUDA_MAJOR}" | grep -E '^(Name|Version)' | tee /opt/dynamo/nixl-versions.txt
+
+# Register the NIXL wheel's libraries with the loader so the Rust bindings'
+# dlopen("libnixl_capi.so") resolves. NIXL finds its plugins beside them.
+USER root
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    /opt/dynamo/venv/bin/python /tmp/register_nixl_libs.py --cuda-major "${CUDA_MAJOR}"
+USER dynamo
 
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE

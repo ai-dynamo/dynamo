@@ -20,9 +20,10 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
 ARG TOKENIZERS_VERSION
-ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
+{% else %}
+ARG NIXL_REF
 {% endif %}
 ARG MODELEXPRESS_VERSION
 
@@ -56,20 +57,14 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/l
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% else %}
-# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
-# stable prefix so non-Python consumers use the same NIXL copy that Python imports.
-# This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
-# processes that do not import the nixl Python package first.
-ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+# Register the upstream nixl-cu${CUDA_MAJOR} wheel's libraries with the loader
+# and expose them at a stable prefix, so non-Python consumers (Rust nixl-sys)
+# use the same NIXL copy that Python imports.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
-COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
-RUN install_nixl_from_wheel \
-    --cuda-major "${CUDA_MAJOR}" \
-    --site-packages "${SITE_PACKAGES}" \
-    --prefix "${NIXL_PREFIX}" \
-    --skip-headers
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    python3 /tmp/register_nixl_libs.py --cuda-major "${CUDA_MAJOR}" --link "${NIXL_PREFIX}"
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
@@ -125,17 +120,17 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
     fi
 
 {% if device != "cuda" %}
-# Copy UCX and NIXL from wheel_builder for CPU/XPU devices
+# Copy UCX and NIXL from nixl_builder for CPU/XPU devices
 # (CUDA devices use NIXL from upstream vLLM wheels)
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
+COPY --from=nixl_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=nixl_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
 {% if device == "xpu" %}
 # XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
-COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 {% endif %}
 # Copy NIXL Python wheels
-COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Install RDMA libraries required for UCX to find RDMA devices
 RUN apt-get update && \
@@ -209,7 +204,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 {% endif %}
 
 # Install device-specific NIXL wheels for non-CUDA devices.
-# These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
+# These are custom-built in nixl_builder and required for dev builds to link against NIXL libraries.
 {% if device != "cuda" %}
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \

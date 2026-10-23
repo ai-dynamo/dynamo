@@ -39,7 +39,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
-ARG NIXL_REF
 
 # Remove the upstream runtime's Git LFS package without pruning shared dependencies.
 RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
@@ -169,23 +168,18 @@ RUN --mount=type=bind,source=./container/deps/trtllm/_dynamo_pmix_hostname.py,ta
     mkdir -p /opt/dynamo && ln -sfn "$t" /opt/dynamo/mpi && \
     echo "MPI for ${TARGETARCH}: $(readlink -f /opt/dynamo/mpi)"
 
-# LD_PRELOAD pins TRT-LLM's bundled libnixl to dodge ai-dynamo/nixl#1668
-# (nixl-cu13's UCX 1.20.0 hangs with two agents/host); drop it when fixed.
-# NIXL_VERSION= clears the base image's stale value (see nixl-versions.txt).
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     PATH=/opt/dynamo/mpi/bin:/usr/local/bin/etcd:${PATH} \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6 \
     LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
-    OPAL_PREFIX=/opt/dynamo/mpi \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
-    NIXL_VERSION=
+    OPAL_PREFIX=/opt/dynamo/mpi
 
 WORKDIR /workspace
 
-# Install packages missing from upstream, sanity-check libnixl, register
-# TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
-# for shells, not K8s python3 launches), swap upstream's standalone etcd
+# Install packages missing from upstream, register TRT-LLM lib paths with
+# ldconfig (upstream's /etc/shinit_v2 only sets them for shells, not K8s
+# python3 launches), swap upstream's standalone etcd
 # tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
 # carries a single copy of each tool, and drop the unused wandb developer
 # tooling the DLFW base carries (upstream removes it on main,
@@ -199,15 +193,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         librdmacm1 \
         rdma-core \
         libjemalloc2 && \
-    test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
-    test -d "${NIXL_PLUGIN_DIR}" && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     printf '%s\n' \
         "/usr/local/tensorrt/lib" \
         "/usr/local/cuda/lib64" \
         "/usr/local/ucx/lib" \
-        "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" \
-        "/opt/nvidia/nvda_nixl/lib64" \
         > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
     ldconfig && \
     ldconfig -p | grep -q 'libturbojpeg.so.0' && \
@@ -218,6 +208,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     /usr/bin/python3 -m pip uninstall -y --break-system-packages wandb && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null && \
     [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ]
+
+# Use the base image's NIXL everywhere: register its libraries with the loader
+# for the Rust bindings, and add its Python bindings to site-packages so
+# `import nixl` works without the base image's PYTHONPATH.
+RUN --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    /usr/bin/python3 /tmp/register_nixl_libs.py \
+        --lib-dir "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" && \
+    test -d /opt/nvidia/nvda_nixl/lib/python3/dist-packages/nixl_cu13 && \
+    echo /opt/nvidia/nvda_nixl/lib/python3/dist-packages \
+        > /usr/local/lib/python3.12/dist-packages/nvda-nixl.pth && \
+    env -u PYTHONPATH /usr/bin/python3 -c 'import nixl._api'
 
 # Restore Triton's default CUDA header/tool paths for SSH-launched ranks that
 # lack the image ENV (GH-14864). Use per-file links inside real directories so
@@ -307,14 +309,11 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
     \
-    # nixl/nixl-cu13 for `import nixl` (dynamo.nixl_connect); version from NIXL_REF.
-    # LD_PRELOAD swaps the runtime .so (nixl#1668).
-    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
-    _nixl_ver="${NIXL_REF#v}" && \
-    uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
-    \
-    # Record effective NIXL versions (pip vs loaded .so) for diagnosis.
-    { uv pip show nixl nixl-cu13 | grep -E '^(Name|Version)'; echo "loaded_libnixl: ${LD_PRELOAD##*:}"; } | tee /opt/dynamo/nixl-versions.txt && \
+    # Record the NIXL in use (the base image's) for diagnosis.
+    python3 -c 'import importlib.metadata as m, nixl_cu13; print("nixl:", m.version("nixl")); print("nixl_cu13:", nixl_cu13.__file__)' \
+        > /opt/dynamo/nixl-versions.txt && \
+    ls /opt/nvidia/nvda_nixl/lib/*-linux-gnu/libcore.so.*.*.* >> /opt/dynamo/nixl-versions.txt && \
+    cat /opt/dynamo/nixl-versions.txt && \
     \
     # Third-party deps Dynamo wheels declare but upstream lacks. The
     # requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
@@ -981,22 +980,18 @@ ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     PATH=/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6 \
     LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
-    OPAL_PREFIX=/opt/dynamo/mpi \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
-    NIXL_VERSION=
+    OPAL_PREFIX=/opt/dynamo/mpi
 {% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6 \
     LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
-    OPAL_PREFIX=/opt/dynamo/mpi \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
-    NIXL_VERSION=
+    OPAL_PREFIX=/opt/dynamo/mpi
 {% endif %}
 
 WORKDIR /workspace

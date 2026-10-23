@@ -85,19 +85,18 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 
 {% if device == "xpu" %}
 {# XPU runtime: NIXL + UCX are needed for P2P transport on Intel GPUs.
-   CUDA sglang runtime does NOT include NIXL/UCX (matching upstream main);
-   those are only added in the dev stage for build-time linking. #}
+   CUDA sglang runtime uses the NIXL wheel from upstream lmsysorg/sglang. #}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
-# Copy UCX and NIXL from wheel_builder
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:0 --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+# Copy UCX and NIXL from nixl_builder
+COPY --from=nixl_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=nixl_builder $NIXL_PREFIX $NIXL_PREFIX
+COPY --chown=dynamo:0 --from=nixl_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 
-COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=nixl_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 
@@ -364,20 +363,21 @@ RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder
 ENV IMAGEIO_FFMPEG_EXE=
 {% endif %}
 
-{% if device != "xpu" and target not in ("dev", "local-dev") %}
+{% if device != "xpu" %}
 # Add generic UCX aliases beside NIXL's private libraries so native consumers
 # use the same implementation without breaking UCX's $ORIGIN-based core and
 # module lookup. The wheel's auditwheel dependency directory is deliberately
 # placed first for every process; it contains only hash-mangled dependencies
 # plus the two generic UCX aliases. No existing wheel file or ELF metadata is
-# modified. The same script publishes NIXL's C API directory at the second path
-# below and registers it with the runtime linker, so the bare dlopen of
-# libnixl_capi.so in nixl-sys resolves. Both paths are passed explicitly because
-# the ENV on the next line has to name the same two directories.
+# modified. Then register NIXL's C API directory with the loader and expose it
+# at /opt/dynamo/nixl. Both paths are passed explicitly because the ENV on the
+# next line has to name the same two directories.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
-    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat /opt/dynamo/nixl-capi
-ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl-capi${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+    --mount=type=bind,source=./container/deps/register_nixl_libs.py,target=/tmp/register_nixl_libs.py,readonly \
+    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat && \
+    python3 /tmp/register_nixl_libs.py --link /opt/dynamo/nixl
+ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 {% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership
