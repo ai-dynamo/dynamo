@@ -25,7 +25,7 @@ import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
 from tensorrt_llm.inputs.multimodal_data import VideoData
-from tensorrt_llm.inputs.utils import async_load_video
+from tensorrt_llm.inputs.utils import async_load_video, load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
@@ -58,19 +58,46 @@ _EMBEDDING_FETCH_MIN_RATE = 64 * 1024
 _EMBEDDING_FETCH_READ_TIMEOUT_S = 300.0
 
 
-def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
-    """Decode H.264/H.265 via NVDEC into TRT-LLM's ``VideoData`` (format="pt").
+def _preferred_video_format(input_processor: Any) -> str:
+    """The input processor's preferred video decode format: "np" or "pt".
 
-    Mirrors ``tensorrt_llm.inputs.media_io._load_video_by_cv2``'s "pt" output for
-    the pinned v1.3.0rc21: RGB, a list of ``(C, H, W)`` float32 [0,1] tensors,
-    with the same metadata keys. Synchronous -- call via ``asyncio.to_thread``.
+    trtllm-serve seeds its media-IO defaults from
+    ``get_preferred_media_io_kwargs()``. MiniMax-M3 VL asks for uint8 "np"
+    frames because its video processor rescales by 1/255 itself; float [0,1]
+    "pt" frames would be rescaled twice and reach the vision tower near black.
+    Anything other than "np" keeps the "pt" frames.
+    """
+    get_prefs = getattr(input_processor, "get_preferred_media_io_kwargs", None)
+    if get_prefs is None:
+        return "pt"
+    try:
+        prefs = get_prefs() or {}
+    except Exception as e:
+        logging.warning("Preferred media IO kwargs unavailable: %s", e)
+        return "pt"
+    return "np" if (prefs.get("video") or {}).get("format") == "np" else "pt"
+
+
+def _nvdec_video_data(
+    content: bytes, num_frames: int, video_format: str = "pt"
+) -> VideoData:
+    """Decode H.264/H.265 via NVDEC into TRT-LLM's ``VideoData``.
+
+    Mirrors ``tensorrt_llm.inputs.media_io._load_video_by_cv2``: "pt" is a list
+    of ``(C, H, W)`` float32 [0,1] tensors, "np" the ``(N, H, W, 3)`` uint8 RGB
+    stack, with the same metadata keys. Synchronous -- call via
+    ``asyncio.to_thread``.
     """
     from dynamo.common.multimodal.nvdec_decoder import decode_video_nvdec
 
     frames_np, meta = decode_video_nvdec(content, num_frames)  # (N,H,W,3) uint8 RGB
-    stacked = frames_np.astype("float32") * (1.0 / 255.0)
-    nchw = torch.from_numpy(stacked).permute(0, 3, 1, 2).contiguous()
-    frames_pt = list(torch.unbind(nchw, dim=0))
+    frames: Any
+    if video_format == "np":
+        frames = frames_np
+    else:
+        stacked = frames_np.astype("float32") * (1.0 / 255.0)
+        nchw = torch.from_numpy(stacked).permute(0, 3, 1, 2).contiguous()
+        frames = list(torch.unbind(nchw, dim=0))
     fps = float(meta.get("fps") or 0.0)
     total = int(meta["total_num_frames"])
     metadata = {
@@ -79,7 +106,7 @@ def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
         "duration": (total / fps) if fps > 0 else 0.0,
         "frames_indices": meta["frames_indices"],
     }
-    return VideoData(frames=frames_pt, metadata=metadata, audio=None)
+    return VideoData(frames=frames, metadata=metadata, audio=None)
 
 
 class TokenizerProtocol(Protocol):
@@ -192,6 +219,7 @@ class MultimodalRequestProcessor:
             self.input_processor = create_input_processor(model_dir, self.tokenizer)
         except Exception as e:
             logging.warning("Input processor unavailable for max_tokens sizing: %s", e)
+        self.video_format = _preferred_video_format(self.input_processor)
 
     def _expanded_prompt_len(
         self, token_ids: List[int], images: Optional[List[Any]]
@@ -216,6 +244,18 @@ class MultimodalRequestProcessor:
         except Exception as e:
             logging.warning("Could not compute expanded prompt length: %s", e)
             return None
+
+    async def _load_video_with_vendor_decoder(self, video: str) -> VideoData:
+        """Decode with TRT-LLM's cv2 loader in ``self.video_format``.
+
+        ``async_load_video`` accepts only "pt" and "pil", so "np" goes through
+        the synchronous ``load_video`` in a worker thread.
+        """
+        if self.video_format == "np":
+            return await asyncio.to_thread(
+                load_video, video, self.num_video_frames, format="np"
+            )
+        return await async_load_video(video, self.num_video_frames)
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -600,7 +640,10 @@ class MultimodalRequestProcessor:
                         if should_use_nvdec(codec):
                             try:
                                 nvdec_video = await asyncio.to_thread(
-                                    _nvdec_video_data, content, self.num_video_frames
+                                    _nvdec_video_data,
+                                    content,
+                                    self.num_video_frames,
+                                    self.video_format,
                                 )
                             except Exception as exc:  # noqa: BLE001 - fall back
                                 logging.warning(
@@ -618,8 +661,8 @@ class MultimodalRequestProcessor:
                                 await asyncio.to_thread(video_file.flush)
                                 try:
                                     videos.append(
-                                        await async_load_video(
-                                            video_file.name, self.num_video_frames
+                                        await self._load_video_with_vendor_decoder(
+                                            video_file.name
                                         )
                                     )
                                 except ImportError as exc:
@@ -638,8 +681,8 @@ class MultimodalRequestProcessor:
                     else:
                         try:
                             videos.append(
-                                await async_load_video(
-                                    normalized_url, self.num_video_frames
+                                await self._load_video_with_vendor_decoder(
+                                    normalized_url
                                 )
                             )
                         except ImportError as exc:
@@ -712,6 +755,19 @@ class MultimodalRequestProcessor:
         # Post-expansion prompt length, so an omitted max_tokens can be sized
         # against the real context usage rather than the unexpanded placeholders.
         mm_data = processed_inputs.get("multi_modal_data")
+
+        # The token IDs are the frontend's rendering of the chat template, one
+        # placeholder per media item already in place. A TRT-LLM processor
+        # without the tokenized+MM fast path gets them detokenized by TRT-LLM,
+        # which drops `chat_template_applied`, so a processor that templates a
+        # raw prompt (MiniMax-M3 VL) adds a second placeholder and rejects the
+        # request. Hand such processors the rendered text with the flag, as
+        # trtllm-serve does; fast-path processors keep the token IDs alone.
+        if mm_data and not getattr(
+            self.input_processor, "supports_token_id_mm_expansion", True
+        ):
+            processed_inputs["prompt"] = self.tokenizer.decode(token_ids)
+            processed_inputs["chat_template_applied"] = True
         # Skipped when the request overrides the processor: the sizing
         # calculator is not override-aware (Qwen2-VL ignores the kwargs while
         # counting) and is not guaranteed non-mutating (Gemma-4 writes them

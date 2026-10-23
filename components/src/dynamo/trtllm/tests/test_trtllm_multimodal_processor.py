@@ -188,6 +188,94 @@ def test_nvdec_video_data_builds_pt_videodata(monkeypatch) -> None:
     assert vd.audio is None
 
 
+def test_nvdec_video_data_keeps_uint8_frames_for_np(monkeypatch) -> None:
+    """ "np" hands over NVDEC's (T,H,W,3) uint8 stack untouched, as the vendor
+    loader's "np" format does; processors that rescale by 1/255 need it."""
+    import numpy as np
+
+    from dynamo.common.multimodal import nvdec_decoder
+
+    frames_np = np.full((2, 4, 5, 3), 200, dtype=np.uint8)
+    meta = {"total_num_frames": 2, "fps": 1.0, "frames_indices": [0, 1]}
+    monkeypatch.setattr(
+        nvdec_decoder,
+        "decode_video_nvdec",
+        lambda content, num_frames: (frames_np, meta),
+    )
+
+    vd = mmp._nvdec_video_data(b"h264-bytes", 2, "np")
+
+    assert vd.frames is frames_np
+    assert vd.metadata["frames_indices"] == [0, 1]
+
+
+@pytest.mark.parametrize(
+    "input_processor, expected",
+    [
+        (None, "pt"),
+        (SimpleNamespace(), "pt"),
+        (SimpleNamespace(get_preferred_media_io_kwargs=lambda: {}), "pt"),
+        (
+            SimpleNamespace(
+                get_preferred_media_io_kwargs=lambda: {"image": {"format": "np"}}
+            ),
+            "pt",
+        ),
+        (
+            SimpleNamespace(
+                get_preferred_media_io_kwargs=lambda: {"video": {"format": "np"}}
+            ),
+            "np",
+        ),
+    ],
+)
+def test_preferred_video_format(input_processor, expected) -> None:
+    assert mmp._preferred_video_format(input_processor) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("codec", ["h264", "vp9"])
+async def test_video_decodes_in_the_preferred_format(codec, monkeypatch) -> None:
+    """With "np" preferred, NVDEC is asked for "np" and the vendor fallback goes
+    through load_video(format="np"), since async_load_video rejects "np"."""
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    processor.video_format = "np"
+    monkeypatch.setattr(mmp, "fetch_bytes", AsyncMock(return_value=b"video bytes"))
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: codec)
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: codec == "h264")
+    nvdec = MagicMock(return_value=object())
+    monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
+    sync_load = MagicMock(return_value=object())
+    monkeypatch.setattr(mmp, "load_video", sync_load)
+    async_load = AsyncMock(return_value=object())
+    monkeypatch.setattr(mmp, "async_load_video", async_load)
+
+    await processor.process_openai_request(
+        {
+            "multi_modal_data": {
+                "video_url": [{"Url": "http://169.254.169.254/v.mp4"}]
+            },
+            "token_ids": [1],
+        },
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    async_load.assert_not_awaited()
+    if codec == "h264":
+        assert nvdec.call_args.args[2] == "np"
+        sync_load.assert_not_called()
+    else:
+        nvdec.assert_not_called()
+        assert sync_load.call_args.kwargs == {"format": "np"}
+
+
 @pytest.mark.asyncio
 async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
     """H.264 video input is hardware-decoded via NVDEC; the vendor
@@ -527,6 +615,45 @@ async def test_mm_processor_kwargs_forwarded(request_extra, expected) -> None:
     )
 
     assert processed["mm_processor_kwargs"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fast_path", [False, True])
+async def test_rendered_prompt_reaches_processors_without_the_token_fast_path(
+    fast_path,
+) -> None:
+    """Without the tokenized+MM fast path, media requests carry the rendered
+    text and chat_template_applied; with it, the token IDs alone."""
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "rendered <image> prompt"
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=tokenizer,
+    )
+    processor.input_processor = SimpleNamespace(
+        supports_token_id_mm_expansion=fast_path
+    )
+    processor.image_loader.load_image_batch = AsyncMock(return_value=[object()])
+
+    processed = await processor.process_openai_request(
+        {
+            "multi_modal_data": {"image_url": [{"Url": "https://example.com/x.png"}]},
+            "token_ids": [1, 2, 3],
+        },
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert processed["prompt_token_ids"] == [1, 2, 3]
+    if fast_path:
+        assert "prompt" not in processed
+        assert "chat_template_applied" not in processed
+    else:
+        assert processed["prompt"] == "rendered <image> prompt"
+        assert processed["chat_template_applied"] is True
+        tokenizer.decode.assert_called_once_with([1, 2, 3])
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,9 @@ def mock_handler():
     handler.model_config = Mock(enable_prompt_embeds=True)
     handler.model_config.dtype = torch.float32
     handler.model_config.get_hidden_size.return_value = 4096
+    # No attributes: vLLM's loader prefers hf_text_config.word_embed_proj_dim
+    # when present, and a bare Mock would invent one.
+    handler.model_config.hf_text_config = Mock(spec=[])
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )

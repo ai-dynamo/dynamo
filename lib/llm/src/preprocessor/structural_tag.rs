@@ -363,6 +363,21 @@ impl OpenAIPreprocessor {
         Ok(applied)
     }
 
+    /// Whether the worker holds a guided grammar until the prompt-opened
+    /// reasoning block closes, as it advertises through
+    /// `TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY` (every request)
+    /// or `TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY` (requests that
+    /// set `require_reasoning`). Operator structural-tag settings govern tool
+    /// tags only, so they do not count here.
+    pub(super) fn backend_holds_guided_grammar(&self, require_reasoning: bool) -> bool {
+        self.structural_tag_reasoning_metadata(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        ) || (require_reasoning
+            && self.structural_tag_reasoning_metadata(
+                TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
+            ))
+    }
+
     fn structural_tag_reasoning_metadata(&self, key: &str) -> bool {
         match self.runtime_config.get_engine_specific::<bool>(key) {
             Ok(Some(excludes_reasoning)) => excludes_reasoning,
@@ -1140,6 +1155,41 @@ mod tests {
             })
         };
         assert_eq!(structural_tag["format"]["content"], expected_content);
+    }
+
+    #[test]
+    fn backend_holds_guided_grammar_follows_worker_metadata() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        for (metadata, require_reasoning, expected) in [
+            (None, true, false),
+            (
+                Some(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY),
+                false,
+                true,
+            ),
+            (
+                Some(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY),
+                false,
+                false,
+            ),
+            (
+                Some(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY),
+                true,
+                true,
+            ),
+        ] {
+            let mut mdc = ModelDeploymentCard::load_from_disk(&model_path, None).unwrap();
+            if let Some(key) = metadata {
+                mdc.runtime_config.set_engine_specific(key, true).unwrap();
+            }
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            assert_eq!(
+                preprocessor.backend_holds_guided_grammar(require_reasoning),
+                expected,
+                "metadata={metadata:?}, require_reasoning={require_reasoning}"
+            );
+        }
     }
 
     #[test]

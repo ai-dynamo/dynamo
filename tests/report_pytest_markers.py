@@ -228,6 +228,7 @@ STUB_MODULES = [
     "vllm.reasoning.mistral_reasoning_parser",
     "vllm.reasoning.qwen3_engine_reasoning_parser",
     "vllm.renderers",
+    "vllm.renderers.chat_utils",
     "vllm.renderers.embed_utils",
     "vllm.sampling_params",
     "vllm.tokenizers",
