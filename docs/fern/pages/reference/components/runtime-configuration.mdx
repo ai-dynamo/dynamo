@@ -34,8 +34,6 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
               args:
                 - --dyn-tool-call-parser
                 - llama3_json
-                - --engine-request-limit
-                - "32"
               env:
                 - name: DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB
                   value: "4.0"
@@ -50,8 +48,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
     # Frontend
     python -m dynamo.frontend \
         --namespace my-cluster \
-        --discovery-backend etcd \
-        --endpoint-types chat
+        --discovery-backend etcd
 
     # vLLM worker
     python -m dynamo.vllm \
@@ -297,7 +294,7 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-structural-tag" type="boolean or JSON object" default="enabled">
-  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Native Rust sidecars retain their conservative default. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
+  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Of the native Rust sidecars, only SGLang shares this default; the vLLM and TensorRT-LLM sidecars default to `false` until their engines compile these tags. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
 
   Environment variable: `DYN_STRUCTURAL_TAG`
 </ParamField>
@@ -369,20 +366,6 @@ address.
   Override the runtime health-check canary payload used by the unified backend's `Worker`. Accepts a JSON object string, for example `'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}'`, or a file reference prefixed with `@`, for example `@/path/to/payload.json`. Takes precedence over the engine's default `health_check_payload()`. Applies to the unified backend only.
 
   Environment variable: `DYN_HEALTH_CHECK_PAYLOAD`
-</ParamField>
-
-<ParamField path="--engine-request-limit" type="integer" default="null">
-  Maximum requests handled concurrently by the engine. Setting a positive integer enables worker-side
-  admission control. When the engine slots and the Dynamo overflow queue are full, the worker rejects
-  the request and the Frontend returns the configured overload status, 529 by default.
-
-  Environment variable: `DYN_ENGINE_REQUEST_LIMIT`
-</ParamField>
-
-<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_LIMIT" type="integer" default="16">
-  Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies only
-  when `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` is set. Must be at least `2`; the
-  effective per-worker cap is the engine limit plus this queue limit.
 </ParamField>
 
 <ParamField path="DYN_SYSTEM_HOST" type="string" default="0.0.0.0">

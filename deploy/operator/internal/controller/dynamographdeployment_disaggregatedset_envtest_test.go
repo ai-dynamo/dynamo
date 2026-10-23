@@ -125,6 +125,83 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(completedResult.Status.Restart.Phase).To(Equal(nvidiacomv1beta1.RestartPhaseCompleted))
 	})
 
+	It("keeps a failed restart pending until its DS revision is observed and ready", func() {
+		for _, withFrontend := range []bool{false, true} {
+			ctx := context.Background()
+			dgd := newEnvtestDSHappyPathDGD(fmt.Sprintf("ds-restart-retry-%t", withFrontend))
+			order := []string{"prefill", "decode"}
+			if withFrontend {
+				order = append(order, "frontend")
+				dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.0.0", PodTemplate: envtestDSTestPodTemplate(),
+				})
+			}
+			Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
+			reconciler := newEnvtestDSReconcilers()
+
+			By("observing the ready baseline before requesting a new restart")
+			_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+			markDisaggregatedSetReady(ctx, current)
+			baseline := fetchTypedDisaggregatedSet(ctx, current)
+			baselineRevision := disaggregatedsetutils.ComputeRevision(baseline.Spec.Roles)
+			current.Spec.Restart = &nvidiacomv1beta1.Restart{
+				ID: "restart-retry", Strategy: &nvidiacomv1beta1.RestartStrategy{
+					Type: nvidiacomv1beta1.RestartStrategyTypeSequential, Order: order,
+				},
+			}
+			Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+			By("failing the DS write and persisting the returned restart status")
+			conflictingClient := &dsRestartWriteConflictClient{Client: k8sClient, failWrite: true}
+			reconciler.Client = conflictingClient
+			program := reconciler.newDisaggregatedSetProgram()
+			result, err := program.Reconcile(ctx, workloadProgramRequest{DGD: current})
+			Expect(err).To(HaveOccurred())
+			Expect(result.Status.Restart.Phase).To(Equal(nvidiacomv1beta1.RestartPhaseRestarting))
+			current = persistWorkloadProgramStatus(ctx, current, result.Status)
+
+			By("retrying against the ready old revision without advancing or completing")
+			result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: current})
+			Expect(err).To(HaveOccurred())
+			Expect(result.Status.Restart.InProgress).To(Equal([]string{"prefill"}))
+			Expect(result.Status.Restart.Phase).To(Equal(nvidiacomv1beta1.RestartPhaseRestarting))
+			observed := fetchTypedDisaggregatedSet(ctx, current)
+			Expect(disaggregatedsetutils.ComputeRevision(observed.Spec.Roles)).To(Equal(baselineRevision))
+			if withFrontend {
+				frontendFound := false
+				for _, child := range ownedEnvtestCutoverDCDs(ctx, current) {
+					if child.Spec.ComponentName == "frontend" {
+						frontendFound = true
+						Expect(child.Spec.PodTemplate.Annotations[consts.RestartAnnotation]).To(BeEmpty())
+					}
+				}
+				Expect(frontendFound).To(BeTrue())
+			}
+
+			By("accepting the write but waiting until the requested revision becomes ready")
+			conflictingClient.failWrite = false
+			result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: current})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.Restart.InProgress).To(Equal([]string{"prefill"}))
+			current = persistWorkloadProgramStatus(ctx, current, result.Status)
+			result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: current})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.Restart.InProgress).To(Equal([]string{"prefill"}))
+
+			By("advancing only after the requested revision is ready and old children are drained")
+			markDisaggregatedSetReady(ctx, current)
+			result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: current})
+			Expect(err).NotTo(HaveOccurred())
+			if withFrontend {
+				Expect(result.Status.Restart.InProgress).To(Equal([]string{"frontend"}))
+			} else {
+				Expect(result.Status.Restart.Phase).To(Equal(nvidiacomv1beta1.RestartPhaseCompleted))
+			}
+		}
+	})
+
 	It("does not switch the durable provider when routing annotations change", func() {
 		ctx := context.Background()
 		dgd := newEnvtestDSHappyPathDGD("demo-ds-immutable-provider")
@@ -344,6 +421,22 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(HaveLen(1))
 	})
 })
+
+type dsRestartWriteConflictClient struct {
+	client.Client
+	failWrite bool
+}
+
+func (c *dsRestartWriteConflictClient) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+	patchOptions := &client.PatchOptions{}
+	for _, option := range options {
+		option.ApplyToPatch(patchOptions)
+	}
+	if c.failWrite && object.GetObjectKind().GroupVersionKind() == disaggregatedSetGVK && len(patchOptions.DryRun) == 0 {
+		return apierrors.NewConflict(disaggregatedsetv1.Resource("disaggregatedsets"), object.GetName(), fmt.Errorf("injected restart write conflict"))
+	}
+	return c.Client.Patch(ctx, object, patch, options...)
+}
 
 func newEnvtestDSReconcilers() *DynamoGraphDeploymentReconciler {
 	runtimeConfig := &commoncontroller.RuntimeConfig{

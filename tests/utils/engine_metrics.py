@@ -150,9 +150,6 @@ class VllmMetricsChecker(EngineMetrics):
 
 @dataclass
 class SGLangMetricsChecker(EngineMetrics):
-    minimum_context_length: int | None = field(default=None, kw_only=True)
-    minimum_kv_capacity: int | None = field(default=None, kw_only=True)
-
     def scheduler_counts(self) -> tuple[float, float]:
         body = self.scrape()
         return (
@@ -168,22 +165,13 @@ class SGLangMetricsChecker(EngineMetrics):
         )
 
     def completion_progress(self, max_tokens: int) -> float:
-        assert self.minimum_context_length is not None, "Missing context prerequisite"
-        assert self.minimum_kv_capacity is not None, "Missing KV capacity prerequisite"
-        assert (
-            0 < max_tokens < self.minimum_context_length
-        ), "Cancellation request needs context space for its prompt"
-        assert (
-            max_tokens < self.minimum_kv_capacity
-        ), "Cancellation request exceeds its KV capacity prerequisite"
+        # SGLang silently shortens max_new_tokens to fit its context and KV pool.
         body = self.scrape()
-        for name, minimum in (
-            ("sglang:context_len", self.minimum_context_length),
-            ("sglang:max_total_num_tokens", self.minimum_kv_capacity),
-        ):
+        for name in ("sglang:context_len", "sglang:max_total_num_tokens"):
+            capacity = min(self.samples(body, name))
             assert (
-                min(self.samples(body, name)) >= minimum
-            ), f"Cancellation request may be shortened: {name} must be >= {minimum}"
+                max_tokens < capacity
+            ), f"Cancellation request may be shortened: {name}={capacity}"
         # SGLang's prefill supplies the first token; this counter counts decode.
         return max_tokens - 1
 

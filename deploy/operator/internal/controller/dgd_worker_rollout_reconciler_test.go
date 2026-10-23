@@ -4047,9 +4047,10 @@ func TestOldWorkerDCDsAtZero(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		dcds []*nvidiacomv1beta1.DynamoComponentDeployment
-		want bool
+		name     string
+		dcds     []*nvidiacomv1beta1.DynamoComponentDeployment
+		deleting bool
+		want     bool
 	}{
 		{
 			name: "no old generations",
@@ -4081,6 +4082,22 @@ func TestOldWorkerDCDsAtZero(t *testing.T) {
 				newDCD(0, 2, 1, ptr.To(int32(0))),
 			},
 			want: false,
+		},
+		{
+			name: "deletion advances generation after scale-down was observed",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				newDCD(0, 3, 2, ptr.To(int32(0))),
+			},
+			deleting: true,
+			want:     true,
+		},
+		{
+			name: "deleting generation still reports non-terminated replicas",
+			dcds: []*nvidiacomv1beta1.DynamoComponentDeployment{
+				newDCD(0, 3, 2, ptr.To(int32(1))),
+			},
+			deleting: true,
+			want:     false,
 		},
 		{
 			name: "replica status has not been reported",
@@ -4116,14 +4133,21 @@ func TestOldWorkerDCDsAtZero(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Check drain status while live or waiting for deletion finalizers")
+			if tt.deleting {
+				for _, dcd := range tt.dcds {
+					dcd.DeletionTimestamp = ptr.To(metav1.Now())
+				}
+			}
 			assert.Equal(t, tt.want, oldWorkerDCDsAtZero(tt.dcds))
 		})
 	}
 }
 
 func TestOldWorkerPodsTerminated(t *testing.T) {
+	t.Log("Define old generations with and without worker hashes")
 	oldDCDs := []*nvidiacomv1beta1.DynamoComponentDeployment{
-		{ObjectMeta: metav1.ObjectMeta{Name: "old-worker-a"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "old-worker-a", Labels: map[string]string{consts.KubeLabelDynamoWorkerHash: "old-hash"}}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "old-worker-b"}},
 	}
 	newPod := func(name, selector string, phase corev1.PodPhase) corev1.Pod {
@@ -4184,7 +4208,7 @@ func TestOldWorkerPodsTerminated(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "pod without a workload selector does not block",
+			name: "pod without a workload identity does not block",
 			pods: []corev1.Pod{newPod("checkpoint", "", corev1.PodRunning)},
 			want: true,
 		},
@@ -4196,10 +4220,50 @@ func TestOldWorkerPodsTerminated(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "running native LWS pod blocks",
+			pods: []corev1.Pod{{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoComponent:           "worker",
+					consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+					consts.KubeLabelDynamoWorkerHash:          "old-hash",
+				}},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}},
+			want: false,
+		},
+		{
+			name: "terminal native LWS pod does not block",
+			pods: []corev1.Pod{{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoComponent:           "worker",
+					consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+					consts.KubeLabelDynamoWorkerHash:          "old-hash",
+				}},
+				Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+			}},
+			want: true,
+		},
+		{
+			name: "native LWS pod from a new generation does not block",
+			pods: []corev1.Pod{{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoComponent:           "worker",
+					consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+					consts.KubeLabelDynamoWorkerHash:          "new-hash",
+				}},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Check whether any old-generation pod still blocks cleanup")
 			assert.Equal(t, tt.want, oldWorkerPodsTerminated(oldDCDs, tt.pods))
 		})
 	}
@@ -4287,66 +4351,91 @@ func TestListDGDComponentPodsUsesCompositeIndex(t *testing.T) {
 }
 
 func TestDGDWorkerPodEventPredicate(t *testing.T) {
-	newPod := func(phase corev1.PodPhase) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
+	for _, tt := range []struct {
+		name  string
+		label string
+	}{
+		{name: "legacy selector", label: consts.KubeLabelDynamoSelector},
+		{name: "native LWS worker hash", label: consts.KubeLabelDynamoWorkerHash},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Create worker pods with the selected generation identity")
+			newPod := func(phase corev1.PodPhase) *corev1.Pod {
+				return &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "worker",
+						Namespace: "default",
+						Labels: map[string]string{
+							consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+							consts.KubeLabelDynamoComponent:           "worker",
+							consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+							tt.label:                                  "old-worker",
+						},
+					},
+					Status: corev1.PodStatus{Phase: phase},
+				}
+			}
+
+			pred := dgdWorkerPodEventPredicate()
+			running := newPod(corev1.PodRunning)
+			failed := newPod(corev1.PodFailed)
+			succeeded := newPod(corev1.PodSucceeded)
+			deleting := running.DeepCopy()
+			deleting.DeletionTimestamp = ptr.To(metav1.Now())
+			unrelated := running.DeepCopy()
+			delete(unrelated.Labels, tt.label)
+			frontend := running.DeepCopy()
+			frontend.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeFrontend
+			moved := running.DeepCopy()
+			moved.Labels[tt.label] = "another-old-worker"
+
+			t.Log("Admit membership and terminality changes while ignoring unrelated events")
+			assert.True(t, pred.Create(event.CreateEvent{Object: running}), "pod creation changes drain membership")
+			assert.False(t, pred.Create(event.CreateEvent{Object: frontend}), "non-worker pods must be ignored")
+			assert.True(t, pred.Delete(event.DeleteEvent{Object: running}), "pod deletion can unblock a drain")
+			assert.False(t, pred.Delete(event.DeleteEvent{Object: unrelated}), "unmanaged pods must be ignored")
+			assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: failed}), "transition to Failed can unblock a drain")
+			assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: succeeded}), "transition to Succeeded can unblock a drain")
+			assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: deleting}), "deletion timestamp alone does not make a pod terminal")
+			assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: failed, ObjectNew: succeeded}), "terminal-to-terminal transitions are irrelevant")
+			assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: moved}), "generation identity changes move the pod between drain memberships")
+			assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: unrelated, ObjectNew: running}), "becoming a managed worker pod changes drain membership")
+			assert.False(t, pred.Generic(event.GenericEvent{Object: running}))
+		})
+	}
+}
+
+func TestMapDGDWorkerPodToRequests(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		label string
+	}{
+		{name: "legacy selector", label: consts.KubeLabelDynamoSelector},
+		{name: "native LWS worker hash", label: consts.KubeLabelDynamoWorkerHash},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Create a managed worker pod with the selected generation identity")
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 				Name:      "worker",
 				Namespace: "default",
 				Labels: map[string]string{
 					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 					consts.KubeLabelDynamoComponent:           "worker",
 					consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
-					consts.KubeLabelDynamoSelector:            "old-worker",
+					tt.label:                                  "old-worker",
 				},
-			},
-			Status: corev1.PodStatus{Phase: phase},
-		}
+			}}
+
+			t.Log("Map the pod event to its graph deployment")
+			requests := mapDGDWorkerPodToRequests(context.Background(), pod)
+			require.Len(t, requests, 1)
+			assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, requests[0].NamespacedName)
+
+			t.Log("Ignore pods without a parent graph deployment")
+			delete(pod.Labels, consts.KubeLabelDynamoGraphDeploymentName)
+			assert.Empty(t, mapDGDWorkerPodToRequests(context.Background(), pod))
+		})
 	}
-
-	pred := dgdWorkerPodEventPredicate()
-	running := newPod(corev1.PodRunning)
-	failed := newPod(corev1.PodFailed)
-	succeeded := newPod(corev1.PodSucceeded)
-	deleting := running.DeepCopy()
-	deleting.DeletionTimestamp = ptr.To(metav1.Now())
-	unrelated := running.DeepCopy()
-	delete(unrelated.Labels, consts.KubeLabelDynamoSelector)
-	frontend := running.DeepCopy()
-	frontend.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeFrontend
-	moved := running.DeepCopy()
-	moved.Labels[consts.KubeLabelDynamoSelector] = "another-old-worker"
-
-	assert.True(t, pred.Create(event.CreateEvent{Object: running}), "pod creation changes drain membership")
-	assert.False(t, pred.Create(event.CreateEvent{Object: frontend}), "non-worker pods must be ignored")
-	assert.True(t, pred.Delete(event.DeleteEvent{Object: running}), "pod deletion can unblock a drain")
-	assert.False(t, pred.Delete(event.DeleteEvent{Object: unrelated}), "unmanaged pods must be ignored")
-	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: failed}), "transition to Failed can unblock a drain")
-	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: succeeded}), "transition to Succeeded can unblock a drain")
-	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: deleting}), "deletion timestamp alone does not make a pod terminal")
-	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: failed, ObjectNew: succeeded}), "terminal-to-terminal transitions are irrelevant")
-	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: moved}), "selector changes move the pod between drain memberships")
-	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: unrelated, ObjectNew: running}), "becoming a managed worker pod changes drain membership")
-	assert.False(t, pred.Generic(event.GenericEvent{Object: running}))
-}
-
-func TestMapDGDWorkerPodToRequests(t *testing.T) {
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name:      "worker",
-		Namespace: "default",
-		Labels: map[string]string{
-			consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-			consts.KubeLabelDynamoComponent:           "worker",
-			consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
-			consts.KubeLabelDynamoSelector:            "old-worker",
-		},
-	}}
-
-	requests := mapDGDWorkerPodToRequests(context.Background(), pod)
-	require.Len(t, requests, 1)
-	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, requests[0].NamespacedName)
-
-	delete(pod.Labels, consts.KubeLabelDynamoGraphDeploymentName)
-	assert.Empty(t, mapDGDWorkerPodToRequests(context.Background(), pod))
 }
 
 // --- reconcileRollingUpdate state machine tests ---
@@ -4951,6 +5040,33 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 				}
 			},
 			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
+			expectedOld: map[string]int32{"worker": 0},
+			expectedNew: map[string]int32{"worker": 3},
+		},
+		{
+			name: "recreate preserves replacement replicas while old deletion advances generation",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(3)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+					},
+				},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				oldDCD := makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 0, 0, 0)
+				oldDCD.Generation = 3
+				oldDCD.Status.ObservedGeneration = 2
+				oldDCD.DeletionTimestamp = ptr.To(metav1.Now())
+				oldDCD.Finalizers = []string{"test.example/hold-deletion"}
+				return []runtime.Object{oldDCD}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, newHash, 3, 3, 3),
+				}
+			},
 			expectedOld: map[string]int32{"worker": 0},
 			expectedNew: map[string]int32{"worker": 3},
 		},

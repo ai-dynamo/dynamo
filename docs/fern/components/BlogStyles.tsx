@@ -76,6 +76,21 @@ article:has(.dynamo-blog-home) {
   padding: 0 clamp(0.25rem, 2vw, 1.5rem) 5rem;
 }
 
+/* The publication lists set hide-toc, which removes the TOC aside that holds
+   the right page margin, so Fern's mx-auto centers the article between the
+   sidebar and the viewport edge and it drifts right of the header on wide
+   screens. Reserve that margin the way Fern's reference layout does, and
+   start the article beside the sidebar where the digest landing starts.
+   Keyed on #fern-toc because Fern renders that aside before the content
+   wrapper, out of reach of a sibling combinator. */
+.fern-main:not(:has(> #fern-toc)) .fern-layout-guide:has(.dynamo-blog-home) {
+  padding-right: calc(var(--page-padding, 2rem) + var(--aside-offset, 0px));
+}
+
+.fern-main:not(:has(> #fern-toc)) article:has(.dynamo-blog-home) {
+  margin-inline: 0 auto;
+}
+
 article:has(.dynamo-blog-home) > header {
   display: none;
 }
