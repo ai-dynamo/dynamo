@@ -16,6 +16,111 @@ from tests.utils import decision_api as client
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_chat_decode_accepts_generated_tokens_and_normal_completion(finish_reason):
+    client.assert_chat_decode(
+        {
+            "choices": [{"finish_reason": finish_reason}],
+            "usage": {"completion_tokens": 1},
+        }
+    )
+
+
+@pytest.mark.parametrize("tokens,finish_reason", [(0, "stop"), (1, None), (1, "error")])
+def test_chat_decode_rejects_zero_decode_or_abnormal_completion(tokens, finish_reason):
+    with pytest.raises(AssertionError):
+        client.assert_chat_decode(
+            {
+                "choices": [{"finish_reason": finish_reason}],
+                "usage": {"completion_tokens": tokens},
+            }
+        )
+
+
+def test_native_parity_rejects_invalid_systemone_contract(monkeypatch):
+    probabilities = {
+        "route": [0.6, 0.4],
+        "urgent": [0.6, 0.4],
+        "severity": [0.4, 0.4, 0.2],
+    }
+    jev = {
+        **_mocker_body(probabilities, "systemone"),
+        "model": "wrong-model",
+        "usage": {"input_tokens": 21, "output_tokens": 0},
+    }
+    oai = {
+        "model": "model",
+        "answers": [
+            {
+                "type": "choice",
+                "name": "route",
+                "choice": "billing",
+                "confidence": 0.5,
+                "probabilities": [
+                    {"value": value, "probability": p}
+                    for value, p in zip(
+                        ("billing", "technical"), probabilities["route"]
+                    )
+                ],
+            },
+            {"type": "predicate", "name": "urgent", "probability": 0.6},
+            {
+                "type": "score",
+                "name": "severity",
+                "score": 0.8,
+                "confidence": 0.5,
+                "probabilities": [
+                    {"value": i, "label": label, "probability": p}
+                    for i, (label, p) in enumerate(
+                        zip(("Low", "Moderate", "High"), probabilities["severity"])
+                    )
+                ],
+            },
+        ],
+        "usage": {
+            "input_tokens": 21,
+            "output_tokens": 0,
+            "total_tokens": 21,
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+    }
+    jev = {
+        **jev,
+        "answers": {
+            **jev["answers"],
+            "severity": {**jev["answers"]["severity"], "score": 0.8},
+        },
+    }
+    chat = {"choices": [{"finish_reason": "stop"}], "usage": {"completion_tokens": 1}}
+
+    def post(url, **kwargs):
+        body = (
+            jev
+            if url.endswith("systemone")
+            else oai
+            if url.endswith("decisions")
+            else chat
+        )
+        return SimpleNamespace(
+            status_code=200,
+            text="",
+            headers={"x-dynamo-systemone-version": "1"},
+            json=lambda: body,
+        )
+
+    monkeypatch.setattr(client.requests, "post", post)
+    references = iter(
+        (probabilities[question], 0.1, 7)
+        for question in ("route", "urgent", "severity")
+    )
+    monkeypatch.setattr(client, "_native_probabilities", lambda *args: next(references))
+    with pytest.raises(AssertionError):
+        client.assert_native_sglang_parity(
+            "http://dynamo", "http://native", "model", None
+        )
+
+
 @pytest.mark.parametrize("dialect", ["oai", "systemone"])
 @pytest.mark.parametrize("wrong_question", ["route", "urgent", "severity"])
 def test_mocker_probability_oracle_rejects_uniform_scores(dialect, wrong_question):

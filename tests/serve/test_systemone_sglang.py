@@ -22,6 +22,7 @@ from transformers import AutoTokenizer
 
 from tests.utils.constants import QWEN
 from tests.utils.decision_api import (
+    assert_chat_decode,
     assert_native_sglang_parity,
     post_with_capacity_retry,
 )
@@ -172,6 +173,17 @@ def test_systemone_scoring_and_chat_overlap(systemone_sglang_server):
             "urgent": {"type": "noul", "instructions": "Action is needed today."}
         },
     }
+    scoring_oai = {
+        "model": QWEN,
+        "input": scoring["state"],
+        "questions": [
+            {
+                "type": "predicate",
+                "name": "urgent",
+                "instructions": "Action is needed today.",
+            }
+        ],
+    }
     chat = {
         "model": QWEN,
         "messages": [{"role": "user", "content": "Say hello."}],
@@ -181,24 +193,33 @@ def test_systemone_scoring_and_chat_overlap(systemone_sglang_server):
 
     def invoke(index):
         route, payload = (
-            ("systemone", scoring) if index % 2 == 0 else ("chat/completions", chat)
-        )
+            ("systemone", scoring),
+            ("decisions", scoring_oai),
+            ("chat/completions", chat),
+        )[index % 3]
         response = post_with_capacity_retry(
             f"{systemone_sglang_server}/v1/{route}", payload
         )
         assert response.status_code == 200, response.text
         body = response.json()
-        if index % 2 == 0:
+        if route != "chat/completions":
             assert body["usage"]["output_tokens"] == 0
-            answer = body["answers"]["urgent"]
-            assert math.isfinite(answer["noul"]) and 0 <= answer["noul"] <= 1
+            if route == "systemone":
+                answer = body["answers"]["urgent"]
+                probability = answer["noul"]
+            else:
+                assert len(body["answers"]) == 1
+                answer = body["answers"][0]
+                assert answer["name"] == "urgent" and answer["type"] == "predicate"
+                probability = answer["probability"]
+            assert math.isfinite(probability) and 0 <= probability <= 1
             if "x_label_mass" in answer:
                 assert (
                     math.isfinite(answer["x_label_mass"])
                     and 0 <= answer["x_label_mass"] <= 1
                 )
         else:
-            assert len(body["choices"]) == 1
+            assert_chat_decode(body)
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(invoke, range(24)))

@@ -154,6 +154,12 @@ def assert_request_headers(response):
     assert response.headers["x-typesafe-request-id"] == response.headers["x-request-id"]
 
 
+def assert_chat_decode(body):
+    assert len(body["choices"]) == 1
+    assert body["choices"][0]["finish_reason"] in ("stop", "length")
+    assert body["usage"]["completion_tokens"] > 0
+
+
 def assert_mocker_probabilities(body, dialect, label_token_ids):
     """Check the mocker's exact deterministic requested-token probabilities."""
     assert dialect in ("oai", "systemone")
@@ -244,7 +250,7 @@ def assert_native_sglang_parity(base_url, native_url, model, tokenizer):
     assert response.status_code == 200, response.text
     assert response.headers["x-dynamo-systemone-version"] == "1"
     body = response.json()
-    assert list(body["answers"]) == ["route", "urgent", "severity"]
+    assert_decision_body(body, model, "systemone")
     oai_response = requests.post(
         f"{base_url}/v1/decisions", json=decision_payload(model), timeout=60
     )
@@ -316,4 +322,4 @@ def assert_native_sglang_parity(base_url, native_url, model, tokenizer):
         timeout=60,
     )
     assert chat.status_code == 200, chat.text
-    assert len(chat.json()["choices"]) == 1
+    assert_chat_decode(chat.json())
