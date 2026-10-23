@@ -18,10 +18,14 @@ use dynamo_sidecar_common::{
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
+use tonic::GrpcMethod;
+use tonic::codec::ProstCodec;
+use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::Channel;
 
 use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
+use crate::protocol::GenerateChunk;
 
 pub type Client = SglangServiceClient<Channel>;
 
@@ -319,10 +323,45 @@ fn client_from_channel(channel: Channel) -> Client {
         .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
 }
 
+/// `SglangServiceClient::generate`, but decoding each streamed response as a
+/// [`GenerateChunk`] instead of a `pb::GenerateResponse`.
+#[derive(Clone)]
+pub(crate) struct GenerateClient(tonic::client::Grpc<Channel>);
+
+impl GenerateClient {
+    fn new(channel: Channel) -> Self {
+        Self(
+            tonic::client::Grpc::new(channel)
+                .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+                .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
+        )
+    }
+
+    pub(crate) async fn generate(
+        &mut self,
+        request: pb::GenerateRequest,
+    ) -> Result<tonic::Response<tonic::Streaming<GenerateChunk>>, tonic::Status> {
+        self.0
+            .ready()
+            .await
+            .map_err(|error| tonic::Status::unknown(format!("Service was not ready: {error}")))?;
+        let path = PathAndQuery::from_static("/sglang.runtime.v1.SglangService/Generate");
+        let mut request = tonic::Request::new(request);
+        request.extensions_mut().insert(GrpcMethod::new(
+            "sglang.runtime.v1.SglangService",
+            "Generate",
+        ));
+        self.0
+            .server_streaming(request, path, ProstCodec::default())
+            .await
+    }
+}
+
 /// Fixed-size pool of independent HTTP/2 connections. Generation calls are
 /// round-robined so high concurrency does not funnel through one codec task.
 pub struct Pool {
-    clients: Vec<Client>,
+    control: Client,
+    streams: Vec<GenerateClient>,
     next: AtomicUsize,
 }
 
@@ -336,27 +375,26 @@ impl Pool {
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
         let pool = connect_pool(uri, *cfg, deadline, false).await?;
-        let clients = (0..pool.len())
-            .map(|_| client_from_channel(pool.next_channel()))
-            .collect();
+        let channels: Vec<Channel> = (0..pool.len()).map(|_| pool.next_channel()).collect();
         Ok(Self {
-            clients,
+            control: client_from_channel(channels[0].clone()),
+            streams: channels.into_iter().map(GenerateClient::new).collect(),
             next: AtomicUsize::new(0),
         })
     }
 
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
-        self.clients.len()
+        self.streams.len()
     }
 
-    pub fn stream_client(&self) -> Client {
-        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.clients.len();
-        self.clients[index].clone()
+    pub(crate) fn stream_client(&self) -> GenerateClient {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.streams.len();
+        self.streams[index].clone()
     }
 
     pub fn control_client(&self) -> Client {
-        self.clients[0].clone()
+        self.control.clone()
     }
 }
 

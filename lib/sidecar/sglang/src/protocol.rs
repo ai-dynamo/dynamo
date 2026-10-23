@@ -14,6 +14,9 @@ use serde_json::{Map, Value};
 use crate::client;
 use crate::proto as pb;
 
+mod generate_chunk;
+pub(crate) use generate_chunk::{GenerateChunk, MetaInfo};
+
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
@@ -398,19 +401,19 @@ pub(crate) fn output_ids_to_u32(ids: &[i32]) -> Result<Vec<u32>, DynamoError> {
         .collect()
 }
 
-fn meta_value(meta: &HashMap<String, String>, key: &str) -> Option<Value> {
+fn meta_value(meta: &MetaInfo, key: &str) -> Option<Value> {
     meta.get(key)
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
 }
 
-pub(crate) fn meta_u32(meta: &HashMap<String, String>, key: &str) -> Option<u32> {
+pub(crate) fn meta_u32(meta: &MetaInfo, key: &str) -> Option<u32> {
     meta_value(meta, key)
         .and_then(|value| value.as_u64())
         .and_then(|value| u32::try_from(value).ok())
 }
 
 pub(crate) fn terminal_from_meta(
-    meta: &HashMap<String, String>,
+    meta: &MetaInfo,
     prompt_tokens: u32,
     generated: u32,
     stop_conditions: &StopConditions,
@@ -454,10 +457,7 @@ pub(crate) fn terminal_from_meta(
 }
 
 /// SGLang reports the prompt tokens served from its prefix cache as `cached_tokens`.
-fn cached_prompt_tokens(
-    meta: &HashMap<String, String>,
-    prompt_tokens: u32,
-) -> Option<PromptTokensDetails> {
+fn cached_prompt_tokens(meta: &MetaInfo, prompt_tokens: u32) -> Option<PromptTokensDetails> {
     meta_u32(meta, "cached_tokens").map(|cached_tokens| PromptTokensDetails {
         audio_tokens: None,
         cached_tokens: Some(cached_tokens.min(prompt_tokens)),
@@ -487,7 +487,7 @@ pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError
 }
 
 pub(crate) fn engine_data_from_meta(
-    meta: &HashMap<String, String>,
+    meta: &MetaInfo,
     include_prompt_logprobs: bool,
 ) -> Result<Option<Value>, DynamoError> {
     let mut data = Map::new();
@@ -500,7 +500,7 @@ pub(crate) fn engine_data_from_meta(
     Ok((!data.is_empty()).then_some(Value::Object(data)))
 }
 
-fn prompt_logprobs_from_meta(meta: &HashMap<String, String>) -> Result<Option<Value>, DynamoError> {
+fn prompt_logprobs_from_meta(meta: &MetaInfo) -> Result<Option<Value>, DynamoError> {
     let Some(Value::Array(input_logprobs)) = meta_value(meta, "input_token_logprobs") else {
         return Ok(None);
     };
@@ -583,7 +583,7 @@ fn prompt_logprob_entry(value: &Value, label: &str) -> Result<(String, Value), D
 pub(crate) type ExtractedLogprobs = (Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
 
 pub(crate) fn extract_logprobs(
-    meta: &HashMap<String, String>,
+    meta: &MetaInfo,
     return_tokens_as_ids: bool,
 ) -> Result<ExtractedLogprobs, DynamoError> {
     let Some(Value::Array(all_logprobs)) = meta_value(meta, "output_token_logprobs") else {
