@@ -10,7 +10,7 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 <ReferenceStyles />
 
-Known issues are mirrored verbatim from each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
+Known issues summarize each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
 
 <a id="v160"></a>
 
@@ -44,7 +44,7 @@ Known issues are mirrored verbatim from each release's GitHub release notes. The
 
 <span className="dynref-badge dynref-badge--blue">Operator</span> **EFA Network Plugin Not Loaded:** On AWS EFA clusters, SGLang and TensorRT-LLM workers configured from the [EFA on AWS guide](../../../kubernetes/installation/rdma-setup/efa-on-aws.mdx) silently fall back to socket transport because the guide's `LD_LIBRARY_PATH` entry is wrong. The issue also affects v1.5.0. **Workaround:** use `/opt/amazon/ofi-nccl/lib` instead of `/opt/aws-ofi-nccl/lib`.
 
-<span className="dynref-badge dynref-badge--blue">RL</span> **Slime Weight Synchronization Failure:** With the experimental Slime integration, the first weight update from the Slime trainer to SGLang v0.5.21 engines fails with HTTP 400. A fix is planned for a future release. No workaround is available yet.
+<span className="dynref-badge dynref-badge--blue">RL</span> **Slime Weight Synchronization Failure:** With the experimental Slime integration, the first weight update from the Slime trainer to SGLang v0.5.21 engines fails with HTTP 400, and restarting the trainer against engines still running from an earlier job also fails. A fix is planned for a future release. No workaround is available yet.
 
 The other v1.5.0 and v1.5.1 known issues are fixed in v1.6.0 or were closed as intended behavior.
 

@@ -48,12 +48,6 @@ Pull, deploy, and install with every artifact pinned to the v1.6.0 release set.
       anchor: "scheduling",
     },
     {
-      area: "Dynamo Sidecar",
-      title: "TensorRT-LLM OpenEngine, LoRA & Encode-Prefill-Decode",
-      body: "The experimental Dynamo Sidecar broadens across all three backends. The TensorRT-LLM sidecar moves onto TensorRT-LLM's OpenEngine gRPC API and adds disaggregated serving ([#14349](https://github.com/ai-dynamo/dynamo/pull/14349)). The vLLM sidecar gains dynamic LoRA load and unload with per-request adapter selection ([#13068](https://github.com/ai-dynamo/dynamo/pull/13068)) and an Encode role for encode-prefill-decode serving of images and video ([#13966](https://github.com/ai-dynamo/dynamo/pull/13966), [#15287](https://github.com/ai-dynamo/dynamo/pull/15287)). SGLang sidecars publish KV events for KV-aware routing, including multinode engines ([#13862](https://github.com/ai-dynamo/dynamo/pull/13862), [#14908](https://github.com/ai-dynamo/dynamo/pull/14908)). Dynamo Operator can run the engine and the Dynamo runtime in separate containers, each with its own image and health checks ([#14927](https://github.com/ai-dynamo/dynamo/pull/14927)), and all sidecars share transport flags ([#15653](https://github.com/ai-dynamo/dynamo/pull/15653)). The `dynamo-sidecar` image is published to NGC ([#16062](https://github.com/ai-dynamo/dynamo/pull/16062)).",
-      anchor: "dynamo-sidecar",
-    },
-    {
       area: "Frontend",
       title: "Structured Parsing, Reranking & Error Fidelity",
       body: "Dynamo Frontend adds opt-in V2 tool and reasoning parsers for eight model families, selected with `DYN_PARSER_VERSION` ([#14950](https://github.com/ai-dynamo/dynamo/pull/14950)), with structural tags on by default for supported parsers ([#15916](https://github.com/ai-dynamo/dynamo/pull/15916)). DeepSeek V4.1 gains reasoning and tool-call support ([#15030](https://github.com/ai-dynamo/dynamo/pull/15030)). An OpenAI-compatible `/v1/rerank` endpoint serves SGLang cross-encoder models ([#14032](https://github.com/ai-dynamo/dynamo/pull/14032)), and a root-level `thinking_token_budget` field caps reasoning tokens on SGLang and vLLM ([#12624](https://github.com/ai-dynamo/dynamo/pull/12624), [#15120](https://github.com/ai-dynamo/dynamo/pull/15120)). Errors map to protocol-correct OpenAI and Anthropic responses ([#14396](https://github.com/ai-dynamo/dynamo/pull/14396), [#14002](https://github.com/ai-dynamo/dynamo/pull/14002)). The Frontend HTTP server now supports mutual TLS ([#14173](https://github.com/ai-dynamo/dynamo/pull/14173)).",
@@ -157,7 +151,9 @@ Pull, deploy, and install with every artifact pinned to the v1.6.0 release set.
 
 ### Dynamo Sidecar
 
-> Dynamo Sidecar remains experimental in Dynamo v1.6.0.
+<Note>
+Dynamo Sidecar remains experimental in Dynamo v1.6.0.
+</Note>
 
 - **vLLM Sidecar LoRA Lifecycle:** Added dynamic LoRA load, unload, and per-request adapter selection to the vLLM sidecar, with local, Hugging Face, and S3 adapters and no silent base-model fallback for unavailable adapters ([#13068](https://github.com/ai-dynamo/dynamo/pull/13068)). Added aggregated and NIXL prefill/decode launchers for local LoRA serving ([#14574](https://github.com/ai-dynamo/dynamo/pull/14574)).
 - **TensorRT-LLM OpenEngine gRPC Sidecar:** Moved the TensorRT-LLM sidecar onto TensorRT-LLM's OpenEngine (`openengine.v1`) gRPC API and added disaggregated serving ([#14349](https://github.com/ai-dynamo/dynamo/pull/14349)). Raised the shared sidecar gRPC startup deadline from 300 to 1,800 seconds for large model loads ([#14825](https://github.com/ai-dynamo/dynamo/pull/14825)).
@@ -318,7 +314,9 @@ Pull, deploy, and install with every artifact pinned to the v1.6.0 release set.
 
 ### Dynamo Sidecar
 
-> Dynamo Sidecar remains experimental in Dynamo v1.6.0.
+<Note>
+Dynamo Sidecar remains experimental in Dynamo v1.6.0.
+</Note>
 
 - **vLLM Sidecar Parser Passthrough:** Accepted `--dyn-tool-call-parser` and `--dyn-reasoning-parser` in the vLLM sidecar so the frontend parses output as in-process workers do ([#15539](https://github.com/ai-dynamo/dynamo/pull/15539)), and started vLLM with `--reasoning-parser none` so thinking requests no longer returned 400 ([#15684](https://github.com/ai-dynamo/dynamo/pull/15684)).
 - **Sidecar Streaming Payload Fidelity:** Fixed the vLLM sidecar to forward buffered empty text deltas as empty strings instead of dropping them, so the frontend waits for vLLM to release its stop-string buffer rather than detokenizing the token IDs and duplicating completion text ([#14699](https://github.com/ai-dynamo/dynamo/pull/14699)), with corrected hidden stop-token reporting and preserved cancelled prefill responses ([#15243](https://github.com/ai-dynamo/dynamo/pull/15243)).
