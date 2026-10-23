@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Router replica side.
+//! Pools from imported EndpointSlices, for router replicas and for the
+//! Global Discovery Service's MCS store.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::{Arc, OnceLock, PoisonError, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_kv_router::global_view::PoolKey;
@@ -16,14 +17,11 @@ use dynamo_kv_router::pool_discovery::{
     PoolDiscoveryError, PoolEvent, PoolRecord, RelayAuthenticator, RelayIdentity, ReplicaDirectory,
     Revision, WatchEvent,
 };
-use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use kube::api::ListParams;
-use kube::runtime::{WatchStreamExt, watcher};
 use kube::{Api, Client};
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use super::cache::{SliceDirectory, SliceIndex, SliceKey};
 use super::mcs;
 
 /// Startup for Kubernetes mode. `registrar` is `None`.
@@ -87,13 +85,7 @@ impl BuildPoolDiscovery for McsPoolDiscovery {
 /// One watch per directory feeds a cache that serves `get`, `list` and
 /// every `list_and_watch` stream. The watch starts on first use and stops
 /// when the directory is dropped.
-pub struct McsPoolDirectory {
-    slices: Api<EndpointSlice>,
-    selector: String,
-    cache: Arc<PoolCache>,
-    watching: OnceLock<()>,
-    stop: CancellationToken,
-}
+pub struct McsPoolDirectory(SliceDirectory<PoolIndex>);
 
 impl McsPoolDirectory {
     pub fn new(
@@ -103,116 +95,38 @@ impl McsPoolDirectory {
         bind_relay_address: bool,
         locations: HashMap<String, PoolLocation>,
     ) -> Self {
-        Self {
-            slices: Api::all(imports),
-            selector: mcs::imported_selector(mcs),
-            cache: Arc::new(PoolCache::new(PoolNaming {
+        Self(SliceDirectory::new(
+            Api::all(imports),
+            mcs::imported_selector(mcs),
+            PoolNaming {
                 mcs,
                 pool_service_suffix,
                 bind_relay_address,
                 locations,
-            })),
-            watching: OnceLock::new(),
-            stop: CancellationToken::new(),
-        }
-    }
-
-    /// Every `Directory` method runs in a Tokio runtime, so the spawn is safe.
-    fn ensure_watching(&self) {
-        self.watching.get_or_init(|| {
-            tokio::spawn(watch_slices(
-                self.slices.clone(),
-                self.selector.clone(),
-                Arc::clone(&self.cache),
-                self.stop.clone(),
-            ));
-        });
-    }
-}
-
-impl Drop for McsPoolDirectory {
-    fn drop(&mut self) {
-        self.stop.cancel();
+            },
+        ))
     }
 }
 
 #[async_trait]
 impl Directory<PoolRecord, PoolKey> for McsPoolDirectory {
     async fn check_connection(&self) -> Result<(), PoolDiscoveryError> {
-        self.slices
-            .list_metadata(&ListParams::default().labels(&self.selector).limit(1))
-            .await
-            .map(|_| ())
-            .map_err(unavailable)
+        self.0.check_connection().await
     }
 
-    /// From the cache once it has synced. Before that, one list from the
-    /// API, so a caller never waits for the watch to start.
     async fn list(&self) -> Result<Snapshot<PoolRecord>, PoolDiscoveryError> {
-        self.ensure_watching();
-        if let Some(snapshot) = self.cache.snapshot() {
-            return Ok(snapshot);
-        }
-        let listed = self
-            .slices
-            .list(&ListParams::default().labels(&self.selector))
-            .await
-            .map_err(unavailable)?;
-        let mut index = PoolIndex::default();
-        index.replace_slices(&self.cache.naming, &listed.items);
-        Ok(index.snapshot())
+        self.0.list().await
     }
 
-    /// From the cache. `Unavailable` until the first list completes, so a
-    /// Relay that dials in early retries instead of being refused.
     async fn get(&self, key: &PoolKey) -> Result<Option<PoolRecord>, PoolDiscoveryError> {
-        self.ensure_watching();
-        let index = self.cache.read();
-        if !index.synced {
-            return Err(unavailable(anyhow::anyhow!(
-                "imported EndpointSlices have not synced yet"
-            )));
-        }
-        Ok(index.pools.get(key).and_then(|pool| pool.record.clone()))
+        self.0.get(key).await
     }
 
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
     ) -> Result<WatchStream<PoolRecord, PoolKey>, PoolDiscoveryError> {
-        self.ensure_watching();
-        Ok(self
-            .cache
-            .subscribe(cancel_token.unwrap_or_default(), self.stop.clone()))
-    }
-}
-
-fn unavailable(error: impl Into<anyhow::Error>) -> PoolDiscoveryError {
-    PoolDiscoveryError::Unavailable(error.into())
-}
-
-/// Single consumer of the slice watch, so the cache applies events in order.
-async fn watch_slices(
-    slices: Api<EndpointSlice>,
-    selector: String,
-    cache: Arc<PoolCache>,
-    stop: CancellationToken,
-) {
-    let config = watcher::Config::default().labels(&selector);
-    let mut events = std::pin::pin!(watcher(slices, config).default_backoff());
-    loop {
-        let event = tokio::select! {
-            biased;
-            () = stop.cancelled() => return,
-            event = events.next() => event,
-        };
-        match event {
-            Some(Ok(event)) => cache.apply(event),
-            // The cache keeps the last good view; the watcher retries with
-            // backoff.
-            Some(Err(error)) => tracing::warn!(%error, "imported EndpointSlice watch error"),
-            None => return,
-        }
+        self.0.list_and_watch(cancel_token).await
     }
 }
 
@@ -286,16 +200,6 @@ fn ready_addresses(slice: &EndpointSlice) -> Vec<IpAddr> {
         .collect()
 }
 
-/// Slices are keyed by (namespace, name).
-type SliceKey = (String, String);
-
-fn slice_key(slice: &EndpointSlice) -> SliceKey {
-    (
-        slice.metadata.namespace.clone().unwrap_or_default(),
-        slice.metadata.name.clone().unwrap_or_default(),
-    )
-}
-
 struct SliceEntry {
     pool: PoolKey,
     ready: Vec<IpAddr>,
@@ -312,24 +216,19 @@ struct PoolState {
 
 #[derive(Default)]
 struct PoolIndex {
-    synced: bool,
     slices: HashMap<SliceKey, SliceEntry>,
-    /// Slices listed since the last `Init`; replace `slices` at `InitDone`.
-    relist: Option<HashMap<SliceKey, SliceEntry>>,
     pools: HashMap<PoolKey, PoolState>,
     last_revision: u64,
 }
 
-impl PoolIndex {
-    fn snapshot(&self) -> Snapshot<PoolRecord> {
-        Snapshot {
-            items: self
-                .pools
-                .values()
-                .filter_map(|pool| pool.record.clone())
-                .collect(),
-            completeness: Completeness::Exact,
-        }
+impl SliceIndex for PoolIndex {
+    type Item = PoolRecord;
+    type Key = PoolKey;
+    type Rules = PoolNaming;
+    type Entry = SliceEntry;
+
+    fn entry(naming: &PoolNaming, slice: &EndpointSlice) -> Option<SliceEntry> {
+        naming.slice(slice)
     }
 
     /// One slice changed or went away. Touches only that slice's pool.
@@ -362,16 +261,8 @@ impl PoolIndex {
         events
     }
 
-    /// A relist: every slice at once. Rebuilds every pool; the caller
+    /// A relist: every slice at once. Rebuilds every pool; the cache
     /// publishes one `Resync` instead of per-pool events.
-    fn replace_slices(&mut self, naming: &PoolNaming, slices: &[EndpointSlice]) {
-        let entries = slices
-            .iter()
-            .filter_map(|slice| Some((slice_key(slice), naming.slice(slice)?)))
-            .collect();
-        self.replace(naming, entries);
-    }
-
     fn replace(&mut self, naming: &PoolNaming, slices: HashMap<SliceKey, SliceEntry>) {
         self.slices = slices;
         for pool in self.pools.values_mut() {
@@ -390,6 +281,23 @@ impl PoolIndex {
         }
     }
 
+    fn snapshot(&self) -> Snapshot<PoolRecord> {
+        Snapshot {
+            items: self
+                .pools
+                .values()
+                .filter_map(|pool| pool.record.clone())
+                .collect(),
+            completeness: Completeness::Exact,
+        }
+    }
+
+    fn get(&self, key: &PoolKey) -> Option<PoolRecord> {
+        self.pools.get(key).and_then(|pool| pool.record.clone())
+    }
+}
+
+impl PoolIndex {
     /// Recomputes one pool from its slices. Returns the event to publish if
     /// the record changed.
     fn rebuild(&mut self, naming: &PoolNaming, key: &PoolKey) -> Option<PoolEvent> {
@@ -444,144 +352,6 @@ impl PoolIndex {
     }
 }
 
-/// Pool records kept current from slice events. Shared by the watch task,
-/// `get`, `list` and every `list_and_watch` stream.
-struct PoolCache {
-    naming: PoolNaming,
-    index: RwLock<PoolIndex>,
-    /// Sent while holding the `index` write lock. A subscriber that takes a
-    /// snapshot and subscribes under the read lock therefore misses no event
-    /// and sees none twice.
-    events: broadcast::Sender<PoolEvent>,
-}
-
-/// Events a slow subscriber may fall behind by before it gets a `Resync`.
-const EVENT_BUFFER: usize = 1024;
-
-impl PoolCache {
-    fn new(naming: PoolNaming) -> Self {
-        Self {
-            naming,
-            index: RwLock::default(),
-            events: broadcast::channel(EVENT_BUFFER).0,
-        }
-    }
-
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, PoolIndex> {
-        self.index.read().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// `None` until the first list completes.
-    fn snapshot(&self) -> Option<Snapshot<PoolRecord>> {
-        let index = self.read();
-        index.synced.then(|| index.snapshot())
-    }
-
-    fn apply(&self, event: watcher::Event<EndpointSlice>) {
-        let mut index = self.index.write().unwrap_or_else(PoisonError::into_inner);
-        let events = match event {
-            watcher::Event::Init => {
-                index.relist = Some(HashMap::new());
-                Vec::new()
-            }
-            watcher::Event::InitApply(slice) => {
-                if let (Some(relist), Some(entry)) =
-                    (index.relist.as_mut(), self.naming.slice(&slice))
-                {
-                    relist.insert(slice_key(&slice), entry);
-                }
-                Vec::new()
-            }
-            watcher::Event::InitDone => {
-                let slices = index.relist.take().unwrap_or_default();
-                index.replace(&self.naming, slices);
-                index.synced = true;
-                vec![WatchEvent::Resync(index.snapshot())]
-            }
-            watcher::Event::Apply(slice) => {
-                let entry = self.naming.slice(&slice);
-                index.upsert(&self.naming, slice_key(&slice), entry)
-            }
-            watcher::Event::Delete(slice) => index.upsert(&self.naming, slice_key(&slice), None),
-        };
-        for event in events {
-            // No subscribers is not an error.
-            let _ = self.events.send(event);
-        }
-    }
-
-    /// Subscribes and snapshots under one read lock. The snapshot is `None`
-    /// before the first list completes.
-    fn subscribe_now(&self) -> (broadcast::Receiver<PoolEvent>, Option<Snapshot<PoolRecord>>) {
-        let index = self.read();
-        let receiver = self.events.subscribe();
-        (receiver, index.synced.then(|| index.snapshot()))
-    }
-
-    /// Follows the watch contract: one `Added` per pool, then a `Resync`
-    /// with the same set, then changes. A subscriber that falls behind gets
-    /// a fresh `Resync`.
-    fn subscribe(
-        self: &Arc<Self>,
-        cancel: CancellationToken,
-        stop: CancellationToken,
-    ) -> WatchStream<PoolRecord, PoolKey> {
-        let cache = Arc::clone(self);
-        Box::pin(async_stream::stream! {
-            let (mut receiver, snapshot) = cache.subscribe_now();
-            let mut started = snapshot.is_some();
-            if let Some(snapshot) = snapshot {
-                for event in initial_events(snapshot) {
-                    yield Ok(event);
-                }
-            }
-            loop {
-                let received = tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => break,
-                    () = stop.cancelled() => break,
-                    received = receiver.recv() => received,
-                };
-                match received {
-                    // The first list completed after this subscription.
-                    Ok(WatchEvent::Resync(snapshot)) if !started => {
-                        started = true;
-                        for event in initial_events(snapshot) {
-                            yield Ok(event);
-                        }
-                    }
-                    Ok(event) => {
-                        if started {
-                            yield Ok(event);
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "pool watch fell behind; resyncing");
-                        let (fresh, snapshot) = cache.subscribe_now();
-                        receiver = fresh;
-                        if let Some(snapshot) = snapshot {
-                            started = true;
-                            yield Ok(WatchEvent::Resync(snapshot));
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        })
-    }
-}
-
-fn initial_events(snapshot: Snapshot<PoolRecord>) -> Vec<PoolEvent> {
-    let mut events: Vec<PoolEvent> = snapshot
-        .items
-        .iter()
-        .cloned()
-        .map(WatchEvent::Added)
-        .collect();
-    events.push(WatchEvent::Resync(snapshot));
-    events
-}
-
 /// The identity both sides use for an address: `ip:<address>`.
 pub fn address_identity(address: IpAddr) -> RelayIdentity {
     RelayIdentity(format!("ip:{address}"))
@@ -631,10 +401,12 @@ impl RelayAuthenticator for MeshAuthenticator {
 mod tests {
     use std::collections::BTreeMap;
 
-    use futures::FutureExt;
+    use futures::{FutureExt, StreamExt};
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::runtime::watcher;
 
+    use super::super::cache::SliceCache;
     use super::mcs::{KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL};
     use super::*;
 
@@ -696,11 +468,11 @@ mod tests {
         PoolKey::new(cluster, "dynamo", dgd).unwrap()
     }
 
-    fn cache(bind_relay_address: bool) -> Arc<PoolCache> {
-        Arc::new(PoolCache::new(naming(bind_relay_address)))
+    fn cache(bind_relay_address: bool) -> Arc<SliceCache<PoolIndex>> {
+        Arc::new(SliceCache::new(naming(bind_relay_address)))
     }
 
-    fn sync(cache: &PoolCache, slices: Vec<EndpointSlice>) {
+    fn sync(cache: &SliceCache<PoolIndex>, slices: Vec<EndpointSlice>) {
         cache.apply(watcher::Event::Init);
         for slice in slices {
             cache.apply(watcher::Event::InitApply(slice));
@@ -708,9 +480,10 @@ mod tests {
         cache.apply(watcher::Event::InitDone);
     }
 
-    fn record(cache: &PoolCache, key: &PoolKey) -> Option<PoolRecord> {
+    fn record(cache: &SliceCache<PoolIndex>, key: &PoolKey) -> Option<PoolRecord> {
         cache
             .read()
+            .index
             .pools
             .get(key)
             .and_then(|pool| pool.record.clone())
@@ -814,7 +587,7 @@ mod tests {
         // The slice is deleted.
         cache.apply(watcher::Event::Delete(live));
         assert!(matches!(events.try_recv().unwrap(), WatchEvent::Removed(_)));
-        assert!(cache.read().pools.is_empty());
+        assert!(cache.read().index.pools.is_empty());
     }
 
     #[test]

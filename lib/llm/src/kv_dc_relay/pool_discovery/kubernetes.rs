@@ -1,20 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Kubernetes mode, using SIG Multicluster. The router side ([`hub`],
-//! [`mcs`]) is implemented; the Relay side ([`endpoints`]) is still a
-//! sketch.
+//! Kubernetes mode, using SIG Multicluster: pools ([`hub`]) and router
+//! replicas ([`endpoints`]) from the EndpointSlices that MCS imports, named
+//! as [`mcs`] describes. The Global Discovery Service
+//! (`crate::global_discovery`) serves both as its MCS store.
 //!
 //! V1 assumes a trusted network where pod addresses are reachable between
 //! clusters (for example Azure CNI with peered VNets, or the AWS VPC CNI with
 //! peered VPCs), and an MCS implementation, Karmada first.
 //!
-//! The operator creates a `ServiceExport` for each pool's PoolRelay Service.
-//! Every router replica watches the imported EndpointSlices: in the hub for
-//! standard MCS, or on the Karmada control plane. The hub exports the
-//! router's Service, so each Relay finds every router replica in its own
-//! cluster. No registrar, no announcer, no leases. Router replicas still
-//! register with the hub's Dynamo runtime discovery, as in every mode.
+//! The operator creates a `ServiceExport` for each pool's PoolRelay Service,
+//! named `<DGD name>-pool-relay` by default. The hub exports the router's
+//! Service, so its replicas appear in every importing cluster. No registrar,
+//! no leases: a pool is live while its PoolRelay endpoint is Ready. Router
+//! replicas still register with the hub's Dynamo runtime discovery, as in
+//! every mode.
 //!
 //! Create the PoolRelay Service and its `ServiceExport` in the workload
 //! cluster, not through Karmada propagation. Kubernetes copies a Service's
@@ -24,7 +25,7 @@
 //! too. Exporting the Service again then found no slice until the Service
 //! changed.
 //!
-//! Router replica in the hub:
+//! Router replica in the hub, reading pools itself:
 //!
 //! ```ignore
 //! let discovery = McsPoolDiscovery {
@@ -39,17 +40,19 @@
 //! // and admit(&*discovery.pools, ..).
 //! ```
 //!
-//! Relay in a workload cluster:
+//! Global Discovery Service with the MCS store:
 //!
 //! ```ignore
-//! let replicas = Arc::new(EndpointSliceReplicaDirectory::imported(local, &router, mcs));
-//! StateBroadcaster::new(replicas, dialer, pool_key)
-//!     .run(cancel.clone())
-//!     .await?;
-//! // run() watches the directory. Added(replica): dialer.dial(&replica, ..).
-//! // Removed(id): close that connection.
+//! let store = DiscoveryStore {
+//!     pools: Arc::new(McsPoolDirectory::new(client.clone(), mcs, suffix, true, locations)),
+//!     routers: Arc::new(EndpointSliceReplicaDirectory::imported(client, &router, mcs)),
+//!     registrar: None,
+//!     authenticator: Arc::new(TrustedNetworkAuthenticator),
+//! };
+//! global_discovery::serve(listener, store, shutdown).await?;
 //! ```
 
+mod cache;
 pub mod endpoints;
 pub mod hub;
 pub mod mcs;

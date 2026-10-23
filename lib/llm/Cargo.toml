@@ -39,6 +39,8 @@ request-trace-bench = []
 request-trace-s3 = []
 # Optional read-only Global View HTTP endpoints for POC inspection.
 global-view-diagnostics = ["dynamo-kv-router/global-view-diagnostics"]
+# The Global Discovery Service binary.
+global-discovery = ["dep:clap"]
 
 [[bench]]
 name = "tokenizer_simple"
@@ -271,6 +273,11 @@ path = "tests/lora_simulation/main.rs"
 [[bin]]
 name = "generate-frontend-openapi"
 path = "src/bin/generate_frontend_openapi.rs"
+
+[[bin]]
+name = "global-discovery"
+path = "src/bin/global_discovery.rs"
+required-features = ["global-discovery"]
 
 [build-dependencies]
 tonic-build = { version = "0.13.1" }
