@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: external Grove preflight
+templates:
+  - templates/grove-preflight.yaml
+tests:
+  - it: preserves the first hook resource apiVersion
+    set: {global.grove.enabled: true}
+    documentSelector: {path: kind, value: ServiceAccount}
+    asserts:
+      - equal: {path: apiVersion, value: v1}
+  - it: omits the hook when Grove integration is disabled
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: omits the hook for bundled Grove
+    set: {global.grove.enabled: true, global.grove.install: true}
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: omits the hook when the operator is disabled
+    set: {global.grove.enabled: true, dynamo-operator.enabled: false}
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: supports a separate compatibility gate
+    set: {global.grove.enabled: true, dynamo-operator.grovePreflight.enabled: false}
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: blocks on a bounded Job after its dependencies
+    set: {global.grove.enabled: true}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: metadata.name, value: RELEASE-NAME-dynamo-operator-check-grove-compatibility}
+      - equal: {path: 'metadata.annotations["helm.sh/hook"]', value: 'pre-install,pre-upgrade'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '-10'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-output-log-policy"]', value: hook-failed}
+      - equal: {path: spec.activeDeadlineSeconds, value: 120}
+      - equal: {path: spec.backoffLimit, value: 2}
+      - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def check\('}
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[1]
+          pattern: '^v?[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?$'
+  - it: keeps the compatibility check visible in long hook names
+    set:
+      global.grove.enabled: true
+      dynamo-operator.fullnameOverride: a-very-long-operator-name-that-needs-truncation-for-the-hook
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - matchRegex: {path: metadata.name, pattern: '^.{1,37}-check-grove-compatibility$'}
+  - it: retains secure pod defaults
+    set: {global.grove.enabled: true}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext
+          value:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile: {type: RuntimeDefault}
+  - it: lets OpenShift assign the UID while retaining other security defaults
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.podSecurityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - notExists: {path: spec.template.spec.securityContext.runAsUser}
+      - equal: {path: spec.template.spec.securityContext.runAsNonRoot, value: true}
+      - equal: {path: spec.template.spec.securityContext.seccompProfile.type, value: RuntimeDefault}
+  - it: supports a namespace-specific UID
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.podSecurityContext.runAsUser: 1000750000
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: spec.template.spec.securityContext.runAsUser, value: 1000750000}
+  - it: does not wait on controller-specific required pod affinity
+    set:
+      global.grove.enabled: true
+      dynamo-operator.controllerManager.affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {control-plane: controller-manager}
+              topologyKey: kubernetes.io/hostname
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - notExists: {path: spec.template.spec.affinity}
+  - it: uses independently configured preflight affinity
+    set:
+      global.grove.enabled: true
+      dynamo-operator.grovePreflight.affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: kubernetes.io/os, operator: In, values: [linux]}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0]
+          value: {key: kubernetes.io/os, operator: In, values: [linux]}
+  - it: prepares only read permissions before the Job and retains them until the next attempt
+    set: {global.grove.enabled: true}
+    documentSelector: {path: kind, value: ClusterRole}
+    asserts:
+      - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '-20'}
+      - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: before-hook-creation}
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [apps]
+              resources: [deployments]
+              verbs: [get, list]
+  - it: requires a namespace for explicit controller selection
+    set: {global.grove.enabled: true, dynamo-operator.grovePreflight.deploymentName: grove-operator}
+    asserts:
+      - failedTemplate:
+          errorMessage: grovePreflight.namespace is required when grovePreflight.deploymentName is set

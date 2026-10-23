@@ -1058,6 +1058,15 @@ impl ControllerHost for ModelWatcher {
         card.runtime_config.normalize_structural_tag_compatibility();
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
+        let router_mode =
+            effective_router_config(card.router_config.as_ref(), &self.router_config).router_mode;
+        anyhow::ensure!(
+            card.model_input != ModelInput::Text || !router_mode.is_kv_routing(),
+            "model '{}': KV routing is incompatible with text-input workers (e.g. vLLM \
+             --use-vllm-tokenizer) because it requires frontend tokenization; enable frontend \
+             tokenization or explicitly configure a non-KV router mode",
+            card.name()
+        );
         anyhow::ensure!(
             mcid.model_suffix.is_some() == card.lora.is_some(),
             "LoRA discovery identity and card metadata disagree"
@@ -2591,6 +2600,142 @@ request_classifier:
                 .active_decode_blocks_threshold,
             Some(0.8)
         );
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_text_input_with_effective_kv_routing() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for frontend_mode in [RouterMode::RoundRobin, RouterMode::KV] {
+            let watcher = ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig {
+                    router_mode: frontend_mode,
+                    ..Default::default()
+                },
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            );
+            for worker_mode in [None, Some(RouterMode::RoundRobin), Some(RouterMode::KV)] {
+                for model_input in [ModelInput::Text, ModelInput::Tokens] {
+                    let mut card = ModelDeploymentCard::with_name_only("kv-text-model");
+                    card.model_input = model_input;
+                    card.model_type = ModelType::Chat;
+                    card.worker_type = Some(WorkerType::Aggregated);
+                    card.router_config = worker_mode.map(|router_mode| RouterConfig {
+                        router_mode,
+                        ..Default::default()
+                    });
+                    let DiscoveryEvent::Added(instance) = discovered_card("kv-text-ns", 1, &card)
+                    else {
+                        unreachable!();
+                    };
+                    let result = watcher.normalize(instance, &NamespaceFilter::Global);
+                    if model_input == ModelInput::Text
+                        && worker_mode.unwrap_or(frontend_mode).is_kv_routing()
+                    {
+                        let error = result.expect_err("text-input KV card must be rejected");
+                        let message = error.to_string();
+                        assert!(message.contains("kv-text-model"), "{message}");
+                        assert!(message.contains("KV routing is incompatible"), "{message}");
+                        assert!(message.contains("frontend tokenization"), "{message}");
+                    } else {
+                        let desired = result.unwrap().expect("valid card must be admitted");
+                        assert_eq!(
+                            desired
+                                .card
+                                .router_config
+                                .as_ref()
+                                .map(|config| config.router_mode),
+                            worker_mode
+                        );
+                        assert_eq!(desired.card.model_input, model_input);
+                    }
+                }
+            }
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn rejected_kv_text_workers_preserve_valid_models() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("kv-text-preserve")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = drt.discovery().instance_id();
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) = watch_test_cards(
+            drt,
+            manager.clone(),
+            RouterConfig {
+                router_mode: RouterMode::KV,
+                ..Default::default()
+            },
+        );
+        let mut valid = ModelDeploymentCard::with_name_only("valid-text-model");
+        valid.model_input = ModelInput::Text;
+        valid.model_type = ModelType::Chat;
+        valid.worker_type = Some(WorkerType::Aggregated);
+        valid.router_config = Some(RouterConfig {
+            router_mode: RouterMode::RoundRobin,
+            ..Default::default()
+        });
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &valid),
+        )
+        .await;
+        let original = wait_for_model(&manager, valid.name(), Model::is_ready_to_serve).await;
+
+        let mut invalid = valid.clone();
+        invalid.router_config = None;
+        // A rejected update must not remove the existing worker or replace its pipeline.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &invalid),
+        )
+        .await;
+        // An incompatible newcomer must not join the serving set either.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 1, &invalid),
+        )
+        .await;
+        let mut other = ModelDeploymentCard::with_name_only("invalid-text-model");
+        other.model_input = ModelInput::Text;
+        other.model_type = ModelType::Chat;
+        other.worker_type = Some(WorkerType::Aggregated);
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 2, &other),
+        )
+        .await;
+
+        let model = manager.get_committed_model(valid.name()).unwrap();
+        assert!(Arc::ptr_eq(&original, &model));
+        assert!(model.is_ready_to_serve());
+        assert_eq!(model.total_workers(), 1);
+        assert_eq!(manager.get_model_cards().len(), 1);
+        assert_eq!(manager.get_model_cards()[0].mdcsum(), valid.mdcsum());
+        assert!(manager.get_committed_model(other.name()).is_none());
+        assert!(!task.is_finished());
+        drop(events);
+        task.await.unwrap();
+        runtime.shutdown();
     }
 
     #[tokio::test]

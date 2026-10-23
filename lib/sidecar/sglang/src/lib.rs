@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use dynamo_sidecar_common::SidecarStartupError;
 
 use args::Args;
@@ -35,11 +35,26 @@ mod protocol;
 
 pub use engine::SglangSidecarEngine;
 
+/// Endpoint that SGLang's `--sidecar` launcher injects into the sidecar process.
+const SGLANG_GRPC_ENDPOINT_ENV: &str = "SGLANG_GRPC_ENDPOINT";
+
+/// Use the injected endpoint only when neither `--grpc-endpoint` nor its env var is set.
+fn parse_args(argv: Vec<String>, injected_endpoint: Option<String>) -> clap::error::Result<Args> {
+    let mut command = Args::command();
+    if let Some(endpoint) = injected_endpoint {
+        command = command.mut_arg("grpc_endpoint", |arg| {
+            arg.default_value(endpoint).required(false)
+        });
+    }
+    Args::from_arg_matches(&command.try_get_matches_from(argv)?)
+}
+
 /// Parse and run the sidecar for both the Python launcher and Rust executable.
 /// Startup errors retain their type so callers can preserve CLI exit codes and
 /// distinguish invalid configuration from runtime failures.
 pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
-    let args = Args::try_parse_from(argv).map_err(SidecarStartupError::from)?;
+    let args = parse_args(argv, std::env::var(SGLANG_GRPC_ENDPOINT_ENV).ok())
+        .map_err(SidecarStartupError::from)?;
     SglangSidecarEngine::validate_args(&args).map_err(SidecarStartupError::from)?;
     dynamo_sidecar_common::run_task(|runtime, shutdown| async move {
         use dynamo_runtime::DistributedRuntime;
@@ -108,5 +123,22 @@ mod tests {
         let error = error.downcast::<SidecarStartupError>().unwrap();
         assert!(matches!(error, SidecarStartupError::Cli(error)
             if error.kind() == clap::error::ErrorKind::DisplayHelp));
+    }
+
+    #[test]
+    fn injected_grpc_endpoint_is_used_only_without_explicit_endpoint() {
+        let endpoint = |argv: &[&str]| {
+            let argv = argv.iter().map(|arg| arg.to_string()).collect();
+            parse_args(argv, Some("127.0.0.1:31001".into()))
+                .unwrap()
+                .sidecar
+                .grpc_endpoint
+        };
+
+        assert_eq!(endpoint(&["sidecar"]).as_str(), "http://127.0.0.1:31001");
+        assert_eq!(
+            endpoint(&["sidecar", "--grpc-endpoint", "127.0.0.1:31003"]).as_str(),
+            "http://127.0.0.1:31003"
+        );
     }
 }

@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dynamo KV state-agent host")
     parser.add_argument("--max-slots", type=int, default=8)
+    parser.add_argument(
+        "--slots-per-socket",
+        type=int,
+        default=1,
+        help=(
+            "Slots sharing one output PUB socket and one raw-input SUB socket. "
+            "Each router connection buffers one PUB's traffic for all of its slots, "
+            "so keep this small (for example 8): enough to stay under the ZMQ "
+            "socket limit with many slots, few enough that one busy router "
+            "connection does not overflow. Above 1, every router must support "
+            "shared publisher endpoints; pooled raw input needs a distinct raw "
+            "topic per source."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -43,11 +57,14 @@ async def worker(runtime: DistributedRuntime) -> None:
     args = parse_args()
     if args.max_slots <= 0:
         raise ValueError("--max-slots must be greater than zero")
+    if args.slots_per_socket <= 0:
+        raise ValueError("--slots-per-socket must be greater than zero")
 
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
     host = KvStateAgentHost(
         runtime.endpoint(f"{namespace}.kv_state_agent.control"),
         args.max_slots,
+        args.slots_per_socket,
     )
     await host.start()
     health_task: asyncio.Future[Any] | None = None

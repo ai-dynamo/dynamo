@@ -107,7 +107,7 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 		if conductor := spec.ComponentRole(v1beta1.ComponentRoleLPXConductor); conductor != nil {
 			conductor.Replicas = nil
 		} else {
-			spec.Replicas = ptr.To(ptr.Deref(dcd.Spec.Replicas, 1))
+			spec.Replicas = new(ptr.Deref(dcd.Spec.Replicas, 1))
 		}
 	}
 
