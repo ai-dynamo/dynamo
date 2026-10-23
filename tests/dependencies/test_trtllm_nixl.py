@@ -65,7 +65,11 @@ def _probe(order):
         load_native()
     sender = nixl_agent(f"packaging-{os.getpid()}-sender")
     receiver = nixl_agent(f"packaging-{os.getpid()}-receiver")
-    if os.environ.get("EFA_VERSION"):
+    # Upstream also sets EFA_VERSION in images without the EFA plugin.
+    efa_plugins = Path("/opt/nvidia/nvda_nixl/lib").glob(
+        "*-linux-gnu/plugins/libplugin_LIBFABRIC.so"
+    )
+    if any(efa_plugins):
         assert "LIBFABRIC" in sender.get_plugin_list(), (
             "EFA plugin must be discoverable in both native/Python load orders"
         )

@@ -12,7 +12,6 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"k8s.io/client-go/rest"
-	"k8s.io/utils/ptr"
 )
 
 func TestWebhookInstallOptionsSelectsValidatingConfiguration(t *testing.T) {
@@ -85,7 +84,7 @@ func TestRESTConfigReturnsCopy(t *testing.T) {
 func TestDefaultOperatorConfigPreservesExplicitGPUDiscovery(t *testing.T) {
 	config := &configv1alpha1.OperatorConfiguration{
 		GPU: configv1alpha1.GPUConfiguration{
-			DiscoveryEnabled: ptr.To(true),
+			DiscoveryEnabled: new(true),
 		},
 	}
 
@@ -98,7 +97,7 @@ func TestDefaultOperatorConfigPreservesExplicitGPUDiscovery(t *testing.T) {
 
 func TestDefaultRuntimeConfigDerivesStaticFeatureGates(t *testing.T) {
 	clusterWide := &configv1alpha1.OperatorConfiguration{
-		GPU: configv1alpha1.GPUConfiguration{DiscoveryEnabled: ptr.To(false)},
+		GPU: configv1alpha1.GPUConfiguration{DiscoveryEnabled: new(false)},
 	}
 	clusterWideRuntime := defaultRuntimeConfig(clusterWide)
 
