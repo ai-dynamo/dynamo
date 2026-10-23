@@ -30,9 +30,13 @@ use std::{
 };
 
 use crate::discovery::{ModelManager, UNKNOWN_METRIC_MODEL};
+use crate::frontend_config::{MetricsConfig, TtftDetail};
 use crate::frontend_load::{FrontendLoadFrame, FrontendModelLoad, RequestGauges, RequestTotals};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
+use crate::protocols::common::ttft::{
+    TTFT_CONTEXT_KEY, TtftDegradedReason, TtftQuality, TtftQualityStatus, TtftStage, TtftTimings,
+};
 use crate::protocols::{
     common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
@@ -692,6 +696,13 @@ pub struct Metrics {
     tokenizer_latency: HistogramVec,
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
+    ttft_stage: HistogramVec,
+    ttft_detail: TtftDetail,
+    ttft_degraded: IntCounterVec,
+    ttft_coarse: IntCounterVec,
+    ttft_unexpected_overlap: prometheus::IntCounter,
+    ttft_stage_handles:
+        dashmap::DashMap<String, Arc<[prometheus::Histogram; TtftStage::ALL.len()]>>,
     inter_token_latency: HistogramVec,
     /// End-to-end latency of an OpenAI `/v1/embeddings` request. Distinct from
     /// `request_duration` so the buckets can be sized for sub-second pooling
@@ -1037,6 +1048,10 @@ pub struct ResponseMetricCollector {
     // every chunk or output token. Each handle shares the underlying metric with its vec,
     // so observations are equivalent.
     time_to_first_token: prometheus::Histogram,
+    ttft_stage: Option<Arc<[prometheus::Histogram; TtftStage::ALL.len()]>>,
+    ttft_logs: bool,
+    ttft_timeline: Option<Arc<TtftTimings>>,
+    ttft_request_id: Option<String>,
     inter_token_latency: Option<prometheus::local::LocalHistogram>,
     itl_pending_tokens: u64,
     input_sequence_length: prometheus::Histogram,
@@ -1155,6 +1170,25 @@ impl Metrics {
     /// Real constructor. `env` is injected so tests can pin bucket configuration
     /// without touching the process environment.
     fn build(metrics_prefix: Option<String>, env: EnvLookup<'_>) -> Self {
+        let detail = env(dynamo_runtime::config::environment_names::llm::DYN_FRONTEND_TTFT_DETAIL)
+            .map(|value| value.parse().expect("invalid DYN_FRONTEND_TTFT_DETAIL"))
+            .unwrap_or_default();
+        Self::build_with_detail(metrics_prefix, env, detail)
+    }
+
+    pub fn with_config(config: &MetricsConfig) -> Self {
+        let detail = config.ttft_detail.unwrap_or_else(TtftDetail::from_env);
+        tracing::info!(mode = ?detail,
+            detail_log_target_enabled = tracing::enabled!(target: "dynamo_frontend::ttft", tracing::Level::DEBUG),
+            "Frontend TTFT detail configuration");
+        Self::build_with_detail(config.prefix(), &system_env, detail)
+    }
+
+    fn build_with_detail(
+        metrics_prefix: Option<String>,
+        env: EnvLookup<'_>,
+        ttft_detail: TtftDetail,
+    ) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
@@ -1340,6 +1374,45 @@ impl Metrics {
             .buckets(time_to_first_token_buckets),
             &["model"],
         )
+        .unwrap();
+
+        let (stage_min, stage_max, stage_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_TTFT_STAGE,
+            0.000001,
+            480.0,
+            26,
+        );
+        let ttft_stage = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::TTFT_STAGE_SECONDS),
+                "Exclusive HTTP TTFT stage duration in seconds; stages sum to HTTP TTFT",
+            )
+            .buckets(generate_log_buckets(stage_min, stage_max, stage_count)),
+            &["model", "stage", "phase"],
+        )
+        .unwrap();
+
+        let ttft_degraded = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::TTFT_DETAIL_DEGRADED_TOTAL),
+                "First-token requests whose detailed TTFT is unclassified, by fixed reason",
+            ),
+            &["reason"],
+        )
+        .unwrap();
+        let ttft_coarse = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::TTFT_DETAIL_COARSE_TOTAL),
+                "First-token requests with known coarse TTFT coverage, by fixed reason",
+            ),
+            &["reason"],
+        )
+        .unwrap();
+        let ttft_unexpected_overlap = prometheus::IntCounter::with_opts(Opts::new(
+            frontend_metric_name(frontend_service::TTFT_DETAIL_UNEXPECTED_OVERLAP_TOTAL),
+            "First-token requests with unexpected overlapping TTFT leaf intervals",
+        ))
         .unwrap();
 
         let inter_token_latency_buckets = inter_token_latency_buckets(env);
@@ -1584,6 +1657,12 @@ impl Metrics {
             tokenizer_latency,
             output_tokens_counter,
             time_to_first_token,
+            ttft_stage,
+            ttft_detail,
+            ttft_degraded,
+            ttft_coarse,
+            ttft_unexpected_overlap,
+            ttft_stage_handles: dashmap::DashMap::new(),
             inter_token_latency,
             embedding_latency,
             images_per_request,
@@ -1764,6 +1843,12 @@ impl Metrics {
         registry.register(Box::new(self.tokenizer_latency.clone()))?;
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
+        if self.ttft_detail.metrics() {
+            registry.register(Box::new(self.ttft_stage.clone()))?;
+            registry.register(Box::new(self.ttft_degraded.clone()))?;
+            registry.register(Box::new(self.ttft_coarse.clone()))?;
+            registry.register(Box::new(self.ttft_unexpected_overlap.clone()))?;
+        }
         registry.register(Box::new(self.inter_token_latency.clone()))?;
         registry.register(Box::new(self.embedding_latency.clone()))?;
         registry.register(Box::new(self.images_per_request.clone()))?;
@@ -2353,6 +2438,26 @@ impl ResponseMetricCollector {
         // Resolve the per-model handles once (cheap clones of the vec entries) so the
         // per-chunk / per-token hot path in `observe_response` does no label hashing.
         let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
+        // Resolve the finite stage label set once per model, not per request/token.
+        let ttft_stage = metrics.ttft_detail.metrics().then(|| {
+            metrics
+                .ttft_stage_handles
+                .entry(model.clone())
+                .or_insert_with(|| {
+                    Arc::new(TtftStage::ALL.map(|stage| {
+                        let [name, phase] = stage.labels();
+                        metrics
+                            .ttft_stage
+                            .with_label_values(&[model.as_str(), name, phase])
+                    }))
+                })
+                .clone()
+        });
+        // Check the configured target before allocating a timeline. In logs-only
+        // mode a disabled filter costs no stage clocks, handles, or Python calls.
+        let ttft_logs = metrics.ttft_detail.logs()
+            && tracing::enabled!(target: "dynamo_frontend::ttft", tracing::Level::DEBUG);
+
         let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
         let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
         let images_per_request = metrics.images_per_request.with_label_values(&[&model]);
@@ -2366,6 +2471,10 @@ impl ResponseMetricCollector {
             request,
             model,
             time_to_first_token,
+            ttft_stage,
+            ttft_logs,
+            ttft_timeline: None,
+            ttft_request_id: None,
             inter_token_latency: None,
             itl_pending_tokens: 0,
             input_sequence_length,
@@ -2398,6 +2507,75 @@ impl ResponseMetricCollector {
             decode_worker_type: None,
             decode_itl_gauge: None,
         }
+    }
+
+    /// Preserve this collector's exact start across the Python processor bridge.
+    /// Other paths still emit an additive sample, with uninstrumented time in
+    /// frontend_overhead, so the stage and total histograms have the same cohort.
+    pub fn attach_ttft_timeline<T: Send + Sync + 'static>(
+        &mut self,
+        request: &mut dynamo_runtime::pipeline::Context<T>,
+    ) {
+        if self.ttft_stage.is_none() && !self.ttft_logs {
+            return;
+        }
+        let timeline = Arc::new(TtftTimings::new(self.start_time));
+        request.insert(TTFT_CONTEXT_KEY, timeline.clone());
+        self.ttft_timeline = Some(timeline);
+        if self.ttft_logs {
+            self.ttft_request_id = Some(request.id().to_owned());
+        }
+    }
+
+    /// One structured event for the same frozen durations sent to Prometheus.
+    /// DEBUG keeps it off at the default INFO level; enable its dedicated target
+    /// with DYN_LOG=info,dynamo_frontend::ttft=debug. Metrics are independent, and
+    /// the tracing macro evaluates numeric fields only when this event is enabled.
+    fn log_ttft_stages(
+        &self,
+        total: Duration,
+        stages: &[Duration; TtftStage::ALL.len()],
+        quality: TtftQuality,
+    ) {
+        let Some(request_id) = self.ttft_request_id.as_deref() else {
+            return;
+        };
+        let ms = |stage: TtftStage| stages[stage as usize].as_secs_f64() * 1000.0;
+        tracing::debug!(
+            target: "dynamo_frontend::ttft",
+            request_id,
+            model = self.model.as_str(),
+            ttft_ms = total.as_secs_f64() * 1000.0,
+            quality = quality.status.as_str(),
+            degraded_reason = quality.degraded_reason.map_or("", |reason| reason.as_str()),
+            coarse_reason = quality.coarse_reason.map_or("", |reason| reason.as_str()),
+            unexpected_overlap = quality.unexpected_overlap,
+            frontend_overhead_ms = ms(TtftStage::FrontendOverhead),
+            preprocess_ms = ms(TtftStage::Preprocess),
+            preprocess_queue_ms = ms(TtftStage::PreprocessQueue),
+            template_tokenize_ms = ms(TtftStage::TemplateTokenize),
+            template_render_ms = ms(TtftStage::TemplateRender),
+            tokenize_ms = ms(TtftStage::Tokenize),
+            structural_tag_build_ms = ms(TtftStage::StructuralTagBuild),
+            dispatch_prepare_prefill_ms = ms(TtftStage::DispatchPreparePrefill),
+            dispatch_prepare_decode_ms = ms(TtftStage::DispatchPrepareDecode),
+            dispatch_prepare_aggregated_ms = ms(TtftStage::DispatchPrepareAggregated),
+            unclassified_ms = ms(TtftStage::Unclassified),
+            multimodal_prepare_ms = ms(TtftStage::MultimodalPrepare),
+            mm_routing_build_ms = ms(TtftStage::MmRoutingBuild),
+            route_prefill_ms = ms(TtftStage::RoutePrefill),
+            route_decode_ms = ms(TtftStage::RouteDecode),
+            route_aggregated_ms = ms(TtftStage::RouteAggregated),
+            dispatch_prefill_ms = ms(TtftStage::BackendPrefill),
+            dispatch_decode_ms = ms(TtftStage::BackendDecode),
+            dispatch_aggregated_ms = ms(TtftStage::BackendAggregated),
+            first_token_wait_prefill_ms = ms(TtftStage::FirstTokenPrefill),
+            first_token_wait_decode_ms = ms(TtftStage::FirstTokenDecode),
+            first_token_wait_aggregated_ms = ms(TtftStage::FirstTokenAggregated),
+            first_token_postprocess_ms = ms(TtftStage::ResponsePostprocess),
+            backend_overlap_prefill_decode_ms = ms(TtftStage::BackendOverlap),
+            "frontend first token"
+        );
     }
 
     /// Set the worker info for per-worker TTFT/ITL metrics.
@@ -2563,9 +2741,53 @@ impl ResponseMetricCollector {
             self.is_first_token = false;
 
             // Publish TTFT and store for span recording
-            let ttft = self.start_time.elapsed().as_secs_f64();
+            let first_token_at = Instant::now();
+            let duration = first_token_at.duration_since(self.start_time);
+            let ttft = duration.as_secs_f64();
             self.ttft_ms = Some(ttft * 1000.0);
             self.time_to_first_token.observe(ttft);
+            if self.ttft_stage.is_some() || self.ttft_logs {
+                let (stages, quality) = if let Some(timeline) = self.ttft_timeline.take() {
+                    let stages = timeline.finish(first_token_at);
+                    (stages, timeline.quality())
+                } else {
+                    let mut stages = [Duration::ZERO; TtftStage::ALL.len()];
+                    stages[TtftStage::Unclassified as usize] = duration;
+                    (
+                        stages,
+                        TtftQuality {
+                            status: TtftQualityStatus::Degraded,
+                            degraded_reason: Some(TtftDegradedReason::MissingTimeline),
+                            coarse_reason: None,
+                            unexpected_overlap: false,
+                        },
+                    )
+                };
+                // Include zeros so all stages share the exact total-TTFT population.
+                if let Some(histograms) = &self.ttft_stage {
+                    if let Some(reason) = quality.degraded_reason {
+                        self.metrics
+                            .ttft_degraded
+                            .with_label_values(&[reason.as_str()])
+                            .inc();
+                    }
+                    if let Some(reason) = quality.coarse_reason {
+                        self.metrics
+                            .ttft_coarse
+                            .with_label_values(&[reason.as_str()])
+                            .inc();
+                    }
+                    if quality.unexpected_overlap {
+                        self.metrics.ttft_unexpected_overlap.inc();
+                    }
+                    for (histogram, elapsed) in histograms.iter().zip(stages) {
+                        histogram.observe(elapsed.as_secs_f64());
+                    }
+                }
+                if self.ttft_logs {
+                    self.log_ttft_stages(duration, &stages, quality);
+                }
+            }
 
             // Update per-worker TTFT and input sequence tokens gauges - attributed to prefill worker.
             // Both gauges are updated atomically from the same request to correlate latency with input size.
@@ -2995,6 +3217,682 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EXPECTED_TTFT_STAGE_LABELS: &[(&str, &str)] = &[
+        ("frontend_overhead", ""),
+        ("preprocess", ""),
+        ("preprocess_queue", ""),
+        ("template_tokenize", ""),
+        ("template_render", ""),
+        ("tokenize", ""),
+        ("structural_tag_build", ""),
+        ("dispatch_prepare", "prefill"),
+        ("dispatch_prepare", "decode"),
+        ("dispatch_prepare", "aggregated"),
+        ("unclassified", ""),
+        ("multimodal_prepare", ""),
+        ("mm_routing_build", ""),
+        ("route", "prefill"),
+        ("route", "decode"),
+        ("route", "aggregated"),
+        ("dispatch", "prefill"),
+        ("dispatch", "decode"),
+        ("dispatch", "aggregated"),
+        ("first_token_wait", "prefill"),
+        ("first_token_wait", "decode"),
+        ("first_token_wait", "aggregated"),
+        ("backend_overlap", "prefill_decode"),
+        ("first_token_postprocess", ""),
+    ];
+
+    /// Synthetic production instrumentation only; excludes HTTP, GPU, and PyO3.
+    /// Run explicitly with --ignored --exact and DYNAMO_TTFT_BENCH_MODE set.
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "manual CPU microbenchmark"]
+    fn ttft_detail_cpu_microbenchmark() {
+        fn cpu_ns() -> u64 {
+            let mut value = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: value is a writable timespec; process CPU clock is read-only.
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut value) },
+                0
+            );
+            value.tv_sec as u64 * 1_000_000_000 + value.tv_nsec as u64
+        }
+        let mode = std::env::var("DYNAMO_TTFT_BENCH_MODE").unwrap_or_else(|_| "off".into());
+        let detail = if mode == "logs-filtered" {
+            TtftDetail::Logs
+        } else {
+            mode.parse().unwrap()
+        };
+        let filter = if mode == "logs-filtered" {
+            "info"
+        } else {
+            "info,dynamo_frontend::ttft=debug"
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::sink)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let metrics = Arc::new(Metrics::build_with_detail(None, &fake_env(&[]), detail));
+            let run = |count| {
+                for _ in 0..count {
+                    let mut collector = response_collector(&metrics, "synthetic");
+                    let mut request = dynamo_runtime::pipeline::Context::new(());
+                    collector.attach_ttft_timeline(&mut request);
+                    if let Some(timeline) = &collector.ttft_timeline {
+                        let outer = timeline.start_span(TtftStage::Preprocess);
+                        let inner = timeline.start_span(TtftStage::TemplateTokenize);
+                        std::hint::black_box(&inner);
+                        drop(inner);
+                        drop(outer);
+                        drop(timeline.start_span(TtftStage::RouteAggregated));
+                        drop(timeline.start_span(TtftStage::BackendAggregated));
+                    }
+                    collector.observe_response(8, 0);
+                    collector.observe_response(8, 1);
+                    std::hint::black_box(&collector);
+                }
+            };
+            run(1000);
+            let cpu_start = cpu_ns();
+            let wall_start = Instant::now();
+            let count = 100_000;
+            run(count);
+            println!(
+                "mode={mode} requests={count} cpu_ns_per_request={} wall_ns_per_request={}",
+                (cpu_ns() - cpu_start) as f64 / count as f64,
+                wall_start.elapsed().as_nanos() as f64 / count as f64
+            );
+        });
+    }
+
+    #[test]
+    fn ttft_detail_modes_and_log_filters_gate_collection_and_outputs() {
+        for mode in [
+            TtftDetail::Off,
+            TtftDetail::Metrics,
+            TtftDetail::Logs,
+            TtftDetail::Both,
+        ] {
+            for directive in [
+                "info",
+                "debug",
+                "info,dynamo_frontend::ttft=debug",
+                "debug,dynamo_frontend::ttft=off",
+            ] {
+                let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let subscriber = TtftLogSubscriber {
+                    filter: directive.parse().unwrap(),
+                    events: events.clone(),
+                };
+                tracing::subscriber::with_default(subscriber, || {
+                    let metrics = Arc::new(Metrics::build_with_detail(None, &fake_env(&[]), mode));
+                    let logs = mode.logs()
+                        && matches!(directive, "debug" | "info,dynamo_frontend::ttft=debug");
+                    let mut collector = response_collector(&metrics, "mode-test");
+                    let mut request = dynamo_runtime::pipeline::Context::new(());
+                    collector.attach_ttft_timeline(&mut request);
+                    assert_eq!(collector.ttft_stage.is_some(), mode.metrics());
+                    assert_eq!(collector.ttft_logs, logs);
+                    assert_eq!(collector.ttft_timeline.is_some(), mode.metrics() || logs);
+                    assert_eq!(
+                        request
+                            .get_optional::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY)
+                            .unwrap()
+                            .is_some(),
+                        mode.metrics() || logs
+                    );
+                    assert_eq!(
+                        metrics.ttft_stage_handles.len(),
+                        usize::from(mode.metrics())
+                    );
+                    collector.observe_response(4, 0);
+                    assert!(events.lock().unwrap().is_empty());
+                    collector.observe_response(4, 1);
+                    collector.observe_response(4, 2);
+                    assert_eq!(events.lock().unwrap().len(), usize::from(logs));
+                    assert_eq!(
+                        metrics
+                            .time_to_first_token
+                            .with_label_values(&["mode-test"])
+                            .get_sample_count(),
+                        1
+                    );
+                    if mode.metrics() {
+                        assert_ttft_stage_cohort(&metrics, "mode-test", 1);
+                    } else {
+                        // No lazy child creation even after first token.
+                        assert!(
+                            metrics
+                                .ttft_stage
+                                .collect()
+                                .iter()
+                                .all(|family| family.get_metric().is_empty())
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn ttft_modes_preserve_legacy_metric_schema_buckets_and_sample_counts() {
+        let mut expected = None;
+        for mode in [
+            TtftDetail::Off,
+            TtftDetail::Metrics,
+            TtftDetail::Logs,
+            TtftDetail::Both,
+        ] {
+            let metrics = Arc::new(Metrics::build_with_detail(None, &fake_env(&[]), mode));
+            let registry = Registry::new();
+            metrics.register(&registry).unwrap();
+            for emits_token in [false, true] {
+                let mut collector = response_collector(&metrics, "compatibility");
+                let mut request = dynamo_runtime::pipeline::Context::new(());
+                collector.attach_ttft_timeline(&mut request);
+                collector.observe_response(4, 0);
+                if emits_token {
+                    collector.observe_response(4, 1);
+                    collector.observe_response(4, 2);
+                }
+            }
+            let mut schema = Vec::new();
+            for family in registry.gather() {
+                if family.name().contains("ttft_stage_seconds")
+                    || family.name().contains("ttft_detail_")
+                {
+                    continue;
+                }
+                for metric in family.get_metric() {
+                    let labels: Vec<_> = metric
+                        .get_label()
+                        .iter()
+                        .map(|label| (label.name(), label.value()))
+                        .collect();
+                    let histogram = metric.get_histogram();
+                    let buckets: Vec<_> = histogram
+                        .get_bucket()
+                        .iter()
+                        .map(|bucket| bucket.upper_bound())
+                        .collect();
+                    schema.push(format!(
+                        "{}|{}|{:?}|{labels:?}|{}|{buckets:?}",
+                        family.name(),
+                        family.help(),
+                        family.get_field_type(),
+                        histogram.get_sample_count()
+                    ));
+                }
+            }
+            schema.sort();
+            if let Some(expected) = &expected {
+                assert_eq!(&schema, expected, "mode={mode:?}");
+            } else {
+                assert!(!schema.is_empty());
+                expected = Some(schema);
+            }
+        }
+    }
+
+    #[test]
+    fn ttft_detail_configuration_defaults_metrics_and_explicit_config_wins() {
+        assert_eq!(
+            Metrics::build(None, &fake_env(&[])).ttft_detail,
+            TtftDetail::Metrics
+        );
+        for (value, expected) in [
+            ("off", TtftDetail::Off),
+            ("metrics", TtftDetail::Metrics),
+            ("logs", TtftDetail::Logs),
+            ("both", TtftDetail::Both),
+        ] {
+            let pairs = [("DYN_FRONTEND_TTFT_DETAIL", value)];
+            let env = fake_env(&pairs);
+            assert_eq!(Metrics::build(None, &env).ttft_detail, expected);
+            assert_eq!(
+                Metrics::build_with_detail(None, &env, TtftDetail::Off).ttft_detail,
+                TtftDetail::Off
+            );
+        }
+        assert!("invalid".parse::<TtftDetail>().is_err());
+    }
+
+    fn assert_ttft_stage_cohort(metrics: &Metrics, model: &str, expected_count: u64) {
+        let total = metrics.time_to_first_token.with_label_values(&[model]);
+        assert_eq!(total.get_sample_count(), expected_count);
+        let mut stage_sum = 0.0;
+        for (stage, phase) in EXPECTED_TTFT_STAGE_LABELS {
+            let histogram = metrics.ttft_stage.with_label_values(&[model, stage, phase]);
+            assert_eq!(
+                histogram.get_sample_count(),
+                expected_count,
+                "stage={stage}, phase={phase} must use the total TTFT request population",
+            );
+            stage_sum += histogram.get_sample_sum();
+        }
+        let total_sum = total.get_sample_sum();
+        assert!(
+            (stage_sum - total_sum).abs() <= 1e-12 * total_sum.max(1.0),
+            "stage sum {stage_sum} differs from actual total TTFT histogram sum {total_sum}",
+        );
+    }
+
+    #[test]
+    fn ttft_missing_timeline_is_conserved_and_reported_once() {
+        let metrics = Arc::new(Metrics::build_with_detail(
+            None,
+            &fake_env(&[]),
+            TtftDetail::Metrics,
+        ));
+        let mut collector = response_collector(&metrics, "missing");
+        collector.observe_response(1, 0);
+        assert_eq!(
+            metrics
+                .ttft_degraded
+                .with_label_values(&["missing_timeline"])
+                .get(),
+            0
+        );
+        collector.observe_response(1, 1);
+        collector.observe_response(1, 1);
+        assert_ttft_stage_cohort(&metrics, "missing", 1);
+        assert_eq!(
+            metrics
+                .ttft_degraded
+                .with_label_values(&["missing_timeline"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .ttft_stage
+                .with_label_values(&["missing", "unclassified", ""])
+                .get_sample_sum(),
+            metrics
+                .time_to_first_token
+                .with_label_values(&["missing"])
+                .get_sample_sum()
+        );
+        assert_eq!(
+            metrics
+                .ttft_stage
+                .with_label_values(&["missing", "frontend_overhead", ""])
+                .get_sample_sum(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn ttft_stage_histogram_uses_frontend_prefix_and_documented_bucket_configuration() {
+        let env = fake_env(&[
+            ("DYN_METRICS_TTFT_STAGE_MIN", "0.002"),
+            ("DYN_METRICS_TTFT_STAGE_MAX", "8"),
+            ("DYN_METRICS_TTFT_STAGE_COUNT", "5"),
+        ]);
+        let metrics = Metrics::build(Some("custom_frontend".to_string()), &env);
+        metrics
+            .ttft_stage
+            .with_label_values(&["model", "frontend_overhead", ""])
+            .observe(0.1);
+        let families = metrics.ttft_stage.collect();
+        assert_eq!(families[0].name(), "custom_frontend_ttft_stage_seconds");
+        let buckets: Vec<_> = families[0].get_metric()[0]
+            .get_histogram()
+            .get_bucket()
+            .iter()
+            .map(|bucket| bucket.upper_bound())
+            .collect();
+        assert_eq!(buckets, generate_log_buckets(0.002, 8.0, 5));
+    }
+
+    #[test]
+    fn ttft_stage_cohorts_match_for_zero_tokens_later_tokens_and_cancelled_requests() {
+        let metrics = Arc::new(Metrics::build_with_detail(
+            None,
+            &fake_env(&[]),
+            TtftDetail::Both,
+        ));
+        let model = "ttft-cohort-model";
+        let mut expected_count = 0;
+
+        // Both instrumented SGLang and other frontend paths contribute to the
+        // same population; missing timelines are explicitly unclassified.
+        for attach_timeline in [false, true] {
+            let mut collector = response_collector(&metrics, model);
+            collector.start_time -= Duration::from_secs(1);
+            let mut request = dynamo_runtime::pipeline::Context::new(());
+            if attach_timeline {
+                collector.attach_ttft_timeline(&mut request);
+            }
+            collector.observe_response(20, 0);
+            assert_ttft_stage_cohort(&metrics, model, expected_count);
+            collector.observe_response(20, 3);
+            expected_count += 1;
+            assert_ttft_stage_cohort(&metrics, model, expected_count);
+
+            // Neither subsequent tokens nor collector drop repeat TTFT samples.
+            collector.observe_response(20, 0);
+            collector.observe_response(20, 5);
+            drop(collector);
+            assert_ttft_stage_cohort(&metrics, model, expected_count);
+
+            let mut cancelled = response_collector(&metrics, model);
+            if attach_timeline {
+                cancelled.attach_ttft_timeline(&mut request);
+            }
+            cancelled.observe_response(20, 0);
+            drop(cancelled);
+            assert_ttft_stage_cohort(&metrics, model, expected_count);
+        }
+    }
+
+    #[test]
+    fn ttft_shared_request_timeline_is_observed_on_existing_http_registry() {
+        let metrics = Arc::new(Metrics::build_with_detail(
+            None,
+            &fake_env(&[]),
+            TtftDetail::Both,
+        ));
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "ttft-shared-timeline-model";
+        let mut collector = response_collector(&metrics, model);
+        let mut request = dynamo_runtime::pipeline::Context::new(());
+        collector.attach_ttft_timeline(&mut request);
+        let shared = request.get::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY).unwrap();
+        assert!(Arc::ptr_eq(
+            shared.as_ref(),
+            collector.ttft_timeline.as_ref().unwrap(),
+        ));
+
+        // The same handle travels through the Python bridge and routed engine;
+        // an open span must be clipped to this collector's first-token instant.
+        let route_span = shared.start_span(TtftStage::RouteDecode);
+        std::thread::sleep(Duration::from_millis(1));
+        collector.observe_response(20, 1);
+        assert_ttft_stage_cohort(&metrics, model, 1);
+        let before = metrics
+            .ttft_stage
+            .with_label_values(&[model, "route", "decode"])
+            .get_sample_sum();
+        assert!(before > 0.0);
+        drop(route_span);
+        collector.observe_response(20, 2);
+        assert_eq!(
+            metrics
+                .ttft_stage
+                .with_label_values(&[model, "route", "decode"])
+                .get_sample_sum(),
+            before,
+            "late span completion must not change the frozen HTTP TTFT",
+        );
+
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "dynamo_frontend_ttft_stage_seconds")
+            .expect("stage histogram must be exported by the existing HTTP registry");
+        assert_eq!(family.get_metric().len(), EXPECTED_TTFT_STAGE_LABELS.len());
+        for sample in family.get_metric() {
+            let labels: std::collections::BTreeMap<_, _> = sample
+                .get_label()
+                .iter()
+                .map(|label| (label.name(), label.value()))
+                .collect();
+            assert_eq!(labels.len(), 3, "no request/worker IDs in stage labels");
+            assert_eq!(labels["model"], model);
+            assert!(EXPECTED_TTFT_STAGE_LABELS.contains(&(labels["stage"], labels["phase"])));
+            assert_eq!(sample.get_histogram().get_sample_count(), 1);
+        }
+    }
+
+    #[test]
+    fn ttft_stage_labels_and_cached_histograms_preserve_model_separation() {
+        let metrics = Arc::new(Metrics::build_with_detail(
+            None,
+            &fake_env(&[]),
+            TtftDetail::Both,
+        ));
+        let mut first = response_collector(&metrics, "ttft-model-a");
+        let mut first_again = response_collector(&metrics, "ttft-model-a");
+        let mut second = response_collector(&metrics, "ttft-model-b");
+        assert!(Arc::ptr_eq(
+            first.ttft_stage.as_ref().unwrap(),
+            first_again.ttft_stage.as_ref().unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            first.ttft_stage.as_ref().unwrap(),
+            second.ttft_stage.as_ref().unwrap()
+        ));
+        first.start_time -= Duration::from_secs(1);
+        second.start_time -= Duration::from_secs(3);
+        first.observe_response(10, 1);
+        first_again.observe_response(10, 1);
+        second.observe_response(10, 1);
+        assert_ttft_stage_cohort(&metrics, "ttft-model-a", 2);
+        assert_ttft_stage_cohort(&metrics, "ttft-model-b", 1);
+        assert!(
+            metrics
+                .ttft_stage
+                .with_label_values(&["ttft-model-b", "unclassified", ""])
+                .get_sample_sum()
+                >= 3.0,
+        );
+        assert_eq!(metrics.ttft_stage_handles.len(), 2);
+    }
+
+    #[derive(Default)]
+    struct TtftLogFields {
+        numbers: std::collections::BTreeMap<&'static str, f64>,
+        text: std::collections::BTreeMap<&'static str, String>,
+    }
+
+    impl tracing::field::Visit for TtftLogFields {
+        fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+            self.numbers.insert(field.name(), value);
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.text.insert(field.name(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.text.insert(field.name(), format!("{value:?}"));
+        }
+    }
+
+    /// Capture actual tracing events without installing a process-global logger
+    /// or adding a test-only logging dependency.
+    #[derive(Clone)]
+    struct TtftLogSubscriber {
+        filter: tracing_subscriber::filter::Targets,
+        events: Arc<std::sync::Mutex<Vec<(tracing::Level, TtftLogFields)>>>,
+    }
+
+    impl tracing::Subscriber for TtftLogSubscriber {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == "dynamo_frontend::ttft"
+                && self
+                    .filter
+                    .would_enable(metadata.target(), metadata.level())
+        }
+
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            // Tests install independent subscribers on different threads. Do
+            // not cache one test's enabled/disabled setting for another test.
+            tracing::subscriber::Interest::sometimes()
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if self.enabled(event.metadata()) {
+                let mut fields = TtftLogFields::default();
+                event.record(&mut fields);
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push((*event.metadata().level(), fields));
+            }
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn ttft_log_is_once_at_first_token_and_matches_histograms_and_request_identity() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = TtftLogSubscriber {
+            filter: "info,dynamo_frontend::ttft=debug".parse().unwrap(),
+            events: events.clone(),
+        };
+        let metrics = Arc::new(Metrics::build_with_detail(
+            None,
+            &fake_env(&[]),
+            TtftDetail::Both,
+        ));
+        let model = "ttft-log-model";
+        tracing::subscriber::with_default(subscriber, || {
+            let mut collector = response_collector(&metrics, model);
+            collector.start_time -= Duration::from_secs(1);
+            let mut request = dynamo_runtime::pipeline::Context::with_id_and_metadata(
+                (),
+                "client-request-42".to_string(),
+                Default::default(),
+            );
+            collector.attach_ttft_timeline(&mut request);
+            let timeline = request.get::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY).unwrap();
+            timeline.record_ago(
+                TtftStage::Preprocess,
+                Duration::from_millis(500),
+                Duration::from_millis(200),
+            );
+            timeline.record_ago(
+                TtftStage::TemplateTokenize,
+                Duration::from_millis(400),
+                Duration::from_millis(300),
+            );
+            let route = timeline.start_span(TtftStage::RouteDecode);
+
+            collector.observe_response(20, 0);
+            assert!(events.lock().unwrap().is_empty());
+            assert_ttft_stage_cohort(&metrics, model, 0);
+            collector.observe_response(20, 3);
+            assert_eq!(events.lock().unwrap().len(), 1);
+            assert_ttft_stage_cohort(&metrics, model, 1);
+            drop(route);
+            collector.observe_response(20, 0);
+            collector.observe_response(20, 4);
+            drop(collector);
+
+            // A request that never produces tokens must neither log a TTFT nor
+            // add samples, even though it carries the full request context.
+            let mut cancelled = response_collector(&metrics, model);
+            cancelled.attach_ttft_timeline(&mut request);
+            cancelled.observe_response(20, 0);
+            drop(cancelled);
+            assert_ttft_stage_cohort(&metrics, model, 1);
+
+            // Other endpoints still record metrics, but without the attached
+            // HTTP request context they must not emit an anonymous chat log.
+            let mut unattached = response_collector(&metrics, "ttft-unattached-model");
+            unattached.observe_response(20, 1);
+            drop(unattached);
+        });
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "later tokens/drop/cancellation must not log"
+        );
+        let (level, fields) = &events[0];
+        assert_eq!(*level, tracing::Level::DEBUG);
+        assert_eq!(fields.text["message"], "frontend first token");
+        assert_eq!(fields.text["request_id"], "client-request-42");
+        assert_eq!(fields.text["model"], model);
+        assert_eq!(
+            fields.numbers.len(),
+            TtftStage::ALL.len() + 1,
+            "every canonical numeric stage field plus total"
+        );
+        let total_ms = fields.numbers["ttft_ms"];
+        let histogram_ttft_ms = metrics
+            .time_to_first_token
+            .with_label_values(&[model])
+            .get_sample_sum()
+            * 1000.0;
+        assert_eq!(total_ms, histogram_ttft_ms);
+        let mut stage_sum_ms = 0.0;
+        for (stage, phase) in EXPECTED_TTFT_STAGE_LABELS {
+            let field = if phase.is_empty() {
+                format!("{stage}_ms")
+            } else {
+                format!("{stage}_{phase}_ms")
+            };
+            let logged_ms = fields.numbers[field.as_str()];
+            let histogram_ms = metrics
+                .ttft_stage
+                .with_label_values(&[model, stage, phase])
+                .get_sample_sum()
+                * 1000.0;
+            assert_eq!(logged_ms, histogram_ms, "numeric field {field}");
+            stage_sum_ms += logged_ms;
+        }
+        assert!((stage_sum_ms - total_ms).abs() <= 1e-9 * total_ms.max(1.0));
+        assert!(fields.numbers["template_tokenize_ms"] > 0.0);
+        assert!(fields.numbers["preprocess_ms"] > 0.0);
+    }
+
+    #[test]
+    fn ttft_log_disabled_by_default_or_explicit_filter_does_not_change_metrics() {
+        for directive in ["info", "debug,dynamo_frontend::ttft=off"] {
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let subscriber = TtftLogSubscriber {
+                filter: directive.parse().unwrap(),
+                events: events.clone(),
+            };
+            let metrics = Arc::new(Metrics::build_with_detail(
+                None,
+                &fake_env(&[]),
+                TtftDetail::Both,
+            ));
+            let model = "ttft-disabled-log-model";
+            tracing::subscriber::with_default(subscriber, || {
+                let mut collector = response_collector(&metrics, model);
+                let mut request = dynamo_runtime::pipeline::Context::new(());
+                collector.attach_ttft_timeline(&mut request);
+                let timeline = request.get::<Arc<TtftTimings>>(TTFT_CONTEXT_KEY).unwrap();
+                let route = timeline.start_span(TtftStage::RouteAggregated);
+                collector.observe_response(20, 0);
+                collector.observe_response(20, 1);
+                drop(route);
+                collector.observe_response(20, 2);
+                drop(collector);
+            });
+            assert!(events.lock().unwrap().is_empty());
+            assert_ttft_stage_cohort(&metrics, model, 1);
+        }
+    }
 
     fn response_collector(metrics: &Arc<Metrics>, model: &str) -> ResponseMetricCollector {
         ResponseMetricCollector::new(

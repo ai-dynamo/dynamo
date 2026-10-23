@@ -286,7 +286,7 @@ impl RoutingHost {
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let route_guard = start_route(&request, phase);
         let explicit = explicit_target(request.content(), phase)?;
         let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
@@ -365,6 +365,7 @@ impl RoutingHost {
             occupancy_reservation,
             lora_load,
             &request,
+            phase,
         );
         let tracker = request.tracker.clone();
         let request_context = request.context().clone();

@@ -66,13 +66,20 @@ Added by an individual metric family. Each label appears only on the metrics not
 <ParamField path="stage" type="string">
   `[Shared]` On `dynamo_frontend_stage_requests` — the frontend pipeline stage a request currently occupies. See [Stage values](#stage-values).
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>preprocess</Badge> <Badge intent="note" minimal>route</Badge> <Badge intent="note" minimal>dispatch</Badge></span>
+  On `dynamo_frontend_ttft_stage_seconds`, identifies an exclusive TTFT contribution. Its values
+  reuse `preprocess`, `route`, and `dispatch` from the request gauge and add finer contributions; see [TTFT stage durations](metrics-catalog.mdx#ttft-stage-durations).
+
+  <span className="enum-values"><span className="enum-label">Request gauge values:</span> <Badge intent="note" minimal>preprocess</Badge> <Badge intent="note" minimal>route</Badge> <Badge intent="note" minimal>dispatch</Badge></span>
 </ParamField>
 
 <ParamField path="phase" type="string">
   `[Shared]` On `dynamo_frontend_stage_requests` — the serving phase. See [Phase values](#phase-values). The empty value is used when the stage does not distinguish phases (e.g. `preprocess`).
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>aggregated</Badge> <Badge intent="note" minimal>"" (empty)</Badge></span>
+  On `dynamo_frontend_ttft_stage_seconds`, uses the same phase values and adds `prefill_decode` for
+  `backend_overlap`. See [TTFT stage durations](metrics-catalog.mdx#ttft-stage-durations) for the
+  allowed stage/phase pairs.
+
+  <span className="enum-values"><span className="enum-label">Request gauge values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>aggregated</Badge> <Badge intent="note" minimal>"" (empty)</Badge></span>
 </ParamField>
 
 <ParamField path="state" type="string">
@@ -103,6 +110,16 @@ Added by an individual metric family. Each label appears only on the metrics not
 
 <ParamField path="reason" type="string">
   `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request.
+
+  On `dynamo_frontend_ttft_detail_degraded_total` and
+  `dynamo_frontend_ttft_detail_coarse_total`, identifies a fixed timing-coverage condition. Values
+  come from the timing registry; arbitrary error messages are never labels. These counters have
+  no model or request-ID label. See [TTFT stage durations](metrics-catalog.mdx#ttft-stage-durations).
+
+  Degraded reasons: `interval_limit`, `invalid_interval`, `invalid_batch`, `invalid_stage`,
+  `invalid_version`, `clock_mismatch`, `timestamp_overflow`, `missing_timeline`.
+
+  Coarse reasons: `opaque_template`, `unsupported_clock`, `missing_coverage`.
 </ParamField>
 
 <ParamField path="migration_type" type="string">

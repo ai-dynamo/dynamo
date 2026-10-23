@@ -50,6 +50,7 @@ from .structural_tag_policy import (
     runtime_structural_tag_options,
 )
 from .thinking import runtime_default_thinking_mode
+from .ttft import ttft_context, ttft_stage
 from .usage import response_usage, update_usage_metadata
 from .utils import (
     PromptLogprobsAccumulator,
@@ -771,6 +772,7 @@ class VllmProcessor:
         vllm_preproc: EngineCoreRequest,
         dynamo_preproc: dict[str, Any],
         mm_processor_kwargs: dict[str, Any] | None = None,
+        context: Any | None = None,
     ) -> tuple[dict | None, list, bool]:
         """Extract MM routing info and prepare mm_kwargs transfer.
 
@@ -797,70 +799,73 @@ class VllmProcessor:
             return None, cleanup_items, nixl_transferred
 
         if vllm_preproc.mm_features:
-            if mm_processor_kwargs:
-                # vLLM rehashes supplied UUIDs when processor kwargs are
-                # present. Fall back to text-prefix routing so the router and
-                # worker cannot publish different cache keys.
-                logger.debug(
-                    "[mm-routing] Exact MM routing disabled because "
-                    "mm_processor_kwargs is non-empty"
-                )
-            else:
-                mm_routing_info = build_mm_routing_info_from_features(
-                    vllm_preproc.mm_features,
-                    prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-                )
-            (
-                mm_hashes_list,
-                mm_placeholders_list,
-                mm_hashes_by_modality,
-                mm_placeholders_by_modality,
-            ) = _group_mm_feature_metadata(vllm_preproc.mm_features)
-            if "extra_args" not in dynamo_preproc:
-                dynamo_preproc["extra_args"] = {}
-            # Forward hashes only when this frontend built the matching exact
-            # routing sequence. Their presence is the worker's request-time
-            # readiness signal; transfer-only metadata is deliberately separate.
-            if mm_routing_info is not None:
-                dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
-                dynamo_preproc["extra_args"][
-                    "mm_hashes_by_modality"
-                ] = mm_hashes_by_modality
-            dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
-            dynamo_preproc["extra_args"][
-                "mm_placeholders_by_modality"
-            ] = mm_placeholders_by_modality
-            # Forward the expanded prompt_token_ids (with image placeholders)
-            # so the backend can use them in the pre-rendered MultiModalInput.
-            dynamo_preproc["extra_args"]["expanded_token_ids"] = list(
-                vllm_preproc.prompt_token_ids
-            )
-
-            n_blocks = len(mm_routing_info["block_mm_infos"]) if mm_routing_info else 0
-            n_mm_blocks = sum(
-                1 for b in (mm_routing_info or {}).get("block_mm_infos", []) if b
-            )
-            logger.debug(
-                "[mm-routing] Built mm_routing_info: %d mm_features, "
-                "%d hashes, %d total blocks, %d blocks with MM content, "
-                "block_size=%d",
-                len(vllm_preproc.mm_features),
-                len(mm_hashes_list),
-                n_blocks,
-                n_mm_blocks,
-                self.block_size,
-            )
-            if logger.isEnabledFor(logging.DEBUG):
-                for i, f in enumerate(vllm_preproc.mm_features):
+            with ttft_stage(context, "mm_routing_build"):
+                if mm_processor_kwargs:
+                    # vLLM rehashes supplied UUIDs when processor kwargs are
+                    # present. Fall back to text-prefix routing so the router and
+                    # worker cannot publish different cache keys.
                     logger.debug(
-                        "[mm-routing]   feature[%d]: modality=%s, hash=%s..., "
-                        "offset=%d, length=%d",
-                        i,
-                        _mm_feature_modality(f),
-                        f.mm_hash[:16] if f.mm_hash else "None",
-                        f.mm_position.offset,
-                        f.mm_position.length,
+                        "[mm-routing] Exact MM routing disabled because "
+                        "mm_processor_kwargs is non-empty"
                     )
+                else:
+                    mm_routing_info = build_mm_routing_info_from_features(
+                        vllm_preproc.mm_features,
+                        prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+                    )
+                (
+                    mm_hashes_list,
+                    mm_placeholders_list,
+                    mm_hashes_by_modality,
+                    mm_placeholders_by_modality,
+                ) = _group_mm_feature_metadata(vllm_preproc.mm_features)
+                if "extra_args" not in dynamo_preproc:
+                    dynamo_preproc["extra_args"] = {}
+                # Forward hashes only when this frontend built the matching exact
+                # routing sequence. Their presence is the worker's request-time
+                # readiness signal; transfer-only metadata is deliberately separate.
+                if mm_routing_info is not None:
+                    dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+                    dynamo_preproc["extra_args"][
+                        "mm_hashes_by_modality"
+                    ] = mm_hashes_by_modality
+                dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
+                dynamo_preproc["extra_args"][
+                    "mm_placeholders_by_modality"
+                ] = mm_placeholders_by_modality
+                # Forward the expanded prompt_token_ids (with image placeholders)
+                # so the backend can use them in the pre-rendered MultiModalInput.
+                dynamo_preproc["extra_args"]["expanded_token_ids"] = list(
+                    vllm_preproc.prompt_token_ids
+                )
+
+                n_blocks = (
+                    len(mm_routing_info["block_mm_infos"]) if mm_routing_info else 0
+                )
+                n_mm_blocks = sum(
+                    1 for b in (mm_routing_info or {}).get("block_mm_infos", []) if b
+                )
+                logger.debug(
+                    "[mm-routing] Built mm_routing_info: %d mm_features, "
+                    "%d hashes, %d total blocks, %d blocks with MM content, "
+                    "block_size=%d",
+                    len(vllm_preproc.mm_features),
+                    len(mm_hashes_list),
+                    n_blocks,
+                    n_mm_blocks,
+                    self.block_size,
+                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    for i, f in enumerate(vllm_preproc.mm_features):
+                        logger.debug(
+                            "[mm-routing]   feature[%d]: modality=%s, hash=%s..., "
+                            "offset=%d, length=%d",
+                            i,
+                            _mm_feature_modality(f),
+                            f.mm_hash[:16] if f.mm_hash else "None",
+                            f.mm_position.offset,
+                            f.mm_position.length,
+                        )
 
             # Transfer pre-processed mm_kwargs to the backend so it can skip
             # the HF processor.  Strategy:
@@ -892,10 +897,11 @@ class VllmProcessor:
                             )
                         # NVTX annotation is owned by MmKwargsSender.prepare via
                         # the subclass's _nvtx_label/_nvtx_color class attrs.
-                        extra_update, cleanup_items = await self._sender.prepare(
-                            vllm_preproc.mm_features,
-                            modality=transfer_modality,
-                        )
+                        with ttft_stage(context, "multimodal_prepare"):
+                            extra_update, cleanup_items = await self._sender.prepare(
+                                vllm_preproc.mm_features,
+                                modality=transfer_modality,
+                            )
                     if extra_update is not None:
                         dynamo_preproc["extra_args"].update(extra_update)
                         nixl_transferred = True
@@ -940,6 +946,7 @@ class VllmProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
+        timing_context = ttft_context(context)
 
         _reject_unsupported_chat_logprobs(
             request.get("logprobs"),
@@ -955,7 +962,10 @@ class VllmProcessor:
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).
         # No data URI encoding needed.
-        with _nvtx.annotate("mm_frontend:preprocess_chat", color="yellow"):
+        with (
+            _nvtx.annotate("mm_frontend:preprocess_chat", color="yellow"),
+            ttft_stage(timing_context, "preprocess"),
+        ):
             pre = await preprocess_chat_request(
                 request,
                 tokenizer=self.tokenizer,
@@ -971,6 +981,7 @@ class VllmProcessor:
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
                 structural_tag_excludes_reasoning=self.structural_tag_excludes_reasoning,
+                context=timing_context,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -1032,7 +1043,13 @@ class VllmProcessor:
         # legacy nvext passthrough.
         thinking_token_budget = resolve_thinking_token_budget(request)
 
-        with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
+        with (
+            _nvtx.annotate("mm_frontend:process_inputs", color="orange"),
+            ttft_stage(
+                timing_context,
+                "multimodal_prepare" if mm_data or mm_uuids else "preprocess",
+            ),
+        ):
             # render_messages_async returns a raw prompt. Convert it to a typed
             # EngineInput before process_inputs. User UUID requests deliberately
             # stay token-only here: the selected worker must populate and query
@@ -1125,6 +1142,7 @@ class VllmProcessor:
                 vllm_preproc,
                 dynamo_preproc,
                 mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
+                context=timing_context,
             )
 
             # Forward multimodal URLs so the backend handler can load the media.

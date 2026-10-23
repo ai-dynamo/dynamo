@@ -15,7 +15,6 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
-    metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
         ResponseStream, RouterMode, SingleIn, async_trait,
@@ -36,8 +35,10 @@ use crate::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
+        observation::StageObservation,
         preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
+        ttft::{TtftSpan, TtftStage},
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
@@ -855,8 +856,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let phase = request.phase();
-        let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let route_guard = start_route(&request, phase);
         let (mut selection, mut operation) = self
             .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
@@ -909,10 +909,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
-        drop(route_guard);
+        let dispatch_prepare = route_selection_finished(route_guard, &request, phase);
         let selected_target = route_target(selection.worker);
         let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
+            .dispatch_selection(request, selection, guard, &budget, dispatch_prepare)
             .await
         {
             Ok(stream) => stream,
@@ -928,6 +928,37 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
         self.bind_affinity(operation, selected_target, stream)
     }
+}
+
+/// The old route gauge and the diagnostic route share selection/tracking
+/// boundaries. Dispatch preparation is a separate diagnostic child, even where
+/// it overlaps the original dispatch gauge.
+fn start_route(request: &PreprocessedRequest, phase: RequestPhase) -> StageObservation {
+    StageObservation::new(route_stage(phase), request.ttft_timings())
+}
+
+fn route_stage(phase: RequestPhase) -> TtftStage {
+    match phase {
+        RequestPhase::Prefill => TtftStage::RoutePrefill,
+        RequestPhase::Decode => TtftStage::RouteDecode,
+        RequestPhase::Aggregated => TtftStage::RouteAggregated,
+    }
+}
+
+fn route_selection_finished(
+    route: StageObservation,
+    request: &PreprocessedRequest,
+    phase: RequestPhase,
+) -> Option<TtftSpan> {
+    drop(route);
+    start_dispatch_prepare(request, phase)
+}
+
+fn start_dispatch_prepare(request: &PreprocessedRequest, phase: RequestPhase) -> Option<TtftSpan> {
+    let stage = route_stage(phase).dispatch_prepare()?;
+    request
+        .ttft_timings()
+        .map(|timings| timings.start_span(stage))
 }
 
 enum ResponseItemOutcome {

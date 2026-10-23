@@ -42,6 +42,13 @@ from .sglang_prepost import (
 )
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
+from .ttft import (
+    TimingBatch,
+    WorkerTiming,
+    import_worker_batch,
+    ttft_context,
+    ttft_stage,
+)
 from .usage import response_usage, update_usage_metadata
 from .utils import (
     PreprocessError,
@@ -346,6 +353,16 @@ class SglangPreprocessWorkerResult:
     effective_reasoning_parser_name: str | None = None
 
 
+@dataclass
+class SglangTimedPreprocessWorkerResult(SglangPreprocessWorkerResult):
+    """Enabled-only payload; the off result does not serialize a timing field."""
+
+    timing_batch: TimingBatch | None = None
+
+
+_WorkerPreprocessTiming = WorkerTiming
+
+
 def _init_worker(
     model_path: str,
     tool_call_parser_name: str | None,
@@ -381,8 +398,10 @@ def _preprocess_worker(
     request: dict[str, Any],
     model_name: str,
     eos_token_ids: list[int] | None,
+    record_ttft_timing: bool = False,
 ) -> SglangPreprocessWorkerResult:
     """Preprocess a request in a worker process and return a picklable result."""
+    timing = _WorkerPreprocessTiming() if record_ttft_timing else None
     pre = preprocess_chat_request(
         request,
         tokenizer=_w_tokenizer,
@@ -394,6 +413,7 @@ def _preprocess_worker(
         structural_tag_mode=_w_structural_tag_mode,
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
+        context=timing,
     )
 
     n = request.get("n", 1)
@@ -418,7 +438,7 @@ def _preprocess_worker(
         _w_reasoning_parser_name if _client_wants_separate_reasoning(request) else None
     )
 
-    return SglangPreprocessWorkerResult(
+    result = SglangPreprocessWorkerResult(
         prompt_token_ids=pre.prompt_token_ids,
         dynamo_preproc=dynamo_preproc,
         request=request,
@@ -426,6 +446,11 @@ def _preprocess_worker(
         effective_reasoning_parser_name=effective_reasoning_parser_name,
         named_zero_arg_tool=pre.named_zero_arg_tool,
     )
+    if timing is not None:
+        return SglangTimedPreprocessWorkerResult(
+            **vars(result), timing_batch=timing.batch()
+        )
+    return result
 
 
 def _build_dynamo_preproc(
@@ -635,23 +660,26 @@ class SglangProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Single-process path: preprocess, dispatch, stream post-process."""
         request_id = random_uuid()
+        timing_context = ttft_context(context)
 
         try:
             if self.debug_perf:
                 t0 = time.monotonic()
 
-            pre = preprocess_chat_request(
-                request,
-                tokenizer=self.tokenizer,
-                tool_call_parser_name=self.tool_call_parser_name,
-                reasoning_parser_name=self.reasoning_parser_name,
-                exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
-                template_force_reasoning=self.template_force_reasoning,
-                default_thinking_mode=self.default_thinking_mode,
-                structural_tag_mode=self.structural_tag_mode,
-                structural_tag_scope=self.structural_tag_scope,
-                structural_tag_schema=self.structural_tag_schema,
-            )
+            with ttft_stage(timing_context, "preprocess"):
+                pre = preprocess_chat_request(
+                    request,
+                    tokenizer=self.tokenizer,
+                    tool_call_parser_name=self.tool_call_parser_name,
+                    reasoning_parser_name=self.reasoning_parser_name,
+                    exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+                    template_force_reasoning=self.template_force_reasoning,
+                    default_thinking_mode=self.default_thinking_mode,
+                    structural_tag_mode=self.structural_tag_mode,
+                    structural_tag_scope=self.structural_tag_scope,
+                    structural_tag_schema=self.structural_tag_schema,
+                    context=timing_context,
+                )
 
             if self.debug_perf:
                 t1 = time.monotonic()
@@ -724,17 +752,31 @@ class SglangProcessor:
         # --- Phase 1: Preprocess (semaphore held) ---
         assert self._worker_semaphore is not None
         assert self.preprocess_pool is not None
+        timing_context = ttft_context(context)
+        enabled = timing_context is not None
         try:
-            async with self._worker_semaphore:
-                future = self.preprocess_pool.submit(
-                    _preprocess_worker,
-                    request,
-                    request["model"],
-                    self.eos_token_ids,
-                )
-                preproc_result: SglangPreprocessWorkerResult = (
-                    await asyncio.wrap_future(future)
-                )
+            with ttft_stage(timing_context, "preprocess"):
+                with ttft_stage(timing_context, "preprocess_queue"):
+                    await self._worker_semaphore.acquire()
+                try:
+                    submitted_ns = time.monotonic_ns() if enabled else 0
+                    # Omit the optional argument entirely when disabled, and use
+                    # the base result without any timing payload on that path.
+                    args = (request, request["model"], self.eos_token_ids)
+                    future = self.preprocess_pool.submit(
+                        _preprocess_worker, *args, *((True,) if enabled else ())
+                    )
+                    preproc_result: SglangPreprocessWorkerResult = (
+                        await asyncio.wrap_future(future)
+                    )
+                finally:
+                    self._worker_semaphore.release()
+                if enabled:
+                    import_worker_batch(
+                        timing_context,
+                        getattr(preproc_result, "timing_batch", None),
+                        submitted_ns,
+                    )
         except InvalidArgument:
             raise
         except PreprocessError as exc:

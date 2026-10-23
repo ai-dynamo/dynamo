@@ -371,6 +371,8 @@ pub mod kvbm {
 
 /// LLM (Language Model) inference environment variables
 pub mod llm {
+    /// Exclusive frontend TTFT detail: off, metrics (default), logs, or both.
+    pub const DYN_FRONTEND_TTFT_DETAIL: &str = "DYN_FRONTEND_TTFT_DETAIL";
     /// Delay between tokens emitted by the token echo engine, in milliseconds.
     pub const DYN_TOKEN_ECHO_DELAY_MS: &str = "DYN_TOKEN_ECHO_DELAY_MS";
 
@@ -583,6 +585,8 @@ pub mod llm {
         pub const DYN_METRICS_OUTPUT_SEQUENCE: &str = "DYN_METRICS_OUTPUT_SEQUENCE";
         /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_TTFT: &str = "DYN_METRICS_TTFT";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_TTFT_STAGE: &str = "DYN_METRICS_TTFT_STAGE";
         /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_ITL: &str = "DYN_METRICS_ITL";
         /// Comma-separated inter-token latency histogram bucket boundaries.
@@ -1201,6 +1205,7 @@ mod tests {
             llm::metrics::DYN_METRICS_INPUT_SEQUENCE,
             llm::metrics::DYN_METRICS_OUTPUT_SEQUENCE,
             llm::metrics::DYN_METRICS_TTFT,
+            llm::metrics::DYN_METRICS_TTFT_STAGE,
             llm::metrics::DYN_METRICS_ITL,
             llm::metrics::DYN_METRICS_ITL_BUCKETS,
             llm::metrics::DYN_METRICS_EMBEDDING_LATENCY,

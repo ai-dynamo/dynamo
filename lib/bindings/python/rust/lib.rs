@@ -416,6 +416,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
     m.add_class::<context::ContextMetadata>()?;
+    m.add_class::<context::TtftStageGuard>()?;
+    m.add_function(wrap_pyfunction!(context::ttft_stage_registry, m)?)?;
     m.add_class::<context::SpanProxy>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;

@@ -153,6 +153,14 @@ class frontend_service:
     OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
+    # Exclusive contributions to HTTP time to first token, labeled by stage and phase.
+    TTFT_STAGE_SECONDS = "ttft_stage_seconds"
+    # Requests with untrustworthy detailed TTFT attribution, labeled by fixed reason.
+    TTFT_DETAIL_DEGRADED_TOTAL = "ttft_detail_degraded_total"
+    # Requests with known coarse TTFT coverage, labeled by fixed reason.
+    TTFT_DETAIL_COARSE_TOTAL = "ttft_detail_coarse_total"
+    # Requests with unexpected overlapping TTFT leaves.
+    TTFT_DETAIL_UNEXPECTED_OVERLAP_TOTAL = "ttft_detail_unexpected_overlap_total"
     # Inter-token latency in seconds
     INTER_TOKEN_LATENCY_SECONDS = "inter_token_latency_seconds"
     # End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.

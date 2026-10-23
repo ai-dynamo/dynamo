@@ -45,6 +45,8 @@ classifiers = [
 keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [tool.maturin]
+# Skip libpython linkage for extension builds, but retain it for cargo tests.
+features = ["pyo3/extension-module"]
 module-name = "dynamo._core"
 manifest-path = "Cargo.toml"
 python-packages = ["dynamo"]

@@ -39,6 +39,7 @@ from .structural_tag_policy import (
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .ttft import ttft_coarse, ttft_stage
 from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
 logger = logging.getLogger(__name__)
@@ -509,6 +510,7 @@ def _render_deepseek_v4_prompt_token_ids(
     messages: list[dict[str, Any]],
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
+    context: Any | None = None,
 ) -> list[int]:
     """Render DeepSeek-V4 prompt token ids via SGLang's ``encoding_dsv4``.
 
@@ -568,12 +570,14 @@ def _render_deepseek_v4_prompt_token_ids(
     if reasoning_effort not in ("max", "high", None):
         reasoning_effort = None
 
-    prompt = encode_messages(
-        encoding_messages,
-        thinking_mode=thinking_mode,
-        reasoning_effort=reasoning_effort,
-    )
-    return _normalize_prompt_token_ids(tokenizer.encode(prompt))
+    with ttft_stage(context, "template_render"):
+        prompt = encode_messages(
+            encoding_messages,
+            thinking_mode=thinking_mode,
+            reasoning_effort=reasoning_effort,
+        )
+    with ttft_stage(context, "tokenize"):
+        return _normalize_prompt_token_ids(tokenizer.encode(prompt))
 
 
 @lru_cache(maxsize=64)
@@ -877,6 +881,7 @@ def preprocess_chat_request(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    context: Any | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -948,6 +953,7 @@ def preprocess_chat_request(
             messages=messages,
             tokenizer=tokenizer,
             template_tools=template_tools,
+            context=context,
         )
     else:
         # Build template kwargs -- single call for rendering + tokenization
@@ -971,25 +977,30 @@ def preprocess_chat_request(
 
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 
-        try:
-            rendered = tokenizer.apply_chat_template(
-                template_messages, **template_kwargs
-            )
-        except (TemplateError, TypeError) as exc:
-            # Jinja filters such as tojson can raise TypeError for invalid inputs.
-            raise PreprocessError(str(exc)) from exc
-        prompt_token_ids = _normalize_prompt_token_ids(rendered)
+        # A custom apply_chat_template may combine backend-specific rendering
+        # and tokenization. Preserve its single call and expose the opaque span.
+        ttft_coarse(context, "opaque_template")
+        with ttft_stage(context, "template_tokenize"):
+            try:
+                rendered = tokenizer.apply_chat_template(
+                    template_messages, **template_kwargs
+                )
+            except (TemplateError, TypeError) as exc:
+                # Jinja filters such as tojson can raise TypeError for invalid inputs.
+                raise PreprocessError(str(exc)) from exc
+            prompt_token_ids = _normalize_prompt_token_ids(rendered)
 
-    response_format_guided_decoding = build_response_format_guided_decoding(request)
-    tool_call_guided_decoding = build_tool_call_guided_decoding(
-        request,
-        tool_call_parser_name=tool_call_parser_name,
-        sglang_tools=sglang_tools,
-        structural_tag_mode=structural_tag_mode,
-        structural_tag_scope=structural_tag_scope,
-        structural_tag_schema=structural_tag_schema,
-        tokenizer=tokenizer,
-    )
+    with ttft_stage(context, "structural_tag_build"):
+        response_format_guided_decoding = build_response_format_guided_decoding(request)
+        tool_call_guided_decoding = build_tool_call_guided_decoding(
+            request,
+            tool_call_parser_name=tool_call_parser_name,
+            sglang_tools=sglang_tools,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
+            tokenizer=tokenizer,
+        )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
     # while both other paths honor them (and reject them against a forced choice).

@@ -701,7 +701,7 @@ mod tests {
                 .sampling_options(Default::default())
                 .output_options(Default::default());
             let (_, image_tokens) = preprocessor
-                .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &ids)
+                .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &ids, None)
                 .await
                 .unwrap();
             let result = builder.build().unwrap();

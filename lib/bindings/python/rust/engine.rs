@@ -410,16 +410,15 @@ where
 
     let current_trace_context = get_distributed_tracing_context();
     let metadata = context.metadata().clone();
+    let python_context = Context::new(ctx.clone(), current_trace_context, None, metadata)
+        .with_ttft_from(&context)
+        .map_err(Error::msg)?;
     let stream = invoke_generator(
         engine.generator.clone(),
         engine.event_loop.clone(),
         move |py| to_python_input(py, request),
-        engine.has_context.then_some({
-            let ctx = ctx.clone();
-            move |py: Python<'_>| {
-                Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                    .map(|context| vec![("context", context.into_any())])
-            }
+        engine.has_context.then_some(move |py: Python<'_>| {
+            Py::new(py, python_context).map(|context| vec![("context", context.into_any())])
         }),
     )
     .await?;

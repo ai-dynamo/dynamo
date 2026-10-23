@@ -88,6 +88,8 @@ impl std::fmt::Display for RequestPhase {
 /// accumulated detokenize timing, where lock-free updates are beneficial.
 #[derive(Debug)]
 pub struct RequestTracker {
+    /// Process-local frontend timeline, shared by preprocessing and routing.
+    ttft: OnceLock<Arc<super::ttft::TtftTimings>>,
     /// When the request was received (monotonic clock for duration calculations)
     request_received: Instant,
 
@@ -224,6 +226,7 @@ impl RequestTracker {
             .unwrap_or(0);
 
         RequestTracker {
+            ttft: OnceLock::new(),
             request_received: now,
             request_received_epoch_ms: epoch_ms,
             prefill_start_time: OnceLock::new(),
@@ -252,6 +255,15 @@ impl RequestTracker {
             external_query_token_ids: OnceLock::new(),
             prompt_token_ids: OnceLock::new(),
         }
+    }
+
+    /// Attach the HTTP timeline without replacing an existing request timeline.
+    pub fn set_ttft(&self, timings: Arc<super::ttft::TtftTimings>) {
+        let _ = self.ttft.set(timings);
+    }
+
+    pub fn ttft(&self) -> Option<&Arc<super::ttft::TtftTimings>> {
+        self.ttft.get()
     }
 
     /// Record when prefill started. Returns true if this was the first call.
@@ -771,6 +783,20 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn ttft_attachment_preserves_the_original_timeline_and_tracker_state() {
+        let tracker = RequestTracker::new();
+        tracker.record_isl(12, Some(4));
+        let timeline = Arc::new(super::super::ttft::TtftTimings::new(Instant::now()));
+        tracker.set_ttft(timeline.clone());
+        tracker.set_ttft(Arc::new(super::super::ttft::TtftTimings::new(
+            Instant::now(),
+        )));
+        assert!(Arc::ptr_eq(tracker.ttft().unwrap(), &timeline));
+        assert_eq!(tracker.isl_tokens(), Some(12));
+        assert_eq!(tracker.cached_tokens(), Some(4));
+    }
 
     #[test]
     fn test_record_isl_osl() {

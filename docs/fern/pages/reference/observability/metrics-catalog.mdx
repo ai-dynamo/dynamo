@@ -131,6 +131,216 @@ The ratio is defined only when the model has an active L1 cache and observed tok
   Time to first token in seconds.
 </ParamField>
 
+<ParamField path="dynamo_frontend_ttft_stage_seconds" type="histogram">
+  Exclusive wall-clock contributions to frontend Time To First Token (TTFT), in seconds. Labeled by
+  `model`, `stage`, and `phase`. Enabled by default. Every request in the enabled cohort that records
+  total TTFT records every legal stage/phase pair, including zeros for unused stages. See
+  [TTFT stage durations](#ttft-stage-durations).
+</ParamField>
+
+<ParamField path="dynamo_frontend_ttft_detail_degraded_total" type="counter">
+  Requests whose first-token breakdown is entirely `unclassified` because reliable detail is
+  unavailable. Labeled by a fixed `reason`; not labeled by model or request ID. Observed once per
+  request at the first token in `metrics` and `both` modes.
+</ParamField>
+
+<ParamField path="dynamo_frontend_ttft_detail_coarse_total" type="counter">
+  First-token requests with an opaque operation, unsupported worker clock, or missing finer coverage. Labeled by a
+  fixed `reason`; not labeled by model or request ID. Observed once per request in `metrics` and
+  `both` modes. See [coverage states](#ttft-stage-durations).
+</ParamField>
+
+<ParamField path="dynamo_frontend_ttft_detail_unexpected_overlap_total" type="counter">
+  First-token requests with overlapping independent frontend stages. Has no labels. The fixed
+  attribution order still preserves the total. Observed at most once per request in `metrics` and
+  `both` modes, regardless of how many overlaps occurred.
+</ParamField>
+
+### TTFT stage durations
+
+`dynamo_frontend_ttft_stage_seconds` partitions the same interval as
+`dynamo_frontend_time_to_first_token_seconds`: from the HTTP request metrics start to the first
+observed nonzero output token count. The total and all contributions share that first-token
+timestamp. Durations are clipped to that interval, concurrent work is counted once, and gaps are
+assigned to `frontend_overhead`. The contributions sum to the request's total TTFT exactly in
+integer durations, subject to floating-point rounding when exported. If timing data is invalid or
+exceeds its bound, the whole interval is assigned to `unclassified` instead.
+
+| `stage` | `phase` | Measured interval |
+|---------|---------|-------------------|
+| `frontend_overhead` | `""` | Time outside instrumented stages, including request setup and gaps between stages |
+| `preprocess` | `""` | Native or Python chat preprocessing, including process-pool dispatch and IPC when used, excluding separately attributed nested stages |
+| `preprocess_queue` | `""` | Waiting for the Python preprocessing concurrency semaphore |
+| `template_render` | `""` | Template rendering where the renderer exposes a separate call |
+| `tokenize` | `""` | Tokenization where the tokenizer exposes a separate call |
+| `template_tokenize` | `""` | Opaque third-party calls that combine rendering and tokenization; never recorded alongside separate timings for the same call |
+| `structural_tag_build` | `""` | Building and serializing structural-tag or guided-decoding constraints |
+| `multimodal_prepare` | `""` | Frontend multimodal input preparation, including media processing and shared-memory or NIXL sender preparation |
+| `mm_routing_build` | `""` | Building multimodal routing information from prepared inputs |
+| `route` | `prefill`, `decode`, `aggregated` | Worker selection, scheduling, and selection tracking for KV and built-in routing policies |
+| `dispatch_prepare` | `prefill`, `decode`, `aggregated` | Work after KV worker selection and before backend dispatch; zero on paths without a separate preparation interval |
+| `dispatch` | `prefill`, `decode`, `aggregated` | The existing dispatch boundary to the first backend response, excluding separately attributed preparation |
+| `first_token_wait` | `prefill`, `decode`, `aggregated` | First backend response to its first nonempty token output; zero when the first response contains tokens |
+| `backend_overlap` | `prefill_decode` | Concurrent prefill and decode backend waits, counted once |
+| `first_token_postprocess` | `""` | First decode or aggregated backend token to the HTTP first-token observation, including detokenization, parser buffering, and delivery |
+| `unclassified` | `""` | The entire TTFT when bounded collection cannot provide trustworthy attribution |
+
+Only these legal pairs are exported; the metric does not create a Cartesian product of all stages
+and phases. The registry also defines parent stages, attribution priority, and Python availability.
+
+The existing metric contracts remain unchanged. They answer different questions from this request
+view:
+
+| Existing view | Reuse in TTFT detail | Preserved contract |
+| --- | --- | --- |
+| `stage_requests{stage="route",phase=...}` | Shared selection lifecycle and canonical `route` stage name | The KV gauge still ends after selection/tracking. Preparation has its own detail interval. |
+| `stage_requests{stage="dispatch",phase=...}` | Same dispatch entry and first-response event | The gauge still starts before KV dispatch preparation. The detail view subtracts the nested `dispatch_prepare` contribution without moving that boundary. |
+| `stage_requests{stage="preprocess",phase=""}` | Shared lifecycle where boundaries match | Original gauge scopes and cleanup on errors or cancellation remain unchanged. |
+| `template_seconds`, `tokenize_seconds` | Existing native timing pairs feed `template_render` and `tokenize` | Inclusive operation durations retain their boundaries and successful-operation sample populations. |
+| `stage_duration_seconds{stage=...}` | Native chat `preprocess` reuses the same timing result | Existing stage values, buckets, and samples remain unchanged; no `model` or `phase` label is added. |
+| `time_to_first_token_seconds{model=...}` | Same start, first-token observation, and request population | Existing total TTFT remains enabled in all modes. |
+
+The gauges count concurrent requests; they do not measure duration. Existing operation histograms
+remain inclusive and can record multiple samples per HTTP request, including retries according to
+their existing rules. The detail histogram removes overlap, clips at the first HTTP token, and
+records zero for unused stages. Summing operation histograms would neither remove overlap nor
+preserve the total-TTFT denominator. Existing dashboards need no migration.
+
+Python requests carry the optional timeline separately from the legacy request tracker. Enabling
+detail does not create a tracker or add requests to existing router timing metrics.
+
+The empty `phase` means the stage does not distinguish serving phases. `aggregated` identifies a
+single worker serving both prefill and decode. Each dispatch snapshots its phase; later tracker
+changes cannot relabel it. `backend_overlap` applies when prefill and decode each have an active
+`dispatch` or `first_token_wait`, after higher-priority frontend work is removed.
+
+The fixed attribution order, from highest to lowest priority, is:
+
+1. `first_token_postprocess`.
+2. `dispatch_prepare`, then `route`, with decode before prefill before aggregated within each.
+3. `structural_tag_build`, `template_render`, `tokenize`, then opaque `template_tokenize`.
+4. `mm_routing_build`, `multimodal_prepare`, `preprocess_queue`, then residual `preprocess`.
+5. `backend_overlap`.
+6. `first_token_wait`, then `dispatch`, for decode, prefill, then aggregated.
+7. `frontend_overhead` for uncovered time.
+
+This policy attributes observable frontend work ahead of simultaneous backend waits. It is not a
+distributed critical-path calculation. Repeated intervals of the same stage form a union, and
+sequential retry intervals remain in the request. Unexpected overlaps between independent frontend stages
+use the same fixed priority and increment a diagnostic count. When an attempt is aborted or retried
+before HTTP observes a token, its postprocessing interval closes so the replacement attempt keeps
+its own route and backend contributions. Tokens held and discarded by migration do not freeze
+HTTP TTFT.
+
+The metric is enabled on the frontend's existing `/metrics` endpoint by default with
+`DYN_FRONTEND_TTFT_DETAIL=metrics`. Use `both` to add per-request logs. The `metrics` and `both` modes
+collect regardless of the log filter. In `logs` mode, collection also requires the
+`dynamo_frontend::ttft` DEBUG target to be enabled. With `off`, or `logs` with that target disabled,
+requests allocate no detail timeline or histogram handles, read no additional stage clocks, and
+skip Python stage calls and pool timing results. Fixed enablement checks remain; this is not a claim
+of zero CPU overhead. The setting is resolved at startup; CLI
+`--ttft-detail` takes precedence over the environment. See
+[TTFT Detail](../components/frontend-configuration.mdx#ttft-detail). The SGLang and vLLM Python chat processors and native Rust
+preprocessor provide preprocessing timings. Chat and text completions carry the HTTP timing context
+through the in-process routing host, including KV, round-robin, random, direct, and other built-in
+policies. These paths record worker selection,
+backend waits, and first-token postprocessing. The `route` label also covers the built-in
+policies. Batched text completion children share the parent HTTP timeline, so overlapping child
+work is counted once.
+
+The timing context stays within one frontend process; a standalone router reached over the
+network does not receive it. Other HTTP endpoints and uninstrumented operations retain their time
+in `frontend_overhead`. A large value does not establish that the frontend consumed that time on
+CPU.
+
+Native Rust rendering and tokenization use their existing separate operation clocks. Python paths
+use separate boundaries only where the backend API exposes them: SGLang's explicit text encoder
+and tokenizer can be measured independently, while fused `apply_chat_template` calls remain
+`template_tokenize`. A vLLM renderer that returns token IDs is also opaque; a renderer that returns
+text uses `template_render`, followed by a separately measured tokenizer call. Rendering may fetch
+media, so renderer time is not necessarily pure template computation. Later media processing and
+transfer preparation contribute to `multimodal_prepare`. The frontend never repeats tokenization
+to manufacture a split.
+
+The SGLang process pool returns a versioned batch with fixed stage IDs and integer nanosecond
+intervals. Supported same-host monotonic clocks are checked against the parent's submission and
+completion window. The parent reads one Python timestamp and imports elapsed ages in one PyO3
+call; Python monotonic values are never subtracted from a Rust `Instant` epoch. Re-anchoring still
+has a bounded call-delay uncertainty. Unsupported clock domains retain the reliable outer
+`preprocess` interval and report coarse coverage; remote backend clocks are not aligned. Backend
+stages include transport, scheduling, and processing, not isolated GPU compute or KV transfer. A
+control response ends `dispatch` without ending `first_token_wait`.
+
+Collection is bounded to 256 intervals per request and 64 per worker batch. Once the HTTP first
+token freezes the result, late intervals and guard cleanup cannot alter it. Normal later calls
+check the frozen flag before reading the clock or locking; a call racing with freeze may already
+have started. No detail interval is recorded for every output token.
+
+Coverage has three fixed states:
+
+| State | Meaning | Attribution |
+| --- | --- | --- |
+| `complete` | All declared measurable boundaries are valid; this does not mean every internal function is measured | Normal exclusive contributions |
+| `coarse` | A known opaque call or unsupported clock prevents finer detail, but the outer window remains reliable | `template_tokenize` or parent residual |
+| `degraded` | An interval limit or invalid timing data makes the detailed partition unreliable | Full TTFT in `unclassified`, all other contributions zero |
+
+Degradation never fabricates frontend CPU time or drops the total-TTFT sample. Existing active
+guards can still close safely when a limit is reached. Diagnostics use fixed reason values;
+request IDs, attempt IDs, prompt text, and tool schemas are never metric labels. The
+[`reason` label reference](metric-labels.mdx#metric-specific-labels) lists the fixed values.
+`missing_timeline` makes an enabled request with no attached timeline visible as degraded,
+preserving its stage sample count. Opaque `template_tokenize` intervals mark coverage coarse.
+
+When metrics are enabled, every legal pair for each model has the same sample count and request
+population as total TTFT on that enabled frontend. Requests that end, fail, or are canceled before the first output token produce neither total
+nor stage TTFT observations. Later tokens do not add TTFT observations. Labels never contain
+request IDs. See [Per-Request First-Token Log](logging.mdx#per-request-first-token-log) for the
+corresponding per-request event.
+
+For a stacked chart of mean stage durations in milliseconds, use:
+
+```promql
+1000 * (
+  sum by (model, stage, phase) (
+    rate(dynamo_frontend_ttft_stage_seconds_sum[$__rate_interval])
+  )
+  /
+  sum by (model, stage, phase) (
+    rate(dynamo_frontend_ttft_stage_seconds_count[$__rate_interval])
+  )
+)
+```
+
+Set the legend to `{{model}} / {{stage}} / {{phase}}` and select one model per stacked panel. Apply
+the same deployment selectors when comparing with mean total TTFT:
+
+```promql
+1000 * (
+  sum by (model) (
+    rate(dynamo_frontend_time_to_first_token_seconds_sum[$__rate_interval])
+  )
+  /
+  sum by (model) (
+    rate(dynamo_frontend_time_to_first_token_seconds_count[$__rate_interval])
+  )
+)
+```
+
+Zero observations preserve the common denominator, so the sum of stage means matches mean total
+TTFT over the same requests. Select the same enabled instances, model, and time window for both
+queries; do not compare detail from a subset of instances with service-wide total TTFT. Stage P95
+or P99 values are not additive: different requests can
+determine each percentile, and unused stages contribute zero observations. Use total TTFT
+percentiles separately to assess tail latency. A scrape overlapping metric updates or differing
+series scrape histories can cause small temporary differences between the sums.
+
+The default stage histogram has 26 finite buckets, including zero, plus `+Inf`. Set
+`DYN_METRICS_TTFT_STAGE_MIN`, `DYN_METRICS_TTFT_STAGE_MAX`, and `DYN_METRICS_TTFT_STAGE_COUNT` before
+frontend startup to customize the logarithmic boundaries. Bucket resolution affects percentile
+estimates; `_sum` and `_count` retain the observed durations independently of the boundaries. See
+[Histogram buckets](../components/frontend-configuration.mdx#histogram-buckets) for defaults,
+validation, and cardinality considerations.
+
 ### Migration
 
 Metrics for [request migration](../../kubernetes/fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) for the internals.

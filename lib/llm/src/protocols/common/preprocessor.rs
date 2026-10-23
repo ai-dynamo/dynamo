@@ -572,6 +572,12 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub tracker: Option<Arc<RequestTracker>>,
 
+    /// Optional HTTP diagnostics for Python requests without a legacy tracker.
+    /// Process-local only: clones share it, and worker payloads never carry it.
+    #[builder(default)]
+    #[serde(skip)]
+    pub ttft: Option<Arc<super::ttft::TtftTimings>>,
+
     /// Set by the runtime's `HealthCheckManager` when this request originated
     /// from a canary probe. Engines may use it in `generate()` to bypass
     /// cross-worker coordination (KV transfer, bootstrap handshake,
@@ -722,6 +728,12 @@ impl std::fmt::Debug for PreprocessedRequest {
 }
 
 impl PreprocessedRequest {
+    pub fn ttft_timings(&self) -> Option<&Arc<super::ttft::TtftTimings>> {
+        self.ttft
+            .as_ref()
+            .or_else(|| self.tracker.as_ref().and_then(|tracker| tracker.ttft()))
+    }
+
     pub fn phase(&self) -> RequestPhase {
         self.tracker
             .as_ref()

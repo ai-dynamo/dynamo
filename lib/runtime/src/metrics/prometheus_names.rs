@@ -261,6 +261,15 @@ pub mod frontend_service {
     /// Time to first token in seconds
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "time_to_first_token_seconds";
 
+    /// Exclusive contributions to HTTP time to first token, labeled by stage and phase.
+    pub const TTFT_STAGE_SECONDS: &str = "ttft_stage_seconds";
+    /// Requests with untrustworthy detailed TTFT attribution, labeled by fixed reason.
+    pub const TTFT_DETAIL_DEGRADED_TOTAL: &str = "ttft_detail_degraded_total";
+    /// Requests with known coarse TTFT coverage, labeled by fixed reason.
+    pub const TTFT_DETAIL_COARSE_TOTAL: &str = "ttft_detail_coarse_total";
+    /// Requests with unexpected overlapping TTFT leaves.
+    pub const TTFT_DETAIL_UNEXPECTED_OVERLAP_TOTAL: &str = "ttft_detail_unexpected_overlap_total";
+
     /// Inter-token latency in seconds
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
 

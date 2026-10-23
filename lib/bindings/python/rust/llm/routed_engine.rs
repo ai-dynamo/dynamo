@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
 use pythonize::{depythonize, pythonize};
 use tokio_stream::StreamExt;
@@ -27,6 +29,12 @@ impl RoutedEngine {
     }
 }
 
+fn copy_ttft_timeline(parent_context: &crate::context::Context, request: &mut PreprocessedRequest) {
+    if let Some(ttft) = parent_context.ttft() {
+        request.ttft = Some(Arc::clone(ttft));
+    }
+}
+
 #[pymethods]
 impl RoutedEngine {
     /// Send a preprocessed request through the Rust prefill-routed pipeline.
@@ -37,8 +45,10 @@ impl RoutedEngine {
         preprocessed: PyObject,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
+        let mut request: PreprocessedRequest =
+            depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
         let request_context = if let Some(parent_context) = context.as_ref() {
+            copy_ttft_timeline(parent_context, &mut request);
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_context = parent_context.inner();
             let child_context = SingleIn::with_id_and_metadata(
@@ -143,6 +153,46 @@ mod tests {
     use dynamo_runtime::logging::{DistributedTraceIdLayer, inject_trace_headers_into_map};
     use opentelemetry::trace::{TraceContextExt, TraceId, TracerProvider as _};
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn http_timeline_crosses_python_without_changing_legacy_tracker_population() {
+        use dynamo_llm::protocols::common::timing::RequestTracker;
+        use dynamo_llm::protocols::common::ttft::{TTFT_CONTEXT_KEY, TtftTimings};
+
+        let timeline = Arc::new(TtftTimings::new(std::time::Instant::now()));
+        let mut source = SingleIn::new(());
+        source.insert(TTFT_CONTEXT_KEY, Arc::clone(&timeline));
+        let python_context =
+            crate::context::Context::new(source.context(), None, None, Default::default())
+                .with_ttft_from(&source)
+                .unwrap();
+        let mut request: PreprocessedRequest =
+            serde_json::from_value(serde_json::json!({"token_ids": []})).unwrap();
+        copy_ttft_timeline(&python_context, &mut request);
+        assert!(request.tracker.is_none());
+        assert!(Arc::ptr_eq(&timeline, request.ttft_timings().unwrap()));
+        assert!(Arc::ptr_eq(
+            &timeline,
+            request.clone().ttft_timings().unwrap()
+        ));
+        // Preserve any existing local tracker (and its other timing state).
+        let tracker = Arc::new(RequestTracker::new());
+        request.tracker = Some(Arc::clone(&tracker));
+        copy_ttft_timeline(&python_context, &mut request);
+        assert!(Arc::ptr_eq(&tracker, request.tracker.as_ref().unwrap()));
+        assert!(tracker.ttft().is_none());
+        assert!(Arc::ptr_eq(
+            &tracker,
+            request.clone().tracker.as_ref().unwrap(),
+        ));
+        // Process-local telemetry does not alter old/new worker wire schemas.
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert!(serialized.get("tracker").is_none());
+        assert!(serialized.get("ttft").is_none());
+        let round_trip: PreprocessedRequest = serde_json::from_value(serialized).unwrap();
+        assert!(round_trip.tracker.is_none());
+        assert!(round_trip.ttft.is_none());
+    }
 
     fn make_trace_context(
         trace_id: &str,

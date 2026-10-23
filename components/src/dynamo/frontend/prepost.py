@@ -38,6 +38,7 @@ from .structural_tag_policy import (
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .ttft import ttft_renderer_stage, ttft_stage
 from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
@@ -747,6 +748,7 @@ async def preprocess_chat_request(
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
     structural_tag_excludes_reasoning: bool = False,
+    context: Any | None = None,
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
@@ -803,39 +805,43 @@ async def preprocess_chat_request(
     # Render first: whether generation starts inside a reasoning block depends
     # on the rendered prompt (e.g. a template that ends the generation prompt
     # with an open think tag), and the tool-call grammar must match it.
-    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+    with ttft_renderer_stage(context) as renderer_timing:
+        _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+        renderer_timing[0] = "prompt_token_ids" in engine_prompt
 
     if "prompt_token_ids" in engine_prompt:
         tokens = list(engine_prompt["prompt_token_ids"])
     else:
-        async_tokenizer = _get_async_tokenizer(tokenizer)
-        encoded = await async_tokenizer(
-            engine_prompt["prompt"],
-            add_special_tokens=request_for_sampling.add_special_tokens,
-        )
-        tokens = list(encoded.input_ids)
-
-    tool_guided_decoding = build_tool_call_guided_decoding(
-        request_for_sampling,
-        tool_parser,
-        parser_guided_decoding=parser_guided_decoding,
-        structural_tag_mode=structural_tag_mode,
-        structural_tag_scope=structural_tag_scope,
-        structural_tag_schema=structural_tag_schema,
-        starts_in_reasoning=(
-            structural_tag_mode == "on"
-            and tool_parser is not None
-            and bool(request_for_sampling.tools)
-            and not structural_tag_excludes_reasoning
-            and _prompt_leaves_reasoning_open(
-                tokens,
-                tokenizer=tokenizer,
-                reasoning_parser_class=reasoning_parser_class,
-                chat_template_kwargs=chat_template_kwargs,
-                model_config=model_config,
+        with ttft_stage(context, "tokenize"):
+            async_tokenizer = _get_async_tokenizer(tokenizer)
+            encoded = await async_tokenizer(
+                engine_prompt["prompt"],
+                add_special_tokens=request_for_sampling.add_special_tokens,
             )
-        ),
-    )
+            tokens = list(encoded.input_ids)
+
+    with ttft_stage(context, "structural_tag_build"):
+        tool_guided_decoding = build_tool_call_guided_decoding(
+            request_for_sampling,
+            tool_parser,
+            parser_guided_decoding=parser_guided_decoding,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
+            starts_in_reasoning=(
+                structural_tag_mode == "on"
+                and tool_parser is not None
+                and bool(request_for_sampling.tools)
+                and not structural_tag_excludes_reasoning
+                and _prompt_leaves_reasoning_open(
+                    tokens,
+                    tokenizer=tokenizer,
+                    reasoning_parser_class=reasoning_parser_class,
+                    chat_template_kwargs=chat_template_kwargs,
+                    model_config=model_config,
+                )
+            ),
+        )
     # A forced tool choice already claims the decoder's single grammar slot, so a
     # caller-set guided_*/structured_outputs constraint over the same token stream
     # cannot also be honored. Reject it (InvalidArgument -> 400) rather than

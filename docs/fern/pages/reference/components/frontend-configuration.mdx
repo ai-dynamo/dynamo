@@ -582,6 +582,38 @@ See the [KServe gRPC Frontend](../../developer-guide/knowledge-base/modular-comp
   Environment variable: `DYN_DUMP_CONFIG_TO`
 </ParamField>
 
+### TTFT Detail
+
+Set `--ttft-detail` or `DYN_FRONTEND_TTFT_DETAIL` before startup. The CLI value takes precedence.
+
+| Value | Detail histogram | Per-request DEBUG event | Collection |
+| --- | --- | --- | --- |
+| `off` | Disabled | Disabled | None |
+| `metrics` (default) | Enabled | Disabled | One request-local timeline |
+| `logs` | Disabled | Enabled when `DYN_LOG` permits `dynamo_frontend::ttft` at DEBUG | Only when that target is enabled |
+| `both` | Enabled | Enabled when the target is enabled | One timeline shared by both outputs |
+
+Existing total TTFT, operation histograms, and stage gauges retain their original behavior in
+every mode. Detail metrics collect by default; per-request logs remain disabled even if the
+global log level is DEBUG. The detail view partitions each request's TTFT into mutually exclusive
+contributions. To enable logs alongside metrics:
+
+```bash
+export DYN_FRONTEND_TTFT_DETAIL=both
+export DYN_LOG='info,dynamo_frontend::ttft=debug'
+```
+
+Invalid modes fail at startup. The mode is fixed for the lifetime of the frontend; requests are
+not sampled. Startup logs report the selected mode and whether the detail DEBUG target is enabled.
+Only `metrics` and `both` register the detail histogram and diagnostic metric families. In `off`,
+the frontend skips detail timelines, stage clock reads, histogram
+observations, Python timing calls, and process-pool timing results. Small fixed enablement checks
+remain. The histogram bucket variables below configure boundaries only; they do not enable
+collection.
+
+See [TTFT stage durations](../observability/metrics-catalog.mdx#ttft-stage-durations) for boundaries
+and [Per-Request First-Token Log](../observability/logging.mdx#per-request-first-token-log) for fields.
+
 ### Histogram buckets
 
 Most frontend latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` is the total number of bucket edges **including** that leading `0`, so `COUNT - 1` edges are spread across the range. Every edge, including the top one, is rounded to two significant figures, so the highest exported edge is `MAX` rounded rather than `MAX` itself. These variables have no CLI equivalent, and the frontend reads them once while building its metrics, so changing one requires a restart.
@@ -592,6 +624,7 @@ Most frontend latency and size histograms use log-spaced buckets, rounded to two
 | `dynamo_frontend_input_sequence_tokens` | `DYN_METRICS_INPUT_SEQUENCE` | `50.0` | `128000.0` | `12` | `130000` |
 | `dynamo_frontend_output_sequence_tokens` | `DYN_METRICS_OUTPUT_SEQUENCE` | `50.0` | `32000.0` | `10` | `32000` |
 | `dynamo_frontend_time_to_first_token_seconds` | `DYN_METRICS_TTFT` | `0.001` | `480.0` | `18` | `480` |
+| `dynamo_frontend_ttft_stage_seconds` | `DYN_METRICS_TTFT_STAGE` | `0.000001` | `480.0` | `26` | `480` |
 | `dynamo_frontend_inter_token_latency_seconds` | `DYN_METRICS_ITL` | `0.001` | `80.0` | `20` | `80` |
 | `dynamo_frontend_embedding_latency_seconds` | `DYN_METRICS_EMBEDDING_LATENCY` | `0.001` | `10.0` | `14` | `10` |
 
@@ -605,6 +638,15 @@ export DYN_METRICS_OUTPUT_SEQUENCE_COUNT=12
 Rounding can move the top edge either way, so pick a `MAX` that is already two significant figures if you need an exact ceiling. Prometheus buckets are inclusive, so `MAX=123` exports `le=120` and only observations *greater than* 120 and up to 123 fall into `+Inf` — a value of exactly 120 still lands in the `le=120` bucket. `MAX=131072` exports `le=130000`. Two of the defaults above are affected: request duration is set to `512` but exports `510`, and input sequence is set to `128000` but exports `130000`.
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
+
+When detail metrics are enabled, `dynamo_frontend_ttft_stage_seconds` exposes only the legal
+`stage`/`phase` pairs in its registry. Each pair has the same bucket boundaries. For `N` pairs and
+`B` finite boundaries, the `_bucket`, `_sum`, and `_count` series total `N * (B + 3)` per model,
+including the `+Inf` bucket. The current registry has 24 pairs, so the default 26 finite boundaries
+produce 696 series per model. The coverage counters add at most 12 fixed global series, independent
+of model count. See
+[TTFT stage durations](../observability/metrics-catalog.mdx#ttft-stage-durations) for the stage
+contract and additive mean queries.
 
 Set `DYN_METRICS_ITL_BUCKETS` to an explicit, comma-separated list of ITL boundaries in seconds. The list must contain 1 to 512 finite, non-negative, strictly increasing values and be at most 16,384 bytes long. Boundaries are used as supplied, without logarithmic spacing or rounding.
 
