@@ -38,12 +38,12 @@ dynamo:
   # the epp image carries) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
-  planner_build_image_tag: 3.13-slim
+  planner_build_image_tag: 3.13.17-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.6
+  planner_runtime_image_tag: 3.13-v4.1.9
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@5be5c1f0
+  planner_baseline_sbom: python@d9eff629
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -60,10 +60,13 @@ dynamo:
   python_version: "3.12"
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
-  uv_version: "0.12.0"
+  uv_version: "0.13.5"
+  go_version: "1.27.3"
 
   nats_version: v2.14.8
-  etcd_version: v3.5.34
+  nats_commit: 3e47c8fa715b0e3b2feaeedc378c25fff88a966e
+  etcd_version: v3.5.35
+  etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 
   nixl_ref: v1.3.2
   nixl_ucx_ref: v1.21.0

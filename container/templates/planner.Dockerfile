@@ -42,6 +42,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
 # Create dynamo user with group 0 for OpenShift compatibility.
 RUN useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
@@ -106,6 +108,15 @@ COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
+ARG PLANNER_PYTHON_VERSION
+USER 0
+
+# Remove this ensurepip copy once the NGC runtime provides Python 3.13.17+.
+# https://github.com/ai-dynamo/dynamo/issues/17188
+RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)"]
+COPY --from=planner_builder /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/ /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/
+RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil, subprocess, tempfile, venv; assert tuple(map(int, ensurepip.version().split('.'))) >= (26, 2, 2); assert len(list((pathlib.Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))) == 1; d = tempfile.mkdtemp(); venv.create(d, with_pip=True); subprocess.run([d + '/bin/python', '-m', 'pip', '--version'], check=True); shutil.rmtree(d)"]
+
 COPY --from=planner_builder /etc/group /etc/passwd /etc/
 COPY --from=planner_builder /bin/dash /bin/sh
 COPY --from=planner_builder /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
@@ -119,6 +130,7 @@ COPY --from=licenses /legal /legal
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA} \
+    GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
     LD_LIBRARY_PATH="/opt/dynamo/lib" \
