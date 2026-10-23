@@ -792,6 +792,14 @@ pub struct HttpService {
     force_shutdown_token: CancellationToken,
     /// Time to keep serving after readiness fails so upstream endpoints converge.
     endpoint_drain_delay: Duration,
+    frontend_load_target: Option<FrontendLoadTarget>,
+}
+
+/// Where this service publishes frontend load.
+#[derive(Clone)]
+struct FrontendLoadTarget {
+    runtime: DistributedRuntime,
+    namespace: String,
 }
 
 #[derive(Clone, Builder)]
@@ -910,9 +918,15 @@ pub struct HttpServiceConfig {
     #[builder(default = "default_rl_port()")]
     rl_port: u16,
 
-    /// Distributed runtime used by the RL worker discovery API.
+    /// Distributed runtime used by the RL worker discovery API and to publish
+    /// frontend load to the KV DC Relay.
     #[builder(default = "None")]
-    runtime: Option<Arc<DistributedRuntime>>,
+    runtime: Option<DistributedRuntime>,
+
+    /// Exact Dynamo namespace the frontend was configured with (`--namespace`).
+    /// See [`frontend_load_namespace`](crate::frontend_load::frontend_load_namespace).
+    #[builder(default = "None")]
+    namespace: Option<String>,
 
     /// Interval for SSE comment frames while a streaming response is idle.
     /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
@@ -1011,6 +1025,9 @@ impl HttpService {
         let state_cancel = state.cancel_token().clone();
         let shutdown_token = self.shutdown_token.clone();
         let endpoint_drain_delay = self.endpoint_drain_delay;
+        // Telemetry continues during drain and stops on every service exit path.
+        let publisher_cancel = CancellationToken::new();
+        let _publisher_guard = publisher_cancel.clone().drop_guard();
 
         let tls = if self.enable_tls {
             let cert_path = self
@@ -1066,6 +1083,7 @@ impl HttpService {
 
         // Spawn canary after all fallible startup so it won't leak on early errors
         tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+        self.start_frontend_load_publisher(&publisher_cancel);
 
         // The server keeps accepting while inflight requests drain, then gives open
         // connections what is left of the shutdown budget.
@@ -1106,6 +1124,24 @@ impl HttpService {
         state.start_stopping();
         state_cancel.cancel();
         Ok(())
+    }
+
+    fn start_frontend_load_publisher(&self, cancel_token: &CancellationToken) {
+        if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+            return;
+        }
+        let Some(target) = &self.frontend_load_target else {
+            return;
+        };
+        let observer = self.state.service_observer();
+        crate::frontend_load::start_frontend_load_publisher(
+            target.runtime.clone(),
+            target.namespace.clone(),
+            self.state.manager_clone(),
+            self.state.metrics_clone(),
+            move || observer.is_ready(),
+            cancel_token.child_token(),
+        );
     }
 
     async fn spawn_rl_listener_if_configured(
@@ -1445,7 +1481,9 @@ impl HttpServiceConfigBuilder {
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
-        state.metrics_clone().register(&registry)?;
+        state
+            .metrics_clone()
+            .register_with_model_manager(&registry, Some(state.manager_clone()))?;
 
         // Readiness is evaluated from the live routing catalog at scrape time.
         register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
@@ -1623,7 +1661,7 @@ impl HttpServiceConfigBuilder {
                      or enable_rl) but HttpServiceConfig.runtime is not set."
                 ));
             };
-            let router = super::openai::rl_router(drt.clone())?;
+            let router = super::openai::rl_router(Arc::new(drt.clone()))?;
             tracing::info!(
                 rl_port = config.rl_port,
                 "RL worker discovery enabled at /v1/rl/workers"
@@ -1655,6 +1693,10 @@ impl HttpServiceConfigBuilder {
             shutdown_token: config.shutdown_token,
             force_shutdown_token: config.force_shutdown_token,
             endpoint_drain_delay: config.endpoint_drain_delay,
+            frontend_load_target: config.runtime.map(|runtime| FrontendLoadTarget {
+                runtime,
+                namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
+            }),
         })
     }
 

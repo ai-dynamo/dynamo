@@ -986,6 +986,41 @@ async fn converted_validation_errors_are_returned_before_streaming_headers() {
 
 #[tokio::test]
 #[serial]
+async fn responses_auto_tool_choice_without_tools_reaches_backend() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 4]).await;
+
+        for tools in [Value::Null, json!([])] {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "tool_choice": "auto",
+                    "stream": stream
+                });
+                if !tools.is_null() {
+                    body["tools"] = tools.clone();
+                }
+                let response = post_json(&svc, "/v1/responses", body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                bounded(response.bytes()).await.unwrap();
+
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].inner.tools.is_none());
+                assert!(requests[0].inner.tool_choice.is_none());
+            }
+        }
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
     temp_env::async_with_vars(BASE_ENV, async {
         let svc = HarnessService::start(Vec::new()).await;
