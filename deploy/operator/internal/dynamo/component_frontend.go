@@ -69,7 +69,7 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	}
 
 	// Preserve existing graphs while allowing new frontends to wait for dependencies.
-	if compatibility.FrontendStartupProbe.Enabled(context.Annotations) && runtimefeatures.FrontendStartupProbe.Enabled(context.RuntimeVersion) {
+	if compatibility.FrontendStartupProbe.Enabled(context.RuntimeVersion, context.Annotations) {
 		container.StartupProbe = &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{

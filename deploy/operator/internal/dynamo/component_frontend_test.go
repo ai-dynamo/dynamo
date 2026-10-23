@@ -28,6 +28,7 @@ func TestFrontendDefaultsStartupProbeVersionGate(t *testing.T) {
 	}{
 		{name: "unknown runtime on new graph", origin: "1.7.0"},
 		{name: "older runtime on new graph", origin: "1.7.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 5, Patch: 9}},
+		{name: "invalid origin preserves existing defaults", origin: "not-semver", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}},
 		{name: "missing origin preserves existing defaults", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}},
 		{name: "released 1.6 graph preserves existing defaults", origin: "1.6.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}},
 		{name: "new graph with minimum supported runtime", origin: "1.7.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}, wantEnabled: true},

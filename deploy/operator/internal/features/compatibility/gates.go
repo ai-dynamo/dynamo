@@ -17,17 +17,21 @@
 
 package compatibility
 
-import semver "github.com/Masterminds/semver/v3"
+import (
+	semver "github.com/Masterminds/semver/v3"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+)
 
 // Feature gates gated on the operator origin version (the operator version that
 // first reconciled / created the DGD resource).
 
 var (
-	// FrontendStartupProbe pins generated startup probes to newly created graphs.
+	// FrontendStartupProbe requires runtime support and pins defaults to new workloads.
 	// The published 1.6 operator did not render this default, even for 1.6 runtimes.
-	FrontendStartupProbe = Gate{
-		Name:             "FrontendStartupProbe",
-		MinOriginVersion: *semver.MustParse("1.7.0"),
+	FrontendStartupProbe = RuntimeGate{
+		Name:              "FrontendStartupProbe",
+		MinOriginVersion:  *semver.MustParse("1.7.0"),
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 6},
 	}
 
 	// GroveNativeMinAvailable enables native availability defaults for newly created Grove workloads.
