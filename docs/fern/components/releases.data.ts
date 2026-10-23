@@ -69,7 +69,7 @@ export interface Release {
 }
 
 export const CURRENT_VERSION = "v1.6.0";
-export const CURRENT_DATE = "Oct 21, 2026";
+export const CURRENT_DATE = "Oct 22, 2026";
 export const CURRENT_TAG = "1.6.0";
 export const CURRENT_WHEEL = "1.6.0";
 
@@ -88,7 +88,7 @@ export const RELEASES: Release[] = [
   {
     version: "v1.6.0",
     notesHref: "/dynamo/dev/reference/releases/v1-6-0",
-    date: "Oct 21, 2026",
+    date: "Oct 22, 2026",
     kind: "stable",
     github: `${GH}v1.6.0`,
     docs: "https://docs.nvidia.com/dynamo",
