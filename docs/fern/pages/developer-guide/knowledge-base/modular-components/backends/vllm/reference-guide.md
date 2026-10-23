@@ -96,13 +96,14 @@ The payload names and encoding inside `fields` are application-defined:
   "messages": [{
     "role": "user",
     "content": [
-      {"type": "text", "text": "Does this structure <chemistry> match the reaction diagram?"},
+      {"type": "text", "text": "Does this structure "},
       {"type": "custom", "kind": "chemistry", "fields": {
         "projected_soft_tokens": {
           "dtype": "float32", "shape": [2, 4096], "data_base64": "..."
         },
         "revision": 1
       }},
+      {"type": "text", "text": " match the reaction diagram?"},
       {"type": "image_url", "image_url": {"url": "https://example.org/reaction-diagram.png"}}
     ]
   }],
@@ -123,13 +124,20 @@ parts retain their existing typed schema and validation. They may share requests
 with custom parts when their engine modality names do not collide.
 
 The model plugin owns domain validation and interpretation. Install or mount it
-in the worker environment. Dynamo excludes custom parts before serializing chat
-templates and auxiliary messages, keeping the payload in `multi_modal_data` only.
-Put processor placeholders such as `<chemistry>` in text parts. For a pre-rendered
-prompt, set `nvext.use_raw_prompt: true` and provide exactly one user message;
-Dynamo concatenates its text parts without another chat template. For token IDs,
-use `nvext.token_data`. Engine token IDs/logprobs remain available through
-`nvext.engine_data` independently of parser-rewritten choice text.
+in the worker environment. For the existing model-specific chat template, Dynamo
+preserves each custom part in place as `{"type":"custom","kind":"chemistry"}`;
+`fields` is absent. The template handles that part and renders the marker its
+registered processor expects. Clients do not also insert a literal marker in a
+text part. Dynamo neither derives a universal marker from `kind` nor changes the
+model's template. Auxiliary messages retain the same payload-free custom parts,
+role metadata, and ordering; payloads travel only in `multi_modal_data`.
+
+For an already rendered prompt, `nvext.use_raw_prompt: true` still requires
+exactly one user message and concatenates its text parts without another template.
+`nvext.token_data` likewise supplies already rendered token IDs. Those bypass modes
+remain responsible for their complete model-specific prompt/token sequence.
+Engine token IDs/logprobs remain available through `nvext.engine_data`
+independently of parser-rewritten choice text.
 
 Custom fields remain opaque JSON, including any base64 strings, shape/dtype
 metadata, or plugin-defined reference objects. The model plugin owns their

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Generator
 
 import pytest
@@ -27,7 +28,7 @@ RESPONSE_TOKEN_IDS = (9707, 1879)
 # float/int distinction, an explicit null, and a base64 blob standing in for a
 # serialized tensor.
 EXPECTED_PAYLOAD = {
-    "custom_input": {
+    "chemistry": {
         "dtype": "float32-le",
         "shape": [2, 4],
         "data_base64": "AAAAAAAAgD8AAABAAABAQAAAgEAAAKBAAADAQAAA4EA=",
@@ -36,7 +37,7 @@ EXPECTED_PAYLOAD = {
         "cache_key": None,
         "tags": ["alpha", "beta"],
     },
-    "second_modality": [{"index": 0}, {"index": 1}],
+    "biology": [{"index": 0}, {"index": 1}],
 }
 
 pytestmark = [
@@ -53,9 +54,14 @@ pytestmark = [
 
 
 class _WorkerProcess(ManagedProcess):
-    def __init__(self, request, *, frontend_port: int) -> None:
+    def __init__(self, request, *, frontend_port: int, template_path: Path) -> None:
         super().__init__(
-            command=["python3", "-m", "tests.frontend.json_multimodal_worker"],
+            command=[
+                "python3",
+                "-m",
+                "tests.frontend.json_multimodal_worker",
+                str(template_path),
+            ],
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", self._models_listed)
             ],
@@ -99,7 +105,12 @@ def services(
         ],
         terminate_all_matching_process_names=False,
     ):
-        with _WorkerProcess(request, frontend_port=frontend_port):
+        with _WorkerProcess(
+            request,
+            frontend_port=frontend_port,
+            template_path=Path(__file__).parents[2]
+            / "lib/llm/tests/data/custom_modality_chat_template.jinja",
+        ):
             yield frontend_port
 
 
@@ -228,7 +239,7 @@ def test_json_and_url_media_reach_the_same_worker_field(services: int) -> None:
 
 
 def test_custom_json_uses_the_normal_chat_template(services: int) -> None:
-    content = [{"type": "text", "text": "Predict this <custom_input>"}]
+    content = [{"type": "text", "text": "Predict this"}]
     content.extend(
         {
             "type": "custom",
@@ -274,3 +285,43 @@ def test_builtin_wire_names_reject_custom_content_at_http_admission(services: in
             )
             assert response.status_code == 400, response.text
             assert "reserved for built-in" in response.text
+
+
+@pytest.mark.parametrize("role", ["user", "tool"])
+def test_template_positions_match_ordered_worker_payloads(
+    services: int, role: str
+) -> None:
+    message = {
+        "role": role,
+        "content": [
+            {"type": "text", "text": "Does this structure "},
+            {
+                "type": "custom",
+                "kind": "chemistry",
+                "fields": {"data_base64": "SECRET_ONE", "sequence": 1},
+            },
+            {"type": "text", "text": " match the diagram?"},
+            {"type": "image_url", "image_url": {"url": IMAGE_URL}},
+            {"type": "custom", "kind": "biology", "fields": {"metadata": "SECRET_BIO"}},
+            {
+                "type": "custom",
+                "kind": "chemistry",
+                "fields": {"data_base64": "SECRET_TWO", "sequence": 2},
+            },
+        ],
+    }
+    message["name" if role == "user" else "tool_call_id"] = (
+        "alice" if role == "user" else "call_7"
+    )
+    response = _chat(
+        services,
+        {
+            "model": MODEL_NAME,
+            "messages": [message],
+            "add_generation_prompt": False,
+            "max_tokens": 4,
+        },
+    )
+    # The worker asserts the exact template-rendered prompt AND its association
+    # with ordered payloads before yielding any response tokens. No model runs.
+    _assert_stub_answered(response)

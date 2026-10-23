@@ -2740,7 +2740,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers"
 version = "11.0.0"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=d5cd19b5ec78255064085d3542858345e42aa7b4#d5cd19b5ec78255064085d3542858345e42aa7b4"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2781,7 +2781,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "9.0.0"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=d5cd19b5ec78255064085d3542858345e42aa7b4#d5cd19b5ec78255064085d3542858345e42aa7b4"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2799,7 +2799,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "9.0.0"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=d5cd19b5ec78255064085d3542858345e42aa7b4#d5cd19b5ec78255064085d3542858345e42aa7b4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3030,7 +3030,7 @@ dependencies = [
 [[package]]
 name = "dynamo-structural-tag"
 version = "0.1.0"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=d5cd19b5ec78255064085d3542858345e42aa7b4#d5cd19b5ec78255064085d3542858345e42aa7b4"
 dependencies = [
  "anyhow",
  "regex",
@@ -3041,7 +3041,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "3.1.2"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=d5cd19b5ec78255064085d3542858345e42aa7b4#d5cd19b5ec78255064085d3542858345e42aa7b4"
 dependencies = [
  "aho-corasick",
  "anyhow",
