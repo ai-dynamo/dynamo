@@ -45,14 +45,14 @@ func v1beta2DefaultedSpec() *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
 			Metric: &metric,
 			SLA:    &nvidiacomv1beta2.ObjectiveSLASpec{TTFTMs: v1beta2Ptr(2000.0), ITLMs: v1beta2Ptr(30.0)},
 		},
-		AISimulate:     &nvidiacomv1beta2.AISimulateSpec{Image: "registry.example.com/aisimulate:1.2.0"},
+		AISimulate:     &nvidiacomv1beta2.AISimulateSpec{Image: "registry.example.com/aisimulate:1.6.0"},
 		Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 1},
 	}
 }
 
 func v1beta2WithParameters(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec, parameters string) *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
 	if spec.AISimulate == nil {
-		spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{Image: "registry.example.com/aisimulate:1.2.0"}
+		spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{Image: "registry.example.com/aisimulate:1.6.0"}
 	}
 	spec.AISimulate.Parameters = &runtime.RawExtension{Raw: []byte(parameters)}
 	return spec
@@ -119,13 +119,24 @@ func TestValidateV1beta2AISimulateImage(t *testing.T) {
 	t.Run("custom tag needs a version", func(t *testing.T) {
 		spec := v1beta2DefaultedSpec()
 		spec.AISimulate.Image = "registry.example.com/aisimulate:custom"
-		v1beta2RequireError(t, validateDynamoGraphDeploymentRequestV1beta2(spec), "spec.aisimulate.versionOverride: is required when spec.aisimulate.image has no parseable version tag")
+		v1beta2RequireError(t, validateDynamoGraphDeploymentRequestV1beta2(spec), "spec.aisimulate.versionOverride: is required when the tag of spec.aisimulate.image is not a Dynamo release with a bundled AISimulate version")
 	})
 	t.Run("custom tag with a version", func(t *testing.T) {
 		spec := v1beta2DefaultedSpec()
 		spec.AISimulate.Image = "registry.example.com/aisimulate:custom"
-		spec.AISimulate.VersionOverride = "1.4.0"
+		spec.AISimulate.VersionOverride = "0.13.1"
 		v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestV1beta2(spec))
+	})
+	t.Run("a Dynamo release without a bundled version needs one", func(t *testing.T) {
+		spec := v1beta2DefaultedSpec()
+		spec.AISimulate.Image = "registry.example.com/aisimulate:1.2.3"
+		spec.AISimulate.VersionOverride = ""
+		v1beta2RequireError(t, validateDynamoGraphDeploymentRequestV1beta2(spec), "spec.aisimulate.versionOverride")
+	})
+	t.Run("an override that is not a version", func(t *testing.T) {
+		spec := v1beta2DefaultedSpec()
+		spec.AISimulate.VersionOverride = "bad"
+		v1beta2RequireError(t, validateDynamoGraphDeploymentRequestV1beta2(spec), "spec.aisimulate.versionOverride: must be a semantic version")
 	})
 }
 

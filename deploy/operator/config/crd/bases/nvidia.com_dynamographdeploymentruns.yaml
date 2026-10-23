@@ -66,7 +66,8 @@ spec:
                     image:
                       description: |-
                         Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-                        persists the configured override or a version-matched Dynamo planner image.
+                        persists the operator's configured AISimulate image, or the Dynamo planner image of
+                        the operator's release, together with the AISimulate version it bundles.
                       minLength: 1
                       type: string
                     parameters:
@@ -76,10 +77,7 @@ spec:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                     versionOverride:
-                      description: |-
-                        VersionOverride declares the AISimulate compatibility version as three numeric parts
-                        (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required
-                        when the image tag is not a version and wins over a version in the tag.
+                      description: nightly or custom image), and it wins over the mapping.
                       minLength: 1
                       pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                       type: string

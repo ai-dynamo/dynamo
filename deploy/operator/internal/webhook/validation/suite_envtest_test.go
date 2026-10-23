@@ -46,9 +46,9 @@ const (
 	legacyEPPImage140          = "registry.example/epp-image:1.4.0"
 	legacySeedUsername         = "operatorenv-legacy-seeder"
 	admissionAISimulateImage   = "registry.example.com/aisimulate:nightly"
-	// admissionAISimulateVersionOverride is the compatibility version of the configured default
-	// image, whose tag names no version.
-	admissionAISimulateVersionOverride = "1.6.0"
+	// admissionAISimulateVersionOverride is the AISimulate version bundled in the configured
+	// default image, whose tag is not a Dynamo release.
+	admissionAISimulateVersionOverride = "0.13.0"
 )
 
 func groveProviderOverride(target, value string) *nvidiacomv1beta1.ProviderOverride {

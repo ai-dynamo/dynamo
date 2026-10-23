@@ -744,7 +744,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery:       true,
 			discovered:         discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.versionOverride: Required value: is required when spec.aisimulate.image has no parseable version tag",
+				"spec.aisimulate.versionOverride: Required value: is required when the tag of spec.aisimulate.image is not a Dynamo release with a bundled AISimulate version",
 			},
 		},
 		{
@@ -759,12 +759,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta2 caller image does not receive the operator's version override",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["aisimulate"] = map[string]any{"image": "registry.example.com/aisimulate:1.4.0"}
+				spec["aisimulate"] = map[string]any{"image": "registry.example.com/aisimulate:1.6.0"}
 			}, nil),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2String(t, result, "spec", "aisimulate", "image"); got != "registry.example.com/aisimulate:1.4.0" {
+				if got := v1beta2String(t, result, "spec", "aisimulate", "image"); got != "registry.example.com/aisimulate:1.6.0" {
 					t.Fatalf("aisimulate.image = %q, want the caller's image", got)
 				}
 				if _, found, _ := unstructured.NestedString(result.Object, "spec", "aisimulate", "versionOverride"); found {

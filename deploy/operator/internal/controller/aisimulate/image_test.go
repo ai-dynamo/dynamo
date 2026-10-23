@@ -20,19 +20,26 @@ package aisimulate
 import "testing"
 
 func TestResolveVersion(t *testing.T) {
+	const mapped = "registry.example.com/aisimulate:1.6.0"
+	want := aisimulateVersionByDynamoMinor["1.6"]
 	cases := []struct {
 		name, image, override, want string
 		wantErr                     bool
 	}{
-		{name: "version from the tag", image: "registry.example.com/aisimulate:1.2.3", want: "1.2.3"},
-		{name: "v-prefixed tag", image: "registry.example.com/aisimulate:v1.2.3", want: "1.2.3"},
-		{name: "override wins over the tag", image: "registry.example.com/aisimulate:1.2.3", override: "2.0.0", want: "2.0.0"},
-		{name: "override rescues a custom tag", image: "registry.example.com/aisimulate:custom", override: "1.4.0", want: "1.4.0"},
+		{name: "bundled version of the Dynamo release in the tag", image: mapped, want: want},
+		{name: "v-prefixed tag", image: "registry.example.com/aisimulate:v1.6.0", want: want},
+		{name: "patch release of the same minor", image: "registry.example.com/aisimulate:1.6.3", want: want},
+		{name: "prerelease of the same minor", image: "registry.example.com/aisimulate:1.6.0-rc.1", want: want},
+		{name: "release without a mapping entry", image: "registry.example.com/aisimulate:1.2.3", wantErr: true},
+		{name: "override wins over the mapping", image: mapped, override: "0.99.0", want: "0.99.0"},
+		{name: "override rescues a release without an entry", image: "registry.example.com/aisimulate:1.2.3", override: "0.9.0", want: "0.9.0"},
+		{name: "override rescues a custom tag", image: "registry.example.com/aisimulate:custom", override: "0.13.1", want: "0.13.1"},
+		{name: "override that is not a version", image: mapped, override: "bad", wantErr: true},
 		{name: "custom tag needs an override", image: "registry.example.com/aisimulate:custom", wantErr: true},
 		{name: "untagged image needs an override", image: "registry.example.com/aisimulate", wantErr: true},
 		{name: "registry port is not a tag", image: "registry.example.com:5000/aisimulate", wantErr: true},
 		{name: "no image", wantErr: true},
-		{name: "override without an image", override: "1.0.0", want: "1.0.0"},
+		{name: "override without an image", override: "0.13.0", want: "0.13.0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

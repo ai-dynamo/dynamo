@@ -4531,12 +4531,12 @@ AISimulateSpec selects the AISimulate execution artifact and supplies native inp
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="image" type="string">
-Image selects a Dynamo-compatible AISimulate runner. When omitted, admission persists the configured override or a version-matched Dynamo planner image.
+Image selects a Dynamo-compatible AISimulate runner. When omitted, admission persists the operator's configured AISimulate image, or the Dynamo planner image of the operator's release, together with the AISimulate version it bundles.
 **Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="versionOverride" type="string">
-VersionOverride declares the AISimulate compatibility version as three numeric parts (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required when the image tag is not a version and wins over a version in the tag.
+nightly or custom image), and it wins over the mapping.
 **Validation:** MinLength: 1  Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 

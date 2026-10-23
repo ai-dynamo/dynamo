@@ -180,8 +180,9 @@ func main() {
 		"AISimulate runner image, put into v1beta2 DGDR spec.aisimulate.image when unset; "+
 			"empty derives dynamo-planner:<operator-version>")
 	flag.StringVar(&dgdrAISimulateDefaultVersionOverride, "dgdr-aisimulate-default-version-override", "",
-		"Compatibility version of the AISimulate default image, put into v1beta2 DGDR "+
-			"spec.aisimulate.versionOverride together with that image; required when its tag is not a semantic version")
+		"AISimulate version bundled in the AISimulate default image, put into v1beta2 DGDR "+
+			"spec.aisimulate.versionOverride together with that image; empty uses the version the release "+
+			"contract maps to the image's Dynamo release, and is required for an image without one")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -190,7 +191,7 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	if err := webhookdefaulting.ValidateAISimulateDefault(
-		dgdrAISimulateDefaultImage, dgdrAISimulateDefaultVersionOverride,
+		operatorVersion, dgdrAISimulateDefaultImage, dgdrAISimulateDefaultVersionOverride,
 	); err != nil {
 		setupLog.Error(err, "invalid AISimulate default")
 		os.Exit(1)

@@ -184,14 +184,21 @@ type ObjectiveSpec struct {
 // AISimulateSpec selects the AISimulate execution artifact and supplies native input.
 type AISimulateSpec struct {
 	// Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-	// persists the configured override or a version-matched Dynamo planner image.
+	// persists the operator's configured AISimulate image, or the Dynamo planner image of
+	// the operator's release, together with the AISimulate version it bundles.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image,omitempty"`
 
-	// VersionOverride declares the AISimulate compatibility version as three numeric parts
-	// (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required
-	// when the image tag is not a version and wins over a version in the tag.
+	// VersionOverride declares the AISimulate version the image bundles as three numeric parts
+
+	// (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix.
+
+	// When omitted, the version is the one the operator maps to the Dynamo release in the
+
+	// image tag. It is required when the tag is not a Dynamo release the operator maps (a
+
+	// nightly or custom image), and it wins over the mapping.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`

@@ -18,27 +18,40 @@
 package defaulting
 
 import (
-	"errors"
 	"fmt"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
 )
 
-// ValidateAISimulateDefault rejects an operator configuration whose default AISimulate artifact
-// validation would reject on every Request that receives it: an image without a semantic-version
-// tag needs the override that names its compatibility version. An override without an image is
-// rejected too, because it would silently pin the version of the image derived from the
-// operator version.
-func ValidateAISimulateDefault(image, versionOverride string) error {
-	if image == "" {
+// resolveAISimulateDefault returns the AISimulate artifact admission persists as one pair: the
+// configured planner image, or the official one derived from the operator version when none is
+// configured, and the AISimulate version it carries. The explicit override wins, the derived image
+// included; otherwise the version is the one bundled in the Dynamo release named by the image tag
+// (aisimulate.ResolveVersion). Both are empty when there is nothing to persist: no image is
+// configured and the operator version names no release. An override then has no image to pair with.
+func resolveAISimulateDefault(operatorVersion, image, versionOverride string) (resolvedImage, version string, err error) {
+	resolvedImage = defaultPlannerImageFor(operatorVersion, image)
+	if resolvedImage == "" {
 		if versionOverride != "" {
-			return errors.New("the AISimulate default version override needs the AISimulate default image")
+			return "", "", fmt.Errorf("the AISimulate default version override needs an image: operator version %q "+
+				"names no release to derive the planner image from; set the AISimulate default image", operatorVersion)
 		}
-		return nil
+		return "", "", nil
 	}
-	if _, err := versionoverride.Resolve(image, versionOverride); err != nil {
-		return fmt.Errorf("the AISimulate default image %q cannot be used as it is: %w; "+
-			"set the AISimulate default version override", image, err)
+	version, err = aisimulate.ResolveVersion(resolvedImage, versionOverride)
+	if err != nil {
+		return "", "", fmt.Errorf("the AISimulate default image %q cannot be used as it is: %w; "+
+			"set the AISimulate default version override to the AISimulate version it bundles", resolvedImage, err)
 	}
-	return nil
+	return resolvedImage, version, nil
+}
+
+// ValidateAISimulateDefault rejects an operator configuration whose default AISimulate artifact
+// admission could not persist: an image, configured or derived from the operator version, whose
+// Dynamo release has no bundled AISimulate version in the release contract needs the override that
+// names it, and an override without any image to pair with is rejected too. An override with an
+// empty image configuration is valid: it pairs with the official planner image.
+func ValidateAISimulateDefault(operatorVersion, image, versionOverride string) error {
+	_, _, err := resolveAISimulateDefault(operatorVersion, image, versionOverride)
+	return err
 }

@@ -57,9 +57,11 @@ type DGDRV1beta2Options struct {
 	// AISimulateImage overrides the version-matched Dynamo planner image persisted
 	// into spec.aisimulate.image when the caller omits it.
 	AISimulateImage string
-	// AISimulateVersionOverride is the compatibility version of AISimulateImage, for an image whose
-	// tag is not a semantic version. The pair is one default: admission persists the override only
-	// together with the image it supplies, never next to an image the caller chose.
+	// AISimulateVersionOverride is the AISimulate version bundled in AISimulateImage, for an image
+	// whose Dynamo release the release contract does not map (a nightly or custom planner image).
+	// Empty maps the image's release. WithV1beta2 completes it, so admission persists the image
+	// together with its AISimulate version, and only next to an image it supplies itself, never
+	// next to an image the caller chose.
 	AISimulateVersionOverride string
 	// Hardware discovers the cluster's GPUs. Nil disables hardware defaulting, and
 	// validation then requires the hardware to be spelled out.
@@ -164,6 +166,7 @@ func (o DGDRV1beta2Options) resolveHardware(
 	if !hasBudget {
 		var gpus int
 		if found != nil {
+			// TODO(#17192): Use the discovered aggregate GPU count so mixed node sizes of one SKU are counted correctly.
 			gpus = found.GPUsPerNode * found.NodesWithGPUs
 		}
 		if gpus <= 0 {

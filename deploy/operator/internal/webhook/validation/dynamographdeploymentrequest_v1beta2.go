@@ -71,8 +71,12 @@ func validateAISimulateSpecV1beta2(spec *nvidiacomv1beta2.AISimulateSpec, fldPat
 			"an AISimulate image is required; set it, or configure the operator's default AISimulate image")}
 	}
 	if _, err := aisimulate.ResolveVersion(spec.Image, spec.VersionOverride); err != nil {
+		if spec.VersionOverride != "" {
+			return field.ErrorList{field.Invalid(fldPath.Child("versionOverride"), spec.VersionOverride,
+				"must be a semantic version such as \"0.13.0\"")}
+		}
 		return field.ErrorList{field.Required(fldPath.Child("versionOverride"),
-			"is required when spec.aisimulate.image has no parseable version tag")}
+			"is required when the tag of spec.aisimulate.image is not a Dynamo release with a bundled AISimulate version")}
 	}
 	return nil
 }
