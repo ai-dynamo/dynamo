@@ -52,7 +52,6 @@ WEIGHT_BYTES = 3 << 30
 # which this module's subject (the loader's byte accounting) does not need.
 _IMPORT_TIME_PATCHES = (
     "patch_torch_memory_saver",
-    "patch_model_runner",
     "patch_xpu_kv_cache_sizing_for_gms",
     "patch_static_state_for_gms",
 )
