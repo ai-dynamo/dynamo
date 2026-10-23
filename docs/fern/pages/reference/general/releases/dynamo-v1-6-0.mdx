@@ -15,7 +15,7 @@ import { PinnedEnvironment } from "@/components/PinnedEnvironment";
 
 <ReleaseHeader version="v1.6.0" />
 
-Dynamo v1.6.0 is the 19th feature release of the open-source distributed inference platform, spanning 654 merged PRs from 148 contributors. **Dynamo Router** gains pluggable flow control: request classifiers can defer, reorder, or steer requests, and every selection path now runs on one shared core with scoring knobs consolidated into one policy file. The experimental engine sidecars reach the TensorRT-LLM OpenEngine API, vLLM LoRA lifecycle, and encode-prefill-decode serving, and the Dynamo Operator can run the engine and Dynamo runtime as separate containers. On Kubernetes, LPX brings LPU-backed inference to DynamoGraphDeployments, multinode components take role-specific pod templates, and Dynamo Snapshot backs engine failover. **Dynamo Planner** reconfigures GPU budgets at runtime, and the engines move to SGLang v0.5.21, TensorRT-LLM v1.3.0rc29, and vLLM v0.31.0.
+Dynamo v1.6.0 is the 19th feature release of the open-source distributed inference platform, spanning 654 merged PRs from 148 contributors. **Dynamo Router** gains pluggable flow control: request classifiers can defer, reorder, or steer requests, and every selection path now runs on one shared core with scoring knobs consolidated into one policy file. On Kubernetes, LPX brings LPU-backed inference to DynamoGraphDeployments, multinode components take role-specific pod templates, and Dynamo Snapshot backs engine failover. **Dynamo Planner** reconfigures GPU budgets at runtime, and the engines move to SGLang v0.5.21, TensorRT-LLM v1.3.0rc29, and vLLM v0.31.0.
 
 <Note>
 Breaking changes and deprecations for this release are tracked on the [Deprecations](deprecations.mdx#v160) ledger; known issues on the [Known Issues](known-issues.mdx#v160) page. Key dependency pins live on [Compatibility](../compatibility.mdx); shipped artifacts on [Release Artifacts](../release-artifacts.mdx). Model early access builds (`vX.Y.Z-<model>-dev.N`) are tracked in [Model Early Access Builds](../model-early-access-builds.mdx).
@@ -48,10 +48,10 @@ Pull, deploy, and install with every artifact pinned to the v1.6.0 release set.
       anchor: "scheduling",
     },
     {
-      area: "Engine Sidecars",
+      area: "Dynamo Sidecar",
       title: "TensorRT-LLM OpenEngine, LoRA & Encode-Prefill-Decode",
-      body: "The experimental engine sidecars broaden across all three backends. The TensorRT-LLM sidecar moves onto TensorRT-LLM's OpenEngine gRPC API and adds disaggregated serving ([#14349](https://github.com/ai-dynamo/dynamo/pull/14349)). The vLLM sidecar gains dynamic LoRA load and unload with per-request adapter selection ([#13068](https://github.com/ai-dynamo/dynamo/pull/13068)) and an Encode role for encode-prefill-decode serving of images and video ([#13966](https://github.com/ai-dynamo/dynamo/pull/13966), [#15287](https://github.com/ai-dynamo/dynamo/pull/15287)). SGLang sidecars publish KV events for KV-aware routing, including multinode engines ([#13862](https://github.com/ai-dynamo/dynamo/pull/13862), [#14908](https://github.com/ai-dynamo/dynamo/pull/14908)). Dynamo Operator can run the engine and the Dynamo runtime in separate containers, each with its own image and health checks ([#14927](https://github.com/ai-dynamo/dynamo/pull/14927)), and all sidecars share transport flags ([#15653](https://github.com/ai-dynamo/dynamo/pull/15653)). The `dynamo-sidecar` image is published to NGC ([#16062](https://github.com/ai-dynamo/dynamo/pull/16062)).",
-      anchor: "engine-sidecars",
+      body: "The experimental Dynamo Sidecar broadens across all three backends. The TensorRT-LLM sidecar moves onto TensorRT-LLM's OpenEngine gRPC API and adds disaggregated serving ([#14349](https://github.com/ai-dynamo/dynamo/pull/14349)). The vLLM sidecar gains dynamic LoRA load and unload with per-request adapter selection ([#13068](https://github.com/ai-dynamo/dynamo/pull/13068)) and an Encode role for encode-prefill-decode serving of images and video ([#13966](https://github.com/ai-dynamo/dynamo/pull/13966), [#15287](https://github.com/ai-dynamo/dynamo/pull/15287)). SGLang sidecars publish KV events for KV-aware routing, including multinode engines ([#13862](https://github.com/ai-dynamo/dynamo/pull/13862), [#14908](https://github.com/ai-dynamo/dynamo/pull/14908)). Dynamo Operator can run the engine and the Dynamo runtime in separate containers, each with its own image and health checks ([#14927](https://github.com/ai-dynamo/dynamo/pull/14927)), and all sidecars share transport flags ([#15653](https://github.com/ai-dynamo/dynamo/pull/15653)). The `dynamo-sidecar` image is published to NGC ([#16062](https://github.com/ai-dynamo/dynamo/pull/16062)).",
+      anchor: "dynamo-sidecar",
     },
     {
       area: "Frontend",
@@ -155,7 +155,7 @@ Pull, deploy, and install with every artifact pinned to the v1.6.0 release set.
 - **EPP Multi-Replica Support:** Removed the admission rule that restricted the Dynamo-mode endpoint picker (EPP) to exactly one replica, so native Rust EPP deployments can scale out and tolerate pod loss like the Frontend-hosted Router, while legacy Go EPP deployments still require a single replica. `DYN_ROUTER_REPLICA_SYNC` remained off by default, matching the Frontend behavior ([#14758](https://github.com/ai-dynamo/dynamo/pull/14758)).
 - **Portable Multinode Topology Variables:** Added `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` to new multinode components so SGLang and vLLM commands no longer depend on Grove or LeaderWorkerSet syntax. Injection is gated on the operator origin version, so existing deployments keep their current environment and command lines, and Grove was upgraded to `v0.1.0-alpha.14` ([#15374](https://github.com/ai-dynamo/dynamo/pull/15374), [#15704](https://github.com/ai-dynamo/dynamo/pull/15704)).
 
-### Engine Sidecars
+### Dynamo Sidecar
 
 - **vLLM Sidecar LoRA Lifecycle:** Added dynamic LoRA load, unload, and per-request adapter selection to the vLLM sidecar, with local, Hugging Face, and S3 adapters and no silent base-model fallback for unavailable adapters ([#13068](https://github.com/ai-dynamo/dynamo/pull/13068)). Added aggregated and NIXL prefill/decode launchers for local LoRA serving ([#14574](https://github.com/ai-dynamo/dynamo/pull/14574)).
 - **TensorRT-LLM OpenEngine gRPC Sidecar:** Moved the TensorRT-LLM sidecar onto TensorRT-LLM's OpenEngine (`openengine.v1`) gRPC API and added disaggregated serving ([#14349](https://github.com/ai-dynamo/dynamo/pull/14349)). Raised the shared sidecar gRPC startup deadline from 300 to 1,800 seconds for large model loads ([#14825](https://github.com/ai-dynamo/dynamo/pull/14825)).
@@ -309,7 +309,7 @@ Pull, deploy, and install with every artifact pinned to the v1.6.0 release set.
 - **v1alpha1 envFromSecret Preservation:** Fixed DGDR overrides that set v1alpha1 `envFromSecret` on a service whose v1beta1 main container already had `envFrom`, such as `hf-token-secret`, which previously dropped the requested Secret during conversion. `envFrom` is now additive like `env` and `volumeMounts`, so the result matches the equivalent v1beta1 override ([#16966](https://github.com/ai-dynamo/dynamo/pull/16966)).
 - **GMS V1 Snapshot Loader Restart Loop:** Fixed the `gms-loader` container exiting after a successful load with `DYN_GMS_USE_V1=true`, which made the restarted loader crash-loop and left the pod `Ready=False` ([#16915](https://github.com/ai-dynamo/dynamo/pull/16915)).
 
-### Engine Sidecars
+### Dynamo Sidecar
 
 - **vLLM Sidecar Parser Passthrough:** Accepted `--dyn-tool-call-parser` and `--dyn-reasoning-parser` in the vLLM sidecar so the frontend parses output as in-process workers do ([#15539](https://github.com/ai-dynamo/dynamo/pull/15539)), and started vLLM with `--reasoning-parser none` so thinking requests no longer returned 400 ([#15684](https://github.com/ai-dynamo/dynamo/pull/15684)).
 - **Sidecar Streaming Payload Fidelity:** Fixed the vLLM sidecar to forward buffered empty text deltas as empty strings instead of dropping them, so the frontend waits for vLLM to release its stop-string buffer rather than detokenizing the token IDs and duplicating completion text ([#14699](https://github.com/ai-dynamo/dynamo/pull/14699)), with corrected hidden stop-token reporting and preserved cancelled prefill responses ([#15243](https://github.com/ai-dynamo/dynamo/pull/15243)).
@@ -425,6 +425,24 @@ vLLM workers can deliver bounded generation artifacts inline or to object stores
 
 An experimental `v1beta2` API runs simulation-backed deployment searches, and DisaggregatedSet joins Grove as an opt-in workload provider.
 
+## Dynamo Special Interest Groups (SIGs)
+
+Dynamo now has six Special Interest Groups (SIGs). Each SIG runs a public meeting, reviews the Dynamo Enhancement Proposals (DEPs) and PRs in its area, and sets that area's roadmap. Anyone in the community can join, bring a PR or DEP, and be involved in the technical direction of Dynamo.
+
+- **#sig-router:** KV-aware routing, Global Router, and Gateway API routing.
+- **#sig-engines:** SGLang, TensorRT-LLM, vLLM, TokenSpeed, and Dynamo Sidecar.
+- **#sig-frontend:** Frontend APIs, tool calling, and parsers.
+- **#sig-deploy:** Kubernetes Operator, Helm charts, DRA, and Grove.
+- **#sig-agents:** Agentic inference, agent hints, and request tracing.
+- **#sig-rl:** RL integration, rollouts, and weight updates.
+
+**How to Join**
+
+1. Join the [ai-dynamo Slack](https://ai-dynamo.org/slack) and find the channel.
+2. Subscribe to the [community calendar](../../../community/community.mdx) for meeting times.
+
+For how to contribute code, docs, and recipes, see the [Contribution Guide](../../../community/contributing/overview.md).
+
 <Accordion title="Open-source contributions and new contributors">
 
 Between v1.5.1 and v1.6.0 the project merged 654 PRs from 148 contributors, 58 of them from outside NVIDIA. Thank you to the external community contributors in this release (organization identified through the commit-author email domain or the public GitHub profile):
@@ -505,23 +523,5 @@ Between v1.5.1 and v1.6.0 the project merged 654 PRs from 148 contributors, 58 o
 - [@ericcurtin](https://github.com/ericcurtin) rejected vLLM-Omni TTS tasks the checkpoint cannot serve ([#15591](https://github.com/ai-dynamo/dynamo/pull/15591)).
 - [@mattwittwer](https://github.com/mattwittwer) rejected non-numeric `logit_bias` keys in the frontend ([#16322](https://github.com/ai-dynamo/dynamo/pull/16322)).
 - [@Jianhong-Zhang](https://github.com/Jianhong-Zhang) upgraded SGLang XPU to v0.5.19 on oneAPI 2026.0 ([#16684](https://github.com/ai-dynamo/dynamo/pull/16684)).
-
-**Dynamo Special Interest Groups (SIGs) Are Live**
-
-Dynamo now has six Special Interest Groups (SIGs). Each SIG runs a public meeting, reviews the Dynamo Enhancement Proposals (DEPs) and PRs in its area, and sets that area's roadmap. Anyone in the community can join, bring a PR or DEP, and be involved in the technical direction of Dynamo.
-
-- **#sig-router:** KV-aware routing, Global Router, and Gateway API routing.
-- **#sig-engines:** SGLang, TensorRT-LLM, vLLM, TokenSpeed, and Dynamo Sidecar.
-- **#sig-frontend:** Frontend APIs, tool calling, and parsers.
-- **#sig-deploy:** Kubernetes Operator, Helm charts, DRA, and Grove.
-- **#sig-agents:** Agentic inference, agent hints, and request tracing.
-- **#sig-rl:** RL integration, rollouts, and weight updates.
-
-**How to Join**
-
-1. Join the [ai-dynamo Slack](https://ai-dynamo.org/slack) and find the channel.
-2. Subscribe to the [community calendar](../../../community/community.mdx) for meeting times.
-
-For how to contribute code, docs, and recipes, see the [Contribution Guide](../../../community/contributing/overview.md).
 
 </Accordion>

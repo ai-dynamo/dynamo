@@ -97,7 +97,7 @@ export const RELEASES: Release[] = [
     delta:
       "vLLM worker services renamed to worker, prefill and decode; Dynamo Operator no longer adopts resources it does not own and validates multinode settings more strictly; Grove v0.1.0-alpha.14 required for new multinode deployments, with Coherent updates now opt-in; AIConfigurator options renamed to AISimulate (--aic-* to --ais-*); Router policy YAML takes precedence over the scoring flags, which are deprecated with removal targeted for v1.7.0; structural tags on by default for supported parsers; TensorRT-LLM AutoDeploy backend removed and the TensorRT-LLM sidecar moved to the OpenEngine gRPC API; invalid DYN_REQUEST_PLANE and DYN_EVENT_PLANE values fail at startup.",
     notesSummary:
-      "Pluggable flow control on one shared worker-selection core in the Router, TensorRT-LLM OpenEngine, LoRA and encode-prefill-decode support in the engine sidecars, V2 tool and reasoning parsers and a rerank endpoint in the Frontend, video-aware KV routing for SGLang, LPX components and role-specific pod templates on Kubernetes, Snapshot-backed engine failover, and runtime GPU budget reconfiguration in the Planner.",
+      "Pluggable flow control on one shared worker-selection core in the Router, V2 tool and reasoning parsers and a rerank endpoint in the Frontend, video-aware KV routing for SGLang, LPX components and role-specific pod templates on Kubernetes, Snapshot-backed engine failover, and runtime GPU budget reconfiguration in the Planner.",
   },
   {
     version: "v1.5.1",
@@ -751,7 +751,7 @@ export const ARTIFACTS: Artifact[] = [
     category: "container",
     group: "component",
     name: "dynamo-sidecar",
-    description: "Engine sidecars that run Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine",
+    description: "Dynamo Sidecar, which runs Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine",
     meta: "CPU-only · AMD64/ARM64",
     href: `${NGC_C}/dynamo-sidecar/tags`,
     badge: "Experimental",

@@ -53,7 +53,7 @@ Current stable release: v1.6.0 (Oct 21, 2026; container tag `1.6.0`, wheel versi
 
 Release highlights (stable releases):
 
-- v1.6.0: Pluggable flow control on one shared worker-selection core in the Router, TensorRT-LLM OpenEngine, LoRA and encode-prefill-decode support in the engine sidecars, V2 tool and reasoning parsers and a rerank endpoint in the Frontend, video-aware KV routing for SGLang, LPX components and role-specific pod templates on Kubernetes, Snapshot-backed engine failover, and runtime GPU budget reconfiguration in the Planner.
+- v1.6.0: Pluggable flow control on one shared worker-selection core in the Router, V2 tool and reasoning parsers and a rerank endpoint in the Frontend, video-aware KV routing for SGLang, LPX components and role-specific pod templates on Kubernetes, Snapshot-backed engine failover, and runtime GPU budget reconfiguration in the Planner.
 - v1.5.0: Pluggable worker selection policies and tiered KV indexing in the Router, guided tool-call streaming and request validation in the Frontend, image decoding at the Frontend for encode-prefill-decode deployments, v1beta1 CRD storage with the Rust EPP as the default Endpoint Picker, GPU Memory Service V1, and a standalone Snapshot operator.
 - v1.4.0: Experimental cross-datacenter prefix routing and reservation replay in the Router, a vLLM-compatible generate token endpoint, tokenizer L1 prefix cache on by default, NIXL disaggregation for vLLM-Omni pipelines, and the Spica deployment simulator.
 - v1.3.0: Tool-calling and reasoning overhaul, RL rollout serving, the largest Router buildout to date, SLA-driven Planner autoscaling, and production GPU Memory Service on Kubernetes.
@@ -181,7 +181,7 @@ Release highlights (stable releases):
 | container | dynamo-frontend | OpenAI-compatible API gateway with Endpoint Prediction Protocol (EPP) | AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0` |
 | container | dynamo-planner | Standalone Planner used by Profiler jobs and Planner pods | AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0` |
 | container | kubernetes-operator | Operator that manages Dynamo deployments and CRDs | AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.6.0` |
-| container | dynamo-sidecar (Experimental) | Engine sidecars that run Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine | CPU-only · AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.6.0` |
+| container | dynamo-sidecar (Experimental) | Dynamo Sidecar, which runs Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine | CPU-only · AMD64/ARM64 | `nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.6.0` |
 | wheel | ai-dynamo | Main package with backend integrations (vLLM, SGLang, TRT-LLM) | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install ai-dynamo==1.6.0` |
 | wheel | ai-dynamo-runtime | Core Python bindings for the Dynamo runtime | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install ai-dynamo-runtime==1.6.0` |
 | wheel | kvbm | KV Block Manager for disaggregated KV cache | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install kvbm==1.6.0` |
