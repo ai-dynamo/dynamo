@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """The release gate must reject skipped capture even when both versions parse."""
 
+import io
 import json
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,7 +51,22 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.tree = self.root / "fixtures"
-        shutil.copytree(fixtures.FIXTURES, self.tree)
+        # Exercise the pre-capture boundary even after this PR publishes 1.6 history.
+        inventory = json.loads((fixtures.FIXTURES / "capture-v1.6.0.json").read_text())
+        prefix = fixtures.FIXTURES.relative_to(fixtures.ROOT).as_posix()
+        archive = subprocess.check_output(
+            ["git", "archive", inventory["inventoryRevision"], prefix],
+            cwd=fixtures.ROOT,
+        )
+        with tarfile.open(fileobj=io.BytesIO(archive)) as frozen:
+            for member in frozen.getmembers():
+                if member.isfile():
+                    destination = self.tree / Path(member.name).relative_to(prefix)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(frozen.extractfile(member).read())
+        shutil.copyfile(
+            fixtures.FIXTURES / "capture-v1.6.0.json", self.tree / "capture-v1.6.0.json"
+        )
         chart = self.root / fixtures.CHART
         chart.parent.mkdir(parents=True)
         chart.write_text("appVersion: 1.6.0\n")
@@ -87,16 +104,66 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             },
         )
 
-        # Make the version marker valid so the missing matrix is the only blocker.
-        (self.root / fixtures.CHART).write_text("appVersion: 1.7.0\n")
-        (self.tree / "RECONCILED_VERSION").write_text("1.6.0\n")
+    def test_v160_capture_rejects_scope_drift_and_other_sources(self):
+        inventory = fixtures.require_complete_matrix("v1.6.0")
+        self.assertEqual(len(inventory["missingScenarios"]), 14)
+        for source in (None, "v1.7.0"):
+            with self.subTest(source=source), self.assertRaisesRegex(
+                ValueError, "Incomplete release matrix"
+            ):
+                fixtures.require_complete_matrix(source)
+        path = next((self.tree / "latest").rglob("input.yaml"))
+        path.write_text(path.read_text() + "\n")
+        with self.assertRaisesRegex(ValueError, "frozen v1.6.0 capture inventory"):
+            fixtures.require_complete_matrix("v1.6.0")
+
+    def test_v160_capture_unlocks_only_the_adjacent_bump(self):
+        inventory = fixtures.require_complete_matrix("v1.6.0")
+        source = {
+            "sourceKind": "release-tag",
+            "sourceRef": "v1.6.0",
+            "sourceRevision": inventory["sourceRevision"],
+        }
+        frozen = {
+            p.relative_to(self.tree): p.read_bytes()
+            for p in (self.tree / "history").rglob("*.yaml")
+        }
+        marker = (self.tree / "RECONCILED_VERSION").read_bytes()
+        original_lock = json.loads((self.tree / "history.lock.json").read_text())
         with (
+            patch.object(fixtures, "capture_source", return_value=source),
             patch.object(
-                fixtures.subprocess, "check_output", return_value="appVersion: 1.6.0\n"
+                fixtures.subprocess, "run", side_effect=self.capture_api_outputs
             ),
-            self.assertRaisesRegex(ValueError, "Incomplete release matrix"),
+        ):
+            fixtures.regenerate(release_tag="v1.6.0")
+        fixtures.check()
+        lock = json.loads((self.tree / "history.lock.json").read_text())
+        self.assertEqual(lock["captures"]["1.6.0"]["captureInventory"], inventory)
+        self.assertEqual(len(lock["captures"]["1.6.0"]["inputs"]), 13)
+        for legacy in ("sglang-1.4", "sglang-1.5", "sglang-1.5-custom"):
+            self.assertFalse((self.tree / "history/1.6.0" / legacy).exists())
+        self.assertEqual(lock["bootstrap"], original_lock)
+        self.assertEqual((self.tree / "RECONCILED_VERSION").read_bytes(), marker)
+        self.assertEqual(frozen, {p: (self.tree / p).read_bytes() for p in frozen})
+        with self.assertRaisesRegex(ValueError, "already captured"):
+            fixtures.regenerate(release_tag="v1.6.0")
+        (self.root / fixtures.CHART).write_text("appVersion: 1.7.0\n")
+        with patch.object(
+            fixtures.subprocess, "check_output", return_value="appVersion: 1.6.0\n"
         ):
             fixtures.check("base")
+        with self.assertRaisesRegex(ValueError, "Incomplete release matrix"):
+            fixtures.regenerate(release_tag="v1.7.0")
+        lock["captures"]["1.6.0"]["sourceKind"] = "release-candidate"
+        (self.tree / "history.lock.json").write_text(json.dumps(lock))
+        with self.assertRaisesRegex(ValueError, "released-tag provenance"):
+            fixtures.check()
+        lock["captures"]["1.6.0"]["sourceKind"] = "release-tag"
+        lock["captures"]["1.6.0"]["captureInventory"]["missingScenarios"] = []
+        (self.tree / "history.lock.json").write_text(json.dumps(lock))
+        with self.assertRaisesRegex(ValueError, "frozen scope"):
+            fixtures.check()
 
     def capture_api_outputs(self, command, *, env, **kwargs):
         # Model the capture boundary only; production admission/reconciliation is tested by clustertest.
@@ -107,6 +174,9 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 relative = source.relative_to(self.tree)
                 objects = list(yaml.safe_load_all(source.read_text()))
                 if role == "history":
+                    # Real API restoration reallocates UIDs; publication must discard this recapture.
+                    for obj in objects:
+                        obj["metadata"]["uid"] = "recaptured-uid"
                     destination = root / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_text(yaml.safe_dump_all(objects))
@@ -175,7 +245,7 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
         ):
             fixtures.regenerate()
             fixtures.check()
-            with self.assertRaisesRegex(ValueError, "already reconciled"):
+            with self.assertRaisesRegex(ValueError, "already captured"):
                 fixtures.regenerate()
             latest = {
                 p.relative_to(self.tree): p.read_bytes()
@@ -186,8 +256,16 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 fixtures.subprocess, "check_output", return_value="appVersion: 1.6.0\n"
             ):
                 fixtures.check("base")
+            first_baselines = {
+                p.relative_to(self.tree): p.read_bytes()
+                for p in (self.tree / "history").rglob("*.yaml")
+            }
             fixtures.regenerate()
             fixtures.check()
+            self.assertEqual(
+                first_baselines,
+                {p: (self.tree / p).read_bytes() for p in first_baselines},
+            )
         self.assertEqual(
             latest,
             {
@@ -195,6 +273,8 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 for p in (self.tree / "latest").rglob("output.yaml")
             },
         )
+        self.assertFalse((self.tree / "history/1.6.0/additional").exists())
+        self.assertFalse((self.tree / "history/1.7.0/additional").exists())
         namespaces = []
         for path in fixtures.fixture_inputs("history") + fixtures.fixture_inputs(
             "latest"
@@ -204,7 +284,7 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             )
         self.assertEqual(len(namespaces), len(set(namespaces)))
         self.assertEqual(
-            (self.tree / "RECONCILED_VERSION").read_text().strip(), "1.7.0"
+            (self.tree / "RECONCILED_VERSION").read_text().strip(), "1.5.0"
         )
         for path in (self.tree / "latest").rglob("output.yaml"):
             self.assertIn("$var:operator-version", path.read_text())
