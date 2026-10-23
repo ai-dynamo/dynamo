@@ -520,6 +520,29 @@ async def test_environment_passes_startup_inventory_to_observer_and_clears_it_on
     assert not observer._collect_worker_counts().startup_in_progress
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["disagg", "agg"])
+async def test_startup_wait_sees_pending_capacity_under_dgd_component_names(mode):
+    deployment, pods = _deployment(), _pods()
+    if mode == "agg":
+        worker = deployment["spec"]["components"][1]
+        worker.update(name="worker", type="worker")
+        deployment["spec"]["components"] = [worker]
+        deployment["status"]["components"] = {
+            "worker": deployment["status"]["components"]["d"]
+        }
+        pods = pods[1:]
+        for pod in pods:
+            pod.metadata.labels["nvidia.com/dynamo-component"] = "worker"
+    environment = PlannerEnvironmentImpl(
+        config=_config(mode),
+        controller=_connector(deployment, pods),
+        require_prefill=mode == "disagg",
+        require_decode=True,
+    )
+    assert await environment._startup_blocked_only_by_pending()
+
+
 @pytest.mark.parametrize("mode", ["disagg", "decode", "agg"])
 def test_budget_clamped_up_proposal_cannot_cancel_startup(mode):
     config = _config(mode)

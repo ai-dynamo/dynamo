@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -190,18 +189,20 @@ async def test_initialize_does_not_treat_rollout_as_pending_capacity():
 
 
 @pytest.mark.asyncio
-async def test_initialize_continues_after_exhausted_readiness_wait(caplog):
+async def test_initialize_raises_when_no_worker_serves_after_readiness_wait():
     controller = _controller()
     controller.wait_for_deployment_ready = AsyncMock(
         side_effect=TimeoutError("not ready after 1800 seconds")
     )
+    controller.get_worker_inventory = AsyncMock(
+        return_value=WorkerCounts(ready_num_decode=0, pending_num_decode=1)
+    )
     environment = _agg_environment(controller)
 
-    with caplog.at_level(logging.WARNING, logger=environment_base.__name__):
+    with pytest.raises(TimeoutError):
         await environment.initialize()
 
-    assert "did not become ready during startup" in caplog.text
-    environment.fpm_provider.async_init.assert_awaited_once()
+    environment.fpm_provider.async_init.assert_not_awaited()
 
 
 @pytest.mark.asyncio

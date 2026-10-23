@@ -247,9 +247,9 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         is short, so requiring full stability would block startup and, once the
         wait is exhausted, restart the Planner into the same wait. Startup
         proceeds as soon as every required role has a serving worker and the only
-        shortfall is verified pending startup capacity. An exhausted wait is
-        logged instead of raised: the tick loop already handles an unstable
-        deployment.
+        shortfall is verified pending startup capacity. Otherwise the readiness
+        wait, including its timeout, applies unchanged: without serving workers
+        there is no worker metadata to bind FPM subscriptions to.
         """
         ready = asyncio.ensure_future(
             self.controller.wait_for_deployment_ready(include_planner=False)
@@ -267,12 +267,6 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                     return
                 await asyncio.wait({ready}, timeout=STARTUP_PENDING_RECHECK_SECONDS)
             ready.result()
-        except TimeoutError as exc:
-            logger.warning(
-                "Deployment did not become ready during startup (%s); "
-                "starting with the current deployment state",
-                exc,
-            )
         finally:
             if not ready.done():
                 ready.cancel()
