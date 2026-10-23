@@ -731,14 +731,14 @@ func deepCopyValue(v reflect.Value) reflect.Value {
 }
 
 func isAtomicSparseMergeType(t reflect.Type) bool {
-	return t == reflect.TypeOf(intstr.IntOrString{})
+	return t == reflect.TypeFor[intstr.IntOrString]()
 }
 
 func normalizeComparableRoundTripValue(v reflect.Value) {
 	if !v.IsValid() {
 		return
 	}
-	if v.Type() == reflect.TypeOf(intstr.IntOrString{}) {
+	if v.Type() == reflect.TypeFor[intstr.IntOrString]() {
 		if !v.CanSet() {
 			return
 		}
@@ -757,8 +757,7 @@ func normalizeComparableRoundTripValue(v reflect.Value) {
 			normalizeComparableRoundTripValue(v.Elem())
 		}
 	case reflect.Struct:
-		for i := 0; i < v.NumField(); i++ {
-			field := v.Field(i)
+		for _, field := range v.Fields() {
 			if field.CanSet() || field.Kind() == reflect.Pointer || field.Kind() == reflect.Interface {
 				normalizeComparableRoundTripValue(field)
 			}
@@ -777,8 +776,8 @@ func normalizeComparableRoundTripValue(v reflect.Value) {
 }
 
 func hasUnexportedFields(t reflect.Type) bool {
-	for i := 0; i < t.NumField(); i++ {
-		if t.Field(i).PkgPath != "" {
+	for field := range t.Fields() {
+		if field.PkgPath != "" {
 			return true
 		}
 	}

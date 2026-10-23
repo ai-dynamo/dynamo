@@ -46,6 +46,7 @@ COPY --chmod=664 --chown=dynamo:0 tests/marker_categories.py /workspace/tests/ma
 # COPY also creates parent directories: keep them traversable by ARC's uid 1001.
 COPY --chmod=755 --chown=dynamo:0 \
     .github/scripts/apply_dev_version.py \
+    .github/scripts/helm_chart_version.py \
     .github/scripts/retry_kubectl.sh \
     .github/scripts/collect_vcluster_diagnostics.sh /workspace/.github/scripts/
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
