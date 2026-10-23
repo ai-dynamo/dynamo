@@ -161,12 +161,12 @@ def test_trtllm_system_pillow_matches_requirements() -> None:
     assert SpecifierSet(f">={floor},<{ceiling}") == expected
 
 
-@pytest.mark.parametrize("image", ["frontend", "planner"])
-def test_pillow_overrides_reach_image_installs(image: str) -> None:
-    """Fail when an image stops passing its overrides file to uv."""
+@pytest.mark.parametrize(("image", "installs"), [("frontend", 3), ("planner", 1)])
+def test_pillow_overrides_reach_image_installs(image: str, installs: int) -> None:
+    """Fail when any image install stops passing its overrides file to uv."""
     dockerfile = _template(f"{image}.Dockerfile")
     target = f"/tmp/overrides.{image}.txt"
     assert (
         f"source=./container/deps/overrides.{image}.txt,target={target}" in dockerfile
     )
-    assert f"--overrides {target}" in dockerfile
+    assert dockerfile.count(f"--overrides {target}") == installs
