@@ -1648,10 +1648,12 @@ func GenerateBasePodSpec(
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
-	// Resolve sidecar mode before selecting a role that may have no runtime container.
-	if errs := ValidateDynamoSidecar(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
+	// Validate any sidecar declarations before selecting a role template.
+	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
 		return nil, errs.ToAggregate()
 	}
+
+	// Preserve component-wide sidecar mode for workers without runtime.
 	componentSidecar := GetComponentDynamoSidecar(component)
 
 	// Complete role sources preserve user-owned launch arguments during lowering.
@@ -1699,7 +1701,7 @@ func generateBasePodSpecWithDefaults(
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	// Stored objects must satisfy admission invariants before defaults are applied.
-	if errs := ValidateDynamoSidecar(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
+	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
 		return nil, errs.ToAggregate()
 	}
 	return generateBasePodSpecWithDefaultsAndOwnership(
@@ -2321,10 +2323,12 @@ func GeneratePodSpecForComponent(
 	if component == nil {
 		return nil, fmt.Errorf("component is nil")
 	}
-	// Resolve sidecar mode before selecting a role that may have no runtime container.
-	if errs := ValidateDynamoSidecar(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
+	// Validate any sidecar declarations before selecting a role template.
+	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
 		return nil, errs.ToAggregate()
 	}
+
+	// Preserve component-wide sidecar mode for workers without runtime.
 	componentSidecar := GetComponentDynamoSidecar(component)
 
 	ownership := roleLaunchOwnedByOperator
@@ -2691,10 +2695,12 @@ type cliqueParams struct {
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
-	// Resolve sidecar mode before selecting a role that may have no runtime container.
-	if errs := ValidateDynamoSidecar(p.component, field.NewPath("spec"), string(p.backendFramework)); len(errs) > 0 {
+	// Validate any sidecar declarations before selecting a role template.
+	if errs := ValidateComponentSidecarConfiguration(p.component, field.NewPath("spec"), string(p.backendFramework)); len(errs) > 0 {
 		return nil, errs.ToAggregate()
 	}
+
+	// Preserve component-wide sidecar mode for workers without runtime.
 	componentSidecar := GetComponentDynamoSidecar(p.component)
 
 	// Complete role templates own backend-specific role launch generation.
@@ -3536,10 +3542,12 @@ func GenerateBasePodSpecForController(
 	containerGPUs ContainerGPUCount,
 	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
-	// Resolve sidecar mode before selecting a role that may have no runtime container.
-	if errs := ValidateDynamoSidecar(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec, field.NewPath("spec"), string(BackendFramework(dynComponent.Spec.BackendFramework))); len(errs) > 0 {
+	// Validate any sidecar declarations before selecting a role template.
+	if errs := ValidateComponentSidecarConfiguration(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec, field.NewPath("spec"), string(BackendFramework(dynComponent.Spec.BackendFramework))); len(errs) > 0 {
 		return nil, errs.ToAggregate()
 	}
+
+	// Preserve component-wide sidecar mode for workers without runtime.
 	componentSidecar := GetComponentDynamoSidecar(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec)
 
 	// Complete role templates own backend-specific role launch generation.

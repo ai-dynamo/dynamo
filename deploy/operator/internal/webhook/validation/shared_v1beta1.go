@@ -344,7 +344,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	allErrs = append(allErrs, dynamo.ValidateDynamoSidecar(spec, fldPath, options.backendFramework)...)
+	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath, options.backendFramework)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 

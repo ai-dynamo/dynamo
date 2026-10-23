@@ -16,9 +16,11 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// ValidateDynamoSidecar validates the runtime init-container contract for admission and rendering.
+// ValidateComponentSidecarConfiguration validates runtime init-container declarations
+// across all authored component and role templates for admission and rendering.
+// Components without a runtime init container have no sidecar-specific requirements.
 // component and fldPath must not be nil.
-func ValidateDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, backendFramework string) field.ErrorList {
+func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, backendFramework string) field.ErrorList {
 	var allErrs field.ErrorList
 	hasSidecar := GetComponentDynamoSidecar(component) != nil
 	detail := fmt.Sprintf("component %q with a runtime init container", component.ComponentName)

@@ -714,7 +714,7 @@ func TestSGLangMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
 			t.Log("Require both role templates directly in sidecar validation")
 			complete := tc.omitRole == "" && tc.omitTemplate == ""
 			require.Equal(t, complete, HasCompleteMultinodeRolePodTemplates(component))
-			errs := ValidateDynamoSidecar(component, field.NewPath("spec"), "sglang")
+			errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), "sglang")
 			if complete {
 				require.Empty(t, errs)
 			} else {
