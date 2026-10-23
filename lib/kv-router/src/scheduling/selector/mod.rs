@@ -549,13 +549,15 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 let row = match picker.pick(&input.context, picker_input) {
                     Ok(row) => row,
                     // Custom-policy pickers only (the default selector returns its own
-                    // rows): a picker that rejects every candidate is a capacity signal,
-                    // not a transport failure. Classify it through the overload branch
-                    // so the request gets the overload semantics (529, or 429 via
+                    // rows): a picker that declines placement for capacity reasons
+                    // (`NoCapacity`) is classified through the overload branch so the
+                    // request gets the overload semantics (529, or 429 via
                     // DYN_HTTP_OVERLOAD_STATUS_CODE) when workers exist but the policy
-                    // would not place the request on any of them. The default selector
-                    // path above is untouched by this branch.
-                    Err(policy_error) => {
+                    // would not place the request on any of them. Other picker errors —
+                    // including `Failed`, which BYO policies use for permanent
+                    // configuration problems such as unsupported worker types — pass
+                    // through unchanged. The default selector path above is untouched.
+                    Err(WorkerSelectionPolicyError::NoCapacity(_)) => {
                         if eligibility.has_eligible_worker_ignoring_overload(
                             workers
                                 .iter()
@@ -563,8 +565,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         ) {
                             return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
                         }
-                        return Err(policy_error.into());
+                        return Err(WorkerSelectionPolicyError::no_capacity(
+                            "no eligible worker satisfies the policy",
+                        )
+                        .into());
                     }
+                    Err(policy_error) => return Err(policy_error.into()),
                 };
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {

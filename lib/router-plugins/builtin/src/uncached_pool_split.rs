@@ -319,7 +319,9 @@ impl WorkerPicker for UncachedPoolSplitPicker {
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
         let candidates = input.candidates();
         if candidates.is_empty() {
-            return Err(WorkerSelectionPolicyError::failed("no eligible worker"));
+            return Err(WorkerSelectionPolicyError::no_capacity(
+                "no eligible worker",
+            ));
         }
         let cached = cached_tokens_per_row(input.cache(), candidates.len(), context.block_size());
         if cached.len() != load.len() {
@@ -341,7 +343,7 @@ impl WorkerPicker for UncachedPoolSplitPicker {
                 let cold_ids = self.cold_member_ids(candidates);
                 let rows = self.warm_candidate_rows(candidates, &cached, &cold_ids);
                 select_affine(load, &cached, rows.into_iter())
-                    .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+                    .ok_or_else(|| WorkerSelectionPolicyError::no_capacity("no eligible worker"))
             }
             Lane::Cold { taint } => {
                 let member_rows: Vec<usize> = match taint.as_deref() {
@@ -409,7 +411,9 @@ impl WorkerPicker for UncachedPoolSplitPicker {
                         }
                     }
                 }
-                Err(WorkerSelectionPolicyError::failed("no eligible worker"))
+                Err(WorkerSelectionPolicyError::no_capacity(
+                    "no eligible worker",
+                ))
             }
         }
     }
