@@ -21,6 +21,7 @@ use crate::protocols::common::extensions::{
 };
 
 pub mod aggregator;
+pub(crate) mod custom_tools;
 mod delta;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
@@ -49,6 +50,7 @@ pub(crate) fn tool_call_response_to_protocol(
     parsed: ToolCallResponse,
 ) -> ChatCompletionMessageToolCall {
     ChatCompletionMessageToolCall {
+        custom: None,
         id: parsed.id,
         r#type: FunctionType::Function,
         function: FunctionCall {
@@ -70,6 +72,7 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
     parsed: ToolCallResponseChunk,
 ) -> ChatCompletionMessageToolCallChunk {
     ChatCompletionMessageToolCallChunk {
+        custom: None,
         index: parsed.index,
         id: parsed.id,
         r#type: parsed.tp.map(|_| FunctionType::Function),
@@ -109,6 +112,11 @@ pub struct NvCreateChatCompletionRequest {
         alias = "chat_template_kwargs"
     )]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// Original Responses definitions, retained for template-capable rendering.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub responses_tools: Option<super::responses::ResponsesToolContext>,
 
     /// OpenAI-style thinking control from client request payloads.
     /// Normalized into `chat_template_args` before preprocessing.
@@ -276,10 +284,28 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
     }
 }
 
+/// Frontend-only boundaries supplied by a recipient-aware parser. These never
+/// cross the worker wire or alter Chat Completions JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageBoundary {
+    Start(dynamo_protocols::types::responses::MessagePhase),
+    End,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponseOutputEvent {
+    Reasoning(String),
+    Boundary(MessageBoundary),
+    Text(String),
+    ToolCall(String),
+}
+
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionResponse {
+    #[serde(skip)]
+    pub response_events: Vec<ResponseOutputEvent>,
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,6 +326,8 @@ pub struct ToolCallCompletion {
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionStreamResponse {
+    #[serde(skip)]
+    pub message_boundary: Option<MessageBoundary>,
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -393,6 +421,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     data.inner.usage = None;
     data.llm_metrics = None;
     data.tool_call_completion.clear();
+    data.message_boundary = None;
     data.nvext = None;
     data.prompt_logprobs = None;
     Some(())
@@ -690,6 +719,13 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        // Direct Rust callers must obey the same custom-format admission and
+        // tool-choice contract as HTTP, without changing their replay payload.
+        if self.inner.has_custom_tools() {
+            let mut normalized = self.clone();
+            normalized.inner.normalize_custom_tools()?;
+            return ValidateRequest::validate(&normalized);
+        }
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
@@ -732,7 +768,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for stream_options
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
-        let effective_tools = validate::validated_effective_tools(&self.inner)?;
+        let effective_tools = self.validated_effective_tools()?;
         validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_ref()))?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
@@ -1454,6 +1490,7 @@ mod tests {
     /// fails the test.
     fn legacy_unary(id: &str, name: &str, args: &str) -> ChatCompletionMessageToolCall {
         ChatCompletionMessageToolCall {
+            custom: None,
             id: id.to_string(),
             r#type: FunctionType::Function,
             function: FunctionCall {
@@ -1471,6 +1508,7 @@ mod tests {
         args: &str,
     ) -> ChatCompletionMessageToolCallChunk {
         ChatCompletionMessageToolCallChunk {
+            custom: None,
             index,
             id: Some(id.to_string()),
             r#type: Some(FunctionType::Function),
@@ -1722,12 +1760,15 @@ mod tests {
     fn test_validate_tools_valid_names() {
         fn make_tool(name: &str) -> ChatCompletionTool {
             ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: name.to_string(),
                     description: None,
                     parameters: Some(json!({"type": "object", "properties": {}})),
                     strict: None,
+                    defer_loading: None,
                 },
             }
         }
@@ -1745,12 +1786,15 @@ mod tests {
     fn test_validate_tools_invalid_names() {
         for name in ["<func_name>", "func name", "func@name", "func,name", ""] {
             let tools = vec![ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: name.to_string(),
                     description: None,
                     parameters: Some(json!({"type": "object", "properties": {}})),
                     strict: None,
+                    defer_loading: None,
                 },
             }];
             assert!(
@@ -1764,12 +1808,15 @@ mod tests {
     fn test_validate_tools_rejects_non_object_parameters() {
         for parameters in [json!("not-an-object"), json!([]), json!(42), json!(true)] {
             let tools = vec![ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: "broken_tool".to_string(),
                     description: None,
                     parameters: Some(parameters),
                     strict: None,
+                    defer_loading: None,
                 },
             }];
 
@@ -1785,12 +1832,15 @@ mod tests {
     #[test]
     fn test_validate_tools_accepts_omitted_parameters() {
         let tools = vec![ChatCompletionTool {
+            custom: None,
             r#type: ChatCompletionToolType::Function,
+            defer_loading: None,
             function: FunctionObject {
                 name: "parameterless_tool".to_string(),
                 description: None,
                 parameters: None,
                 strict: None,
+                defer_loading: None,
             },
         }];
 

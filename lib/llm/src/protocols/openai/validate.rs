@@ -716,12 +716,15 @@ fn normalize_dynamic_system_tool(
     };
 
     Ok(ChatCompletionTool {
+        custom: None,
         r#type: ChatCompletionToolType::Function,
+        defer_loading: None,
         function: FunctionObject {
             name: name.to_string(),
             description,
             parameters,
             strict,
+            defer_loading: None,
         },
     })
 }

@@ -1,8 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_renderer::response_tools::{
+    CUSTOM_TOOL_INPUT_ARG, client_tool_search_function, custom_tool_parameters,
+    native_tools_for_chat_template,
+};
+
 pub mod stream_converter;
+mod template_tools;
 mod tool_names;
+pub use template_tools::ResponsesToolContext;
+pub(crate) use template_tools::effective_response_tools;
+use template_tools::*;
 
 pub use tool_names::ToolNameMap;
 
@@ -11,12 +20,13 @@ use std::collections::{HashMap, HashSet};
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
     InputContent, InputImageContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
-    InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
-    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
-    RefusalContent, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
-    ServiceTierResponses, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
-    ToolChoiceAllowed, ToolChoiceAllowedMode, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    InputTokenDetails, Instructions, Item, MessageItem, MessagePhase, NamespaceToolParamTool,
+    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
+    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent,
+    ReasoningTextContent, RefusalContent, RequestTool, RequestToolChoiceParam, Response,
+    ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status,
+    SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
+    ToolChoiceOptions, ToolSearchExecutionType, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -39,6 +49,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse};
+#[cfg(test)]
+use super::tools::custom_input;
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
@@ -79,7 +91,12 @@ pub struct NvCreateResponse {
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
+#[serde(try_from = "serde_json::Value")]
 pub struct NvResponse {
+    #[serde(skip)]
+    pub template_tools: Option<Vec<RequestTool>>,
+    #[serde(skip)]
+    pub requested_tool_choice: Option<RequestToolChoiceParam>,
     /// Flattened Response fields (includes upstream + extended spec fields).
     #[serde(flatten)]
     #[schema(value_type = Object)]
@@ -99,6 +116,49 @@ pub struct NvResponse {
     pub frequency_penalty: f32,
     #[serde(default)]
     pub store: bool,
+}
+
+impl TryFrom<serde_json::Value> for NvResponse {
+    type Error = serde_json::Error;
+
+    fn try_from(mut value: serde_json::Value) -> Result<Self, Self::Error> {
+        // Keep request extensions while the pinned SDK parses its base response.
+        let template_tools =
+            serde_json::from_value(value.get("tools").cloned().unwrap_or_default())?;
+        let requested_tool_choice: Option<RequestToolChoiceParam> =
+            serde_json::from_value(value.get("tool_choice").cloned().unwrap_or_default())?;
+        if let Some(choice) = &requested_tool_choice {
+            value["tool_choice"] = serde_json::to_value(choice.sdk_response_choice())?;
+        }
+        let nvext = value.get("nvext").filter(|value| !value.is_null()).cloned();
+        let presence_penalty = serde_json::from_value(
+            value
+                .get("presence_penalty")
+                .cloned()
+                .unwrap_or(serde_json::json!(0.0)),
+        )?;
+        let frequency_penalty = serde_json::from_value(
+            value
+                .get("frequency_penalty")
+                .cloned()
+                .unwrap_or(serde_json::json!(0.0)),
+        )?;
+        let store = serde_json::from_value(
+            value
+                .get("store")
+                .cloned()
+                .unwrap_or(serde_json::json!(false)),
+        )?;
+        Ok(Self {
+            inner: serde_json::from_value(value)?,
+            nvext,
+            presence_penalty,
+            frequency_penalty,
+            store,
+            template_tools,
+            requested_tool_choice,
+        })
+    }
 }
 
 /// Patch an already-serialized `Response` JSON object to match the
@@ -154,6 +214,18 @@ impl Serialize for NvResponse {
             self.store,
         );
 
+        if let Some(tools) = &self.template_tools {
+            obj.insert(
+                "tools".into(),
+                serde_json::to_value(tools).map_err(serde::ser::Error::custom)?,
+            );
+        }
+        if let Some(choice) = &self.requested_tool_choice {
+            obj.insert(
+                "tool_choice".into(),
+                serde_json::to_value(choice).map_err(serde::ser::Error::custom)?,
+            );
+        }
         if let Some(nvext) = &self.nvext {
             obj.insert("nvext".into(), nvext.clone());
         }
@@ -574,6 +646,7 @@ fn convert_input_items_to_messages(
                 },
                 Item::FunctionCall(fc) => {
                     pending.push_tool_call(ChatCompletionMessageToolCall {
+                        custom: None,
                         id: fc.call_id.clone(),
                         r#type: FunctionType::Function,
                         function: dynamo_protocols::types::FunctionCall {
@@ -715,12 +788,15 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
                              strict: Option<bool>,
                              namespace: Option<&str>| {
         converted.push(ChatCompletionTool {
+            custom: None,
             r#type: ChatCompletionToolType::Function,
+            defer_loading: None,
             function: FunctionObject {
                 name: names.encode(namespace, name),
                 description: description.clone(),
                 parameters: parameters.clone(),
                 strict,
+                defer_loading: None,
             },
         });
     };
@@ -729,6 +805,25 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
         match tool {
             Tool::Function(f) => {
                 push_function(&f.name, &f.description, &f.parameters, f.strict, None)
+            }
+            Tool::Custom(custom) => push_function(
+                &custom.name,
+                &custom.description,
+                &Some(custom_tool_parameters()),
+                None,
+                None,
+            ),
+            Tool::ToolSearch(search)
+                if search.execution == Some(ToolSearchExecutionType::Client) =>
+            {
+                let value = client_tool_search_function(search).expect("client search function");
+                push_function(
+                    "tool_search",
+                    &value["function"]["description"].as_str().map(str::to_owned),
+                    &Some(value["function"]["parameters"].clone()),
+                    None,
+                    None,
+                );
             }
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
@@ -740,7 +835,13 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
                             f.strict,
                             Some(&namespace.name),
                         ),
-                        _ => return unsupported_tool(tool, "tools"),
+                        NamespaceToolParamTool::Custom(custom) => push_function(
+                            &custom.name,
+                            &custom.description,
+                            &Some(custom_tool_parameters()),
+                            None,
+                            Some(&namespace.name),
+                        ),
                     }
                 }
             }
@@ -761,21 +862,37 @@ fn unsupported_tool<T>(tool: &impl serde::Serialize, field: &str) -> anyhow::Res
     .into())
 }
 
-/// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
+/// Convert Responses API RequestToolChoiceParam to ChatCompletionToolChoiceOption.
 ///
 /// Preserve supported modes and named functions; return `InvalidArgument` for
 /// choices whose semantics cannot be represented by the adapter.
 fn convert_tool_choice(
-    tc: &ToolChoiceParam,
+    tc: &RequestToolChoiceParam,
     names: &ToolNameMap,
 ) -> anyhow::Result<ChatCompletionToolChoiceOption> {
     Ok(match tc {
-        ToolChoiceParam::Option(mode) => match mode {
+        RequestToolChoiceParam::ToolSearch => {
+            ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionName {
+                    name: "tool_search".into(),
+                },
+            })
+        }
+        RequestToolChoiceParam::Custom(custom) => {
+            ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionName {
+                    name: names.resolve_choice(None, &custom.name)?,
+                },
+            })
+        }
+        RequestToolChoiceParam::Option(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
             ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
             ToolChoiceOptions::Required => ChatCompletionToolChoiceOption::Required,
         },
-        ToolChoiceParam::Function(f) => {
+        RequestToolChoiceParam::Function(f) => {
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionName {
@@ -787,9 +904,8 @@ fn convert_tool_choice(
     })
 }
 
-/// Dynamo currently executes only function tools through the Responses-to-Chat
-/// adapter. Keep rejecting every other allowed-tool kind instead of silently
-/// widening the request to the full tool set.
+/// Function and freeform custom tools share the Responses-to-Chat adapter.
+/// Reject other allowlist entries rather than widening the selected tool set.
 fn allowed_function_names(
     choice: &ToolChoiceAllowed,
     names: &ToolNameMap,
@@ -798,9 +914,9 @@ fn allowed_function_names(
     for tool in &choice.tools {
         let tool_type = tool.get("type").and_then(serde_json::Value::as_str);
         let name = tool.get("name").and_then(serde_json::Value::as_str);
-        let (Some("function"), Some(name)) = (tool_type, name) else {
+        let (Some("function" | "custom"), Some(name)) = (tool_type, name) else {
             return Err(ResponsesConversionError::InvalidArgument(
-                "Responses allowed_tools currently supports only function entries with a string name"
+                "Responses allowed_tools currently supports only function or custom entries with a string name"
                     .to_string(),
             )
             .into());
@@ -819,7 +935,7 @@ fn allowed_function_names(
     }
     if allowed.is_empty() {
         return Err(ResponsesConversionError::InvalidArgument(
-            "Responses allowed_tools must contain at least one function".to_string(),
+            "Responses allowed_tools must contain at least one tool".to_string(),
         )
         .into());
     }
@@ -830,7 +946,7 @@ fn allowed_function_names(
 /// be separated from the tool definitions it constrains.
 fn convert_tools_and_choice(
     tools: Option<&[Tool]>,
-    tool_choice: Option<&ToolChoiceParam>,
+    tool_choice: Option<&RequestToolChoiceParam>,
     names: &ToolNameMap,
     skip_strict_schema_validation: bool,
 ) -> anyhow::Result<(
@@ -851,10 +967,12 @@ fn convert_tools_and_choice(
 
     let converted_choice = match tool_choice {
         // vLLM rejects explicit auto without tools; use the backend default.
-        Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto)) if converted_tools.is_empty() => {
+        Some(RequestToolChoiceParam::Option(ToolChoiceOptions::Auto))
+            if converted_tools.is_empty() =>
+        {
             None
         }
-        Some(ToolChoiceParam::AllowedTools(choice)) => {
+        Some(RequestToolChoiceParam::AllowedTools(choice)) => {
             let allowed = allowed_function_names(choice, names)?;
             let available: HashSet<&str> = converted_tools
                 .iter()
@@ -917,16 +1035,65 @@ fn convert_service_tier(
     })
 }
 
+fn merge_leading_system_messages(
+    messages: &mut Vec<ChatCompletionRequestMessage>,
+    history_phases: &mut HashMap<usize, MessagePhase>,
+) {
+    let leading_system_count = messages
+        .iter()
+        .take_while(|m| matches!(m, ChatCompletionRequestMessage::System(_)))
+        .count();
+    if leading_system_count > 1 {
+        let combined: String = messages[..leading_system_count]
+            .iter()
+            .map(|m| match m {
+                ChatCompletionRequestMessage::System(s) => match &s.content {
+                    ChatCompletionRequestSystemMessageContent::Text(t) => t.as_str(),
+                    // Today this converter only ever builds `Text` system
+                    // content, so the merge is lossless.  Log loudly if a
+                    // non-text variant (e.g. `Array`, should async-openai
+                    // start emitting it) reaches here so the dropped
+                    // content is diagnosable instead of silently lost.
+                    other => {
+                        tracing::debug!(
+                            "dropping non-text system message content during leading-system merge: {other:?}"
+                        );
+                        ""
+                    }
+                },
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        *history_phases = std::mem::take(history_phases)
+            .into_iter()
+            .map(|(index, phase)| (index.saturating_sub(leading_system_count - 1), phase))
+            .collect();
+        messages.drain(0..leading_system_count);
+        messages.insert(
+            0,
+            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                content: ChatCompletionRequestSystemMessageContent::Text(combined),
+                name: None,
+                tools: None,
+            }),
+        );
+    }
+}
+
 impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
     /// Convert a Responses request using one alias map for tools, history, and choices.
     /// Return an error for tool types or choices that Chat Completions cannot represent.
     fn try_from(resp: NvCreateResponse) -> Result<Self, Self::Error> {
-        let names = ToolNameMap::new(
-            resp.inner.tools.as_deref().unwrap_or_default(),
-            Some(&resp.inner.input),
-        );
+        let effective_tools = effective_response_tools(&resp)?;
+        let inner_tools: Vec<_> = effective_tools
+            .iter()
+            .map(|tool| tool.inner.clone())
+            .collect();
+        let names = ToolNameMap::new(&inner_tools, Some(&resp.inner.input));
+        let mut history_phases = HashMap::new();
         let mut messages = Vec::new();
 
         // Prepend instructions as system message if present
@@ -951,61 +1118,58 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 ));
             }
             InputParam::Items(items) => {
-                let item_messages = convert_input_items_to_messages(items, &names)?;
+                let (item_messages, phases) = convert_input_items_with_phases(items, &names)?;
+                history_phases.extend(
+                    phases
+                        .into_iter()
+                        .map(|(index, phase)| (index + messages.len(), phase)),
+                );
                 messages.extend(item_messages);
             }
         }
 
-        // Merge any run of leading system messages into one.
-        //
-        // Some chat templates (e.g. Qwen's tool_use template) reject requests
-        // that have more than one system message at the start.  A Codex CLI
-        // first-turn request commonly produces two: one from `instructions` and
-        // one from a `developer`-role input item.  Concatenate them here with a
-        // newline separator so the backend sees exactly one system message.
-        {
-            let leading_system_count = messages
-                .iter()
-                .take_while(|m| matches!(m, ChatCompletionRequestMessage::System(_)))
-                .count();
-            if leading_system_count > 1 {
-                let combined: String = messages[..leading_system_count]
+        merge_leading_system_messages(&mut messages, &mut history_phases);
+        let phase_history =
+            (!history_phases.is_empty()).then(|| (messages.clone(), history_phases.clone()));
+        let legacy_history = if !history_phases.is_empty() {
+            if let InputParam::Items(items) = &resp.inner.input {
+                let normalized: Vec<_> = items
                     .iter()
-                    .map(|m| match m {
-                        ChatCompletionRequestMessage::System(s) => match &s.content {
-                            ChatCompletionRequestSystemMessageContent::Text(t) => t.as_str(),
-                            // Today this converter only ever builds `Text` system
-                            // content, so the merge is lossless.  Log loudly if a
-                            // non-text variant (e.g. `Array`, should async-openai
-                            // start emitting it) reaches here so the dropped
-                            // content is diagnosable instead of silently lost.
-                            other => {
-                                tracing::debug!(
-                                    "dropping non-text system message content during leading-system merge: {other:?}"
-                                );
-                                ""
-                            }
-                        },
-                        _ => unreachable!(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                messages.drain(0..leading_system_count);
-                messages.insert(
-                    0,
-                    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                        content: ChatCompletionRequestSystemMessageContent::Text(combined),
-                        name: None,
-                        tools: None,
-                    }),
-                );
+                    .map(normalize_template_input)
+                    .collect::<anyhow::Result<_>>()?;
+                let mut legacy = convert_input_items_to_messages(&normalized, &names)?;
+                if let Some(instructions) = &resp.inner.instructions {
+                    legacy.insert(
+                        0,
+                        ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                            content: ChatCompletionRequestSystemMessageContent::Text(
+                                instructions.clone(),
+                            ),
+                            name: None,
+                            tools: None,
+                        }),
+                    );
+                }
+                merge_leading_system_messages(&mut legacy, &mut HashMap::new());
+                Some(legacy)
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        // Conversion is model-independent. Keep main's coalesced assistant
+        // history until a Spark-capable consumer explicitly opts into phases.
+        if let Some(legacy) = &legacy_history {
+            messages = legacy.clone();
+            history_phases.clear();
         }
 
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
         let (tools, tool_choice) = convert_tools_and_choice(
-            resp.inner.tools.as_deref(),
+            (!inner_tools.is_empty()).then_some(inner_tools.as_slice()),
             resp.inner.tool_choice.as_ref(),
             &names,
             *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
@@ -1035,6 +1199,55 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .map(convert_service_tier)
             .transpose()?;
 
+        let fallback_names = ToolNameMap::new(&inner_tools, Some(&resp.inner.input));
+        let mut history_tool_names: HashMap<String, Vec<String>> = HashMap::new();
+        // Backends may restart call IDs each turn. Preserve each occurrence's
+        // identity rather than renaming all earlier calls to the last one.
+        for call in messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatCompletionRequestMessage::Assistant(message) => message.tool_calls.as_ref(),
+                _ => None,
+            })
+            .flatten()
+        {
+            history_tool_names
+                .entry(call.id.clone())
+                .or_default()
+                .push(call.function.name.clone());
+        }
+        let tool_choice_name = match &tool_choice {
+            Some(ChatCompletionToolChoiceOption::Named(choice)) => {
+                Some(choice.function.name.clone())
+            }
+            _ => None,
+        };
+        let selected_tools = matches!(
+            resp.inner.tool_choice,
+            Some(RequestToolChoiceParam::AllowedTools(_))
+        )
+        .then(|| {
+            tools
+                .iter()
+                .flatten()
+                .map(|tool| {
+                    let (namespace, name) = names.decode(&tool.function.name);
+                    (namespace.map(str::to_owned), name.to_owned())
+                })
+                .collect()
+        });
+        let responses_tools = Some(ResponsesToolContext {
+            tools: effective_tools,
+            declared_tools: resp.inner.tools.clone().unwrap_or_default(),
+            native: false,
+            names: fallback_names,
+            history_phases,
+            legacy_history,
+            phase_history,
+            history_tool_names,
+            tool_choice_name,
+            selected_tools,
+        });
         Ok(NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
                 messages,
@@ -1058,6 +1271,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 ..Default::default()
             },
             common: Default::default(),
+            responses_tools,
             nvext: resp.nvext,
             chat_template_args: resp.chat_template_args,
             thinking: None,
@@ -1092,7 +1306,9 @@ pub struct ResponseParams {
     pub parallel_tool_calls: Option<bool>,
     pub store: Option<bool>,
     pub tools: Option<Vec<Tool>>,
-    pub tool_choice: Option<ToolChoiceParam>,
+    pub template_tools: Option<Vec<RequestTool>>,
+    pub loaded_tools: Vec<Tool>,
+    pub tool_choice: Option<RequestToolChoiceParam>,
     pub instructions: Option<String>,
     pub reasoning: Option<Reasoning>,
     pub text: Option<ResponseTextParam>,
@@ -1144,7 +1360,11 @@ impl ResponseParams {
         match &self.tool_names {
             Some(names) => std::borrow::Cow::Borrowed(names),
             None => std::borrow::Cow::Owned(ToolNameMap::new(
-                self.tools.as_deref().unwrap_or_default(),
+                if self.loaded_tools.is_empty() {
+                    self.tools.as_deref().unwrap_or_default()
+                } else {
+                    &self.loaded_tools
+                },
                 None,
             )),
         }
@@ -1152,10 +1372,27 @@ impl ResponseParams {
 
     /// No allowlist means unrestricted; an invalid allowlist permits no calls.
     fn allowed_backend_names(&self, names: &ToolNameMap) -> Option<HashSet<String>> {
-        let Some(ToolChoiceParam::AllowedTools(choice)) = &self.tool_choice else {
+        let Some(RequestToolChoiceParam::AllowedTools(choice)) = &self.tool_choice else {
             return None;
         };
-        Some(allowed_function_names(choice, names).unwrap_or_default())
+        Some(
+            allowed_function_names(choice, names)
+                .unwrap_or_default()
+                .into_iter()
+                .flat_map(|alias| {
+                    let (ns, name) = names.decode(&alias);
+                    let native_name = if ns.is_none() {
+                        name.to_owned()
+                    } else {
+                        names.encode(ns, name)
+                    };
+                    let qualified = ns.map(|ns| format!("{ns}.{name}"));
+                    std::iter::once(alias)
+                        .chain(qualified)
+                        .chain(std::iter::once(native_name))
+                })
+                .collect(),
+        )
     }
 }
 
@@ -1215,6 +1452,7 @@ pub fn chat_completion_to_response(
     let names = params.tool_name_map();
     let allowed_names = params.allowed_backend_names(&names);
     let nvext = nv_resp.nvext.clone();
+    let response_events = nv_resp.response_events;
     let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
@@ -1244,6 +1482,7 @@ pub fn chat_completion_to_response(
             }));
         }
 
+        let replay_calls = choice.message.tool_calls.clone().unwrap_or_default();
         // Handle structured tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
             if let Some(disallowed) = tool_calls.iter().find(|tc| {
@@ -1257,17 +1496,13 @@ pub fn chat_completion_to_response(
                 );
             }
             for tc in &tool_calls {
-                let (namespace, name) = names.decode(&tc.function.name);
-                output.push(OutputItem::FunctionCall(FunctionToolCall {
-                    caller: None,
-                    r#async: None,
-                    arguments: tc.function.arguments.clone(),
-                    call_id: tc.id.clone(),
-                    namespace: namespace.map(str::to_owned),
-                    name: name.to_owned(),
-                    id: Some(format!("fc_{}", Uuid::new_v4().simple())),
-                    status: Some(OutputStatus::Completed),
-                }));
+                output.push(params.tool_output(
+                    format!("fc_{}", Uuid::new_v4().simple()),
+                    tc.id.clone(),
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    OutputStatus::Completed,
+                )?);
             }
         }
         let content_text = match choice.message.content {
@@ -1299,6 +1534,109 @@ pub fn chat_completion_to_response(
                 phase: None,
                 content,
             }));
+        }
+
+        if !response_events.is_empty() {
+            // Keep the optional reasoning summary, then reconstruct the visible turn
+            // from parser-owned boundaries and call identities in generation order.
+            output.clear();
+            let mut phase = None;
+            let mut text = String::new();
+            let mut open = false;
+            let flush = |output: &mut Vec<OutputItem>,
+                         text: &mut String,
+                         phase: Option<MessagePhase>,
+                         status: OutputStatus,
+                         open: &mut bool| {
+                if *open || !text.is_empty() {
+                    let OutputItem::Message(mut message) = make_text_message(
+                        format!("msg_{}", Uuid::new_v4().simple()),
+                        std::mem::take(text),
+                    ) else {
+                        unreachable!()
+                    };
+                    message.phase = phase;
+                    message.status = status;
+                    output.push(OutputItem::Message(message));
+                    *open = false;
+                }
+            };
+            use super::chat_completions::{MessageBoundary, ResponseOutputEvent};
+            for event in response_events {
+                match event {
+                    ResponseOutputEvent::Boundary(MessageBoundary::Start(next)) => {
+                        flush(
+                            &mut output,
+                            &mut text,
+                            phase,
+                            OutputStatus::Completed,
+                            &mut open,
+                        );
+                        phase = Some(next);
+                        open = true;
+                    }
+                    ResponseOutputEvent::Boundary(MessageBoundary::End) => {
+                        flush(
+                            &mut output,
+                            &mut text,
+                            phase,
+                            OutputStatus::Completed,
+                            &mut open,
+                        );
+                        phase = None;
+                    }
+                    ResponseOutputEvent::Reasoning(reasoning) => {
+                        flush(
+                            &mut output,
+                            &mut text,
+                            phase,
+                            OutputStatus::Completed,
+                            &mut open,
+                        );
+                        if params.reasoning_summary_requested() && !reasoning.is_empty() {
+                            output.push(OutputItem::Reasoning(ReasoningItem {
+                                id: Some(format!("rs_{}", Uuid::new_v4().simple())),
+                                summary: vec![],
+                                content: Some(vec![ReasoningItemContent::ReasoningText(
+                                    ReasoningTextContent { text: reasoning },
+                                )]),
+                                encrypted_content: None,
+                                status: Some(OutputStatus::Completed),
+                            }));
+                        }
+                    }
+                    ResponseOutputEvent::Text(delta) => text.push_str(&delta),
+                    ResponseOutputEvent::ToolCall(id) => {
+                        flush(
+                            &mut output,
+                            &mut text,
+                            phase,
+                            OutputStatus::Completed,
+                            &mut open,
+                        );
+                        if let Some(call) = replay_calls.iter().find(|call| call.id == id) {
+                            output.push(params.tool_output(
+                                format!("fc_{}", Uuid::new_v4().simple()),
+                                call.id.clone(),
+                                &call.function.name,
+                                &call.function.arguments,
+                                OutputStatus::Completed,
+                            )?);
+                        }
+                    }
+                }
+            }
+            flush(
+                &mut output,
+                &mut text,
+                phase,
+                if incomplete_reason.is_some() {
+                    OutputStatus::Incomplete
+                } else {
+                    OutputStatus::Completed
+                },
+                &mut open,
+            );
         }
 
         if output.is_empty() {
@@ -1336,9 +1674,15 @@ pub fn chat_completion_to_response(
     if incomplete_reason.is_some() {
         // The budget runs out once, inside the item the model was still writing.
         // Earlier output items were complete and must not be relabelled.
-        let terminal = output
-            .iter()
-            .rposition(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)));
+        let terminal = output.iter().rposition(|item| {
+            matches!(
+                item,
+                OutputItem::Message(_)
+                    | OutputItem::FunctionCall(_)
+                    | OutputItem::CustomToolCall(_)
+                    | OutputItem::ToolSearchCall(_)
+            )
+        });
         for (index, item) in output.iter_mut().enumerate() {
             match item {
                 OutputItem::Message(message) if Some(index) == terminal => {
@@ -1346,6 +1690,10 @@ pub fn chat_completion_to_response(
                 }
                 OutputItem::FunctionCall(call) if Some(index) == terminal => {
                     call.status = Some(OutputStatus::Incomplete)
+                }
+                OutputItem::ToolSearchCall(call) if Some(index) == terminal => {
+                    call.status =
+                        dynamo_protocols::types::responses::FunctionCallStatus::Incomplete;
                 }
                 OutputItem::Reasoning(reasoning) if terminal.is_none() => {
                     reasoning.status = Some(OutputStatus::Incomplete)
@@ -1381,7 +1729,10 @@ pub fn chat_completion_to_response(
         tool_choice: params
             .tool_choice
             .clone()
-            .or(Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto))),
+            .or(Some(RequestToolChoiceParam::Option(
+                ToolChoiceOptions::Auto,
+            )))
+            .map(|choice| choice.sdk_response_choice()),
         tools: Some(
             params
                 .tools
@@ -1441,6 +1792,8 @@ pub fn chat_completion_to_response(
     };
 
     Ok(NvResponse {
+        template_tools: params.echoed_tools(),
+        requested_tool_choice: params.tool_choice.clone(),
         inner: response,
         nvext,
         presence_penalty: params.presence_penalty.unwrap_or(0.0),
@@ -1451,6 +1804,10 @@ pub fn chat_completion_to_response(
 
 #[cfg(test)]
 mod tests {
+    mod native_tools;
+    mod phases_and_tool_search;
+    mod tool_adaptation;
+
     use dynamo_protocols::types::responses::{
         CreateResponse, EasyInputContent, EasyInputMessage, FunctionCallOutput,
         FunctionCallOutputItemParam, FunctionToolCall, InputContent, InputImageContent, InputItem,
@@ -3106,7 +3463,16 @@ mod tests {
             .unwrap(),
         );
 
-        let names = ToolNameMap::new(req.inner.tools.as_deref().unwrap(), None);
+        let names = ToolNameMap::new(
+            &req.inner
+                .tools
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|tool| tool.inner.clone())
+                .collect::<Vec<_>>(),
+            None,
+        );
         let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
         let tools = chat.inner.tools.unwrap();
         assert_ne!(tools[0].function.name, tools[1].function.name);
@@ -3200,7 +3566,16 @@ mod tests {
             }))
             .unwrap(),
         );
-        let names = ToolNameMap::new(req.inner.tools.as_deref().unwrap(), None);
+        let names = ToolNameMap::new(
+            &req.inner
+                .tools
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|tool| tool.inner.clone())
+                .collect::<Vec<_>>(),
+            None,
+        );
         let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
         let tools = chat.inner.tools.unwrap();
         assert_ne!(tools[0].function.name, tools[1].function.name);
@@ -3242,7 +3617,16 @@ mod tests {
             ]}
         }))
         .unwrap();
-        let names = ToolNameMap::new(req.inner.tools.as_deref().unwrap(), Some(&req.inner.input));
+        let names = ToolNameMap::new(
+            &req.inner
+                .tools
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|tool| tool.inner.clone())
+                .collect::<Vec<_>>(),
+            Some(&req.inner.input),
+        );
         let chat = NvCreateChatCompletionRequest::try_from(req.clone()).unwrap();
         let tools = chat.inner.tools.unwrap();
         assert_eq!(tools.len(), 1);
@@ -3261,7 +3645,12 @@ mod tests {
         };
         assert_eq!(&last.tool_calls.as_ref().unwrap()[0].function.name, alias);
         let params = ResponseParams {
-            tools: req.inner.tools.clone(),
+            tools: req
+                .inner
+                .tools
+                .as_ref()
+                .map(|tools| tools.iter().map(|tool| tool.inner.clone()).collect()),
+            template_tools: req.inner.tools.clone(),
             tool_choice: req.inner.tool_choice.clone(),
             tool_names: Some(names.clone()),
             ..Default::default()
@@ -3387,6 +3776,7 @@ mod tests {
     fn test_into_nvresponse_from_chat_response() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3443,6 +3833,7 @@ mod tests {
     fn test_response_with_tool_calls() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3451,6 +3842,7 @@ mod tests {
                         content: None,
                         refusal: None,
                         tool_calls: Some(vec![ChatCompletionMessageToolCall {
+                            custom: None,
                             id: "call_abc".into(),
                             r#type: FunctionType::Function,
                             function: dynamo_protocols::types::FunctionCall {
@@ -3517,6 +3909,7 @@ mod tests {
     #[test]
     fn test_response_with_namespaced_tool_call() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3525,6 +3918,7 @@ mod tests {
                         content: None,
                         refusal: None,
                         tool_calls: Some(vec![ChatCompletionMessageToolCall {
+                            custom: None,
                             id: "call_abc".into(),
                             r#type: dynamo_protocols::types::FunctionType::Function,
                             function: dynamo_protocols::types::FunctionCall {
@@ -3589,11 +3983,12 @@ mod tests {
                 }]))
                 .unwrap(),
             ),
-            tool_choice: Some(ToolChoiceParam::Option(ToolChoiceOptions::Auto)),
+            tool_choice: Some(RequestToolChoiceParam::Option(ToolChoiceOptions::Auto)),
             ..Default::default()
         };
         let mut chat = make_chat_resp_with_text(text);
         chat.inner.choices[0].message.tool_calls = Some(vec![ChatCompletionMessageToolCall {
+            custom: None,
             id: "call_original".into(),
             r#type: FunctionType::Function,
             function: dynamo_protocols::types::FunctionCall {
@@ -3753,6 +4148,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3790,6 +4186,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3819,6 +4216,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3845,6 +4243,7 @@ mod tests {
         };
 
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![],
                 created: 0,
@@ -3998,6 +4397,7 @@ mod tests {
             ChatChoice, ChatCompletionMessageContent, ChatCompletionResponseMessage, FinishReason,
         };
         NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 choices: vec![ChatChoice {
                     index: 0,
@@ -4053,6 +4453,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, arguments)| ChatCompletionMessageToolCall {
+                    custom: None,
                     id: format!("call_abc{index}"),
                     r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
@@ -4109,6 +4510,7 @@ mod tests {
         // and function-call order is asserted here.
         message.content = None;
         message.tool_calls = Some(vec![ChatCompletionMessageToolCall {
+            custom: None,
             id: "call_weather".into(),
             r#type: FunctionType::Function,
             function: dynamo_protocols::types::FunctionCall {

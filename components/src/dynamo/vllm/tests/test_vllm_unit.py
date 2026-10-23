@@ -567,6 +567,19 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
 
 
 @pytest.mark.parametrize(
+    "parser", ["muse_spark_open", "muse_spark", "qwen3_coder", None]
+)
+def test_muse_grammar_owns_reasoning_before_engine_launch(parser):
+    vllm_main = _load_vllm_main()
+    config = SimpleNamespace(dyn_tool_call_parser=parser)
+    outputs = SimpleNamespace(enable_in_reasoning=False)
+    vllm_main.configure_muse_structural_tag_reasoning(
+        config, SimpleNamespace(structured_outputs_config=outputs)
+    )
+    assert outputs.enable_in_reasoning is (parser in ("muse_spark_open", "muse_spark"))
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
@@ -718,6 +731,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         engine_args=FakeEngineArgs(),
         embedding_worker=False,
         embedding_worker_processes=1,
+        dyn_tool_call_parser=None,
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,
