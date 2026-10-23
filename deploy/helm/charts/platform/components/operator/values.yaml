@@ -118,6 +118,11 @@ controllerManager:
     # AISimulate runner image put into v1beta2 DGDR spec.aisimulate.image when unset.
     # Empty derives nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operator-version>.
     dgdrAISimulateDefaultImage: ""
+    # Compatibility version of dgdrAISimulateDefaultImage, put into v1beta2 DGDR
+    # spec.aisimulate.versionOverride together with that image. Required when the image tag
+    # is not a semantic version (for example nightly); the operator refuses to start without
+    # it. A Request that names its own image never receives it.
+    dgdrAISimulateDefaultVersionOverride: ""
     resources:
       limits:
         cpu: 1024m

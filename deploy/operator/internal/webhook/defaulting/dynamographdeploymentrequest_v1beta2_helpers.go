@@ -52,6 +52,10 @@ type DGDRV1beta2Options struct {
 	// AISimulateImage overrides the version-matched Dynamo planner image persisted
 	// into spec.aisimulate.image when the caller omits it.
 	AISimulateImage string
+	// AISimulateVersionOverride is the compatibility version of AISimulateImage, for an image whose
+	// tag is not a semantic version. The pair is one default: admission persists the override only
+	// together with the image it supplies, never next to an image the caller chose.
+	AISimulateVersionOverride string
 	// Hardware discovers the cluster's GPUs. Nil disables hardware defaulting, and
 	// validation then requires the hardware to be spelled out.
 	Hardware HardwareDiscoverer
@@ -70,8 +74,9 @@ func (o DGDRV1beta2Options) resolveDefaults(
 	oldSpec, spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 ) dynamoGraphDeploymentRequestV1beta2DefaultOptions {
 	return dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:        o.resolveHardware(ctx, operation, oldSpec, spec),
-		aisimulateImage: o.AISimulateImage,
+		hardware:                  o.resolveHardware(ctx, operation, oldSpec, spec),
+		aisimulateImage:           o.AISimulateImage,
+		aisimulateVersionOverride: o.AISimulateVersionOverride,
 	}
 }
 

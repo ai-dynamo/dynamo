@@ -121,6 +121,8 @@ type dynamoGraphDeploymentRequestV1beta2DefaultOptions struct {
 	hardware hardwareDefaultsV1beta2
 	// aisimulateImage is the operator's resolved AISimulate image.
 	aisimulateImage string
+	// aisimulateVersionOverride belongs to aisimulateImage.
+	aisimulateVersionOverride string
 }
 
 // hardwareDefaultsV1beta2 is the hardware the cluster can offer for the values a Request omits.
@@ -180,7 +182,7 @@ func defaultNativeSearchInputV1beta2(
 		input.AISimulate = &nvidiacomv1beta2.AISimulateSpec{}
 	}
 	if input.AISimulate != nil {
-		defaultAISimulateSpecV1beta2(input.AISimulate, opts.aisimulateImage)
+		defaultAISimulateSpecV1beta2(input.AISimulate, opts.aisimulateImage, opts.aisimulateVersionOverride)
 	}
 
 	if input.Recommendation == nil {
@@ -237,9 +239,16 @@ func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	}
 }
 
-func defaultAISimulateSpecV1beta2(aisimulate *nvidiacomv1beta2.AISimulateSpec, image string) {
-	if aisimulate.Image == "" && image != "" {
-		aisimulate.Image = image
+// defaultAISimulateSpecV1beta2 persists the operator's AISimulate artifact as one pair. The
+// override follows the image: it is applied only when admission supplies the image. A caller's
+// image derives its own version or brings its own override, and a caller's override always wins.
+func defaultAISimulateSpecV1beta2(aisimulate *nvidiacomv1beta2.AISimulateSpec, image, versionOverride string) {
+	if aisimulate.Image != "" || image == "" {
+		return
+	}
+	aisimulate.Image = image
+	if aisimulate.VersionOverride == "" {
+		aisimulate.VersionOverride = versionOverride
 	}
 }
 

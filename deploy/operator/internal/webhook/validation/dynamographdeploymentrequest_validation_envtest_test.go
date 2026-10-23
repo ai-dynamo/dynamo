@@ -755,6 +755,48 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name:         "v1beta2 model-only request stores the configured AISimulate image and its override",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2AdmissionDefaults(t, result)
+			},
+		},
+		{
+			name: "v1beta2 caller image does not receive the operator's version override",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["aisimulate"] = map[string]any{"image": "registry.example.com/aisimulate:1.4.0"}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "aisimulate", "image"); got != "registry.example.com/aisimulate:1.4.0" {
+					t.Fatalf("aisimulate.image = %q, want the caller's image", got)
+				}
+				if _, found, _ := unstructured.NestedString(result.Object, "spec", "aisimulate", "versionOverride"); found {
+					t.Fatalf("aisimulate.versionOverride was set next to a caller's image")
+				}
+			},
+		},
+		{
+			name: "v1beta2 caller override wins next to the configured image",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["aisimulate"] = map[string]any{"versionOverride": "2.0.0"}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "aisimulate", "image"); got != admissionAISimulateImage {
+					t.Fatalf("aisimulate.image = %q, want the configured image", got)
+				}
+				if got := v1beta2String(t, result, "spec", "aisimulate", "versionOverride"); got != "2.0.0" {
+					t.Fatalf("aisimulate.versionOverride = %q, want the caller's 2.0.0", got)
+				}
+			},
+		},
+
+		{
 			name: "v1beta2 empty objective and recommendation receive their defaults",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{}
@@ -1183,7 +1225,8 @@ const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
 func v1beta2NativeHardwareDGDR(labels map[string]any) *unstructured.Unstructured {
 	return v1beta2DGDRForAdmission(func(spec map[string]any) {
 		spec["aisimulate"] = map[string]any{
-			"image": admissionAISimulateImage,
+			"image":           admissionAISimulateImage,
+			"versionOverride": admissionAISimulateVersionOverride,
 			"parameters": map[string]any{
 				"search_space": map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": int64(8)},
 			},
@@ -1342,6 +1385,9 @@ func expectV1beta2AdmissionDefaults(t *testing.T, obj *unstructured.Unstructured
 	}
 	if got := v1beta2String(t, obj, "spec", "aisimulate", "image"); got != admissionAISimulateImage {
 		t.Fatalf("aisimulate.image = %q, want %q", got, admissionAISimulateImage)
+	}
+	if got := v1beta2String(t, obj, "spec", "aisimulate", "versionOverride"); got != admissionAISimulateVersionOverride {
+		t.Fatalf("aisimulate.versionOverride = %q, want %q", got, admissionAISimulateVersionOverride)
 	}
 	if got := v1beta2String(t, obj, "spec", "hardware", "gpu", "sku"); got != "h200_sxm" {
 		t.Fatalf("hardware.gpu.sku = %q, want h200_sxm", got)
