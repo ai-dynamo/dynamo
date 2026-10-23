@@ -554,7 +554,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2SchemaDefaults(t, result)
+				expectV1beta2StructuralDefaults(t, result)
 				expectV1beta2AdmissionDefaults(t, result)
 			},
 		},
@@ -755,6 +755,47 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "v1beta2 empty objective and recommendation receive their defaults",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["objective"] = map[string]any{}
+				spec["recommendation"] = map[string]any{}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2StructuralDefaults(t, result)
+				expectV1beta2AdmissionDefaults(t, result)
+			},
+		},
+		{
+			name: "v1beta2 pareto objective receives no scalar metric",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["objective"] = map[string]any{"mode": "Pareto", "metrics": []any{"TTFT", "Throughput"}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				v1beta2Absent(t, result, "spec", "objective", "metric")
+			},
+		},
+		{
+			name: "v1beta2 explicit values are all kept",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["backends"] = []any{"vllm"}
+				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
+				spec["workload"] = map[string]any{"static": map[string]any{"isl": int64(10)}}
+				spec["objective"] = map[string]any{"mode": "Optimize", "metric": "TTFT"}
+				spec["aisimulate"] = map[string]any{
+					"image":           "registry.example.com/aisimulate:custom",
+					"versionOverride": "1.4.0",
+				}
+				spec["recommendation"] = map[string]any{"maxCandidates": int64(3)}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check:        expectV1beta2ExplicitValues,
+		},
+		{
 			name: "v1beta2 duplicate backends are rejected on create",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["backends"] = []any{"vllm", "vllm"}
@@ -832,7 +873,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				if result.GetGeneration() != 1 {
 					t.Fatalf("generation = %d, want 1: defaulting must not change an unchanged spec", result.GetGeneration())
 				}
-				expectV1beta2SchemaDefaults(t, result)
+				expectV1beta2StructuralDefaults(t, result)
 				expectV1beta2AdmissionDefaults(t, result)
 			},
 		},
@@ -1235,8 +1276,8 @@ func v1beta2Empty(t *testing.T, obj *unstructured.Unstructured, path ...string) 
 	}
 }
 
-// expectV1beta2SchemaDefaults checks what the CRD supplies when workload and sla are omitted.
-func expectV1beta2SchemaDefaults(t *testing.T, obj *unstructured.Unstructured) {
+// expectV1beta2StructuralDefaults checks the defaults admission supplies to a model-only Request.
+func expectV1beta2StructuralDefaults(t *testing.T, obj *unstructured.Unstructured) {
 	t.Helper()
 	for key, want := range map[string]float64{"isl": 1024, "osl": 128, "concurrency": 10} {
 		if got := v1beta2Number(t, obj, "spec", "workload", "static", key); got != want {
@@ -1248,6 +1289,49 @@ func expectV1beta2SchemaDefaults(t *testing.T, obj *unstructured.Unstructured) {
 	if got := v1beta2String(t, obj, "spec", "objective", "mode"); got != "Optimize" {
 		t.Fatalf("objective.mode = %q, want Optimize", got)
 	}
+	if got, _ := v1beta2Field(t, obj, "spec", "backends"); !reflect.DeepEqual(got, []any{"vllm", "sglang", "trtllm"}) {
+		t.Fatalf("backends = %#v, want vllm, sglang and trtllm", got)
+	}
+	if got := v1beta2Number(t, obj, "spec", "recommendation", "maxCandidates"); got != 1 {
+		t.Fatalf("recommendation.maxCandidates = %v, want 1", got)
+	}
+}
+
+// expectV1beta2ExplicitValues checks that every value the explicit-values row sent survived.
+func expectV1beta2ExplicitValues(t *testing.T, obj *unstructured.Unstructured) {
+	t.Helper()
+	if got, _ := v1beta2Field(t, obj, "spec", "backends"); !reflect.DeepEqual(got, []any{"vllm"}) {
+		t.Fatalf("backends = %#v, want only vllm", got)
+	}
+	for _, want := range []struct {
+		path  []string
+		value float64
+	}{
+		{[]string{"spec", "hardware", "gpu", "budget"}, 4},
+		{[]string{"spec", "workload", "static", "isl"}, 10},
+		{[]string{"spec", "recommendation", "maxCandidates"}, 3},
+	} {
+		if got := v1beta2Number(t, obj, want.path...); got != want.value {
+			t.Fatalf("%v = %v, want %v", want.path, got, want.value)
+		}
+	}
+	for _, want := range []struct {
+		path  []string
+		value string
+	}{
+		{[]string{"spec", "hardware", "gpu", "sku"}, "h100_sxm"},
+		{[]string{"spec", "objective", "mode"}, "Optimize"},
+		{[]string{"spec", "objective", "metric"}, "TTFT"},
+		{[]string{"spec", "aisimulate", "image"}, "registry.example.com/aisimulate:custom"},
+		{[]string{"spec", "aisimulate", "versionOverride"}, "1.4.0"},
+	} {
+		if got := v1beta2String(t, obj, want.path...); got != want.value {
+			t.Fatalf("%v = %q, want %q", want.path, got, want.value)
+		}
+	}
+	// A static workload that names only isl is not filled in.
+	v1beta2Absent(t, obj, "spec", "workload", "static", "osl")
+	v1beta2Absent(t, obj, "spec", "workload", "static", "concurrency")
 }
 
 // expectV1beta2AdmissionDefaults checks what admission supplies from the environment.

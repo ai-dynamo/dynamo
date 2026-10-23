@@ -26,233 +26,12 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	admissionv1 "k8s.io/api/admission/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func v1beta2Ptr[T any](v T) *T { return &v }
-
-// v1beta2SchemaDefaulted is a model-only Request as the API server hands it to admission: the
-// CRD has applied its defaults, and admission has not run.
-func v1beta2SchemaDefaulted() *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
-	return &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
-		Model:    &nvidiacomv1beta2.ModelSpec{Name: "meta-llama/Llama-3.1-8B-Instruct"},
-		Backends: []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM, nvidiacomv1beta2.BackendSGLang, nvidiacomv1beta2.BackendTRTLLM},
-		Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{
-			ISL: v1beta2Ptr(int32(1024)), OSL: v1beta2Ptr(int32(128)), Concurrency: v1beta2Ptr(int32(10)),
-		}},
-		Objective: &nvidiacomv1beta2.ObjectiveSpec{
-			Mode: nvidiacomv1beta2.ObjectiveModeOptimize,
-		},
-		Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 1},
-	}
-}
-
-func v1beta2JSON(t *testing.T, spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) string {
-	t.Helper()
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(raw)
-}
-
-func TestDefaultSpecV1beta2ModelOnlyRequest(t *testing.T) {
-	spec := v1beta2SchemaDefaulted()
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:        hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8},
-		aisimulateImage: "registry.example.com/aisimulate:1.2.0",
-	})
-	if got := ptrDeref(spec.Objective.Metric); got != "Throughput" {
-		t.Fatalf("metric = %q", got)
-	}
-	gpu := spec.Hardware.GPU
-	if *gpu.SKU != "h200_sxm" || *gpu.Budget != 8 {
-		t.Fatalf("hardware = %s/%d", *gpu.SKU, *gpu.Budget)
-	}
-	if spec.AISimulate.Image != "registry.example.com/aisimulate:1.2.0" {
-		t.Fatalf("image = %q", spec.AISimulate.Image)
-	}
-}
-
-func ptrDeref(metric *nvidiacomv1beta2.ObjectiveMetric) nvidiacomv1beta2.ObjectiveMetric {
-	if metric == nil {
-		return ""
-	}
-	return *metric
-}
-
-func TestDefaultSpecV1beta2IsIdempotent(t *testing.T) {
-	opts := dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:        hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8},
-		aisimulateImage: "registry.example.com/aisimulate:1.2.0",
-	}
-	spec := v1beta2SchemaDefaulted()
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-	first := v1beta2JSON(t, spec)
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-	if second := v1beta2JSON(t, spec); second != first {
-		t.Fatalf("a second pass changed the spec:\n%s\n%s", first, second)
-	}
-}
-
-func TestDefaultSpecV1beta2PreservesExplicitValues(t *testing.T) {
-	opts := dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:        hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8},
-		aisimulateImage: "registry.example.com/aisimulate:1.2.0",
-	}
-	t.Run("hardware", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: v1beta2Ptr("b200_sxm"), Budget: v1beta2Ptr(int32(2))}}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if *spec.Hardware.GPU.SKU != "b200_sxm" || *spec.Hardware.GPU.Budget != 2 {
-			t.Fatalf("hardware overwritten: %s/%d", *spec.Hardware.GPU.SKU, *spec.Hardware.GPU.Budget)
-		}
-	})
-	t.Run("a pinned SKU lets admission size the budget", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: v1beta2Ptr("b200_sxm")}}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if *spec.Hardware.GPU.SKU != "b200_sxm" || *spec.Hardware.GPU.Budget != 8 {
-			t.Fatalf("got %s/%d", *spec.Hardware.GPU.SKU, *spec.Hardware.GPU.Budget)
-		}
-	})
-	t.Run("an empty hardware object is filled", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if spec.Hardware.GPU == nil || *spec.Hardware.GPU.SKU != "h200_sxm" {
-			t.Fatal("hardware not filled")
-		}
-	})
-	t.Run("metric", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Objective.Metric = v1beta2Ptr(nvidiacomv1beta2.ObjectiveMetric("TTFT"))
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if *spec.Objective.Metric != "TTFT" {
-			t.Fatalf("metric overwritten: %s", *spec.Objective.Metric)
-		}
-	})
-	t.Run("image", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{Image: "registry.example.com/aisimulate:custom", VersionOverride: "1.4.0"}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if spec.AISimulate.Image != "registry.example.com/aisimulate:custom" {
-			t.Fatalf("image overwritten: %s", spec.AISimulate.Image)
-		}
-	})
-	t.Run("parameters are untouched", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{Parameters: &runtime.RawExtension{Raw: []byte(`{"goal":{"target":"ttft"}}`)}}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if string(spec.AISimulate.Parameters.Raw) != `{"goal":{"target":"ttft"}}` {
-			t.Fatal("parameters changed")
-		}
-		if spec.AISimulate.Image != "registry.example.com/aisimulate:1.2.0" {
-			t.Fatal("image not persisted next to parameters")
-		}
-	})
-}
-
-func TestDefaultSpecV1beta2KeepsExplicitValues(t *testing.T) {
-	opts := dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:        hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8},
-		aisimulateImage: "registry.example.com/aisimulate:1.2.0",
-	}
-	t.Run("an empty workload receives the static default", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if !hasModelOnlyStatic(spec.Workload) {
-			t.Fatal("workload: {} must receive the static model-only default")
-		}
-	})
-	t.Run("an explicit empty static workload is an opt-out", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if spec.Workload.Static.ISL != nil || spec.Workload.Static.OSL != nil || spec.Workload.Static.Concurrency != nil {
-			t.Fatal("an explicit workload.static: {} was filled")
-		}
-	})
-	t.Run("omitted workload", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Workload = nil
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if !hasModelOnlyStatic(spec.Workload) {
-			t.Fatal("an omitted workload must become workload: {}, with the static model-only default")
-		}
-	})
-	t.Run("explicit empty SLA", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Objective.SLA = &nvidiacomv1beta2.ObjectiveSLASpec{}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if spec.Objective.SLA.TTFTMs != nil || spec.Objective.SLA.ITLMs != nil {
-			t.Fatal("an explicit sla: {} was filled")
-		}
-	})
-	t.Run("an explicit zero-valued backend list element is kept", func(t *testing.T) {
-		spec := v1beta2SchemaDefaulted()
-		spec.Backends = []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if len(spec.Backends) != 1 {
-			t.Fatal("backends changed")
-		}
-	})
-}
-
-func TestDefaultObjectiveSpecV1beta2(t *testing.T) {
-	cases := []struct {
-		name      string
-		objective nvidiacomv1beta2.ObjectiveSpec
-		want      nvidiacomv1beta2.ObjectiveMetric
-	}{
-		{"optimize without a metric", nvidiacomv1beta2.ObjectiveSpec{Mode: nvidiacomv1beta2.ObjectiveModeOptimize}, "Throughput"},
-		{"an explicit metric is kept", nvidiacomv1beta2.ObjectiveSpec{Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: v1beta2Ptr(nvidiacomv1beta2.ObjectiveMetric("TTFT"))}, "TTFT"},
-		{"pareto has no scalar metric", nvidiacomv1beta2.ObjectiveSpec{Mode: nvidiacomv1beta2.ObjectiveModePareto, Metrics: []nvidiacomv1beta2.ObjectiveMetric{"TTFT", "Throughput"}}, ""},
-		{"an absent mode is Optimize, which admission fills", nvidiacomv1beta2.ObjectiveSpec{}, "Throughput"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			defaultObjectiveSpecV1beta2(&tc.objective)
-			if got := ptrDeref(tc.objective.Metric); got != tc.want {
-				t.Fatalf("metric = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestDefaultSpecV1beta2DoesNotCreateWhatTheEnvironmentCannotFill(t *testing.T) {
-	spec := v1beta2SchemaDefaulted()
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, dynamoGraphDeploymentRequestV1beta2DefaultOptions{})
-	if spec.Hardware != nil || spec.AISimulate != nil {
-		t.Fatalf("created sections with nothing to put in them: %s", v1beta2JSON(t, spec))
-	}
-	spec.Objective = nil
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, dynamoGraphDeploymentRequestV1beta2DefaultOptions{})
-	if spec.Objective == nil || ptrDeref(spec.Objective.Metric) != "Throughput" {
-		t.Fatal("an omitted objective must become objective: {} with the Optimize metric default")
-	}
-}
-
-func TestNativeTargetOverridesTheDefaultedMetric(t *testing.T) {
-	spec := v1beta2SchemaDefaulted()
-	spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{Parameters: &runtime.RawExtension{Raw: []byte(`{"goal":{"target":"ttft"}}`)}}
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, dynamoGraphDeploymentRequestV1beta2DefaultOptions{})
-	if *spec.Objective.Metric != "Throughput" {
-		t.Fatalf("the typed metric must be defaulted regardless of the parameters, got %q", *spec.Objective.Metric)
-	}
-	input, err := aisimulate.Lower(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target, _ := input["goal"].(map[string]any)["target"]; target != "ttft" {
-		t.Fatalf("the native target must win when lowered, got %v", target)
-	}
-}
 
 type fakeDiscoverer struct {
 	found   gpu.GPUInfo
@@ -274,7 +53,7 @@ func (f *fakeDiscoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta
 
 func TestResolveHardwareV1beta2(t *testing.T) {
 	spec := func(sku *string, budget *int32) *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
-		s := v1beta2SchemaDefaulted()
+		s := modelOnlySpecV1beta2()
 		if sku != nil || budget != nil {
 			s.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: sku, Budget: budget}}
 		}
@@ -350,7 +129,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 func TestResolveDefaultsV1beta2(t *testing.T) {
 	d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}
 	got := DGDRV1beta2Options{Hardware: d, AISimulateImage: "registry.example.com/aisimulate:1.2.0"}.
-		resolveDefaults(context.Background(), admissionv1.Create, nil, v1beta2SchemaDefaulted())
+		resolveDefaults(context.Background(), admissionv1.Create, nil, modelOnlySpecV1beta2())
 	if got.aisimulateImage != "registry.example.com/aisimulate:1.2.0" || got.hardware.sku != "h200_sxm" || got.hardware.budget != 8 {
 		t.Fatalf("got %+v", got)
 	}
@@ -372,7 +151,7 @@ func TestDefaultEnvelopeV1beta2(t *testing.T) {
 		AISimulateImage: "registry.example.com/aisimulate:1.2.0",
 		Hardware:        &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}},
 	}
-	dgdr := v1beta2Envelope(t, v1beta2SchemaDefaulted())
+	dgdr := v1beta2Envelope(t, modelOnlySpecV1beta2())
 
 	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, nil, options); err != nil {
 		t.Fatal(err)
@@ -401,24 +180,6 @@ func TestDefaultEnvelopeV1beta2(t *testing.T) {
 	}
 }
 
-func TestDefaultEnvelopeV1beta2LeavesUnchangedEnvelopeUntouched(t *testing.T) {
-	// Nothing for admission to add: the objective already carries its metric and there is no
-	// environment to contribute. The envelope bytes stay exactly as sent, even though they are
-	// not in canonical form.
-	spec := v1beta2SchemaDefaulted()
-	spec.Objective.Metric = v1beta2Ptr(nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU"))
-	raw, _ := json.Marshal(spec)
-	dgdr := v1beta2Envelope(t, spec)
-	dgdr.Spec.V1Beta2.Raw = append([]byte(" "), raw...)
-	original := string(dgdr.Spec.V1Beta2.Raw)
-	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, nil, DGDRV1beta2Options{}); err != nil {
-		t.Fatal(err)
-	}
-	if string(dgdr.Spec.V1Beta2.Raw) != original {
-		t.Fatalf("envelope was rewritten without a change: %q", dgdr.Spec.V1Beta2.Raw)
-	}
-}
-
 func TestDefaultEnvelopeV1beta2RejectsMalformedSpec(t *testing.T) {
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
 	dgdr.Spec.V1Beta2 = &apiextensionsv1.JSON{Raw: []byte(`{"model": 3}`)}
@@ -428,7 +189,7 @@ func TestDefaultEnvelopeV1beta2RejectsMalformedSpec(t *testing.T) {
 }
 
 func hardwareSpecV1beta2(sku *string, budget *int32) *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
-	spec := v1beta2SchemaDefaulted()
+	spec := modelOnlySpecV1beta2()
 	if sku != nil || budget != nil {
 		spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: sku, Budget: budget}}
 	}
@@ -494,41 +255,6 @@ func TestResolveHardwareByOperationV1beta2(t *testing.T) {
 	}
 }
 
-// A Request created while discovery had nothing to offer keeps its spec through a later
-// metadata-only update, even after the cluster recovers.
-func TestUpdateKeepsUnchangedHardwareUnresolved(t *testing.T) {
-	options := DGDRV1beta2Options{Hardware: &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}}
-	// The objective metric is still defaulted on update, so the spec already carries it.
-	spec := v1beta2SchemaDefaulted()
-	metric := defaultMetricV1beta2
-	spec.Objective.Metric = &metric
-	dgdr := v1beta2Envelope(t, spec)
-	first := string(dgdr.Spec.V1Beta2.Raw)
-	if err := defaultDynamoGraphDeploymentRequestV1beta2(
-		context.Background(), dgdr, admissionv1.Update, hardwareSpecV1beta2(nil, nil), options); err != nil {
-		t.Fatal(err)
-	}
-	if string(dgdr.Spec.V1Beta2.Raw) != first {
-		t.Fatalf("update changed the spec:\n%s\n%s", first, dgdr.Spec.V1Beta2.Raw)
-	}
-}
-
-func TestUpdateRediscoversRemovedHardware(t *testing.T) {
-	options := DGDRV1beta2Options{Hardware: &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}}
-	dgdr := v1beta2Envelope(t, v1beta2SchemaDefaulted())
-	old := hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), v1beta2Ptr(int32(4)))
-	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Update, old, options); err != nil {
-		t.Fatal(err)
-	}
-	var got nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
-	if err := json.Unmarshal(dgdr.Spec.V1Beta2.Raw, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Hardware == nil || got.Hardware.GPU == nil || *got.Hardware.GPU.SKU != "h200_sxm" || *got.Hardware.GPU.Budget != 8 {
-		t.Fatalf("hardware not rediscovered: %+v", got.Hardware)
-	}
-}
-
 func TestDecodeOldSpecV1beta2(t *testing.T) {
 	old, err := json.Marshal(v1beta2Envelope(t, hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil)))
 	if err != nil {
@@ -549,39 +275,30 @@ func TestDecodeOldSpecV1beta2(t *testing.T) {
 	}
 }
 
-func TestDefaultSpecV1beta2StructuralDefaults(t *testing.T) {
-	opts := dynamoGraphDeploymentRequestV1beta2DefaultOptions{}
-
-	t.Run("an empty native spec receives the four structural parents", func(t *testing.T) {
-		spec := &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if len(spec.Backends) != 3 {
-			t.Fatalf("backends = %v, want vllm, sglang and trtllm", spec.Backends)
-		}
-		if !hasModelOnlyStatic(spec.Workload) {
-			t.Fatalf("workload = %s, want {} with the static model-only default", v1beta2JSON(t, spec))
-		}
-		if spec.Objective == nil || spec.Recommendation == nil {
-			t.Fatalf("objective and recommendation must exist: %s", v1beta2JSON(t, spec))
-		}
-	})
-	t.Run("explicit values and opt-outs are kept", func(t *testing.T) {
-		spec := &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{}
-		spec.Backends = []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM}
-		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}}
-		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if len(spec.Backends) != 1 {
-			t.Fatalf("backends changed: %v", spec.Backends)
-		}
-		if spec.Workload.Static == nil {
-			t.Fatal("workload.static: {} (the opt-out) was removed")
-		}
-	})
+// modelOnlySpecV1beta2 is a Request as a client sends it: only the model is named.
+func modelOnlySpecV1beta2() *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
+	spec := &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{}
+	spec.Model = &nvidiacomv1beta2.ModelSpec{Name: "meta-llama/Llama-3.1-8B-Instruct"}
+	return spec
 }
 
-func hasModelOnlyStatic(w *nvidiacomv1beta2.WorkloadSpec) bool {
-	return w != nil && w.Static != nil &&
-		int32Is(w.Static.ISL, 1024) && int32Is(w.Static.OSL, 128) && int32Is(w.Static.Concurrency, 10)
+// An envelope that admission has nothing to add to keeps its exact bytes, even when they are
+// not in canonical form.
+func TestDefaultEnvelopeV1beta2LeavesUnchangedEnvelopeUntouched(t *testing.T) {
+	spec := modelOnlySpecV1beta2()
+	defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, dynamoGraphDeploymentRequestV1beta2DefaultOptions{})
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dgdr := v1beta2Envelope(t, spec)
+	dgdr.Spec.V1Beta2.Raw = append([]byte(" "), raw...)
+	original := string(dgdr.Spec.V1Beta2.Raw)
+	if err := defaultDynamoGraphDeploymentRequestV1beta2(
+		context.Background(), dgdr, admissionv1.Create, nil, DGDRV1beta2Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if string(dgdr.Spec.V1Beta2.Raw) != original {
+		t.Fatalf("envelope was rewritten without a change: %q", dgdr.Spec.V1Beta2.Raw)
+	}
 }
-
-func int32Is(p *int32, want int32) bool { return p != nil && *p == want }
