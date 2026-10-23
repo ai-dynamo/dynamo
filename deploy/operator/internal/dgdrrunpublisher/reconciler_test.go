@@ -102,10 +102,11 @@ func (w *memWriter) CreateCandidate(ctx context.Context, _ *v1beta2.DynamoGraphD
 		return stored, nil
 	}
 	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      name,
-		UID:       types.UID("uid-" + name),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
+		Namespace:       testNamespace,
+		Name:            name,
+		UID:             types.UID("uid-" + name),
+		Labels:          map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
+		OwnerReferences: controllerRef(testRunUID),
 	}}
 	return stored, client.IgnoreAlreadyExists(w.c.Create(ctx, object))
 }
@@ -430,9 +431,10 @@ func TestFailedMaterializationIsNotCreatedButCounted(t *testing.T) {
 func TestCandidateWithoutStatusIsCompletedNotRecreated(t *testing.T) {
 	f := newFixture(t)
 	existing := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      cn("a"),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "a"},
+		Namespace:       testNamespace,
+		Name:            cn("a"),
+		Labels:          map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "a"},
+		OwnerReferences: controllerRef(testRunUID),
 	}}
 	if err := f.c.Create(context.Background(), existing); err != nil {
 		t.Fatal(err)
@@ -590,26 +592,6 @@ func TestFinalReconcileFailureEndsTheProcessAfterBoundedRetries(t *testing.T) {
 	}
 	f.mustReconcile()
 	if err := f.r.Completion.Err(); err == nil || ExitCode(err) != ExitReconcileFailed {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestMalformedProjectionFailsImmediately(t *testing.T) {
-	f := newFixture(t)
-	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
-	// Two live candidates claiming the same id make the diff input malformed.
-	for _, name := range []string{"x-1", "x-2"} {
-		object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace, Name: name,
-			Labels: map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "dup"},
-		}}
-		if err := f.c.Create(context.Background(), object); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f.mustReconcile()
-	var inputErr *dgdcreconcile.DiffInputError
-	if err := f.r.Completion.Err(); !errors.As(err, &inputErr) || ExitCode(err) != ExitReconcileFailed {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -863,9 +845,10 @@ func TestNewCandidateStatusUsesTheVersionReturnedByTheCreate(t *testing.T) {
 func TestExistingCandidateStatusUsesItsCachedVersion(t *testing.T) {
 	f := newFixture(t)
 	existing := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      cn("a"),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "a"},
+		Namespace:       testNamespace,
+		Name:            cn("a"),
+		Labels:          map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "a"},
+		OwnerReferences: controllerRef(testRunUID),
 	}}
 	if err := f.c.Create(context.Background(), existing); err != nil {
 		t.Fatal(err)
@@ -896,5 +879,123 @@ func TestConflictIsRetriedWithoutUsingUpTheFinalAttempts(t *testing.T) {
 	f.mustReconcile()
 	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
 		t.Fatalf("finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
+	}
+}
+
+func controllerRef(uid string) []metav1.OwnerReference {
+	controller := true
+	return []metav1.OwnerReference{{
+		APIVersion: "nvidia.com/v1beta2",
+		Kind:       "DynamoGraphDeploymentRun",
+		Name:       testRunName,
+		UID:        types.UID(uid),
+		Controller: &controller,
+	}}
+}
+
+// existingCandidate creates a populated candidate behind the publisher's back. The run-UID
+// label puts it in the publisher's cache whatever its owner or name.
+func (f *fixture) existingCandidate(name, id string, owners []metav1.OwnerReference) {
+	f.t.Helper()
+	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
+		Namespace:       testNamespace,
+		Name:            name,
+		Labels:          map[string]string{LabelRunUID: testRunUID, LabelCandidateID: id},
+		OwnerReferences: owners,
+	}}
+	object.Status.Metrics = &runtime.RawExtension{Raw: []byte("{}")}
+	if err := f.c.Create(context.Background(), object); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *fixture) candidateExists(name string) bool {
+	f.t.Helper()
+	var object v1beta2.DynamoGraphDeploymentCandidate
+	err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: name}, &object)
+	if err != nil && !apierrors.IsNotFound(err) {
+		f.t.Fatal(err)
+	}
+	return err == nil
+}
+
+func TestForeignCandidateWithMatchingLabelsIsNeitherCurrentNorDeleted(t *testing.T) {
+	f := newFixture(t)
+	// Both carry this run's UID label. One claims a desired id under another controller; the
+	// other has no controller and an id that is not desired.
+	f.existingCandidate("foreign-a", "a", controllerRef("another-run-uid"))
+	f.existingCandidate("foreign-gone", "gone", nil)
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}
+	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("a foreign object must not satisfy the desired id nor be deleted, ops = %v, want %v", got, want)
+	}
+	if got, want := f.lastStatus().CandidateNames, []string{cn("a")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("refs = %v, want %v", got, want)
+	}
+	for _, name := range []string{"foreign-a", "foreign-gone"} {
+		if !f.candidateExists(name) {
+			t.Fatalf("foreign candidate %s must be left alone", name)
+		}
+	}
+}
+
+func TestOwnedCandidateUnderTheWrongNameIsReplacedThenDeleted(t *testing.T) {
+	f := newFixture(t)
+	f.existingCandidate("squatter", "a", controllerRef(testRunUID))
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status", "delete:squatter"}
+	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the expected object is created and referenced before the owned stray is deleted, ops = %v, want %v", got, want)
+	}
+}
+
+func TestObsoleteOwnedCandidateIsDeletedAfterTheRunStatusUpdate(t *testing.T) {
+	f := newFixture(t)
+	f.existingCandidate(cn("old"), "old", controllerRef(testRunUID))
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status", "delete:" + cn("old")}
+	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ops = %v, want %v", got, want)
+	}
+}
+
+func TestOwnedDuplicatesUnderWrongNamesAreAllReplaced(t *testing.T) {
+	f := newFixture(t)
+	f.existingCandidate("x-1", "a", controllerRef(testRunUID))
+	f.existingCandidate("x-2", "a", controllerRef(testRunUID))
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	ops := f.takeOps()
+	if len(ops) != 5 || !reflect.DeepEqual(ops[:3], []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}) {
+		t.Fatalf("ops = %v", ops)
+	}
+	if deleted := map[string]bool{ops[3]: true, ops[4]: true}; !deleted["delete:x-1"] || !deleted["delete:x-2"] {
+		t.Fatalf("both strays must be deleted, ops = %v", ops)
+	}
+	if f.lastStatus().Published != 1 {
+		t.Fatalf("status = %+v", f.lastStatus())
+	}
+}
+
+func TestClearedCandidateStatusIsRepaired(t *testing.T) {
+	f := newFixture(t)
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	f.takeOps()
+	var object v1beta2.DynamoGraphDeploymentCandidate
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: cn("a")}, &object); err != nil {
+		t.Fatal(err)
+	}
+	object.Status.Metrics = nil
+	if err := f.c.Update(context.Background(), &object); err != nil {
+		t.Fatal(err)
+	}
+	f.mustReconcile()
+	if got, want := f.takeOps(), []string{"populate:" + cn("a")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("a candidate whose status was cleared must be repaired, ops = %v, want %v", got, want)
 	}
 }

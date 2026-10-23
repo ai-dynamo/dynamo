@@ -35,9 +35,11 @@ const (
 // terminal snapshot, which violates the producer protocol.
 var ErrMissingTerminalSnapshot = fmt.Errorf("%w: sweeper exited without publishing a terminal snapshot", ErrProtocolViolation)
 
-// ErrRunFailed means the Sweeper published a terminal Failed snapshot. The snapshot is
-// reconciled first; the error keeps a producer that reports failure but exits 0 from
-// letting the Job complete successfully.
+// ErrRunFailed means the run ended without a usable result: the Sweeper published a
+// terminal Failed snapshot, or a Succeeded one with no materialized candidate. The
+// snapshot is reconciled first; the error keeps a producer that reports failure but exits
+// 0 from letting the Job complete successfully. The concrete error is a *RunFailedError
+// carrying the bounded diagnostics.
 var ErrRunFailed = errors.New("sweeper reported a failed run")
 
 // ExitCode maps the result of Run to the process exit code.
@@ -60,10 +62,24 @@ type SweeperState struct {
 	ExitCode int32
 }
 
-// terminalResult is the outcome once a terminal snapshot has been reconciled.
-func terminalResult(phase string) error {
-	if phase == PhaseFailed {
-		return ErrRunFailed
+// terminalResult is the outcome once a terminal snapshot has been reconciled. A Failed
+// snapshot fails the run with the producer's own diagnostics. A Succeeded snapshot must
+// also contain at least one materialized candidate: success with nothing to recommend
+// (every materialization failed, or none was produced) is a failed run, not a result.
+func terminalResult(desired DesiredState) error {
+	switch {
+	case desired.Outcome.Phase == PhaseFailed:
+		return &RunFailedError{Outcome: desired.Outcome}
+	case len(desired.Candidates) == 0:
+		message := "run reported success but produced no candidate"
+		if desired.Failed > 0 {
+			message = fmt.Sprintf("run reported success but no candidate could be materialized (%d failed)", desired.Failed)
+		}
+		return &RunFailedError{Outcome: TerminalOutcome{
+			Phase:   PhaseFailed,
+			Message: message,
+			Error:   desired.FirstFailure,
+		}}
 	}
 	return nil
 }

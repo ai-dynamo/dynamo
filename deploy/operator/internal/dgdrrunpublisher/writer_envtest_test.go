@@ -263,3 +263,31 @@ func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
 		t.Fatalf("deleting a missing candidate must not fail: %v", err)
 	}
 }
+
+func TestEnvtestForeignObjectAtTheExpectedNameIsNotTakenOver(t *testing.T) {
+	f := newWriterFixture(t)
+	name := f.name("a")
+	// An object controlled by another run sits on the deterministic name. It carries another
+	// run's UID label, so the publisher's cache never lists it and only the writer can notice.
+	foreignRun := f.run.DeepCopy()
+	foreignRun.UID = "another-run-uid"
+	foreign, err := buildCandidateApply(f.client.Scheme(), f.run.Namespace, string(foreignRun.UID), foreignRun, name, envtestCandidate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.client.Create(f.ctx, foreign); err != nil {
+		t.Fatalf("create foreign candidate: %v", err)
+	}
+
+	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, envtestCandidate()); err == nil {
+		t.Fatal("applying over an object this run does not control must be refused")
+	}
+	got := f.candidate(name)
+	owner := metav1.GetControllerOf(got)
+	if owner == nil || owner.UID != "another-run-uid" || got.Labels[LabelRunUID] != "another-run-uid" {
+		t.Fatalf("the foreign object must be left as it was: owner=%v labels=%v", owner, got.Labels)
+	}
+	if hasApplyManager(got.ManagedFields, "") {
+		t.Fatal("the publisher must not have applied anything to the foreign object")
+	}
+}

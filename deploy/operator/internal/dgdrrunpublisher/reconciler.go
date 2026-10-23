@@ -160,7 +160,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	}
 	switch {
 	case desired.Terminal:
-		r.Completion.Finish(terminalResult(desired.Phase))
+		r.Completion.Finish(terminalResult(desired))
 	case exited:
 		r.Completion.Finish(exitResult(state))
 	}
@@ -193,6 +193,13 @@ func (r *Reconciler) retryOrFail(exited bool, err error) error {
 // apply drives the cluster toward the desired state: create missing candidates, finish
 // the status of candidates that lack it, update the run, then delete obsolete candidates.
 // It is idempotent and safe to retry; existing candidate specs are never touched.
+//
+// Only a candidate this run controls, under the deterministic name of a desired
+// candidate, counts as current. A label match is not ownership: objects with another (or
+// no) controller are ignored completely and never written or deleted. A candidate this
+// run controls under any other name, or for an id that is no longer desired, is obsolete:
+// its replacement is created first and the new references are published before it is
+// deleted.
 func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired DesiredState) error {
 	if desired.Failed > 0 {
 		ctrl.LoggerFrom(ctx).V(1).Info("candidates failed materialization and are not published", "count", desired.Failed)
@@ -204,14 +211,23 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 	current := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
 	uids := make(map[string]types.UID, len(list.Items))
 	versions := make(map[string]string, len(list.Items)) // cached resourceVersion per candidate
+	var obsolete []string                                // controlled by this run, but not the object of a desired candidate
 	for i := range list.Items {
 		item := &list.Items[i]
+		if !controlledByRun(item, run.UID) {
+			continue // a matching label is not ownership
+		}
+		uids[item.Name] = item.UID
+		id := item.Labels[LabelCandidateID]
+		if expected, desiredID := desired.Names[id]; !desiredID || item.Name != expected {
+			obsolete = append(obsolete, item.Name)
+			continue
+		}
 		current = append(current, dgdcreconcile.CurrentDGDC{
 			Name:       item.Name,
-			ID:         item.Labels[LabelCandidateID],
+			ID:         id,
 			Incomplete: item.Status.Metrics == nil,
 		})
-		uids[item.Name] = item.UID
 		versions[item.Name] = item.ResourceVersion
 	}
 	actions, err := dgdcreconcile.ComputeActions(desired.Candidates, current)
@@ -249,7 +265,8 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		return err
 	}
 
-	for _, name := range actions.Deletes {
+	obsolete = append(obsolete, actions.Deletes...)
+	for _, name := range obsolete {
 		if err := r.Writer.DeleteCandidate(ctx, name, uids[name]); err != nil {
 			return fmt.Errorf("deleting candidate %s: %w", name, err)
 		}

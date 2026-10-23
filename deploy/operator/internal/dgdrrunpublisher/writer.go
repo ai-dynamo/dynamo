@@ -20,10 +20,12 @@ package dgdrrunpublisher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -73,6 +75,14 @@ type clientWriter struct {
 
 var _ writer = (*clientWriter)(nil)
 
+// controlledByRun reports whether object's controller owner reference names the run
+// incarnation with the given UID. A label match is not ownership: only an object this run
+// controls may satisfy a desired candidate or be deleted by the publisher.
+func controlledByRun(object metav1.Object, runUID types.UID) bool {
+	owner := metav1.GetControllerOf(object)
+	return runUID != "" && owner != nil && owner.UID == runUID
+}
+
 func (w *clientWriter) apply(ctx context.Context, object *unstructured.Unstructured, status bool) error {
 	configuration := client.ApplyConfigurationFromUnstructured(object)
 	if status {
@@ -89,6 +99,19 @@ func (w *clientWriter) apply(ctx context.Context, object *unstructured.Unstructu
 func (w *clientWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
 	object, err := buildCandidateApply(w.Client.Scheme(), w.Namespace, w.RunUID, run, name, candidate)
 	if err != nil {
+		return StoredCandidate{}, err
+	}
+	// The deterministic name is only ours if nothing else sits on it. Such an object lacks
+	// the run-UID label (or the cache would have listed it), so the reconciler cannot see it,
+	// and a server-side apply over it would take it over. Refuse instead; the error is
+	// retried through the workqueue and ends the process after the bounded final attempts.
+	var existing v1beta2.DynamoGraphDeploymentCandidate
+	switch err := w.Reader.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: name}, &existing); {
+	case err == nil:
+		if !controlledByRun(&existing, run.UID) {
+			return StoredCandidate{}, fmt.Errorf("candidate %s exists and is not controlled by run %s", name, w.RunName)
+		}
+	case !apierrors.IsNotFound(err):
 		return StoredCandidate{}, err
 	}
 	if err := w.apply(ctx, object, false); err != nil {

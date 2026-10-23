@@ -42,15 +42,6 @@ func TestExitCodes(t *testing.T) {
 	}
 }
 
-func TestTerminalResult(t *testing.T) {
-	if err := terminalResult(PhaseSucceeded); err != nil {
-		t.Fatalf("succeeded: %v", err)
-	}
-	if err := terminalResult(PhaseFailed); !errors.Is(err, ErrRunFailed) {
-		t.Fatalf("failed: %v", err)
-	}
-}
-
 func TestExitResultWithoutATerminalSnapshot(t *testing.T) {
 	if err := exitResult(SweeperState{Exited: true, ExitCode: 137}); err != nil {
 		t.Fatalf("a crash is reported by the Sweeper's own exit code, not the publisher: %v", err)
