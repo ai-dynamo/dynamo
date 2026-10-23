@@ -187,11 +187,9 @@ jobs:
           echo "rc_number=${RC_ROUND}" >> "$GITHUB_OUTPUT"
           echo "Staging ${RELEASE_BRANCH} (CI branch ${CI_BRANCH}) @ ${SHA} as ${RELEASE_VERSION}-rc.${RC_ROUND}"
 
-      # A dispatch runs the workflow files from the dispatch ref (normally main),
-      # not from the release branch being staged. A change that landed on only one
-      # side silently changes what gets staged (rc10 dropped the kvbm wheels because
-      # main removed them from WHEEL_TOKENS while release/1.6.0 still shipped KVBM).
-      # Call out any drift between the two; require_workflow_match makes it fatal.
+      # This run uses the workflow files from the dispatch ref, not the release
+      # branch, so drift between them silently changes what gets staged. Warn on
+      # it; require_workflow_match makes it fatal.
       - name: Check workflow files match the release branch
         env:
           REPO: ${{ github.repository }}
