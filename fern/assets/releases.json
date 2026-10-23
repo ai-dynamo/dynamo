@@ -1,11 +1,11 @@
 {
   "source": "docs/fern/components/releases.data.ts",
   "generator": "docs/fern/scripts/gen_llms_tables.py",
-  "updated": "2026-10-21",
+  "updated": "2026-10-22",
   "current": {
     "version": "v1.6.0",
-    "date": "Oct 21, 2026",
-    "dateIso": "2026-10-21",
+    "date": "Oct 22, 2026",
+    "dateIso": "2026-10-22",
     "tag": "1.6.0",
     "wheel": "1.6.0"
   },
@@ -20,7 +20,8 @@
   "releases": [
     {
       "version": "v1.6.0",
-      "date": "Oct 21, 2026",
+      "notesHref": "/dynamo/dev/reference/releases/v1-6-0",
+      "date": "Oct 22, 2026",
       "kind": "stable",
       "github": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.6.0",
       "docs": "https://docs.nvidia.com/dynamo",
@@ -34,9 +35,9 @@
       },
       "ucx": "1.21.x",
       "delta": "vLLM worker services renamed to worker, prefill and decode; Dynamo Operator no longer adopts resources it does not own and validates multinode settings more strictly; Grove v0.1.0-alpha.14 required for new multinode deployments, with Coherent updates now opt-in; AIConfigurator options renamed to AISimulate (--aic-* to --ais-*); Router policy YAML takes precedence over the scoring flags, which are deprecated with removal targeted for v1.7.0; structural tags on by default for supported parsers; TensorRT-LLM AutoDeploy backend removed and the TensorRT-LLM sidecar moved to the OpenEngine gRPC API; invalid DYN_REQUEST_PLANE and DYN_EVENT_PLANE values fail at startup.",
-      "notesSummary": "Pluggable flow control on one shared worker-selection core in the Router, TensorRT-LLM OpenEngine, LoRA and encode-prefill-decode support in the engine sidecars, V2 tool and reasoning parsers and a rerank endpoint in the Frontend, video-aware KV routing for SGLang, LPX components and role-specific pod templates on Kubernetes, Snapshot-backed engine failover, and runtime GPU budget reconfiguration in the Planner.",
-      "dateIso": "2026-10-21",
-      "notesUrl": "https://github.com/ai-dynamo/dynamo/releases/tag/v1.6.0"
+      "notesSummary": "Pluggable flow control on one shared worker-selection core in the Router, V2 tool and reasoning parsers and a rerank endpoint in the Frontend, video-aware KV routing for SGLang, LPX components and role-specific pod templates on Kubernetes, Snapshot-backed engine failover, and runtime GPU budget reconfiguration in the Planner.",
+      "dateIso": "2026-10-22",
+      "notesUrl": "https://docs.nvidia.com/dynamo/dev/reference/releases/v1-6-0"
     },
     {
       "version": "v1.5.1",
@@ -1431,7 +1432,7 @@
       "category": "container",
       "group": "component",
       "name": "dynamo-sidecar",
-      "description": "Engine sidecars that run Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine",
+      "description": "Dynamo Sidecar, which runs Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine",
       "meta": "CPU-only · AMD64/ARM64",
       "href": "https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-sidecar/tags",
       "badge": "Experimental",
@@ -2217,6 +2218,13 @@
     }
   ],
   "releaseStats": {
+    "v1.6.0": {
+      "prs": 654,
+      "contributors": 148,
+      "firstTimers": 45,
+      "breaking": 41,
+      "knownIssues": 15
+    },
     "v1.5.1": {
       "breaking": 2,
       "knownIssues": 2
@@ -2224,6 +2232,7 @@
     "v1.5.0": {
       "prs": 658,
       "contributors": 123,
+      "firstTimers": 23,
       "breaking": 44,
       "knownIssues": 12
     },
