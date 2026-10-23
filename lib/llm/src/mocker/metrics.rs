@@ -651,7 +651,9 @@ impl NativeRequestTiming {
         self.output_tokens += 1;
         let Some(last_token_at) = self.last_token_at.replace(now) else {
             self.first_token_at = Some(now);
-            if let Some(time_to_first_token_seconds) = &handles.time_to_first_token_seconds {
+            if let Some(time_to_first_token_seconds) = &handles.time_to_first_token_seconds
+                && !matches!(handles.engine, EngineType::Trtllm)
+            {
                 time_to_first_token_seconds.observe(now.duration_since(self.start).as_secs_f64());
             }
             return;
@@ -666,6 +668,14 @@ impl NativeRequestTiming {
         let Some(handles) = &self.handles else {
             return;
         };
+
+        // TensorRT-LLM logs TTFT with the rest of a request's metrics once it finishes.
+        if matches!(handles.engine, EngineType::Trtllm)
+            && let (Some(time_to_first_token_seconds), Some(first)) =
+                (&handles.time_to_first_token_seconds, self.first_token_at)
+        {
+            time_to_first_token_seconds.observe(first.duration_since(self.start).as_secs_f64());
+        }
 
         // The first output token belongs to prefill, so TPOT spans the remaining tokens.
         let tpot = match (self.first_token_at, self.last_token_at) {
@@ -1067,9 +1077,18 @@ mod tests {
 
         let mut timing = metrics.request_timing(1, Instant::now());
         timing.record_token();
+        // TensorRT-LLM records TTFT only when the request finishes.
+        assert_eq!(
+            histogram_count(&registry, "trtllm_time_to_first_token_seconds"),
+            0
+        );
         std::thread::sleep(Duration::from_millis(1));
         timing.record_token();
         timing.record_normal_completion();
+        assert_eq!(
+            histogram_count(&registry, "trtllm_time_to_first_token_seconds"),
+            1
+        );
 
         let mut single_token = metrics.request_timing(0, Instant::now());
         single_token.record_token();
