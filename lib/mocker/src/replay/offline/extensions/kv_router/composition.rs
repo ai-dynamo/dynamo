@@ -384,6 +384,7 @@ mod tests {
 
     fn spec(scaling: ProviderSpec) -> ReplaySpec {
         ReplaySpec {
+            encoder: None,
             version: 1,
             topology: ReplayTopology::Aggregated {
                 workers: WorkerPoolSpec::default(),
@@ -428,6 +429,7 @@ mod tests {
             &[WorkerTopology {
                 worker_id: 0,
                 scheduler_ids: vec![0],
+                router_hint: false,
             }],
         )
         .unwrap_err();
@@ -571,6 +573,7 @@ mod tests {
             vec![WorkerTopology {
                 worker_id: 0,
                 scheduler_ids: vec![0],
+                router_hint: false,
             }]
         };
         let mut composition = crate::replay::with_kv_event_lag_ms(25.0, || {

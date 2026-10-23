@@ -230,3 +230,46 @@ def test_legacy_identity_shape_is_rejected():
                 "decode_pick": {"tp": 2, "dp": 2},
             }
         )
+
+
+def test_dataset_sources_roundtrip_without_accessing_runtime_files():
+    source = {"root": "/not-mounted-yet/dataset", "manifest": "prefill.json"}
+    config = PlannerConfig(
+        namespace="external-data",
+        mode="disagg",
+        ais_perf_model={
+            "roles": {"decode": _role_config()},
+            "dataset_profiles": {"prefill": source},
+        },
+    )
+    assert PlannerConfig.model_validate_json(
+        config.model_dump_json()
+    ).ais_perf_model.model_dump(mode="json") == config.ais_perf_model.model_dump(
+        mode="json"
+    )
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        {
+            "dataset_profiles": {
+                "aggregated": {"root": "/data", "manifest": "profile.json"}
+            }
+        },
+        {
+            "dataset_profiles": {
+                "prefill": {"root": "relative", "manifest": "profile.json"}
+            }
+        },
+        {
+            "roles": {"decode": _role_config()},
+            "dataset_profiles": {
+                "decode": {"root": "/data", "manifest": "profile.json"}
+            },
+        },
+    ],
+)
+def test_dataset_source_configuration_rejects_ambiguous_or_invalid_roles(sources):
+    with pytest.raises(ValidationError):
+        AISPerfModelSpec.model_validate(sources)

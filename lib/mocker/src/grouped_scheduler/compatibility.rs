@@ -50,6 +50,8 @@ impl CompatibilityState {
             tokens: request.tokens,
             max_output_tokens: request.max_output_tokens,
             output_token_ids: request.output_token_ids,
+            images: Vec::new(),
+            kv_hint: None,
             session_id: request
                 .replay_context
                 .and_then(|context| context.session_id().map(str::to_owned)),
@@ -116,8 +118,14 @@ impl CompatibilityState {
         }
     }
 
-    pub(super) fn lifecycle_event(&self, event: LifecycleEvent) -> Result<SchedulerLifecycleEvent> {
-        Ok(match event {
+    pub(super) fn lifecycle_event(
+        &self,
+        event: LifecycleEvent,
+    ) -> Result<Option<SchedulerLifecycleEvent>> {
+        Ok(Some(match event {
+            // Live Dynamo publishes token timing itself; these native replay
+            // diagnostics are not handoff-control events.
+            LifecycleEvent::TtftMilestone { .. } => return Ok(None),
             LifecycleEvent::SourceHeld {
                 handoff_id,
                 request_id,
@@ -146,7 +154,7 @@ impl CompatibilityState {
                 request_id,
                 transferable_prompt_tokens,
             },
-        })
+        }))
     }
 }
 
@@ -324,6 +332,23 @@ mod tests {
                 ..Default::default()
             });
             assert_eq!(request.session_id.as_deref(), expected);
+            assert!(request.images.is_empty());
+            assert!(request.kv_hint.is_none());
         }
+    }
+
+    #[test]
+    fn native_timing_milestone_is_not_a_handoff_control_event() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        assert!(
+            state
+                .lifecycle_event(LifecycleEvent::TtftMilestone {
+                    request_id: Uuid::from_u128(1),
+                    stage: aisimulate_core::engine::TtftMilestone::Received,
+                    at_ms: 1.0,
+                })
+                .unwrap()
+                .is_none()
+        );
     }
 }

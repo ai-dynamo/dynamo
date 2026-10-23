@@ -650,6 +650,8 @@ mod tests {
             strict_priority,
             policy_class: None,
             replay_context: None,
+            images: Vec::new(),
+            kv_hints: None,
         }
     }
 

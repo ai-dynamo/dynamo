@@ -16,8 +16,11 @@ import logging
 import math
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
+from aisimulate_core.datasets import prepare_execution_profile
 from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
 from dynamo.common.forward_pass_metrics import (
@@ -26,7 +29,7 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
 from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
@@ -102,6 +105,10 @@ class PlannerEnginePerfModel:
         self._capabilities = capabilities
         self._engine_model: Optional[AISCoreEnginePerfModel] = None
         self._engine_model_key: Optional[tuple[Any, ...]] = None
+        # Keep prepared inputs alive across limit changes and model rebuilds.
+        self._profile_directory: Optional[TemporaryDirectory] = None
+        self._profile_source: Optional[tuple[str, str]] = None
+        self._profile_config: Optional[dict[str, Any]] = None
         # Retained history is canonical; pending marks that the active engine
         # model has not successfully consumed the complete history.
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
@@ -237,6 +244,37 @@ class PlannerEnginePerfModel:
             "max_kv_tokens": max_kv_tokens,
         }
 
+    def _configured_role(self) -> dict[str, Any]:
+        spec = self._config.ais_perf_model
+        if spec is None:
+            raise ValueError("AIS role configuration is absent")
+        source = spec.dataset_profiles.get(self._worker_type)
+        if source is None:
+            return spec.roles[self._worker_type]
+        key = (source.root, source.manifest)
+        if key != self._profile_source:
+            directory = TemporaryDirectory(prefix="dynamo-ais-profile-")
+            try:
+                prepared = prepare_execution_profile(
+                    Path(source.root),
+                    source.manifest,
+                    Path(directory.name) / "prepared",
+                )
+                normalized = AISPerfModelSpec(
+                    roles={self._worker_type: prepared}
+                ).roles[self._worker_type]
+            except BaseException:
+                directory.cleanup()
+                raise
+            if self._profile_directory is not None:
+                self._profile_directory.cleanup()
+            self._profile_directory = directory
+            self._profile_source = key
+            self._profile_config = normalized
+        if self._profile_config is None:
+            raise RuntimeError("AIS dataset profile was not prepared")
+        return self._profile_config
+
     def _build_ais_config(self) -> dict[str, Any]:
         spec = self._config.ais_perf_model
         if spec is None:
@@ -253,7 +291,7 @@ class PlannerEnginePerfModel:
                 )
             )
         else:
-            config = deepcopy(spec.roles[self._worker_type])
+            config = deepcopy(self._configured_role())
         if self._capabilities is not None:
             block_size = self._capabilities.kv_cache_block_size
             if block_size is not None:
@@ -314,7 +352,15 @@ class PlannerEnginePerfModel:
         spec = self._config.ais_perf_model
         if spec is None:
             return None
-        return spec.roles[self._worker_type]["attention_dp"]
+        return self._configured_role()["attention_dp"]
+
+    def _uses_execution_profile(self) -> bool:
+        return self._config.ais_perf_model is not None and bool(
+            self._configured_role()
+            .get("estimator_config", {})
+            .get("op_level", {})
+            .get("execution_profile")
+        )
 
     # ------------------------------------------------------------------
     # Observation and bootstrap
@@ -375,7 +421,7 @@ class PlannerEnginePerfModel:
         spec = self._config.ais_perf_model
         if spec is None:
             return default
-        controls = spec.roles[self._worker_type].get("estimator_config", {})
+        controls = self._configured_role().get("estimator_config", {})
         return max(
             controls.get(estimator, {})
             .get("sampling", {})
@@ -495,17 +541,28 @@ class PlannerEnginePerfModel:
             return None
 
         scale = 1.0 - _clamp_kv_hit_rate(kv_hit_rate)
-        fpms = [
-            self._synthetic_prefill_fpm(
-                fpm,
-                queue_scale=queue_scale,
-                decode_scale=decode_scale,
-                include_queued_decode=include_queued_decode,
-                prefill_scale=scale,
-                add_next_request=add_next_request,
-            )
-            for fpm in metrics_by_rank
-        ]
+        if self._uses_execution_profile():
+            # Preserve measured geometry; synthetic queue redistribution and
+            # prefix discounts cannot qualify an exact measured cell.
+            if (
+                queue_scale != 1.0
+                or scale != 1.0
+                or (add_next_request and self.avg_isl > 0)
+            ):
+                return None
+            fpms = metrics_by_rank
+        else:
+            fpms = [
+                self._synthetic_prefill_fpm(
+                    fpm,
+                    queue_scale=queue_scale,
+                    decode_scale=decode_scale,
+                    include_queued_decode=include_queued_decode,
+                    prefill_scale=scale,
+                    add_next_request=add_next_request,
+                )
+                for fpm in metrics_by_rank
+            ]
         try:
             result = self._engine_model.get_queued_prefill_time(fpms)
         except _ENGINE_MODEL_EXCEPTIONS as e:
@@ -530,16 +587,41 @@ class PlannerEnginePerfModel:
         if self._engine_model is None:
             return None
 
-        fpms = [
-            self._synthetic_decode_fpm(
-                fpm,
-                decode_scale=decode_scale,
-                include_queued_decode=include_queued_decode,
-                include_queued_prefill_as_kv=include_queued_prefill_as_kv,
-                add_next_request=add_next_request,
-            )
-            for fpm in metrics_by_rank
-        ]
+        if self._uses_execution_profile():
+            if (
+                decode_scale != 1.0
+                or (add_next_request and self.avg_decode_length > 0)
+                or any(
+                    (
+                        include_queued_decode
+                        and (
+                            fpm.queued_requests.num_decode_requests
+                            or fpm.queued_requests.sum_decode_kv_tokens
+                        )
+                    )
+                    or (
+                        include_queued_prefill_as_kv
+                        and (
+                            fpm.queued_requests.num_prefill_requests
+                            or fpm.queued_requests.sum_prefill_tokens
+                        )
+                    )
+                    for fpm in metrics_by_rank
+                )
+            ):
+                return None
+            fpms = metrics_by_rank
+        else:
+            fpms = [
+                self._synthetic_decode_fpm(
+                    fpm,
+                    decode_scale=decode_scale,
+                    include_queued_decode=include_queued_decode,
+                    include_queued_prefill_as_kv=include_queued_prefill_as_kv,
+                    add_next_request=add_next_request,
+                )
+                for fpm in metrics_by_rank
+            ]
         try:
             result = self._engine_model.get_scheduled_decode_itl(fpms)
         except _ENGINE_MODEL_EXCEPTIONS as e:

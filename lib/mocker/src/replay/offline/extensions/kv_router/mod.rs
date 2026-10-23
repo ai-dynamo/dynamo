@@ -511,6 +511,7 @@ impl KvRouterPlacement {
     fn placement(&self, admission: WorkerAdmission) -> Placement {
         Placement {
             request_id: admission.uuid,
+            kv_hints: None,
             scheduler_id: admission.worker_idx,
             placement_replica_id: None,
             reported_overlap_tokens: admission.overlap_blocks as usize
@@ -1420,6 +1421,8 @@ mod tests {
             strict_priority,
             policy_class: None,
             replay_context: None,
+            images: Vec::new(),
+            kv_hints: None,
         }
     }
 
