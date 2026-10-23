@@ -93,13 +93,14 @@ allow_exact_paths:
 # Explicit third-party exceptions: LOGGED in the report but do NOT fail the build.
 # Every entry must carry a reason and an owner so the waiver is auditable.
 exceptions:
-  - glob: "**/nvidia/dali/.libs/*"
+  - glob: "**/nvidia/dali/.libs/libav*"
     reason: >-
       NVIDIA DALI (nvidia-dali-cuda130) vendors its own ffmpeg stack (libav* plus
       the libsw*/libpostproc companions) under .libs/ for its video reader. It is
       owned and handled by its own component team and tracked separately rather
-      than gated here. The glob covers the whole vendored dir so the libsw*
-      companions are waived too, not just libavcodec.
+      than gated here. The waiver is scoped to the ffmpeg library families, so
+      anything else DALI vendors that hits a deny glob (libx264, libx265,
+      fdk-aac) still fails the build.
 
       Resolved by a version bump, not by narrowing. Measured with
       container/compliance/enumerate_bundled_decoders.py against the shipped
@@ -144,6 +145,16 @@ exceptions:
       nvidia-dali-cuda130 2.3.0 wheel that nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc1
       carries: 440 decoders, h264, hevc, aac, aac_fixed and aac_latm absent, vp8,
       vp9, mjpeg and av1 present.
+    owner: DALI
+  - glob: "**/nvidia/dali/.libs/libsw*"
+    reason: >-
+      Companion to the DALI libav* waiver above: libswscale/libswresample from
+      the same vendored ffmpeg build.
+    owner: DALI
+  - glob: "**/nvidia/dali/.libs/libpostproc*"
+    reason: >-
+      Companion to the DALI libav* waiver above: libpostproc from the same
+      vendored ffmpeg build.
     owner: DALI
   # PyNvVideoCodec (added for NVDEC hardware video decode) vendors libavutil and
   # libavformat under its package dir to demux input containers before handing the
