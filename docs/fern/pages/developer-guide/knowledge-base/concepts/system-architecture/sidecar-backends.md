@@ -59,7 +59,7 @@ The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
 `sglang`, `trtllm`, and `lpx` onto those executables. It is a convenience for ad-hoc
 `docker run`; the deployment manifests override it with `command`. The inference
 engine remains in a separate GPU container, so the sidecar image does not
-include vLLM, SGLang, TensorRT-LLM, CUDA, or engine-specific Python
+include vLLM, SGLang, TensorRT-LLM, LPX engines, CUDA, or engine-specific Python
 dependencies. The image runs as the non-root `dynamo` user with numeric user ID
 `1000` and declares port `9090` for Dynamo system endpoints, so Kubernetes can
 enforce `runAsNonRoot`.
@@ -86,7 +86,7 @@ The engine and sidecar share one worker pod. The engine is the `main`
 container; the sidecar is a
 [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/):
 an init container named `runtime` with `restartPolicy: Always`, which requires
-Kubernetes 1.29 or later. The two connect over loopback.
+Kubernetes 1.29 or later. The two connect over loopback or a Unix socket.
 
 ```yaml
 podTemplate:
@@ -105,9 +105,11 @@ podTemplate:
 Kubernetes starts the sidecar before the engine and keeps it running for the
 life of the pod. Declaring the `runtime` init container enables sidecar mode in
 the Dynamo operator, which gives the sidecar `/live` and `/health` probes on
-port `9090`. These probes do not track engine loading, so keep the engine's own
-probes on `main`. Sidecar mode supports worker, prefill, and decode components;
-multinode deployments are not yet supported.
+port `9090`; in host-network LPX Agent Pods the sidecar keeps only the probes its
+template declares. These probes do not track engine loading, so keep the engine's own
+probes on `main`. Sidecar mode supports worker, prefill, and decode components,
+and LPX components through their role templates; multinode deployments are not
+yet supported.
 
 ## Topologies
 

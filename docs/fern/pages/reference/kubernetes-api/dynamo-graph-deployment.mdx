@@ -121,7 +121,7 @@ Set an explicit minimum at component scope. Dynamo resolves the target when omit
 |---|---|---|
 | Standalone single-node component | `PodCliqueTemplateSpec` | `spec.minAvailable` |
 | Multinode, inter-pod GPU memory service, or forced scaling group | `PodCliqueScalingGroupConfig` | `minAvailable` |
-| LPX component with a conductor role or an agent runtime sidecar | `PodCliqueScalingGroupConfig` | `minAvailable` |
+| LPX component with a conductor role or an agent `runtime` init container | `PodCliqueScalingGroupConfig` | `minAvailable` |
 
 A standalone prefill component can specify:
 
