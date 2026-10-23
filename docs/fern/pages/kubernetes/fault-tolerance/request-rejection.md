@@ -83,17 +83,22 @@ for the complete flag, environment-variable, and validation reference.
 <Step title="Adjust thresholds at runtime">
 
 Optional. Use the Frontend admin API to change thresholds for a discovered model without redeploying.
-The API is off by default. Set `DYN_ENABLE_FRONTEND_ADMIN_API` to a truthy value on the frontend to
-register both `busy_threshold` routes; otherwise they return 404.
+The API is available by default on a separate admin port, bound to `127.0.0.1:8002` inside each
+Frontend pod; the inference port does not serve it. Updates apply to one Frontend process, so
+port-forward to each Frontend pod you want to change. Set `DYN_DISABLE_FRONTEND_ADMIN_API` to a
+truthy value to turn the admin API off.
 
 ```bash
-kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
+FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} \
+  -l nvidia.com/dynamo-graph-deployment-name=<deployment-name>,nvidia.com/dynamo-component-type=frontend \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward pod/${FRONTEND_POD} 8000:8000 8002:8002 -n ${NAMESPACE}
 ```
 
 Set one or more thresholds:
 
 ```bash
-curl -X POST http://localhost:8000/busy_threshold \
+curl -X POST http://localhost:8002/busy_threshold \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
@@ -105,7 +110,7 @@ curl -X POST http://localhost:8000/busy_threshold \
 Read the stored thresholds:
 
 ```bash
-curl http://localhost:8000/busy_threshold
+curl http://localhost:8002/busy_threshold
 ```
 
 A numeric value enables only its corresponding check. The router applies the new configuration when
@@ -120,7 +125,7 @@ decision immediately. This endpoint does not enable `--router-mode kv` or
 Inspect the configured thresholds and worker-load metrics:
 
 ```bash
-curl -s http://localhost:8000/busy_threshold
+curl -s http://localhost:8002/busy_threshold
 curl -s http://localhost:8000/metrics \
   | grep -E 'dynamo_frontend_worker_active_(decode_blocks|prefill_tokens)'
 ```

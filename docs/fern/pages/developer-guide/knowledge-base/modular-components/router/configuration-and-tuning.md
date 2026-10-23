@@ -587,7 +587,7 @@ Use `--router-queue-policy wspt` when your workload has a mix of short and long 
 ## Runtime Policy Updates
 
 **Experimental.** `/router_policy` groups worker-selection parameters and model-level busy
-thresholds on the frontend HTTP port (8000 by default).
+thresholds on the frontend admin port (`127.0.0.1:8002` by default), not the inference port.
 
 | Resource | Methods | Scope |
 | --- | --- | --- |
@@ -611,7 +611,7 @@ Routers that have stopped or do not respond within five seconds are omitted; hea
 remain available in the listing.
 
 ```bash
-curl --get http://localhost:8000/router_policy --data-urlencode model=qwen
+curl --get http://localhost:8002/router_policy --data-urlencode model=qwen
 ```
 
 Use a returned `router_id` and revision in `PATCH /router_policy`:
@@ -671,7 +671,7 @@ resets use these effective values; host-owned cache accounting settings are unch
 one or more threshold fields with `POST /router_policy/busy_threshold` to update them:
 
 ```bash
-curl -X POST http://localhost:8000/router_policy/busy_threshold \
+curl -X POST http://localhost:8002/router_policy/busy_threshold \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen","active_decode_blocks_threshold":0.85,"active_prefill_tokens_threshold":1000,"active_prefill_tokens_threshold_frac":0.8}'
 ```
@@ -694,10 +694,13 @@ reset. Updating thresholds and selection parameters is not one atomic transactio
 
 ### Scope and Access
 
-The frontend admin API is off by default. `DYN_ENABLE_FRONTEND_ADMIN_API=1` enables `/router_policy`,
-its busy-threshold subresource, and the legacy `/busy_threshold` routes on the HTTP port, with no
-separate admin authentication. Restrict access to these management
-routes at the deployment's gateway or network boundary.
+The frontend admin API is enabled by default on its own listener, bound to `127.0.0.1:8002`,
+with no admin authentication. The inference port does not serve these routes. Set
+`DYN_FRONTEND_ADMIN_PORT` to change the port; when it is set and the port cannot be bound, the
+frontend fails to start. On the default port, a bind failure only logs an error and the admin
+routes are unavailable. `DYN_FRONTEND_ADMIN_HOST` widens the bind address; if you widen it,
+restrict the admin port at the network boundary. `DYN_DISABLE_FRONTEND_ADMIN_API=1` disables
+`/router_policy`, its busy-threshold subresource, and the legacy `/busy_threshold` routes.
 
 Updates are process-local and not persisted. A rebuilt router receives a new ID and starts
 from its configured startup values. A controller must address each frontend replica directly,
