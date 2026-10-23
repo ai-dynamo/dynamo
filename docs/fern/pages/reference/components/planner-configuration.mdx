@@ -597,7 +597,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     Delay after a window ends before its sweep launches. Requests that complete after the launch time are excluded from the window. Must be 0 or greater.
   </ParamField>
   <ParamField path="history_seconds" type="number" default="null">
-    Trace history before each window that warms the load predictors of candidate planners and of a newly selected predictor. `null` resolves to the minimum the predictors need: `throughput_adjustment_interval_seconds` × max(`prophet_window_size`, `kalman_min_points`) over the current predictor and the load-predictor candidates, or 0 without throughput scaling. An explicit value must be 0 or greater, and a value smaller than that minimum is rejected.
+    Trace history before each window that warms the load predictors of candidate planners and of a newly selected predictor. With throughput scaling, replay reads this history from the replayed trace and, before its first request, from `load_predictor_warmup_trace`, which must then be a Dynamo request trace that ends at or before the first replayed request; without throughput scaling no history is read. `null` resolves to the minimum the predictors need: `throughput_adjustment_interval_seconds` × max(`prophet_window_size`, `kalman_min_points`) over the current predictor and the load-predictor candidates, or 0 without throughput scaling. An explicit value must be 0 or greater, and a value smaller than that minimum is rejected.
   </ParamField>
   <ParamField path="decision_latency_seconds" type="number | measured" default="0.0">
     Delay from sweep launch to decision. A number is a fixed delay, 0 or greater. `measured` uses the sweep's own wall-clock time, capped at `timeout_seconds`, times `decision_latency_scale`; it depends on the replay host, so it is not reproducible across hosts or runs. The decision lands no earlier than one Planner tick after launch. See [Decision Timing](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#decision-timing) for the mechanics and [Decision Latency](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#decision-latency) for choosing a value.
@@ -615,7 +615,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     Scoring ITL SLA. Must be greater than 0. `null` uses the Planner's `itl_ms`; in `aisimulate predict`, `null` takes `evaluation.sla.itl_ms` when it is set (see [Requirements](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#requirements)).
   </ParamField>
   <ParamField path="min_improvement_percentage" type="number" default="3.0">
-    Apply the best candidate only if its score exceeds the current point's score on the same window by more than this percentage. Must be in [0, 100). To choose a value, see [Measure the Gain](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#measure-the-gain).
+    Apply the best candidate only if its score exceeds the current point's score on the same window by more than this percentage. Must be in [0, 100). Candidate replays share one random seed, so a candidate that changes no routing or scaling decision scores exactly the current point and is kept. To choose a value, see [Measure the Gain](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#measure-the-gain).
   </ParamField>
   <ParamField path="max_candidates" type="integer" default="512">
     Upper bound on the expanded grid size (the product of all domain sizes), on the values of each knob, and separately on the number of load-predictor candidates. Must be at least 1. A grid that exceeds it is rejected with the size of each dimension. For the candidate set a sweep replays, see [Candidates and the Sweep](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#candidates-and-the-sweep).
@@ -632,23 +632,6 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
   <ParamField path="planner" type="object | string" default="null">
     Planner search domain, written like the `planner` section of `aisimulate recommend --stack dynamo` and limited to what a running Planner can change (see [Search domains](#search-domains)). `default` searches the parts of the AISimulate default domain that apply to this Planner. `null` (or no `planner` field) keeps every Planner field unchanged; an empty map `{}` is rejected. A written knob or group requires load or throughput scaling, and the scaling mode that uses it: for example, `load_sensitivity` needs load scaling, and `load_predictor` needs `optimization_target: sla` with throughput scaling. A searched field must have a value in the Planner config. `ttft_ms` and `itl_ms` are never searched.
   </ParamField>
-  <ParamField path="live" type="RetuneLiveConfig">
-    Inputs reserved for a live Planner, which rejects `retune` in this release. Replay ignores this section, apart from a warning when `live.engine` is set and differs from the replayed engine. When `live.engine` is set, it must set `prefill_engine_args` and `decode_engine_args` for `mode: disagg` and neither for `mode: agg`.
-  </ParamField>
-  <Indent>
-    <ParamField path="trace_paths" type="[]string" default="[]">
-      Frontend request-trace segment prefixes, globs, or directories to read for each window. Entries must be non-empty.
-    </ParamField>
-    <ParamField path="engine" type="RetuneEngineSpec" default="null">
-      Engine snapshot of the deployment that candidate replays run against. See [RetuneEngineSpec](#retuneenginespec).
-    </ParamField>
-    <ParamField path="frontend_urls" type="[]string" default="[]">
-      Frontend base URLs for router updates, as `http` or `https` URLs, for example `http://10.0.0.5:8000`.
-    </ParamField>
-    <ParamField path="reconcile_interval_seconds" type="number" default="30.0">
-      Cadence for reconciling frontend router parameters. Must be greater than 0.
-    </ParamField>
-  </Indent>
 </Indent>
 
 ### Search domains
@@ -660,6 +643,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
   - Each knob may expand to at most `max_candidates` values.
   - A bare list (`[0.5, 1.0]`) is rejected; write `{choices: [0.5, 1.0]}`.
   - In YAML, write floats with a decimal point and a signed exponent (`1.0e-3`): YAML 1.1 reads `1e-3` as a string, which the schema rejects.
+- **Infeasible points.** When the Planner starts, a Planner grid point that fails `PlannerConfig` validation or does not fit the deployment, such as a `min_workers` above what `max_num_gpus` allows, is dropped, and one warning reports how many points were dropped. Startup fails only when some value of a searched Planner knob fits in no grid point, or when a load-predictor candidate is invalid. A decision that would apply Planner fields that no longer validate or fit, for example after a budget change, is `failed`.
 - **Omitted knobs.** A knob that has an AISimulate default domain searches it when omitted, as in `aisimulate recommend`. The retune-only knobs in the tables below keep their current value unless written. Knobs fixed at startup always keep their running value.
 - **Names.** Write the public names below. A live name, such as `router_temperature`, `min_endpoint`, or `max_gpu_budget`, is rejected with the public name to use. Decisions and `report.planner.retune_events` record the live names: the PATCH `/router_policy` parameter names and the `PlannerConfig` field names.
 
@@ -673,9 +657,11 @@ Router knobs:
 | `prefill_load_scale` | `prefill_load_scale` | `{0, 0.25, 0.5, 1, 2, 4, 8, 16, 32}` | Domain |
 | `temperature` | `router_temperature` | `{0, 0.2, 0.5, 1}` | Domain |
 | `overlap_score_credit_decay`, `decode_active_request_weight` (retune only) | Same | Startup value | Domain, non-negative |
-| `host_cache_hit_weight`, `disk_cache_hit_weight`, `shared_cache_multiplier` (retune only) | Same | Startup value | Domain, from 0 to 1 |
+| `host_cache_hit_weight`, `disk_cache_hit_weight` (retune only) | Same | Startup value | Domain, from 0 to 1; see the note below |
 
 `router: default` is 3 × 9 × 4 = 108 points.
+
+`shared_cache_multiplier` is not retunable and is rejected: replay reports no shared cache hits, so every value would score the same. `host_cache_hit_weight` and `disk_cache_hit_weight` are searched with a fidelity gap. A candidate replay starts its router with the candidate's weights, which change both the policy's scores and the replay router's own accounting of host and disk cache hits. An applied change updates only the policy's scores and leaves that accounting at its startup value, so the replay after the decision can differ from the candidate's replay.
 
 Planner knobs:
 
@@ -857,41 +843,6 @@ One in-process plugin under `plugin_registration.in_process_plugins`. Rejects un
 </ParamField>
 <ParamField path="kwargs" type="object" default="{}">
   Keyword arguments passed to the plugin class constructor.
-</ParamField>
-
-### RetuneEngineSpec
-
-Engine snapshot that every retune candidate replay runs against, under `retune.live.engine`. Each field is a `dynamo.replay.run_trace_replay` keyword argument; replay derives the same snapshot from its own arguments. Rejects unknown fields.
-
-<ParamField path="extra_engine_args" type="object" default="null">
-  Aggregated engine arguments, for `mode: agg`.
-</ParamField>
-<ParamField path="prefill_engine_args" type="object" default="null">
-  Prefill engine arguments, for `mode: disagg`. Set together with `decode_engine_args`; cannot be combined with `extra_engine_args`.
-</ParamField>
-<ParamField path="decode_engine_args" type="object" default="null">
-  Decode engine arguments, for `mode: disagg`. Set together with `prefill_engine_args`.
-</ParamField>
-<ParamField path="router_mode" type="string" default="kv_router">
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round_robin</Badge> <Badge intent="note" minimal>kv_router</Badge></span>
-</ParamField>
-<ParamField path="router_config" type="object" default="null">
-  Startup `KvRouterConfig` in its JSON form. Every candidate replay merges its router parameters into this snapshot.
-</ParamField>
-<ParamField path="ais_perf_config" type="object" default="null">
-  AISimulate performance configuration of the deployed engine, if any.
-</ParamField>
-<ParamField path="performance_model_metadata" type="object" default="null">
-  Performance-model metadata passed to each candidate replay.
-</ParamField>
-<ParamField path="model_name" type="string" default="null">
-  Served model name. Must not be empty when set.
-</ParamField>
-<ParamField path="kv_event_lag_ms" type="number" default="null">
-  Delay of KV cache events seen by the replay router's indexer, in milliseconds. Must be 0 or greater.
-</ParamField>
-<ParamField path="benchmark_granularity" type="integer" default="8">
-  Granularity of the performance-model bootstrap of inner Planners. Must be greater than 0.
 </ParamField>
 
 ## Environment variables

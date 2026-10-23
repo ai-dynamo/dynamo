@@ -342,7 +342,7 @@ point on the same window by more than `min_improvement_percentage`, the Planner 
 Retune searches parameters a running deployment can change without a restart:
 
 - **Router parameters** of the KV router, in `retune.router`: `overlap_score_credit`,
-  `prefill_load_scale`, `temperature`, and five more `/router_policy` parameters.
+  `prefill_load_scale`, `temperature`, and four more `/router_policy` parameters.
 - **Planner runtime fields**, in `retune.planner`: load-scaling sensitivity, the load predictor,
   minimum worker counts, GPU budgets, `max_throughput_scaling_replicas`, and the thresholds of
   `optimization_target: load`.
@@ -359,8 +359,10 @@ Retune supports two scenarios:
 
 A sweep takes time, so the decision lands at least one Planner tick after the sweep launches, and
 later when `decision_latency_seconds` models the sweep's duration. The old parameters serve traffic
-until then. Each candidate is replayed once, so a decision is only as reliable as the margin
-`min_improvement_percentage` leaves over replay noise; see
+until then. Each candidate is replayed once, and all candidates of a window share one random seed,
+so a candidate that changes no routing or scaling decision ties the current point and is kept. A
+candidate that changes decisions is judged on one replay of one window, so
+`min_improvement_percentage` sets the margin it must clear; see
 [Measure the Gain](aisimulate-planner-replay.mdx#measure-the-gain).
 
 This minimal fixed-replica configuration searches the 108-point default router domain every six
