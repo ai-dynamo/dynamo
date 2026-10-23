@@ -21,13 +21,6 @@ members = [
     "examples/router/custom-policy-example/epp",
     "examples/router/custom-policy-example/simple-stacked-score-pick",
     "lib/memory",
-    "lib/kvbm-common",
-    "lib/kvbm-config",
-    "lib/kvbm-engine",
-    "lib/kvbm-kernels",
-    "lib/kvbm-consolidator",
-    "lib/kvbm-logical",
-    "lib/kvbm-physical",
     "lib/bench",
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
@@ -59,14 +52,14 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.13.0-dev.202610040000000065" }
+aisimulate-core = { version = "=0.13.0-dev.202610160000000073" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
-dynamo-llm = { path = "lib/llm", version = "1.6.0" }
+dynamo-llm = { path = "lib/llm", version = "1.6.0", default-features = false }
 dynamo-rl = { path = "lib/rl", version = "1.6.0" }
-dynamo-tokenizers = { version = "=2.0.0" }
-dynamo-renderer = { version = "=6.0.0" }
+dynamo-tokenizers = { version = "=3.1.1" }
+dynamo-renderer = { version = "=8.0.3" }
 dynamo-tokens = { path = "lib/tokens", version = "1.6.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.6.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.6.0" }
@@ -74,25 +67,18 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.6.0" }
 dynamo-memory = { path = "lib/memory", version = "1.6.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.6.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.6.0" }
-dynamo-protocols = { version = "=6.1.0" }
-dynamo-parsers = { version = "9.0.0" }
+dynamo-protocols = { version = "=8.2.0" }
+dynamo-parsers = { version = "=10.0.7" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "0.5.3" }
+# Native count-before-string early streaming still needs a frontend-crates fix.
+dynamo-parsers-v2 = { version = "=0.7.24" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.6.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.6.0" }
 
 
-# kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.6.0" }
-kvbm-config = { path = "lib/kvbm-config", version = "1.6.0" }
-kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.6.0" }
-kvbm-engine = { path = "lib/kvbm-engine", version = "1.6.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.6.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.6.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.6.0" }
 
 # velo
 velo = { version = "0.12.0" }
@@ -125,8 +111,8 @@ fs4 = { version = "0.13.1" }
 hf-hub = { version = "0.4.2", default-features = false }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.6.0" }
-modelexpress-common = { version = "0.6.0" }
+modelexpress-client = { version = "0.7.0" }
+modelexpress-common = { version = "0.7.0" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }
@@ -152,12 +138,13 @@ serde_json = { version = "1" }
 serde_path_to_error = "0.1"
 smallvec = "1"
 strum = { version = "0.27", features = ["derive"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
-tokio = { version = "=1.52.4", features = ["full"] }
+tokio = { version = "=1.54.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
-tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
+tokio-util = { version = "0.7.19", features = ["codec", "net", "rt", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 axum = { version = "=0.8.4", features = ["macros", "ws"] }
@@ -202,7 +189,7 @@ tonic-build = { version = "0.13.1" }
 prost-types-v14 = { package = "prost-types", version = "0.14.3" }
 tonic-v14 = { package = "tonic", version = "0.14.6" }
 tonic-health-v14 = { package = "tonic-health", version = "0.14.6" }
-vllm-proto = { version = "=0.3.0" }
+vllm-proto = { version = "=0.6.0" }
 kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs", "runtime"] }
 k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 rcgen = { version = "0.13" }

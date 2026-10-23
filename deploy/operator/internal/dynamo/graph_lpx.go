@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -26,16 +28,17 @@ import (
 
 // RenderLPXPodCliqueSet constructs the shared LPX Grove envelope without workload
 // templates. Its labels include the resolved scheduler queue.
-// Pointer inputs must be non-nil and are not mutated.
+// existingPCS may be nil on creation; other pointer inputs must be non-nil and are not mutated.
 func RenderLPXPodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
 	pcsName string,
+	existingPCS *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	// Reuse the ordinary Grove defaults once for the complete LPX graph.
-	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
+	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig, existingPCS)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +90,13 @@ func RenderLPXWorkloadTemplates(
 	rendered, err := dynamolpx.RenderNodeLocal(workload, plan, *input)
 	if err != nil {
 		return nil, err
+	}
+
+	// The conductor component owns the complete workload's disruption budget.
+	if component.ProviderOverride != nil {
+		if budget, exists := provideroverride.GroveMaxUnavailable(component.ProviderOverride.Value.Raw); exists {
+			rendered.ScalingGroup.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(budget)}
+		}
 	}
 
 	// Scope the rendered resources to the graph's Kubernetes namespace.
@@ -255,7 +265,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 	}
 	// Pass runtime inputs; deployment identity is stamped only on final resources.
 	input := &dynamolpx.RenderInput{
-		MinAvailable: p.component.MinAvailable,
+		MinAvailable: new(provideroverride.EffectiveGroveMinAvailable(p.component)),
 		Stages:       make(map[string]corev1.PodTemplateSpec),
 	}
 
@@ -284,7 +294,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		}
 
 		// The serving role owns its startup independently of the Agent template.
-		if workload.Pipeline() != dynamolpx.PipelineLPX {
+		if workload.Pipeline() != dynamolpx.PipelineHybrid {
 			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 			input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 				p.discoveryContext, lpuDefaults)

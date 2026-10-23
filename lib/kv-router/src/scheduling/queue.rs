@@ -32,9 +32,12 @@ use super::types::{
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
+use crate::plugins::worker_selection::{
+    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+};
 use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
-    WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike,
+    WorkerId, WorkerSelectionResult, WorkerWithDpRank,
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
@@ -78,6 +81,7 @@ struct QueuedRequest {
 
 struct SelectedWorkerForRequest {
     selection: WorkerSelectionResult,
+    selection_trace: Option<SelectionTrace>,
     selected_worker_tiers: SelectedWorkerTierSnapshot,
     selected_worker_load: AdvisoryWorkerLoad,
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
@@ -141,6 +145,10 @@ fn target_cached_prefix_blocks(request: &SchedulingRequest, target: WorkerWithDp
 
 #[allow(clippy::large_enum_variant)]
 enum AdmissionCommand {
+    PolicyConfig {
+        update: Option<RuntimePolicyUpdate>,
+        response: oneshot::Sender<Result<RuntimePolicyConfig, RuntimePolicyError>>,
+    },
     Enqueue {
         request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
@@ -157,6 +165,41 @@ enum AdmissionCommand {
         ack_tx: oneshot::Sender<()>,
     },
     Cleanup,
+}
+
+/// Control handle for the policy owned by one scheduler actor. Updates do not replace the
+/// scheduler, its queued requests, or active bookings. A stopped actor rejects further operations.
+pub struct RuntimePolicyControl {
+    tx: mpsc::WeakSender<AdmissionCommand>,
+}
+
+impl RuntimePolicyControl {
+    pub async fn get(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.request(None).await
+    }
+
+    pub async fn update(
+        &self,
+        update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        self.request(Some(update)).await
+    }
+
+    async fn request(
+        &self,
+        update: Option<RuntimePolicyUpdate>,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        let (response, receiver) = oneshot::channel();
+        let sender = self.tx.upgrade().ok_or(RuntimePolicyError::Unavailable)?;
+        sender
+            .send(AdmissionCommand::PolicyConfig { update, response })
+            .await
+            .map_err(|_| RuntimePolicyError::Unavailable)?;
+        drop(sender);
+        receiver
+            .await
+            .map_err(|_| RuntimePolicyError::Unavailable)?
+    }
 }
 
 #[doc(hidden)]
@@ -491,6 +534,8 @@ struct SchedulerQueueActor<
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
+    /// Per-candidate cost capture for admitted selections, installed once by the host.
+    selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -504,6 +549,7 @@ pub struct SchedulerQueue<
     RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
     admission_tx: mpsc::Sender<AdmissionCommand>,
+    runtime_policy: Arc<RuntimePolicyControl>,
     cleanup: Arc<AdmissionCleanup>,
     capacity_updates: Option<Arc<CapacityUpdates>>,
     direct_release: DirectBookingRelease,
@@ -520,6 +566,8 @@ pub struct SchedulerQueue<
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
+    /// Per-candidate cost capture for admitted selections, installed once by the host.
+    selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
     #[allow(clippy::type_complexity)]
     // Covariant type markers, without ownership or auto-trait bounds.
     _marker: PhantomData<fn() -> (P, C, Sel, RF)>,
@@ -617,8 +665,12 @@ impl<
                 .collect(),
         );
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
+        let runtime_policy = Arc::new(RuntimePolicyControl {
+            tx: admission_tx.downgrade(),
+        });
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
+        let selection_trace = Arc::new(OnceLock::new());
         let start_time = Instant::now();
         let capacity_updates = queueing_enabled.then(|| Arc::new(CapacityUpdates::new()));
         let direct_release: DirectBookingRelease = {
@@ -659,10 +711,12 @@ impl<
             overloaded_worker_provider,
             available_worker_provider: available_worker_provider.clone(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
+            selection_trace: Arc::clone(&selection_trace),
         };
         tokio::spawn(actor.run(admission_rx));
         Self {
             admission_tx,
+            runtime_policy,
             cleanup,
             capacity_updates,
             direct_release,
@@ -675,6 +729,7 @@ impl<
             available_worker_provider,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
+            selection_trace,
             _marker: PhantomData,
         }
     }
@@ -697,6 +752,13 @@ impl<
         self.non_max_overlap_selection_observer
             .set(observer)
             .is_ok()
+    }
+
+    /// Install per-candidate cost capture for admitted selections.
+    ///
+    /// Returns `false` when a spec is already installed.
+    pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
+        self.selection_trace.set(spec).is_ok()
     }
 
     /// Enqueue a new request through the router-owned policy queue.
@@ -823,7 +885,8 @@ impl<
             .best_cached_tokens();
         let mut classification =
             ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
-                .with_pinned_worker(request.pinned_worker);
+                .with_pinned_worker(request.pinned_worker)
+                .with_sequence_hashes(request.token_seq.as_deref());
         if let Some(request_id) = request.mode.request_id() {
             classification = classification.with_request_id(request_id);
         }
@@ -1005,15 +1068,28 @@ impl<
             return;
         }
 
+        let _ = self.admission_barrier().await;
+    }
+
+    /// Process previously submitted admission commands and recheck ready work.
+    ///
+    /// Unlike [`Self::update`], this waits for the actor even when queueing is
+    /// disabled. It does not wait for capacity-blocked requests to be admitted,
+    /// or submit scheduling futures that the caller has not polled yet.
+    /// Returns an error if the actor stops before acknowledging the barrier.
+    pub async fn admission_barrier(&self) -> Result<(), KvSchedulerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
-        if self
-            .admission_tx
+        self.admission_tx
             .send(AdmissionCommand::Update { ack_tx })
             .await
-            .is_ok()
-        {
-            let _ = ack_rx.await;
-        }
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        ack_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)
+    }
+
+    pub fn policy_control(&self) -> &Arc<RuntimePolicyControl> {
+        &self.runtime_policy
     }
 
     /// Notify pending admission after the authoritative mutation is complete.
@@ -1143,6 +1219,19 @@ impl<
                         self.handle_update().await;
                     }
                     let _ = resp_tx.send(result);
+                }
+                AdmissionCommand::PolicyConfig { update, response } => {
+                    // A cancelled or timed-out caller must not leave a queued mutation behind.
+                    if !response.is_closed() {
+                        let result = match update {
+                            Some(update) => self.selector.update_runtime_config(update),
+                            None => self.selector.runtime_config(),
+                        };
+                        let _ = response.send(result);
+                    }
+                    if drain_cleanup && self.drain_cleanup() {
+                        self.handle_update().await;
+                    }
                 }
                 AdmissionCommand::Update { ack_tx } => {
                     self.handle_update().await;
@@ -1611,9 +1700,12 @@ impl<
         result
     }
 
+    /// `admitted` selections may carry the installed selection trace; advisory
+    /// probes never do, so they do not pay for capture.
     fn select_worker_for_request(
         &self,
         request: &SchedulingRequest,
+        admitted: bool,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
         let available_worker_ids = self
             .available_worker_provider
@@ -1635,14 +1727,22 @@ impl<
             {
                 eligibility = eligibility.with_affinity_target(target);
             }
+            let trace = if admitted {
+                self.selection_trace.get().copied()
+            } else {
+                None
+            };
             self.selector
-                .select_worker(WorkerSelectionInput::configured(
-                    &workers,
-                    request,
-                    eligibility,
-                    self.block_size,
-                ))
-                .map(|selection| {
+                .select_worker_traced(
+                    WorkerSelectionInput::configured(
+                        &workers,
+                        request,
+                        eligibility,
+                        self.block_size,
+                    ),
+                    trace,
+                )
+                .map(|(selection, selection_trace)| {
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()
                     {
@@ -1676,6 +1776,7 @@ impl<
                     };
                     SelectedWorkerForRequest {
                         selection,
+                        selection_trace,
                         selected_worker_tiers,
                         selected_worker_load,
                         non_max_overlap_selection,
@@ -1690,7 +1791,7 @@ impl<
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         self.with_projected_loads(request, decay_now, |actor, request| {
-            let selected = actor.select_worker_for_request(request)?;
+            let selected = actor.select_worker_for_request(request, false)?;
             let target_cached_prefix_blocks =
                 target_cached_prefix_blocks(request, selected.selection.worker);
 
@@ -1706,6 +1807,7 @@ impl<
                     target_cached_prefix_blocks,
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
+                    selection_trace: selected.selection_trace,
                 },
             })
         })
@@ -1731,7 +1833,7 @@ impl<
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
     ) -> bool {
-        let selected = match self.select_worker_for_request(request) {
+        let selected = match self.select_worker_for_request(request, true) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -1752,6 +1854,7 @@ impl<
             target_cached_prefix_blocks,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
+            selection_trace: selected.selection_trace,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -2111,7 +2214,13 @@ mod tests {
             self.response_rx.lock().unwrap().take();
         }
 
-        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+        fn observe_load(
+            &self,
+            _: &WorkerWithDpRank,
+            _: &str,
+            _: crate::sequences::LocalWorkerLoad,
+        ) {
+        }
     }
 
     #[derive(Default)]
@@ -2646,6 +2755,125 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test]
+    async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
+        use crate::plugins::request_classifier::{ClassifyFuture, RequestClassifier};
+
+        struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
+        impl RequestClassifier for InspectHashes {
+            fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+                let expected = self.0.clone();
+                let pin = self.1;
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    assert_eq!(request.sequence_hashes(), expected.as_deref());
+                    assert_eq!(request.pinned_worker(), Some(pin));
+                    Ok(request)
+                })
+            }
+        }
+
+        let profile = PolicyProfile::synthetic(None, crate::config::RouterQueuePolicy::Fcfs);
+        let (queue, _slots) = make_queue_with_profile(1, 64, 256, profile);
+        let pin = WorkerWithDpRank::new(0, 0);
+        for hashes in [None, Some(vec![]), Some(vec![11, 7, 11])] {
+            let (mut request, _rx) = make_request("prefix-input", 193);
+            request.token_seq = hashes.clone();
+            request.pinned_worker = Some(pin);
+            let classified = queue.build_classify_request(&request, Instant::now());
+            assert_eq!(request.token_seq, hashes);
+            let mut classifier = InspectHashes(hashes, pin);
+            let pending = classifier.classify(classified);
+            // The independently pollable future must not borrow actor-owned data.
+            request.token_seq = Some(vec![99]);
+            request.pinned_worker = None;
+            drop(request);
+            pending.await.unwrap();
+        }
+    }
+
+    /// Measures real queue projection with snapshots held in pending classifier futures.
+    /// Run in release mode with CLASSIFIER_BENCH_HASHES ("none" or a count) and
+    /// CLASSIFIER_BENCH_PENDING set; source setup and cancellation are not timed.
+    #[tokio::test]
+    #[ignore = "CPU microbenchmark; run explicitly with --release --ignored --nocapture"]
+    async fn classifier_input_projection_benchmark() {
+        use crate::plugins::request_classifier::{ClassifyFuture, RequestClassifier};
+        use std::hint::black_box;
+        use std::task::Context;
+        use std::time::Instant as WallClock;
+
+        struct Park;
+        impl RequestClassifier for Park {
+            fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+                Box::pin(async move {
+                    std::future::pending::<()>().await;
+                    Ok(black_box(request))
+                })
+            }
+        }
+
+        let hash_count = std::env::var("CLASSIFIER_BENCH_HASHES").unwrap();
+        let hashes = if hash_count == "none" {
+            None
+        } else {
+            Some(hash_count.parse::<usize>().unwrap())
+        };
+        let retained: usize = std::env::var("CLASSIFIER_BENCH_PENDING")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(retained > 0 && retained <= 1024);
+        assert!(hashes.unwrap_or(0) <= 62_500);
+        let profile = PolicyProfile::synthetic(None, crate::config::RouterQueuePolicy::Fcfs);
+        let (queue, _slots) = make_queue_with_profile(1, 16, 1_000_000, profile);
+        let sources: Vec<_> = (0..retained)
+            .map(|i| {
+                let (mut request, rx) = make_request(
+                    &format!("copy-bench-{i}"),
+                    hashes.unwrap_or(0).saturating_mul(16).max(1),
+                );
+                request.token_seq = hashes.map(|n| (0..n as u64).collect());
+                (request, rx)
+            })
+            .collect();
+        let mut classifier = Park;
+        let mut futures = Vec::with_capacity(retained);
+        let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
+        let ingress_at = Instant::now();
+        let repeats = (1024 / retained).max(1);
+        let mut samples = Vec::with_capacity(40);
+        for sample in 0..45 {
+            let mut elapsed = std::time::Duration::ZERO;
+            for _ in 0..repeats {
+                let start = WallClock::now();
+                for (request, _) in &sources {
+                    let input = queue.build_classify_request(black_box(request), ingress_at);
+                    let mut future = classifier.classify(input);
+                    assert!(future.as_mut().poll(&mut cx).is_pending());
+                    futures.push(future);
+                }
+                elapsed += start.elapsed();
+                // Keep every snapshot live until the batch ends; cancellation is excluded.
+                black_box(&futures);
+                futures.clear();
+            }
+            if sample >= 5 {
+                samples.push(elapsed.as_secs_f64() * 1e9 / (retained * repeats) as f64);
+            }
+        }
+        println!(
+            "CLASSIFIER_BENCH {}",
+            serde_json::json!({
+                "hashes": hashes,
+                "pending": retained,
+                "repeats_per_sample": repeats,
+                "classify_request_bytes": std::mem::size_of::<ClassifyRequest>(),
+                "ns_per_request_samples": samples,
+            })
+        );
     }
 
     #[tokio::test]
@@ -3286,6 +3514,7 @@ policy_classes:
             non_max_overlap_selection_observer: Arc::clone(
                 &queue.non_max_overlap_selection_observer,
             ),
+            selection_trace: Arc::clone(&queue.selection_trace),
         }
     }
 
@@ -3367,6 +3596,35 @@ policy_classes:
         })
         .await
         .expect("admission commands must progress with capacity wakes");
+        assert!(!slots.has_booking(&booking));
+        drop(permits);
+        slots.assert_completely_drained(Instant::now());
+    }
+
+    #[tokio::test]
+    async fn runtime_control_drains_cleanup_when_the_command_channel_was_full() {
+        let (queue, slots) = make_queue(1, 16, 64, Some(0.0));
+        let booking = book_directly(&slots, "abandoned");
+        let mut permits = queue
+            .admission_tx
+            .reserve_many(queue.admission_tx.max_capacity())
+            .await
+            .unwrap();
+        drop(queue.booking_handle(booking.clone()));
+        assert!(slots.has_booking(&booking));
+        let (response, receiver) = oneshot::channel();
+        permits
+            .next()
+            .unwrap()
+            .send(AdmissionCommand::PolicyConfig {
+                update: None,
+                response,
+            });
+        let result = tokio::time::timeout(Duration::from_secs(2), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(RuntimePolicyError::Unsupported)));
         assert!(!slots.has_booking(&booking));
         drop(permits);
         slots.assert_completely_drained(Instant::now());

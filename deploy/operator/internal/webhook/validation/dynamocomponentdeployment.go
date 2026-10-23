@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -58,11 +59,9 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                                ctx,
-			runtimeVersionSource:               runtimeVersionSource,
-			allowMissingRuntimeVersionOverride: true,
-		},
+		ctx:                                ctx,
+		runtimeVersionSource:               runtimeVersionSource,
+		allowMissingRuntimeVersionOverride: true,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd, nil)
@@ -86,12 +85,10 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                                ctx,
-			runtimeVersionSource:               runtimeVersionSource,
-			ratchetRuntimeVersion:              true,
-			allowMissingRuntimeVersionOverride: true,
-		},
+		ctx:                                ctx,
+		runtimeVersionSource:               runtimeVersionSource,
+		ratchetRuntimeVersion:              true,
+		allowMissingRuntimeVersionOverride: true,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD, oldDCD)
@@ -186,6 +183,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		oldSharedSpec = &oldSpec.DynamoComponentDeploymentSharedSpec
 	}
 	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+	allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,

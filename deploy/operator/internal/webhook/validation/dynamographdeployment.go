@@ -70,6 +70,8 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathway            bool
 	grovePathwayRequirement string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
+	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
@@ -90,12 +92,10 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	ratchetRuntimeVersion bool,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: ratchetRuntimeVersion,
-		},
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: ratchetRuntimeVersion,
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
@@ -120,14 +120,12 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: true,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: true,
+		userInfo:              userInfo,
+		operatorPrincipal:     operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
@@ -173,13 +171,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 	// it, and the Disabled variant went away when runtime-version validation
 	// moved to the ratchet flag, so this carries the v1beta1 default.
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                  ctx,
-			mgr:                  v.mgr,
-			runtimeVersionSource: runtimeVersionSourceV1Beta1,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                  ctx,
+		mgr:                  v.mgr,
+		runtimeVersionSource: runtimeVersionSourceV1Beta1,
+		userInfo:             userInfo,
+		operatorPrincipal:    operatorPrincipal,
 	}
 
 	allErrs := validation.validateObjectMetaUpdate(
@@ -200,7 +196,24 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		&dgd.ObjectMeta,
 		field.NewPath("metadata"),
 		hasIntraPodFailover(&dgd.Spec),
+		dgd.HasLPXComponent(),
 	)...)
+
+	// Validate desired strategy intent; admission has no observed PCS rollout state.
+	updateStrategy, err := dynamo.ResolveGroveUpdateStrategy(dgd, nil)
+	if err != nil {
+		// The metadata validator reports an invalid annotation at its exact path.
+		updateStrategy = nil
+	}
+
+	// Compare desired strategy intent to suppress repeated warnings on unrelated updates.
+	oldStrategy := grovev1alpha1.RollingRecreateStrategy
+	if oldDGD != nil {
+		resolved, oldErr := dynamo.ResolveGroveUpdateStrategy(oldDGD, nil)
+		if oldErr == nil {
+			oldStrategy = k8sptr.Deref(resolved, grovev1alpha1.RollingRecreateStrategy)
+		}
+	}
 
 	groveEnabled := features.MustGateFrom(v.ctx).Enabled(features.Grove)
 	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
@@ -215,6 +228,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 		oldComponents:           oldComponents,
+		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
+		oldGroveUpdateStrategy:  oldStrategy,
 	}
 	if grovePathway {
 		specOpts.pcsName = dynamo.PCSNameForDGD(
@@ -237,6 +252,7 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	objectMeta *metav1.ObjectMeta,
 	fldPath *field.Path,
 	hasIntraPodFailover bool,
+	hasLPXComponent bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
@@ -256,17 +272,21 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			`must be "mp" or "ray"`,
 		))
 	}
-	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists &&
-		value != string(grovev1alpha1.RollingRecreateStrategy) &&
-		value != string(grovev1alpha1.OnDeleteStrategy) {
-		allErrs = append(allErrs, field.NotSupported(
-			annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
-			value,
-			[]string{
-				string(grovev1alpha1.RollingRecreateStrategy),
-				string(grovev1alpha1.OnDeleteStrategy),
-			},
-		))
+	// Parse strategy annotations with the same value set used by the renderer.
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists {
+		strategy, err := dynamo.ParseGroveUpdateStrategy(value)
+		if err != nil {
+			allErrs = append(allErrs, field.NotSupported(annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy), value, dynamo.SupportedGroveUpdateStrategies()))
+		}
+
+		// OnDelete leaves LPX Pods on stale templates, which the LPX scheduler treats as dependency loss.
+		if hasLPXComponent && strategy == grovev1alpha1.OnDeleteStrategy {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
+				value,
+				`must be "Coherent" or "RollingRecreate" when LPX components are configured`,
+			))
+		}
 	}
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
 		allErrs = append(allErrs, field.NotSupported(
@@ -342,6 +362,23 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if len(spec.Components) == 0 {
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
+	// Keep availability defaulting consistent while migrating the graph to its native minimum form.
+	hasLegacyMinimum := false
+	for i := range spec.Components {
+		hasLegacyMinimum = hasLegacyMinimum || spec.Components[i].MinAvailable != nil
+	}
+	if hasLegacyMinimum {
+		for i := range spec.Components {
+			component := &spec.Components[i]
+			if component.ProviderOverride == nil {
+				continue
+			}
+			if _, native := provideroverride.GroveMinAvailable(component.ProviderOverride.Value.Raw); native {
+				allErrs = append(allErrs, field.Forbidden(componentsPath.Index(i).Child("providerOverride", "value"), "cannot mix provider-native minAvailable with deprecated component minAvailable; migrate all components together"))
+			}
+		}
+	}
+
 	components := componentsByName(spec.Components)
 	hasLPXComponent := lpxComponentCount > 0
 	for i := range spec.Components {
@@ -414,6 +451,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, spec.BackendFramework)...)
 
 		// Allow existing LPX components to survive disablement without accepting new or changed specs.
 		allErrs = append(allErrs, lpxComponentGateErrors(
@@ -429,6 +467,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
 				oldComponent:                      opts.oldComponents[component.ComponentName],
+				groveUpdateStrategy:               opts.groveUpdateStrategy,
+				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
 			},
 		)...)
 	}

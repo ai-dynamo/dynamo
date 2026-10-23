@@ -8,7 +8,6 @@ package lws
 import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/webhookconfig"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	lwswebhooks "sigs.k8s.io/lws/pkg/webhooks"
 )
@@ -37,16 +36,14 @@ func Configurations() webhookconfig.Configurations {
 		admissionregistrationv1.Update,
 	}
 	rule := admissionregistrationv1.RuleWithOperations{
-		Operations: operations,
-		Rule: admissionregistrationv1.Rule{
-			APIGroups:   []string{lwsGroup},
-			APIVersions: []string{"v1"},
-			Resources:   []string{lwsResource},
-		},
+		Operations:  operations,
+		APIGroups:   []string{lwsGroup},
+		APIVersions: []string{"v1"},
+		Resources:   []string{lwsResource},
 	}
 	return webhookconfig.Configurations{
 		Mutating: []*admissionregistrationv1.MutatingWebhookConfiguration{{
-			ObjectMeta: metav1.ObjectMeta{Name: "lws-mutating-webhook-configuration"},
+			Name: "lws-mutating-webhook-configuration",
 			Webhooks: []admissionregistrationv1.MutatingWebhook{{
 				Name:                    "mleaderworkerset.kb.io",
 				AdmissionReviewVersions: []string{"v1"},
@@ -57,7 +54,7 @@ func Configurations() webhookconfig.Configurations {
 			}},
 		}},
 		Validating: []*admissionregistrationv1.ValidatingWebhookConfiguration{{
-			ObjectMeta: metav1.ObjectMeta{Name: "lws-validating-webhook-configuration"},
+			Name: "lws-validating-webhook-configuration",
 			Webhooks: []admissionregistrationv1.ValidatingWebhook{{
 				Name:                    "vleaderworkerset.kb.io",
 				AdmissionReviewVersions: []string{"v1"},

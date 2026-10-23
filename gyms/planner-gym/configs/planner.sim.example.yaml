@@ -4,8 +4,7 @@
 # Reusable Dynamo Planner policy. Match-owned topology, GPU budget, engine
 # costs, and report paths stay in the Match Config and are injected by Arena.
 optimization_target: sla
-ttft_ms: 2000
-itl_ms: 50
+# Match Config supplies the selected profile's TTFT and ITL targets per run.
 enable_load_scaling: true
 enable_throughput_scaling: false
 pre_deployment_sweeping_mode: none

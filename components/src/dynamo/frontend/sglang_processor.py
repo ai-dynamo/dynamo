@@ -25,7 +25,7 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .sglang_prepost import (
     ReasoningParser,
@@ -40,9 +40,12 @@ from .sglang_prepost import (
     preprocess_chat_request,
     resolve_skip_special_tokens,
 )
+from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
     PreprocessError,
+    PromptLogprobsAccumulator,
     as_error_envelope,
     extract_mm_urls,
     handle_engine_error,
@@ -65,6 +68,32 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
         return None
     cached_tokens = prompt_details.get("cached_tokens")
     return cached_tokens if isinstance(cached_tokens, int) else None
+
+
+def _request_logprobs_count(request: dict[str, Any]) -> int | None:
+    """Map OpenAI chat logprob fields onto ``output_options.logprobs``.
+
+    The result is the number of alternatives per token. ``logprobs: true``
+    without ``top_logprobs`` is ``0``: the sampled token only. A positive
+    ``top_logprobs`` requires ``logprobs: true``, as in OpenAI.
+    """
+    logprobs = request.get("logprobs")
+    top_logprobs = request.get("top_logprobs")
+    if top_logprobs is not None and (
+        not isinstance(top_logprobs, int)
+        or isinstance(top_logprobs, bool)
+        or top_logprobs < 0
+    ):
+        raise PreprocessError("`top_logprobs` must be an integer >= 0.")
+    if top_logprobs and logprobs is not True:
+        raise PreprocessError(
+            "When using `top_logprobs`, `logprobs` must be set to true."
+        )
+    if logprobs is True:
+        return top_logprobs if top_logprobs is not None else 0
+    if isinstance(logprobs, int) and not isinstance(logprobs, bool):
+        return logprobs
+    return None
 
 
 def _normalize_eos_token_ids(value: Any) -> list[int]:
@@ -272,6 +301,9 @@ _w_reasoning_parser_name: str | None = None
 _w_exclude_tools_when_tool_choice_none: bool = True
 _w_template_force_reasoning: bool = False
 _w_default_thinking_mode: str | None = None
+_w_structural_tag_mode: str = "off"
+_w_structural_tag_scope: str = "auto"
+_w_structural_tag_schema: str = "auto"
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -323,11 +355,15 @@ def _init_worker(
     template_force_reasoning: bool = False,
     chat_template: str | None = None,
     default_thinking_mode: str | None = None,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
-    global _w_default_thinking_mode
+    global _w_default_thinking_mode, _w_structural_tag_mode
+    global _w_structural_tag_scope, _w_structural_tag_schema
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -336,6 +372,9 @@ def _init_worker(
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
     _w_template_force_reasoning = template_force_reasoning
     _w_default_thinking_mode = default_thinking_mode
+    _w_structural_tag_mode = structural_tag_mode
+    _w_structural_tag_scope = structural_tag_scope
+    _w_structural_tag_schema = structural_tag_schema
 
 
 def _preprocess_worker(
@@ -352,6 +391,9 @@ def _preprocess_worker(
         exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
         template_force_reasoning=_w_template_force_reasoning,
         default_thinking_mode=_w_default_thinking_mode,
+        structural_tag_mode=_w_structural_tag_mode,
+        structural_tag_scope=_w_structural_tag_scope,
+        structural_tag_schema=_w_structural_tag_schema,
     )
 
     n = request.get("n", 1)
@@ -415,17 +457,6 @@ def _build_dynamo_preproc(
     elif stop is None:
         stop = []
 
-    # Handle logprobs
-    logprobs_val = None
-    logprobs = request.get("logprobs")
-    top_logprobs = request.get("top_logprobs")
-    if logprobs is True:
-        logprobs_val = top_logprobs if top_logprobs is not None else 1
-    elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-        logprobs_val = logprobs
-    elif top_logprobs not in (None, 0):
-        logprobs_val = top_logprobs
-
     nvext = request.get("nvext") or {}
     routing = request.get("routing")
     nvext_routing = (
@@ -479,8 +510,13 @@ def _build_dynamo_preproc(
             "guided_decoding": guided_decoding,
         },
         "output_options": {
-            "logprobs": logprobs_val,
-            "prompt_logprobs": None,
+            "logprobs": _request_logprobs_count(request),
+            "prompt_logprobs": (
+                request.get("prompt_logprobs")
+                if request.get("stream") is not True
+                or nvext_extra_field_requested(request, "prompt_logprobs")
+                else None
+            ),
             # Preserve special tokens when a parser is active so delimiters
             # remain visible. Mirrors the post-processor's decode behavior.
             "skip_special_tokens": resolve_skip_special_tokens(
@@ -525,6 +561,9 @@ class SglangProcessor:
         preprocess_workers: int = 0,
         stream_interval: int = 1,
         default_thinking_mode: str | None = None,
+        structural_tag_mode: str = "off",
+        structural_tag_scope: str = "auto",
+        structural_tag_schema: str = "auto",
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -549,6 +588,9 @@ class SglangProcessor:
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
         self.default_thinking_mode = default_thinking_mode
+        self.structural_tag_mode = structural_tag_mode
+        self.structural_tag_scope = structural_tag_scope
+        self.structural_tag_schema = structural_tag_schema
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -606,6 +648,9 @@ class SglangProcessor:
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 template_force_reasoning=self.template_force_reasoning,
                 default_thinking_mode=self.default_thinking_mode,
+                structural_tag_mode=self.structural_tag_mode,
+                structural_tag_scope=self.structural_tag_scope,
+                structural_tag_schema=self.structural_tag_schema,
             )
 
             if self.debug_perf:
@@ -710,6 +755,9 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
             force_reasoning=preproc_result.force_reasoning,
+            guided_decoding=preproc_result.dynamo_preproc["sampling_options"][
+                "guided_decoding"
+            ],
             tokenizer=self.tokenizer,
         )
 
@@ -757,6 +805,8 @@ class SglangProcessor:
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
         stream_interval = self.stream_interval
+        prompt_logprobs = PromptLogprobsAccumulator(request)
+        logprobs_count = _request_logprobs_count(request)
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -770,7 +820,8 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
-            pending_usage: dict[str, Any] | None = None
+            latest_usage: dict[str, Any] = {}
+            pending_terminal: dict[str, Any] | None = None
             first_chunk = True
             input_tokens = len(tokens)
             cumulative_output_tokens = 0
@@ -792,7 +843,7 @@ class SglangProcessor:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
-                nonlocal pending_usage
+                nonlocal latest_usage
                 nonlocal first_chunk
                 nonlocal post_proc_total_ms
                 nonlocal token_count
@@ -814,13 +865,13 @@ class SglangProcessor:
 
                 choice = post.process_output(mapped_response)
 
-                if post.locally_finished and pending_usage is None:
-                    pending_usage = {
+                if post.locally_finished and not latest_usage:
+                    latest_usage = {
                         "prompt_tokens": input_tokens,
                         "completion_tokens": cumulative_output_tokens,
                         "total_tokens": input_tokens + cumulative_output_tokens,
                     }
-                usage_for_metrics = pending_usage
+                usage_for_metrics = latest_usage
 
                 if self.debug_perf:
                     t_pp1 = time.monotonic()
@@ -836,8 +887,14 @@ class SglangProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if pending_usage:
-                        dynamo_out["usage"] = pending_usage
+                    if usage := response_usage(
+                        request,
+                        latest_usage,
+                        prompt_tokens=input_tokens,
+                        completion_tokens=cumulative_output_tokens,
+                        finished=bool(finish_reason or post.locally_finished),
+                    ):
+                        dynamo_out["usage"] = usage
                     response_nvext: dict[str, Any] = {}
                     effective_stop_reason = (
                         stop_reason
@@ -856,6 +913,7 @@ class SglangProcessor:
                     if response_nvext:
                         dynamo_out["nvext"] = response_nvext
 
+                    prompt_logprobs.attach(dynamo_out)
                     envelope["data"] = dynamo_out
 
                 metrics: dict[str, Any] = {
@@ -883,9 +941,24 @@ class SglangProcessor:
                 pending_token_ids = []
                 pending_log_probs = None
                 pending_top_logprobs = None
-                pending_usage = None
                 first_chunk = False
                 return envelope
+
+            def finalize_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
+                data = terminal["data"]
+                if usage := response_usage(
+                    request,
+                    latest_usage,
+                    prompt_tokens=input_tokens,
+                    completion_tokens=cumulative_output_tokens,
+                    finished=True,
+                ):
+                    data["usage"] = usage
+                cached_tokens = _cached_tokens_from_usage(latest_usage)
+                if cached_tokens is not None:
+                    data["llm_metrics"]["cached_tokens"] = cached_tokens
+                prompt_logprobs.attach(data)
+                return terminal
 
             async for dynamo_response in dynamo_stream:
                 if dynamo_response.is_error():
@@ -914,9 +987,36 @@ class SglangProcessor:
                     )
                     break
 
+                raw_finish_reason = engine_response.get("finish_reason")
+                finish_reason = _map_finish_reason(raw_finish_reason)
+                backend_finished = raw_finish_reason is not None
+                if pending_terminal is not None and finish_reason == "error":
+                    yield as_error_envelope(
+                        make_internal_error(request_id, raw_finish_reason)
+                    )
+                    break
+                prompt_logprobs.update(engine_response)
+                if usage := engine_response.get("completion_usage"):
+                    update_usage_metadata(latest_usage, usage)
+                if pending_terminal is not None:
+                    if prompt_logprobs.needs_payload and not backend_finished:
+                        continue
+                    yield finalize_terminal(pending_terminal)
+                    break
+
                 new_ids = engine_response["token_ids"]
-                log_probs = engine_response.get("log_probs")
-                top_logprobs = engine_response.get("top_logprobs")
+                log_probs = (
+                    engine_response.get("log_probs")
+                    if logprobs_count is not None
+                    else None
+                )
+                top_logprobs = (
+                    engine_response.get("top_logprobs") if logprobs_count else None
+                )
+                if top_logprobs is not None:
+                    top_logprobs = [
+                        entries[:logprobs_count] for entries in top_logprobs
+                    ]
 
                 if new_ids and pending_token_ids:
                     pending_logprob_shape = (
@@ -934,19 +1034,22 @@ class SglangProcessor:
                             stop_terminated=False,
                             engine_data=None,
                         )
+                        if (
+                            post.locally_finished
+                            and prompt_logprobs.needs_payload
+                            and not backend_finished
+                        ):
+                            pending_terminal = envelope
+                            continue
                         yield envelope
                         if post.locally_finished:
                             break
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
-                raw_finish_reason = engine_response.get("finish_reason")
-                finish_reason = _map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
                 stop_terminated = raw_finish_reason in {"eos", "stop"}
 
-                if usage := engine_response.get("completion_usage"):
-                    pending_usage = usage
                 engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
@@ -971,10 +1074,21 @@ class SglangProcessor:
                         stop_terminated=stop_terminated,
                         engine_data=engine_data,
                     )
+                    if (
+                        post.locally_finished
+                        and prompt_logprobs.needs_payload
+                        and not backend_finished
+                    ):
+                        # Preserve terminal metadata without emitting post-stop text.
+                        pending_terminal = envelope
+                        continue
                     yield envelope
                     if post.locally_finished:
                         break
-        except (InvalidArgument, Unknown):
+            else:
+                if pending_terminal is not None:
+                    yield finalize_terminal(pending_terminal)
+        except (InvalidArgument, Unknown, WorkerUnavailable):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
@@ -1067,6 +1181,11 @@ class SglangEngineFactory:
             or _runtime_config_parser_name(mdc, "reasoning_parser")
         )
         default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        (
+            structural_tag_mode,
+            structural_tag_scope,
+            structural_tag_schema,
+        ) = runtime_structural_tag_options(mdc.runtime_config())
 
         if tool_call_parser_name:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)
@@ -1077,6 +1196,7 @@ class SglangEngineFactory:
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
+        assert preprocess_workers is not None  # Resolved by FrontendConfig.validate().
         if preprocess_workers > 0:
             logger.info(
                 "Creating SGLang preprocess worker pool with %d workers for %s",
@@ -1095,6 +1215,9 @@ class SglangEngineFactory:
                     template_force_reasoning,
                     chat_template,
                     default_thinking_mode,
+                    structural_tag_mode,
+                    structural_tag_scope,
+                    structural_tag_schema,
                 ),
             )
             futures = [
@@ -1131,6 +1254,9 @@ class SglangEngineFactory:
             preprocess_workers=preprocess_workers,
             stream_interval=self.stream_interval,
             default_thinking_mode=default_thinking_mode,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

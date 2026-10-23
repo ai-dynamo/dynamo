@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -101,14 +100,12 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 
 	// Create/update ServiceAccount
 	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceAccountName,
-			Namespace: targetNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       serviceAccountName,
-			},
+		Name:      serviceAccountName,
+		Namespace: targetNamespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       serviceAccountName,
 		},
 	}
 
@@ -132,14 +129,12 @@ func (m *Manager) EnsureServiceAccountWithRBAC(
 	// Create/update RoleBinding
 	roleBindingName := fmt.Sprintf("%s-binding", serviceAccountName)
 	rb := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      roleBindingName,
-			Namespace: targetNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       serviceAccountName,
-			},
+		Name:      roleBindingName,
+		Namespace: targetNamespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       serviceAccountName,
 		},
 		Subjects: []rbacv1.Subject{{
 			Kind:      kindServiceAccount,

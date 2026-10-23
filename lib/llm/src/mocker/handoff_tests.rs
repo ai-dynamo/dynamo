@@ -10,7 +10,7 @@ use dynamo_mocker::common::handoff::{
 };
 use dynamo_mocker::common::protocols::{
     EngineType, FpmPublisher, KvCacheEventSink, KvEventPublishers, KvTransferTimingMode,
-    MockEngineArgs, WorkerType,
+    MockerConfig, WorkerType,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest};
 use dynamo_mocker::services::bootstrap::{
@@ -26,23 +26,23 @@ fn args_with_mode(
     engine_type: EngineType,
     worker_type: WorkerType,
     transfer_timing_mode: KvTransferTimingMode,
-) -> MockEngineArgs {
-    let mut builder = MockEngineArgs::builder()
-        .engine_type(engine_type)
-        .block_size(4)
-        .num_gpu_blocks(64)
-        .max_num_batched_tokens(Some(64))
-        .max_num_seqs(Some(2))
-        .worker_type(worker_type)
-        .speedup_ratio(1000.0)
-        .decode_speedup_ratio(1000.0)
-        .kv_transfer_bandwidth(Some(1.0))
-        .kv_bytes_per_token(Some(1_000_000))
-        .kv_transfer_timing_mode(transfer_timing_mode);
-    if engine_type == EngineType::Sglang {
-        builder = builder.sglang(Some(Default::default()));
-    }
-    builder.build().unwrap()
+) -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": engine_type,
+            "worker_type": worker_type,
+            "block_size": 4,
+            "num_gpu_blocks": 64,
+            "max_num_batched_tokens": 64,
+            "max_num_seqs": 2,
+            "speedup_ratio": 1000.0,
+            "decode_speedup_ratio": 1000.0,
+            "kv_transfer_bandwidth": 1.0,
+            "kv_transfer_bytes_per_token": 1_000_000,
+            "kv_transfer_timing_mode": transfer_timing_mode
+        }
+    }))
+    .unwrap()
 }
 
 fn request(uuid: Uuid, output_tokens: usize) -> dynamo_mocker::common::protocols::DirectRequest {

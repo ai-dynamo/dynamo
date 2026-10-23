@@ -62,6 +62,16 @@ async fn wait_closed(address: std::net::SocketAddr) {
 
 #[tokio::test]
 async fn runtime_only_probes_and_routes_share_the_advertised_listener() {
+    if crate::test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::runtime_only_probes_and_routes_share_the_advertised_listener"
+        ),
+        &[],
+    ) {
+        return;
+    }
+
     temp_env::async_with_vars(http_env(), async {
         // Port zero used to bind twice and fail the second server-info registration.
         let runtime = Runtime::from_current().unwrap();
@@ -92,6 +102,16 @@ async fn runtime_only_probes_and_routes_share_the_advertised_listener() {
 
 #[tokio::test]
 async fn default_worker_probes_keep_configured_health_and_response() {
+    if crate::test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::default_worker_probes_keep_configured_health_and_response"
+        ),
+        &[],
+    ) {
+        return;
+    }
+
     temp_env::async_with_vars(http_env(), async {
         temp_env::async_with_vars(
             [
@@ -128,6 +148,16 @@ async fn default_worker_probes_keep_configured_health_and_response() {
 
 #[tokio::test]
 async fn runtime_shutdown_withdraws_readiness_without_stopping_liveness() {
+    if crate::test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::runtime_shutdown_withdraws_readiness_without_stopping_liveness"
+        ),
+        &[],
+    ) {
+        return;
+    }
+
     temp_env::async_with_vars(http_env(), async {
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new_with_probe_policy(
@@ -167,6 +197,16 @@ fn reserve_system_port() -> std::net::TcpListener {
 
 #[tokio::test]
 async fn pending_runtime_initialization_does_not_bind_http_and_cancels_on_shutdown() {
+    if crate::test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::pending_runtime_initialization_does_not_bind_http_and_cancels_on_shutdown"
+        ),
+        &[],
+    ) {
+        return;
+    }
+
     temp_env::async_with_vars(http_env(), async {
         let reserved = reserve_system_port();
         let address = reserved.local_addr().unwrap();
@@ -211,6 +251,16 @@ async fn pending_runtime_initialization_does_not_bind_http_and_cancels_on_shutdo
 
 #[tokio::test]
 async fn disabled_http_and_bind_failure_preserve_policy_contracts() {
+    if crate::test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::disabled_http_and_bind_failure_preserve_policy_contracts"
+        ),
+        &[],
+    ) {
+        return;
+    }
+
     temp_env::async_with_vars(http_env(), async {
         temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some("-1"))], async {
             for policy in [SystemProbePolicy::Worker, SystemProbePolicy::RuntimeOnly] {
@@ -252,6 +302,16 @@ async fn disabled_http_and_bind_failure_preserve_policy_contracts() {
 }
 #[tokio::test]
 async fn dependency_outage_only_fails_readiness_and_can_recover() {
+    if crate::test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::dependency_outage_only_fails_readiness_and_can_recover"
+        ),
+        &[],
+    ) {
+        return;
+    }
+
     temp_env::async_with_vars(http_env(), async {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::sync::Notify;
@@ -338,6 +398,16 @@ async fn dependency_outage_only_fails_readiness_and_can_recover() {
 
 #[tokio::test]
 async fn stalled_discovery_check_times_out_without_blocking_liveness() {
+    if crate::test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::stalled_discovery_check_times_out_without_blocking_liveness"
+        ),
+        &[],
+    ) {
+        return;
+    }
+
     temp_env::async_with_vars(http_env(), async {
         let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         // Without a lease or authentication RPC, etcd uses a lazy channel. This
@@ -396,6 +466,16 @@ async fn stalled_discovery_check_times_out_without_blocking_liveness() {
 
 #[tokio::test]
 async fn etcd_readiness_requires_an_elected_leader() {
+    if crate::test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::etcd_readiness_requires_an_elected_leader"
+        ),
+        &[],
+    ) {
+        return;
+    }
+
     use std::sync::atomic::{AtomicU8, Ordering};
 
     temp_env::async_with_vars(http_env(), async {
