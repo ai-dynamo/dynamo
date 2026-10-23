@@ -95,6 +95,22 @@ func withTimestamp(t *testing.T, data []byte, timestamp string) []byte {
 	return out
 }
 
+func withRunDiagnostics(t *testing.T, data []byte, message, runError string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	run := doc["run"].(map[string]any)
+	run["message"] = message
+	run["error"] = runError
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 func TestParseSnapshotValidation(t *testing.T) {
 	bad := map[string]string{
 		"schema":        `{"schemaVersion":2,"run":{"phase":"Running","terminal":false}}`,

@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,8 +40,8 @@ import (
 const (
 	// LabelRunUID ties a candidate to one incarnation of its run. The run name can be
 	// reused after a delete and recreate; the UID cannot, so candidates left over from a
-	// previous run of the same name are never mistaken for current ones. The manager's
-	// cache selects candidates by this label.
+	// previous run of the same name are never mistaken for current ones. It is a repairable
+	// index; the controller owner UID remains the authoritative ownership relation.
 	LabelRunUID = "nvidia.com/dgdr-run-uid"
 	// LabelCandidateID records the stable candidate id (the identity read back on list).
 	LabelCandidateID = "nvidia.com/dgdr-candidate-id"
@@ -193,47 +194,57 @@ func (r *Reconciler) retryOrFail(exited bool, err error) error {
 // apply drives the cluster toward the desired state: create missing candidates, finish
 // the status of candidates that lack it, update the run, then delete obsolete candidates.
 // It is idempotent and safe to retry; existing candidate specs are never touched.
-//
-// Only a candidate this run controls, under the deterministic name of a desired
-// candidate, counts as current. A label match is not ownership: objects with another (or
-// no) controller are ignored completely and never written or deleted. A candidate this
-// run controls under any other name, or for an id that is no longer desired, is obsolete:
-// its replacement is created first and the new references are published before it is
-// deleted.
 func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired DesiredState) error {
 	if desired.Failed > 0 {
 		ctrl.LoggerFrom(ctx).V(1).Info("candidates failed materialization and are not published", "count", desired.Failed)
 	}
 	var list v1beta2.DynamoGraphDeploymentCandidateList
-	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace), client.MatchingLabels{LabelRunUID: r.RunUID}); err != nil {
+	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace)); err != nil {
 		return fmt.Errorf("listing candidates: %w", err)
 	}
 	current := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
+	ownedObsolete := make([]string, 0, len(list.Items))
 	uids := make(map[string]types.UID, len(list.Items))
 	versions := make(map[string]string, len(list.Items)) // cached resourceVersion per candidate
-	var obsolete []string                                // controlled by this run, but not the object of a desired candidate
+	expectedIDs := make(map[string]string, len(desired.Names))
+	for id, name := range desired.Names {
+		expectedIDs[name] = id
+	}
 	for i := range list.Items {
 		item := &list.Items[i]
-		if !controlledByRun(item, run.UID) {
-			continue // a matching label is not ownership
+
+		// A label match scopes the cache but does not establish ownership. Foreign
+		// candidates must never satisfy desired state or become deletion targets.
+		owner := metav1.GetControllerOf(item)
+		if owner == nil || owner.UID != run.UID {
+			continue
 		}
-		uids[item.Name] = item.UID
-		id := item.Labels[LabelCandidateID]
-		if expected, desiredID := desired.Names[id]; !desiredID || item.Name != expected {
-			obsolete = append(obsolete, item.Name)
+
+		// The deterministic name is the authoritative identity. An owned object under
+		// another name is obsolete; an expected object with a stale identity label is
+		// reapplied in place instead of deleted.
+		expectedID, isExpected := expectedIDs[item.Name]
+		if !isExpected {
+			ownedObsolete = append(ownedObsolete, item.Name)
+			uids[item.Name] = item.UID
+			continue
+		}
+		if item.Labels[LabelRunUID] != r.RunUID || item.Labels[LabelCandidateID] != expectedID {
 			continue
 		}
 		current = append(current, dgdcreconcile.CurrentDGDC{
 			Name:       item.Name,
-			ID:         id,
+			ID:         expectedID,
 			Incomplete: item.Status.Metrics == nil,
 		})
+		uids[item.Name] = item.UID
 		versions[item.Name] = item.ResourceVersion
 	}
 	actions, err := dgdcreconcile.ComputeActions(desired.Candidates, current)
 	if err != nil {
 		return err
 	}
+	actions.Deletes = append(actions.Deletes, ownedObsolete...)
 	// populated names the candidates whose status the API server already has; they are
 	// known from the live read that follows each apply, not from the cache.
 	populated := map[string]struct{}{}
@@ -265,8 +276,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		return err
 	}
 
-	obsolete = append(obsolete, actions.Deletes...)
-	for _, name := range obsolete {
+	for _, name := range actions.Deletes {
 		if err := r.Writer.DeleteCandidate(ctx, name, uids[name]); err != nil {
 			return fmt.Errorf("deleting candidate %s: %w", name, err)
 		}

@@ -37,12 +37,12 @@
 // The publisher's own writes come back as watch events and the cache can trail them. The
 // Reconciler keeps no record of what it wrote: it decides from the current observations,
 // constrains its status writes to the resourceVersion it observed (a stale decision
-// conflicts and is retried through the workqueue), so the echo of one of its own writes
-// is a pass with nothing left to do; see Reconciler.
+// conflicts and is retried through the workqueue); see Reconciler.
 //
-// The manager's cache covers only this Run, its candidates (by the run-UID label) and the
-// publisher's own Pod, so there is no API-server polling and no spec comparison:
-// candidate specs are immutable once created.
+// The manager's cache covers this Run and Pod by name and Candidates in their namespace.
+// Candidate membership is determined from controller ownership rather than mutable
+// labels, so there is no API-server polling and no spec comparison: candidate specs are
+// immutable once created.
 //
 // The sidecar is a regular container of the same Job pod as the Sweeper. The Job only
 // completes once the publisher has exited, so a successful exit acknowledges that the

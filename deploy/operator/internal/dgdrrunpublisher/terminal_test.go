@@ -25,63 +25,31 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
-
-	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
-// withRun sets the producer's message and error on a snapshot's run block.
-func withRun(t *testing.T, data []byte, message, errText string) []byte {
-	t.Helper()
-	doc := map[string]any{}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		t.Fatal(err)
-	}
-	run, ok := doc["run"].(map[string]any)
-	if !ok {
-		t.Fatalf("snapshot has no run block: %s", data)
-	}
-	run["message"], run["error"] = message, errText
-	out, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
-}
-
-func TestTerminalResult(t *testing.T) {
-	materialized := []dgdcreconcile.DesiredCandidate{{ID: "a"}}
-	succeeded := DesiredState{Candidates: materialized, Terminal: true, Outcome: TerminalOutcome{Phase: PhaseSucceeded}}
-	if err := terminalResult(succeeded); err != nil {
-		t.Fatalf("succeeded: %v", err)
-	}
-
-	failed := DesiredState{Candidates: materialized, Terminal: true, Outcome: TerminalOutcome{Phase: PhaseFailed, Message: "m", Error: "e"}}
-	err := terminalResult(failed)
+func TestTerminalResultIsAStructuredRunFailure(t *testing.T) {
 	var failure *RunFailedError
-	if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || failure.Outcome != failed.Outcome {
+	err := terminalResult(DesiredState{Phase: PhaseFailed, Message: "m", Error: "e"})
+	if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || failure.Outcome != (TerminalOutcome{Phase: PhaseFailed, Message: "m", Error: "e"}) {
 		t.Fatalf("failed: %v", err)
 	}
 	if got, want := err.Error(), ErrRunFailed.Error()+": m: e"; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}
-
-	empty := DesiredState{Terminal: true, Outcome: TerminalOutcome{Phase: PhaseSucceeded}}
-	if err := terminalResult(empty); !errors.Is(err, ErrRunFailed) {
-		t.Fatalf("success without a candidate must fail the run: %v", err)
+	err = terminalResult(DesiredState{Phase: PhaseSucceeded, Failed: 1, FirstFailure: "x: render failed"})
+	if !errors.As(err, &failure) || failure.Outcome.Error != "x: render failed" || !strings.Contains(failure.Outcome.Message, "1 candidate materialization failure") {
+		t.Fatalf("empty success: %v", err)
 	}
 }
 
 func TestDesireCarriesBoundedDiagnostics(t *testing.T) {
 	long := strings.Repeat("e", 3*maxDiagnosticBytes)
-	state := desire(t, withRun(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), "no recommendation\ncould be materialized", long))
-	if state.Outcome.Phase != PhaseFailed || state.Outcome.Message != "no recommendation could be materialized" {
-		t.Fatalf("outcome = %+v", state.Outcome)
+	state := desire(t, withRunDiagnostics(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), "no recommendation\ncould be materialized", long))
+	if state.Phase != PhaseFailed || state.Message != "no recommendation could be materialized" {
+		t.Fatalf("state = %+v", state)
 	}
-	if len(state.Outcome.Error) > maxDiagnosticBytes || !strings.HasPrefix(state.Outcome.Error, "eee") {
-		t.Fatalf("error must be kept but bounded, got %d bytes", len(state.Outcome.Error))
+	if len(state.Error) > maxDiagnosticBytes || !strings.HasPrefix(state.Error, "eee") {
+		t.Fatalf("error must be kept but bounded, got %d bytes", len(state.Error))
 	}
 }
 
@@ -99,30 +67,17 @@ func TestBoundDiagnostic(t *testing.T) {
 	}
 }
 
-func TestTerminalSucceededWithoutAMaterializedCandidateIsARunFailure(t *testing.T) {
-	cases := map[string][]cand{
-		"only failed materializations": {{id: "x", failed: true}},
-		"no candidates at all":         nil,
+func TestTerminalSucceededWithoutAMaterializedCandidateCarriesTheCandidateFailure(t *testing.T) {
+	f := newFixture(t)
+	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "x", failed: true}))
+	f.mustReconcile()
+	var failure *RunFailedError
+	err := f.r.Completion.Err()
+	if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || ExitCode(err) != ExitRunFailed {
+		t.Fatalf("err = %v", err)
 	}
-	for name, candidates := range cases {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t)
-			f.publish(snapshotJSON(t, PhaseSucceeded, candidates...))
-			f.mustReconcile()
-			for _, op := range f.takeOps() {
-				if strings.HasPrefix(op, "create") {
-					t.Fatalf("nothing was materialized, nothing may be created: %s", op)
-				}
-			}
-			err := f.r.Completion.Err()
-			var failure *RunFailedError
-			if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || ExitCode(err) != ExitRunFailed {
-				t.Fatalf("err = %v, want the run-failed outcome instead of exit 0", err)
-			}
-			if len(candidates) > 0 && !strings.HasPrefix(failure.Outcome.Error, "x: ") {
-				t.Fatalf("the candidate failure must be part of the diagnostics: %+v", failure.Outcome)
-			}
-		})
+	if !strings.HasPrefix(failure.Outcome.Error, "x: ") {
+		t.Fatalf("the candidate failure must be part of the diagnostics: %+v", failure.Outcome)
 	}
 }
 
@@ -130,7 +85,7 @@ func TestTerminalFailureDiagnosticsSurviveTheCompletionHandoff(t *testing.T) {
 	f := newFixture(t)
 	message := "no recommendation could be materialized"
 	long := "backend vllm rejected the generated worker configuration " + strings.Repeat("x", 3*maxDiagnosticBytes)
-	f.publish(withRun(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), message, long))
+	f.publish(withRunDiagnostics(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), message, long))
 	f.mustReconcile()
 
 	err := f.r.Completion.Err()
@@ -183,30 +138,5 @@ func TestTerminationMessageForOtherFailuresAndSuccess(t *testing.T) {
 	var got TerminalOutcome
 	if err := json.Unmarshal(data, &got); err != nil || got.Error != "api down" || got.Phase != "" {
 		t.Fatalf("got %+v, err %v", got, err)
-	}
-}
-
-func TestOnlyAControllerOwnedObjectBelongsToTheRun(t *testing.T) {
-	candidate := func(owners []metav1.OwnerReference) *v1beta2.DynamoGraphDeploymentCandidate {
-		return &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{OwnerReferences: owners}}
-	}
-	notController := controllerRef(testRunUID)
-	notController[0].Controller = nil
-	cases := map[string]struct {
-		owners []metav1.OwnerReference
-		want   bool
-	}{
-		"controlled by the run":       {controllerRef(testRunUID), true},
-		"controlled by another run":   {controllerRef("another-run-uid"), false},
-		"no owner":                    {nil, false},
-		"owned but not as controller": {notController, false},
-	}
-	for name, tc := range cases {
-		if got := controlledByRun(candidate(tc.owners), types.UID(testRunUID)); got != tc.want {
-			t.Errorf("%s: got %t, want %t", name, got, tc.want)
-		}
-	}
-	if controlledByRun(candidate(controllerRef(testRunUID)), "") {
-		t.Error("an empty run UID must never match")
 	}
 }

@@ -35,11 +35,10 @@ const (
 // terminal snapshot, which violates the producer protocol.
 var ErrMissingTerminalSnapshot = fmt.Errorf("%w: sweeper exited without publishing a terminal snapshot", ErrProtocolViolation)
 
-// ErrRunFailed means the run ended without a usable result: the Sweeper published a
-// terminal Failed snapshot, or a Succeeded one with no materialized candidate. The
-// snapshot is reconciled first; the error keeps a producer that reports failure but exits
-// 0 from letting the Job complete successfully. The concrete error is a *RunFailedError
-// carrying the bounded diagnostics.
+// ErrRunFailed means the Sweeper reported failure or produced no usable recommendation.
+// The snapshot is reconciled first; the error keeps that outcome from letting the Job
+// complete successfully. The concrete error is a *RunFailedError carrying the bounded
+// diagnostics.
 var ErrRunFailed = errors.New("sweeper reported a failed run")
 
 // ExitCode maps the result of Run to the process exit code.
@@ -63,25 +62,27 @@ type SweeperState struct {
 }
 
 // terminalResult is the outcome once a terminal snapshot has been reconciled. A Failed
-// snapshot fails the run with the producer's own diagnostics. A Succeeded snapshot must
-// also contain at least one materialized candidate: success with nothing to recommend
-// (every materialization failed, or none was produced) is a failed run, not a result.
+// snapshot fails the run with the producer's own (bounded) diagnostics. A Succeeded one
+// must also contain a materialized candidate: success with nothing to recommend is a
+// failed run, not a result. The error is a *RunFailedError, so errors.Is(err,
+// ErrRunFailed) and ExitCode are unchanged.
 func terminalResult(desired DesiredState) error {
-	switch {
-	case desired.Outcome.Phase == PhaseFailed:
-		return &RunFailedError{Outcome: desired.Outcome}
-	case len(desired.Candidates) == 0:
-		message := "run reported success but produced no candidate"
-		if desired.Failed > 0 {
-			message = fmt.Sprintf("run reported success but no candidate could be materialized (%d failed)", desired.Failed)
-		}
-		return &RunFailedError{Outcome: TerminalOutcome{
-			Phase:   PhaseFailed,
-			Message: message,
-			Error:   desired.FirstFailure,
-		}}
+	if desired.Phase == PhaseSucceeded && len(desired.Candidates) > 0 {
+		return nil
 	}
-	return nil
+	outcome := TerminalOutcome{Phase: PhaseFailed, Message: desired.Message, Error: desired.Error}
+	if desired.Phase == PhaseSucceeded {
+		outcome.Message = "no candidate was materialized"
+		if desired.Failed > 0 {
+			noun := "failures"
+			if desired.Failed == 1 {
+				noun = "failure"
+			}
+			outcome.Message += fmt.Sprintf(": %d candidate materialization %s", desired.Failed, noun)
+		}
+		outcome.Error = desired.FirstFailure
+	}
+	return &RunFailedError{Outcome: outcome}
 }
 
 // exitResult is the outcome when the Sweeper exited and the last snapshot it wrote (if

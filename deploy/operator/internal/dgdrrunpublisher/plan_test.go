@@ -57,7 +57,7 @@ func TestSwapKeepsCandidateNamesAndOnlyReordersReferences(t *testing.T) {
 }
 
 func TestFailedMaterializationIsNotDesiredButCounted(t *testing.T) {
-	state := desire(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "x", failed: true}))
+	state := desire(t, withRunDiagnostics(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "x", failed: true}), "search warning", "render error"))
 	if len(state.Candidates) != 1 || state.Candidates[0].ID != "a" {
 		t.Fatalf("candidates = %+v", state.Candidates)
 	}
@@ -69,6 +69,9 @@ func TestFailedMaterializationIsNotDesiredButCounted(t *testing.T) {
 	}
 	if state.Status.Published != 1 {
 		t.Fatalf("published = %d, want 1: failed candidates are not published", state.Status.Published)
+	}
+	if state.Message != "search warning" || state.Error != "render error" {
+		t.Fatalf("terminal diagnostics = %q / %q", state.Message, state.Error)
 	}
 }
 

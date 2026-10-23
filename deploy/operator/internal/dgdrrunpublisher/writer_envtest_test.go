@@ -21,18 +21,27 @@ package dgdrrunpublisher
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 // These tests send the publisher's real server-side-apply payloads to an API server that
@@ -44,6 +53,7 @@ type writerFixture struct {
 	t      *testing.T
 	ctx    context.Context
 	client client.Client
+	config *rest.Config
 	run    *v1beta2.DynamoGraphDeploymentRun
 	writer *clientWriter
 }
@@ -70,6 +80,7 @@ func newWriterFixture(t *testing.T) *writerFixture {
 		t:      t,
 		ctx:    ctx,
 		client: c,
+		config: env.RESTConfig(),
 		run:    run,
 		writer: &clientWriter{
 			Client:    c,
@@ -110,6 +121,82 @@ func envtestCandidate() dgdcreconcile.DesiredCandidate {
 		Parameters: map[string]any{"tp": 2},
 		Metrics:    map[string]any{"throughput": 12.5},
 	}
+}
+
+func foreignCandidate(t *testing.T, namespace, name string, candidate dgdcreconcile.DesiredCandidate) *v1beta2.DynamoGraphDeploymentCandidate {
+	t.Helper()
+	spec, _, err := decodeManifest(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, err := json.Marshal(candidate.Parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &v1beta2.DynamoGraphDeploymentCandidate{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+			Labels:    map[string]string{"owner": "foreign"},
+		},
+		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{
+			DynamoGraphDeploymentSpec: *spec,
+			Parameters:                runtime.RawExtension{Raw: parameters},
+		},
+	}
+}
+
+type writeInterceptClient struct {
+	client.Client
+	beforeCreate func()
+	beforeApply  func()
+}
+
+func (c *writeInterceptClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
+	if c.beforeCreate != nil {
+		hook := c.beforeCreate
+		c.beforeCreate = nil
+		hook()
+	}
+	return c.Client.Create(ctx, object, options...)
+}
+
+func (c *writeInterceptClient) Apply(ctx context.Context, configuration runtime.ApplyConfiguration, options ...client.ApplyOption) error {
+	if c.beforeApply != nil {
+		hook := c.beforeApply
+		c.beforeApply = nil
+		hook()
+	}
+	return c.Client.Apply(ctx, configuration, options...)
+}
+
+type reconcileRecorder struct {
+	delegate *Reconciler
+	count    atomic.Int64
+}
+
+func (r *reconcileRecorder) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
+	result, err := r.delegate.Reconcile(ctx, request)
+	r.count.Add(1)
+	return result, err
+}
+
+func waitForReconcileQuiet(t *testing.T, recorder *reconcileRecorder, quiet, timeout time.Duration) {
+	t.Helper()
+	var last int64 = -1
+	var stableSince time.Time
+	require.Eventually(t, func() bool {
+		current := recorder.count.Load()
+		if current == 0 {
+			return false
+		}
+		if current != last {
+			last = current
+			stableSince = time.Now()
+			return false
+		}
+		return time.Since(stableSince) >= quiet
+	}, timeout, 10*time.Millisecond, "reconciliation count did not become stable")
 }
 
 func hasApplyManager(fields []metav1.ManagedFieldsEntry, subresource string) bool {
@@ -153,6 +240,102 @@ func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	}
 	if again.ResourceVersion != stored.ResourceVersion {
 		t.Errorf("re-applying the same candidate changed resourceVersion %s -> %s", stored.ResourceVersion, again.ResourceVersion)
+	}
+
+	drifted := f.candidate(name)
+	delete(drifted.Labels, LabelRunUID)
+	if err := f.client.Update(f.ctx, drifted); err != nil {
+		t.Fatalf("remove run label: %v", err)
+	}
+	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, envtestCandidate()); err != nil {
+		t.Fatalf("repair candidate labels: %v", err)
+	}
+	if got := f.candidate(name); got.Labels[LabelRunUID] != string(f.run.UID) {
+		t.Fatalf("run label was not repaired: %v", got.Labels)
+	}
+}
+
+func TestEnvtestCandidateApplyDoesNotAdoptAForeignObject(t *testing.T) {
+	f := newWriterFixture(t)
+	name := f.name("a")
+	candidate := envtestCandidate()
+	foreign := foreignCandidate(t, f.run.Namespace, name, candidate)
+	if err := f.client.Create(f.ctx, foreign); err != nil {
+		t.Fatalf("create foreign candidate: %v", err)
+	}
+
+	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, candidate); err == nil {
+		t.Fatal("applying a candidate over a foreign object succeeded")
+	}
+	got := f.candidate(name)
+	if owner := metav1.GetControllerOf(got); owner != nil {
+		t.Fatalf("foreign candidate was adopted by %+v", owner)
+	}
+	if got.Labels["owner"] != "foreign" || got.Labels[LabelRunUID] != "" {
+		t.Fatalf("foreign candidate was modified: labels = %v", got.Labels)
+	}
+}
+
+func TestEnvtestCandidateCreateRaceDoesNotAdoptForeignObject(t *testing.T) {
+	f := newWriterFixture(t)
+	name := f.name("a")
+	candidate := envtestCandidate()
+	foreign := foreignCandidate(t, f.run.Namespace, name, candidate)
+	intercept := &writeInterceptClient{Client: f.client}
+	intercept.beforeCreate = func() {
+		if err := f.client.Create(f.ctx, foreign); err != nil {
+			t.Fatalf("create racing foreign candidate: %v", err)
+		}
+	}
+	writer := *f.writer
+	writer.Client = intercept
+
+	if _, err := writer.CreateCandidate(f.ctx, f.run, name, candidate); err == nil {
+		t.Fatal("candidate creation adopted the foreign object that won the name race")
+	}
+	got := f.candidate(name)
+	if owner := metav1.GetControllerOf(got); owner != nil {
+		t.Fatalf("racing foreign candidate was adopted by %+v", owner)
+	}
+	if got.Labels["owner"] != "foreign" || got.Labels[LabelRunUID] != "" {
+		t.Fatalf("racing foreign candidate was modified: labels = %v", got.Labels)
+	}
+}
+
+func TestEnvtestCandidateApplyRejectsDeleteRecreateRace(t *testing.T) {
+	f := newWriterFixture(t)
+	name := f.name("a")
+	candidate := envtestCandidate()
+	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, candidate); err != nil {
+		t.Fatalf("create owned candidate: %v", err)
+	}
+	ownedUID := f.candidate(name).UID
+	foreign := foreignCandidate(t, f.run.Namespace, name, candidate)
+	intercept := &writeInterceptClient{Client: f.client}
+	intercept.beforeApply = func() {
+		current := f.candidate(name)
+		if err := f.client.Delete(f.ctx, current); err != nil {
+			t.Fatalf("delete owned candidate during apply race: %v", err)
+		}
+		if err := f.client.Create(f.ctx, foreign); err != nil {
+			t.Fatalf("recreate foreign candidate during apply race: %v", err)
+		}
+	}
+	writer := *f.writer
+	writer.Client = intercept
+
+	if _, err := writer.CreateCandidate(f.ctx, f.run, name, candidate); err == nil {
+		t.Fatal("UID- and resourceVersion-constrained apply accepted a replacement object")
+	}
+	got := f.candidate(name)
+	if got.UID == ownedUID {
+		t.Fatalf("candidate UID did not change across delete/recreate: %s", got.UID)
+	}
+	if owner := metav1.GetControllerOf(got); owner != nil {
+		t.Fatalf("replacement foreign candidate was adopted by %+v", owner)
+	}
+	if got.Labels["owner"] != "foreign" || got.Labels[LabelRunUID] != "" {
+		t.Fatalf("replacement foreign candidate was modified: labels = %v", got.Labels)
 	}
 }
 
@@ -264,30 +447,113 @@ func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
 	}
 }
 
-func TestEnvtestForeignObjectAtTheExpectedNameIsNotTakenOver(t *testing.T) {
+func TestEnvtestCandidateUpdateTriggersStatusRepair(t *testing.T) {
 	f := newWriterFixture(t)
-	name := f.name("a")
-	// An object controlled by another run sits on the deterministic name. It carries another
-	// run's UID label, so the publisher's cache never lists it and only the writer can notice.
-	foreignRun := f.run.DeepCopy()
-	foreignRun.UID = "another-run-uid"
-	foreign, err := buildCandidateApply(f.client.Scheme(), f.run.Namespace, string(foreignRun.UID), foreignRun, name, envtestCandidate())
+	podName := "publisher-pod"
+	candidate := envtestCandidate()
+	snapshot, err := ParseSnapshot(snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: candidate.Metrics}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.client.Create(f.ctx, foreign); err != nil {
-		t.Fatalf("create foreign candidate: %v", err)
+	desired := Desire(f.run.Name, string(f.run.UID), snapshot)
+
+	t.Log("Arrange a fully converged Run and Candidate before starting the manager")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: f.run.Namespace, Name: podName},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sweeper", Image: "example.invalid/sweeper"}}},
+	}
+	if err := f.client.Create(f.ctx, pod); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	name := f.name("a")
+	stored, err := f.writer.CreateCandidate(f.ctx, f.run, name, candidate)
+	if err != nil {
+		t.Fatalf("create candidate: %v", err)
+	}
+	if err := f.writer.PopulateStatus(f.ctx, name, stored.ResourceVersion, candidate); err != nil {
+		t.Fatalf("populate candidate: %v", err)
+	}
+	if err := f.writer.UpdateRunStatus(f.ctx, f.currentRun().ResourceVersion, desired.Status); err != nil {
+		t.Fatalf("converge run status: %v", err)
 	}
 
-	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, envtestCandidate()); err == nil {
-		t.Fatal("applying over an object this run does not control must be refused")
+	t.Log("Start the production controller watches around an instrumented Reconciler")
+	scheme, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
 	}
-	got := f.candidate(name)
-	owner := metav1.GetControllerOf(got)
-	if owner == nil || owner.UID != "another-run-uid" || got.Labels[LabelRunUID] != "another-run-uid" {
-		t.Fatalf("the foreign object must be left as it was: owner=%v labels=%v", owner, got.Labels)
+	manager, err := ctrl.NewManager(f.config, ctrl.Options{
+		Scheme:         scheme,
+		Cache:          cacheOptions(Config{Namespace: f.run.Namespace, RunName: f.run.Name, RunUID: string(f.run.UID), PodName: podName}),
+		Metrics:        metricsserver.Options{BindAddress: "0"},
+		LeaderElection: false,
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
 	}
-	if hasApplyManager(got.ManagedFields, "") {
-		t.Fatal("the publisher must not have applied anything to the foreign object")
+	store := &InputStore{}
+	store.accept(snapshot)
+	completion := NewCompletion()
+	reconciler := &Reconciler{
+		Client: manager.GetClient(),
+		Writer: &clientWriter{
+			Client:    manager.GetClient(),
+			Reader:    manager.GetAPIReader(),
+			Namespace: f.run.Namespace,
+			RunName:   f.run.Name,
+			RunUID:    string(f.run.UID),
+		},
+		Namespace:        f.run.Namespace,
+		RunName:          f.run.Name,
+		RunUID:           string(f.run.UID),
+		PodName:          podName,
+		SweeperContainer: "sweeper",
+		Store:            store,
+		Completion:       completion,
 	}
+	recorder := &reconcileRecorder{delegate: reconciler}
+	events := make(chan event.GenericEvent, 1)
+	key := types.NamespacedName{Namespace: f.run.Namespace, Name: f.run.Name}
+	if err := setupController(manager, recorder, key, events); err != nil {
+		t.Fatalf("setup controller: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Start(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("publisher stopped: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("publisher did not stop")
+		}
+	})
+
+	waitForReconcileQuiet(t, recorder, 250*time.Millisecond, 10*time.Second)
+	beforeUpdate := recorder.count.Load()
+
+	t.Log("Clear only Candidate status after the controller is quiet")
+	var current v1beta2.DynamoGraphDeploymentCandidate
+	if err := f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: name}, &current); err != nil {
+		t.Fatalf("get candidate: %v", err)
+	}
+	current.Status.Metrics = nil
+	if err := f.client.Status().Update(f.ctx, &current); err != nil {
+		t.Fatalf("clear candidate status: %v", err)
+	}
+	require.Eventually(t, func() bool { return recorder.count.Load() > beforeUpdate }, 10*time.Second, 25*time.Millisecond,
+		"Candidate update did not trigger a new reconciliation")
+	require.Eventually(t, func() bool {
+		var repaired v1beta2.DynamoGraphDeploymentCandidate
+		if err := f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: name}, &repaired); err != nil {
+			return false
+		}
+		return repaired.Status.Metrics != nil
+	}, 10*time.Second, 25*time.Millisecond, "candidate status update did not trigger repair")
 }
