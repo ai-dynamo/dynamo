@@ -304,9 +304,15 @@ run it. This section describes the mechanics.
 
 ### Engine Integration
 
-Retune is owned by the engine rather than by a plugin. A sweep can take minutes or hours, longer
-than the plugin pipeline's default deadlines of 5 seconds per call and 30 seconds per tick, and the
-engine is the only component whose clock is abstracted for both replay and live hosts.
+Retune lives in the Planner engine (`OrchestratorEngineAdapter`), not in a plugin, for two reasons:
+
+- A sweep runs for minutes to hours. A plugin must answer within the pipeline's deadlines: 5 seconds
+  per call (`request_timeout_seconds` of the plugin transport) and 30 seconds per tick
+  (`scheduling.tick_max_duration_seconds`). The engine instead launches the sweep in one tick and
+  collects the result in a later tick, outside those deadlines.
+- Retune's timing must behave the same in replay and live. In replay the sweep runs while virtual
+  time is frozen; live, it runs in the background while wall-clock time moves on. Only the engine
+  holds the clock abstraction (`VirtualClock` in replay, `WallClock` live).
 
 - `OrchestratorEngineAdapter` builds a `RetuneController` only when `config.retune` is set. The
   constructor runs the checks that need the router bindings, the worker capabilities, or the full
