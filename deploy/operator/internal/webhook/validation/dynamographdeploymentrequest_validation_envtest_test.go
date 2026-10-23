@@ -742,24 +742,51 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta2 stored invalid spec is rejected again on a metadata-only update",
 			oldRequest: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["backends"] = []any{"vllm", "vllm"}
+				spec["aisimulate"] = map[string]any{"image": "registry.example.com/aisimulate:custom"}
 			}, nil),
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["backends"] = []any{"vllm", "vllm"}
+				spec["aisimulate"] = map[string]any{"image": "registry.example.com/aisimulate:custom"}
 			}, map[string]any{"updated": "true"}),
 			seedWithoutWebhook: true,
 			gpuDiscovery:       true,
 			discovered:         discoveredH200,
-			wantWebhook:        []string{`spec.backends[1]: Duplicate value: "vllm"`},
+			wantWebhook: []string{
+				"spec.aisimulate.versionOverride: Required value: is required when spec.aisimulate.image has no parseable version tag",
+			},
 		},
 		{
 			name: "v1beta2 duplicate backends are rejected on create",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["backends"] = []any{"vllm", "vllm"}
 			}, nil),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.backends[1]: Duplicate value: "vllm"`,
+		},
+		{
+			name:         "v1beta2 missing model is rejected by the representation CEL",
+			request:      v1beta2DGDRForAdmission(func(spec map[string]any) { delete(spec, "model") }, nil),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
-			wantWebhook:  []string{`spec.backends[1]: Duplicate value: "vllm"`},
+			wantCELErr:   `spec: Invalid value: exactly one of native v1beta2 fields or v1beta1 must be specified`,
+		},
+		{
+			name: "v1beta2 empty model name is rejected by the schema",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["model"] = map[string]any{"name": ""}
+			}, nil),
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.model.name: Invalid value: "": spec.model.name in body should be at least 1 chars long`,
+		},
+		{
+			name: "v1beta2 kvLoadRatio range needs min below max",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{"static": map[string]any{"kvLoadRatio": []any{0.9, 0.1}}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantCELErr:   `spec.workload.static.kvLoadRatio: Invalid value: a range needs min < max`,
 		},
 		{
 			name: "v1beta2 versionOverride latest is rejected by the schema",
@@ -864,9 +891,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["backends"] = []any{"sglang", "sglang"}
 			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			wantWebhook:  []string{`spec.backends[1]: Duplicate value: "sglang"`},
+			gpuDiscovery:  true,
+			discovered:    discoveredH200,
+			wantSchemaErr: `spec.backends[1]: Duplicate value: "sglang"`,
 		},
 	}
 

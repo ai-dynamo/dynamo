@@ -70,6 +70,7 @@ type HardwareSpec struct {
 // +kubebuilder:validation:MaxItems=2
 // +kubebuilder:validation:items:Minimum=0
 // +kubebuilder:validation:items:Maximum=1
+// +kubebuilder:validation:XValidation:rule="size(self) != 2 || self[0] < self[1]",message="a range needs min < max"
 type KVLoadRatio []float64
 
 // StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
@@ -225,6 +226,7 @@ type NativeSearchInput struct {
 	// Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
+	// +listType=set
 	Backends []Backend `json:"backends,omitempty"`
 
 	// Hardware bounds the accelerator configurations evaluated by the search.

@@ -19,7 +19,6 @@ package validation
 
 import (
 	"encoding/json"
-	"strings"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
@@ -51,56 +50,16 @@ func validateDynamoGraphDeploymentRequestV1beta2(spec *nvidiacomv1beta2.DynamoGr
 	return validateDynamoGraphDeploymentRequestSpecV1beta2(spec, field.NewPath("spec"))
 }
 
-// validateDynamoGraphDeploymentRequestSpecV1beta2 validates spec. spec and fldPath must not be nil.
+// validateDynamoGraphDeploymentRequestSpecV1beta2 validates the typed rules that the source
+// schema and CEL cannot express. The generated OpenAPI schema and CEL of the v1beta2 API have
+// already run before conversion reaches this webhook, so they are not repeated here: native
+// model presence, the model name length, backend uniqueness and the kvLoadRatio range order.
+// spec and fldPath must not be nil.
 func validateDynamoGraphDeploymentRequestSpecV1beta2(
 	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
-	var errs field.ErrorList
-	errs = append(errs, validateModelSpecV1beta2(spec.Model, fldPath.Child("model"))...)
-	errs = append(errs, validateBackendsV1beta2(spec.Backends, fldPath.Child("backends"))...)
-	if spec.Workload != nil {
-		errs = append(errs, validateWorkloadSpecV1beta2(spec.Workload, fldPath.Child("workload"))...)
-	}
-	errs = append(errs, validateAISimulateSpecV1beta2(spec.AISimulate, fldPath.Child("aisimulate"))...)
-	return errs
-}
-
-func validateModelSpecV1beta2(model *nvidiacomv1beta2.ModelSpec, fldPath *field.Path) field.ErrorList {
-	if model == nil {
-		return field.ErrorList{field.Required(fldPath, "model is required")}
-	}
-	if strings.TrimSpace(model.Name) == "" {
-		return field.ErrorList{field.Required(fldPath.Child("name"), "must not be blank")}
-	}
-	return nil
-}
-
-func validateBackendsV1beta2(backends []nvidiacomv1beta2.Backend, fldPath *field.Path) field.ErrorList {
-	var errs field.ErrorList
-	seen := make(map[nvidiacomv1beta2.Backend]bool, len(backends))
-	for i, backend := range backends {
-		if seen[backend] {
-			errs = append(errs, field.Duplicate(fldPath.Index(i), backend))
-		}
-		seen[backend] = true
-	}
-	return errs
-}
-
-func validateWorkloadSpecV1beta2(workload *nvidiacomv1beta2.WorkloadSpec, fldPath *field.Path) field.ErrorList {
-	if workload.Static == nil {
-		return nil
-	}
-	return validateStaticWorkloadSpecV1beta2(workload.Static, fldPath.Child("static"))
-}
-
-func validateStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpec, fldPath *field.Path) field.ErrorList {
-	// The schema bounds each ratio to [0, 1] and the number of entries to one or two.
-	if len(static.KVLoadRatio) == 2 && static.KVLoadRatio[0] >= static.KVLoadRatio[1] {
-		return field.ErrorList{field.Invalid(fldPath.Child("kvLoadRatio"), static.KVLoadRatio, "a range needs min < max")}
-	}
-	return nil
+	return validateAISimulateSpecV1beta2(spec.AISimulate, fldPath.Child("aisimulate"))
 }
 
 // validateAISimulateSpecV1beta2 validates the execution artifact. Admission persists the
