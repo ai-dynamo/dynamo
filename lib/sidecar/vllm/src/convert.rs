@@ -10,7 +10,7 @@ use dynamo_backend_common::{
     TopLogprob, usage,
 };
 use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_routing_hash};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 
 use crate::client;
 use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
@@ -82,20 +82,19 @@ fn requires_frontend_decode(request: &PreprocessedRequest) -> bool {
 }
 
 pub(crate) fn build_generate_request(
-    request: PreprocessedRequest,
+    mut request: PreprocessedRequest,
     request_id: String,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    let mut request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     let output_text = !requires_frontend_decode(&request);
     validate_multimodal_cache_uuids(&request)?;
-    // Legacy envelopes may only carry controls preserved by the typed request.
+    // Native envelopes may only carry controls preserved by the typed request.
     if !mode.is_prefill()
         && !mode.is_encode()
         && let Some(sampling) = vllm_tito_sampling(&request.extra_args)?
     {
-        if legacy_bool(sampling, "return_token_ids")? == Some(false) {
+        if sampling_bool(sampling, "return_token_ids")? == Some(false) {
             return Err(client::invalid_argument(
                 "extra_args.vllm_tito.sampling_params.return_token_ids must be true for vLLM gRPC",
             ));
@@ -306,124 +305,6 @@ pub(crate) fn data_parallel_rank(
     })
 }
 
-/// Compatibility with v1.4 frontends during v1.5 and v1.6 rolling upgrades.
-/// TODO(v1.7): Remove after v1.4 falls outside the N-2 compatibility window.
-pub(crate) fn normalize_response_options(
-    mut request: PreprocessedRequest,
-) -> Result<PreprocessedRequest, DynamoError> {
-    let Some(sampling) = vllm_tito_sampling(&request.extra_args)?.cloned() else {
-        return Ok(request);
-    };
-    let legacy_kv_transfer = request
-        .extra_args
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .and_then(|extra| extra.get("vllm_tito"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|envelope| envelope.get("kv_transfer_params"))
-        .cloned();
-    let legacy_skip_prefix_cache = legacy_bool(&sampling, "skip_reading_prefix_cache")?;
-    hydrate_option(
-        &mut request.sampling_options.temperature,
-        &sampling,
-        "temperature",
-    )?;
-    hydrate_option(&mut request.sampling_options.top_p, &sampling, "top_p")?;
-    hydrate_option(&mut request.sampling_options.top_k, &sampling, "top_k")?;
-    hydrate_option(&mut request.sampling_options.min_p, &sampling, "min_p")?;
-    hydrate_option(&mut request.sampling_options.seed, &sampling, "seed")?;
-    hydrate_option(
-        &mut request.sampling_options.presence_penalty,
-        &sampling,
-        "presence_penalty",
-    )?;
-    hydrate_option(
-        &mut request.sampling_options.frequency_penalty,
-        &sampling,
-        "frequency_penalty",
-    )?;
-    hydrate_option(
-        &mut request.sampling_options.repetition_penalty,
-        &sampling,
-        "repetition_penalty",
-    )?;
-    hydrate_option(
-        &mut request.stop_conditions.max_tokens,
-        &sampling,
-        "max_tokens",
-    )?;
-    hydrate_option(
-        &mut request.stop_conditions.min_tokens,
-        &sampling,
-        "min_tokens",
-    )?;
-    if request.stop_conditions.stop_token_ids.is_none()
-        && request.stop_conditions.stop_token_ids_hidden.is_none()
-    {
-        hydrate_option(
-            &mut request.stop_conditions.stop_token_ids,
-            &sampling,
-            "stop_token_ids",
-        )?;
-    }
-    hydrate_option(
-        &mut request.stop_conditions.ignore_eos,
-        &sampling,
-        "ignore_eos",
-    )?;
-    if request.output_options.logprobs.is_none() {
-        request.output_options.logprobs = legacy_logprob_count(&sampling, "logprobs")?;
-    }
-    if request.output_options.prompt_logprobs.is_none() {
-        request.output_options.prompt_logprobs =
-            legacy_logprob_count(&sampling, "prompt_logprobs")?;
-    }
-    if request.output_options.skip_special_tokens.is_none() {
-        request.output_options.skip_special_tokens = legacy_bool(&sampling, "skip_special_tokens")?;
-    }
-    if let Some(legacy_kv_transfer) = legacy_kv_transfer
-        && let Some(extra) = request
-            .extra_args
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-        && !extra.contains_key("kv_transfer_params")
-    {
-        extra.insert("kv_transfer_params".to_string(), legacy_kv_transfer);
-    }
-    if let Some(legacy_skip_prefix_cache) = legacy_skip_prefix_cache
-        && let Some(extra) = request
-            .extra_args
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-        && !extra.contains_key("skip_reading_prefix_cache")
-    {
-        extra.insert(
-            "skip_reading_prefix_cache".to_string(),
-            serde_json::Value::Bool(legacy_skip_prefix_cache),
-        );
-    }
-    Ok(request)
-}
-
-fn hydrate_option<T: DeserializeOwned>(
-    target: &mut Option<T>,
-    sampling: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Result<(), DynamoError> {
-    if target.is_some() {
-        return Ok(());
-    }
-    let Some(value) = sampling.get(field).filter(|value| !value.is_null()) else {
-        return Ok(());
-    };
-    *target = Some(serde_json::from_value(value.clone()).map_err(|error| {
-        client::invalid_argument(format!(
-            "extra_args.vllm_tito.sampling_params.{field} is invalid: {error}"
-        ))
-    })?);
-    Ok(())
-}
-
 fn vllm_tito_sampling(
     extra_args: &Option<serde_json::Value>,
 ) -> Result<Option<&serde_json::Map<String, serde_json::Value>>, DynamoError> {
@@ -449,7 +330,7 @@ fn vllm_tito_sampling(
     Ok(Some(sampling))
 }
 
-fn legacy_bool(
+fn sampling_bool(
     sampling: &serde_json::Map<String, serde_json::Value>,
     field: &str,
 ) -> Result<Option<bool>, DynamoError> {
@@ -459,26 +340,6 @@ fn legacy_bool(
         Some(_) => Err(client::invalid_argument(format!(
             "extra_args.vllm_tito.sampling_params.{field} must be a boolean"
         ))),
-    }
-}
-
-fn legacy_logprob_count(
-    sampling: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Result<Option<u32>, DynamoError> {
-    match sampling.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => match value.as_i64() {
-            Some(-1) => Ok(Some(u32::MAX)),
-            Some(value) if value >= 0 => u32::try_from(value).map(Some).map_err(|_| {
-                client::invalid_argument(format!(
-                    "extra_args.vllm_tito.sampling_params.{field} exceeds u32"
-                ))
-            }),
-            _ => Err(client::invalid_argument(format!(
-                "extra_args.vllm_tito.sampling_params.{field} must be non-negative or -1"
-            ))),
-        },
     }
 }
 
@@ -1573,6 +1434,7 @@ impl ResponseState {
             num_tokens,
             token_ids,
             finish_info,
+            sampling_mask,
             ..
         } = output;
 
@@ -1704,13 +1566,26 @@ impl ResponseState {
                 })?,
             );
         }
+        if !sampling_mask.is_empty() {
+            mapped
+                .engine_data
+                .get_or_insert_with(|| serde_json::json!({}))["sampling_mask"] = serde_json::json!(
+                sampling_mask
+                    .into_iter()
+                    .map(|row| row.ids)
+                    .collect::<Vec<_>>()
+            );
+        }
         self.attach_prompt_data(&mut mapped);
         Ok(Some(mapped))
     }
 
     fn attach_prompt_data(&mut self, output: &mut LLMEngineOutput) {
-        if output.engine_data.is_none() {
-            output.engine_data = self.prompt_info.take().map(prompt_logprobs_to_json);
+        if let Some(prompt) = self.prompt_info.take() {
+            output
+                .engine_data
+                .get_or_insert_with(|| serde_json::json!({}))["prompt_logprobs"] =
+                prompt_logprobs_to_json(prompt);
         }
     }
 
@@ -1739,10 +1614,17 @@ impl ResponseState {
             return Ok(());
         }
         let count = prompt.num_prompt_tokens as usize;
+        // A single input token has no preceding context to score. vLLM may
+        // omit all three score arrays instead of sending an unscored row.
+        let score_count = if count == 1 && prompt.logprobs.is_empty() {
+            0
+        } else {
+            count
+        };
         if prompt.token_ids.len() != count
-            || prompt.logprobs.len() != count
-            || prompt.ranks.len() != count
-            || prompt.candidate_tokens.len() != count
+            || prompt.logprobs.len() != score_count
+            || prompt.ranks.len() != score_count
+            || prompt.candidate_tokens.len() != score_count
         {
             return Err(client::protocol_error(format!(
                 "prompt logprob array lengths do not match expected count {count}: token_ids={}, logprobs={}, ranks={}, candidate_tokens={}",
@@ -1761,17 +1643,16 @@ impl ResponseState {
 fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
     let count = prompt.num_prompt_tokens as usize;
     let mut positions = Vec::with_capacity(count);
+    if count > 0 {
+        positions.push(serde_json::Value::Null);
+    }
     let rows = prompt
         .token_ids
         .into_iter()
         .zip(prompt.logprobs)
         .zip(prompt.ranks)
         .zip(prompt.candidate_tokens);
-    for (index, (((token_id, logprob), rank), candidates)) in rows.enumerate() {
-        if index == 0 {
-            positions.push(serde_json::Value::Null);
-            continue;
-        }
+    for (((token_id, logprob), rank), candidates) in rows.skip(1) {
         let mut entries = serde_json::Map::with_capacity(candidates.tokens.len() + 1);
         entries.insert(token_id.to_string(), prompt_logprob_entry(logprob, rank));
         for candidate in candidates.tokens {
@@ -1783,12 +1664,7 @@ fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
         positions.push(serde_json::Value::Object(entries));
     }
 
-    let mut engine_data = serde_json::Map::with_capacity(1);
-    engine_data.insert(
-        "prompt_logprobs".to_string(),
-        serde_json::Value::Array(positions),
-    );
-    serde_json::Value::Object(engine_data)
+    serde_json::Value::Array(positions)
 }
 
 fn prompt_logprob_entry(logprob: f32, rank: u32) -> serde_json::Value {

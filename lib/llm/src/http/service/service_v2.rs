@@ -48,9 +48,6 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
-use crate::local_model::runtime_config::{
-    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-};
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -1228,6 +1225,52 @@ pub(super) static SGLANG_ENABLE_GENERATE_ENV: &str = "DYN_SGLANG_ENABLE_GENERATE
 /// Environment variable to set the SGLang Generate endpoint path
 /// (default: `/generate`).
 pub(super) static HTTP_SVC_SGLANG_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_SGLANG_GENERATE_PATH";
+/// Resolve legacy backend switches once; readiness and routing use the same formats.
+fn configured_generate_routes(
+    enable_engine_apis: bool,
+) -> Result<Vec<(String, crate::generate_format::SharedFormat)>> {
+    use crate::generate_format::{named, selected};
+    resolve_generate_routes(
+        [
+            (
+                (enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV))
+                    .then(|| named("vllm")),
+                HTTP_SVC_VLLM_GENERATE_PATH_ENV,
+                "/inference/v1/generate",
+            ),
+            (
+                (enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV)).then(selected),
+                HTTP_SVC_SGLANG_GENERATE_PATH_ENV,
+                "/generate",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(format, path_env, default_path)| {
+            format.map(|format| {
+                (
+                    format,
+                    var(path_env).unwrap_or_else(|_| default_path.to_string()),
+                )
+            })
+        }),
+    )
+}
+
+fn resolve_generate_routes(
+    entries: impl IntoIterator<Item = (Result<crate::generate_format::SharedFormat>, String)>,
+) -> Result<Vec<(String, crate::generate_format::SharedFormat)>> {
+    let mut routes = Vec::new();
+    for (format, path) in entries {
+        validate_generate_route_path(&path)?;
+        anyhow::ensure!(
+            !routes.iter().any(|(existing, _)| existing == &path),
+            "duplicate Generate route path: {path}"
+        );
+        routes.push((path, format?));
+    }
+    Ok(routes)
+}
+
 fn validate_generate_route_path(path: &str) -> Result<()> {
     if !path.starts_with("/") {
         anyhow::bail!("Generate route path must start with '/': {path:?}");
@@ -1281,17 +1324,11 @@ impl HttpServiceConfigBuilder {
         let model_ready_metrics_prefix = metrics_config.prefix();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
-        let vllm_generate_enabled =
-            config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
-        let sglang_generate_enabled =
-            config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV);
-        let generate_engine_capabilities = [
-            vllm_generate_enabled.then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
-            sglang_generate_enabled.then_some(SGLANG_GENERATE_CAPABILITY),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let generate_routes = configured_generate_routes(config.enable_engine_apis)?;
+        let generate_engine_capabilities = generate_routes
+            .iter()
+            .map(|(_, format)| format.capability())
+            .collect::<Vec<_>>();
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -1459,8 +1496,7 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             &config.request_template,
             anthropic_endpoints_enabled,
-            vllm_generate_enabled,
-            sglang_generate_enabled,
+            generate_routes,
             config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
         let mut inference_router = axum::Router::new();
@@ -1619,8 +1655,7 @@ impl HttpServiceConfigBuilder {
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
-        vllm_generate_enabled: bool,
-        sglang_generate_enabled: bool,
+        generate_routes: Vec<(String, crate::generate_format::SharedFormat)>,
         enable_batch_endpoints: bool,
     ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
@@ -1684,25 +1719,13 @@ impl HttpServiceConfigBuilder {
             );
         }
 
-        if vllm_generate_enabled || sglang_generate_enabled {
+        if !generate_routes.is_empty() {
             tracing::warn!("The engine-native Generate APIs are experimental.");
             let mut generate_docs = Vec::new();
             let mut generate_route = axum::Router::new();
-            if vllm_generate_enabled {
-                let generate_path = var(HTTP_SVC_VLLM_GENERATE_PATH_ENV).ok();
-                if let Some(path) = generate_path.as_deref() {
-                    validate_generate_route_path(path)?;
-                }
-                let (docs, route) = super::generate::generate_router(state.clone(), generate_path);
-                generate_docs.extend(docs);
-                generate_route = generate_route.merge(route);
-            }
-            if sglang_generate_enabled {
-                let generate_path = var(HTTP_SVC_SGLANG_GENERATE_PATH_ENV).ok();
-                if let Some(path) = generate_path.as_deref() {
-                    validate_generate_route_path(path)?;
-                }
-                let (docs, route) = super::sglang_generate::router(state.clone(), generate_path);
+            for (path, format) in generate_routes {
+                let (docs, route) =
+                    super::format_generate::router(state.clone(), Some(path), format);
                 generate_docs.extend(docs);
                 generate_route = generate_route.merge(route);
             }
@@ -1740,6 +1763,9 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::{
+        SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    };
     use std::io::Write;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
@@ -2143,8 +2169,41 @@ mod tests {
         handle.abort();
     }
 
+    // These tests own route readiness, not either backend's wire format.
+    fn install_readiness_formats() {
+        use crate::generate_format::{
+            ClientError, ClientRequest, GenerateFormat, Opened, Registry,
+        };
+        struct ReadinessFormat(&'static str, &'static str);
+        impl GenerateFormat for ReadinessFormat {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn capability(&self) -> &'static str {
+                self.1
+            }
+            fn open(&self, _: ClientRequest<'_>) -> Result<Opened, ClientError> {
+                unreachable!("route readiness must not parse inference requests")
+            }
+        }
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let mut registry = Registry::default();
+            for (name, capability) in [
+                ("sglang", SGLANG_GENERATE_CAPABILITY),
+                ("vllm", VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+            ] {
+                registry
+                    .register(Arc::new(ReadinessFormat(name, capability)))
+                    .unwrap();
+            }
+            assert!(crate::generate_format::install(registry));
+        });
+    }
+
     #[tokio::test]
     async fn model_readiness_waits_for_generate_route_without_dispatching_inference() {
+        install_readiness_formats();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let service = HttpService::builder()
@@ -3532,6 +3591,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn generate_capabilities_follow_startup_gates() {
+        install_readiness_formats();
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
@@ -3571,7 +3631,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn generate_route_paths_follow_backend_env_overrides() {
+    fn generate_route_paths_use_overrides() {
+        install_readiness_formats();
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),
@@ -3593,6 +3654,23 @@ mod tests {
                 assert!(!route_docs.contains(&"POST /generate".to_string()));
                 assert!(!route_docs.contains(&"POST /inference/v1/generate".to_string()));
             },
+        );
+    }
+
+    #[test]
+    fn generate_route_paths_reject_collisions() {
+        install_readiness_formats();
+        let error = resolve_generate_routes(["vllm", "sglang"].map(|name| {
+            (
+                crate::generate_format::named(name),
+                "/native/shared".to_string(),
+            )
+        }))
+        .err()
+        .expect("duplicate path must fail");
+        assert_eq!(
+            error.to_string(),
+            "duplicate Generate route path: /native/shared"
         );
     }
 

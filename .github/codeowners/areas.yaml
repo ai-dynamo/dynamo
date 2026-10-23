@@ -10,6 +10,8 @@ areas:
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs
+  - lib/generate-format-catalog/
+  - lib/llm/src/generate_format.rs
   - lib/llm/src/entrypoint.rs
   - lib/llm/src/entrypoint/
   - lib/llm/src/entrypoint/input.rs
@@ -88,6 +90,7 @@ areas:
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
   - lib/sidecar/vllm/
+  - lib/generate-formats/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -111,6 +114,7 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+  - lib/generate-formats/sglang/
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:

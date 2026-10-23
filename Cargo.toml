@@ -14,6 +14,9 @@ members = [
     "lib/kv-router",
     "lib/router-plugins/catalog",
     "lib/router-plugins/builtin",
+    "lib/generate-format-catalog",
+    "lib/generate-formats/sglang",
+    "lib/generate-formats/vllm",
     "examples/router/custom-policy-example/soft-pin-repin",
     "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
@@ -51,6 +54,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }
+dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version = "1.6.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
 aisimulate-core = { version = "=0.13.0-dev.202610160000000073" }
 
