@@ -700,7 +700,38 @@ async def test_publish_events_does_not_materialize_unset_kv_cache_defaults(monke
         kv_cache_config["free_gpu_memory_fraction"] == config.free_gpu_memory_fraction
     )
     assert kv_cache_config["event_buffer_max_size"] > 0
+    assert kv_cache_config["use_kv_cache_manager_v2"] is False
     assert "enable_swa_scratch_reuse" not in kv_cache_config
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_publish_events_rejects_kv_cache_manager_v2(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--override-engine-args",
+            '{"kv_cache_config": {"use_kv_cache_manager_v2": true}}',
+        ]
+    )
+
+    with (
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ) as get_llm_engine,
+    ):
+        with pytest.raises(ValueError, match="use_kv_cache_manager_v2=True"):
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    get_llm_engine.assert_not_called()
 
 
 class MultimodalProcessorInstantiated(Exception):
