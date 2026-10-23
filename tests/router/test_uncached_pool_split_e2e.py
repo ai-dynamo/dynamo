@@ -288,9 +288,9 @@ def test_cold_and_warm_traffic_with_tainted_worker(
                     _statuses(frontend_port, [_warm_prompt(i) for i in range(4)])
                 )
 
-    assert all(status == 200 for status in cold_statuses), (
-        f"cold requests must succeed with a tainted worker present, got: {cold_statuses}"
-    )
-    assert all(status == 200 for status in warm_statuses), (
-        f"warm requests must succeed alongside the pool split, got: {warm_statuses}"
-    )
+    assert all(
+        status == 200 for status in cold_statuses
+    ), f"cold requests must succeed with a tainted worker present, got: {cold_statuses}"
+    assert all(
+        status == 200 for status in warm_statuses
+    ), f"warm requests must succeed alongside the pool split, got: {warm_statuses}"

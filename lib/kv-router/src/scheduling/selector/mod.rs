@@ -620,6 +620,7 @@ mod selection_trace_tests {
                 worker: WorkerWithDpRank::from_worker_id(id as u64),
                 cost: *cost,
                 preferred_taint_multiplier: None,
+                taints: None,
             })
             .collect()
     }

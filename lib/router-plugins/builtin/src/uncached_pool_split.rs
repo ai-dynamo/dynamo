@@ -658,7 +658,8 @@ mod tests {
                 shared.map(|rc| rc.borrow().clone()).unwrap_or_default(),
             ),
         };
-        let result = WorkerSelectionPolicy::new(
+
+        WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",
             Vec::new(),
@@ -670,8 +671,7 @@ mod tests {
             request.eligibility(),
             BLOCK_SIZE,
         ))
-        .map(|outcome| outcome.worker);
-        result
+        .map(|outcome| outcome.worker)
     }
 
     /// Two tiers over effective prefill: [100, 160) on taint cold-1, [160, ∞) on cold-2.
