@@ -3553,6 +3553,13 @@ func GenerateBasePodSpecForController(
 
 	parentGraphDeploymentName := dynComponent.GetParentGraphDeploymentName()
 	if parentGraphDeploymentName == "" {
+		// The selected template is a deep copy. Ignore authored template origins:
+		// only immutable standalone metadata can select new operator defaults.
+		template := ensurePodTemplate(componentSpec)
+		delete(template.Annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+		if origin, exists := dynComponent.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+			template.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
+		}
 		parentGraphDeploymentName = dynComponent.Name
 	}
 

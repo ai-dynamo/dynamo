@@ -52,11 +52,13 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ##### Frontend Startup Probe Defaults
 
-**Change:** Generated frontend startup probes require both a DGD origin of operator 1.7.0
-or later and a frontend runtime of 1.6.0 or later. Frontend sidecars use the same DGD
-origin and resolve their own image version.
+**Change:** Generated frontend startup probes require both a workload origin of operator
+1.7.0 or later and a frontend runtime of 1.6.0 or later. Standalone DCDs record their
+immutable origin only on CREATE; UPDATE never backfills existing resources. DGD-managed
+DCDs inherit the parent graph origin, even when the child is created by a newer operator.
+Frontend sidecars use the same origin and resolve their own image version.
 
-**Existing deployments:** DGDs created by operator 1.6.x or earlier, and resources
+**Existing deployments:** Workloads created by operator 1.6.x or earlier, and resources
 without a resolvable origin, retain their previous frontend defaults during operator-only
 upgrades. Explicitly authored complete probes remain effective.
 

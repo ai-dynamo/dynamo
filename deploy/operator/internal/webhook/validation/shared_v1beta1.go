@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -35,6 +36,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
@@ -1512,4 +1514,43 @@ func (v *sharedValidation) validateGroveSpecUpdate(
 		newForced,
 		fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 	)}
+}
+
+// validateObjectMeta checks shared creation provenance. objectMeta and fldPath are non-nil.
+func (v *sharedValidation) validateObjectMeta(objectMeta *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	annotationsPath := fldPath.Child("annotations")
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+		if _, err := semver.NewVersion(value); err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
+				value,
+				"must be valid semver",
+			))
+		}
+	}
+	return allErrs
+}
+
+// validateObjectMetaUpdate preserves creation provenance, including legacy absence.
+// newObjectMeta, oldObjectMeta, and fldPath are non-nil.
+func (v *sharedValidation) validateObjectMetaUpdate(newObjectMeta, oldObjectMeta *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	annotationsPath := fldPath.Child("annotations")
+	newOrigin, newOriginExists := newObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	oldOrigin, oldOriginExists := oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	// Keep creation provenance immutable, including whether it exists at all.
+	if newOriginExists != oldOriginExists || newOrigin != oldOrigin {
+		var invalidValue any
+		if newOriginExists {
+			invalidValue = newOrigin
+		}
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
+	return allErrs
 }

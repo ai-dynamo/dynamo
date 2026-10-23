@@ -105,16 +105,12 @@ func TestFrontendStartupProbeOriginPropagation(t *testing.T) {
 		name        string
 		origin      string
 		sidecar     bool
-		authored    bool
 		wantEnabled bool
 	}{
 		{name: "missing graph origin preserves frontend defaults"},
 		{name: "1.6 graph preserves frontend defaults", origin: "1.6.0"},
 		{name: "1.7 graph enables frontend default", origin: "1.7.0", wantEnabled: true},
 		{name: "1.6 graph preserves frontend sidecar", origin: "1.6.0", sidecar: true},
-		{name: "1.7 graph enables frontend sidecar", origin: "1.7.0", sidecar: true, wantEnabled: true},
-		{name: "1.6 graph keeps authored probe", origin: "1.6.0", authored: true, wantEnabled: true},
-		{name: "1.6 graph keeps authored sidecar probe", origin: "1.6.0", sidecar: true, authored: true, wantEnabled: true},
 	}
 
 	for _, tt := range tests {
@@ -139,10 +135,8 @@ func TestFrontendStartupProbeOriginPropagation(t *testing.T) {
 				component.PodTemplate.Spec.Containers = append(component.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: "frontend:1.6.0"})
 				frontendIndex = 1
 			}
-			var authored *corev1.Probe
-			if tt.authored {
-				authored = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}, PeriodSeconds: 5}
-				component.PodTemplate.Spec.Containers[frontendIndex].StartupProbe = authored.DeepCopy()
+			if tt.wantEnabled {
+				component.PodTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = "1.6.0"
 			}
 
 			t.Log("Render through the production graph path, including frontend sidecar lowering")
@@ -150,12 +144,59 @@ func TestFrontendStartupProbeOriginPropagation(t *testing.T) {
 				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, component.ComponentName, nil, staticContainerGPUCount(0))
 			require.NoError(t, err)
 
-			t.Log("Preserve old defaults and explicit probes without disabling the new default")
+			t.Log("Preserve old graph defaults and propagate the authoritative new origin")
 			probe := pod.Containers[frontendIndex].StartupProbe
 			require.Equal(t, tt.wantEnabled, probe != nil)
-			if tt.authored {
-				require.Equal(t, authored, probe)
+		})
+	}
+}
+
+func TestFrontendStartupProbeDCDOrigin(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		origin         string
+		templateOrigin string
+		graphChild     bool
+		sidecar        bool
+		wantEnabled    bool
+	}{
+		{name: "legacy standalone ignores authored origin", templateOrigin: "1.7.0"},
+		{name: "1.6 standalone keeps old defaults", origin: "1.6.0", templateOrigin: "1.7.0"},
+		{name: "new standalone overrides old template origin", origin: "1.7.0", templateOrigin: "1.6.0", wantEnabled: true},
+		{name: "new standalone frontend sidecar", origin: "1.7.0", sidecar: true, wantEnabled: true},
+		{name: "old graph child keeps parent origin", templateOrigin: "1.6.0", graphChild: true},
+		{name: "new graph child uses parent origin", templateOrigin: "1.7.0", graphChild: true, wantEnabled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dcd := &v1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.templateOrigin}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "frontend:1.6.0"}}},
+					},
+				}},
 			}
+			if tt.origin != "" {
+				dcd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.origin}
+			}
+			if tt.graphChild {
+				dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph", Controller: ptr.To(true)}}
+			}
+			index := 0
+			if tt.sidecar {
+				dcd.Spec.ComponentType = v1beta1.ComponentTypeWorker
+				dcd.Spec.BackendFramework = "vllm"
+				dcd.Spec.FrontendSidecar = ptr.To("frontend")
+				dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: "frontend:1.6.0"})
+				index = 1
+			}
+			original := dcd.DeepCopy()
+			pod, err := GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, RoleMain, commonconsts.MultinodeDeploymentTypeGrove, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+			require.NoError(t, err)
+			require.Equal(t, tt.wantEnabled, pod.Containers[index].StartupProbe != nil)
+			require.Equal(t, original, dcd)
 		})
 	}
 }
