@@ -953,9 +953,6 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
-              - page: MiniMax M3.1
-                path: pages/recipes/model-recipes/minimax-m3-1.mdx
-                slug: minimax-m3-1
               - page: MiniMax M3
                 path: pages/recipes/model-recipes/minimax-m3.mdx
                 slug: minimax-m3
