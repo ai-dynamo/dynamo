@@ -24,6 +24,7 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
+# Datadog attempt-to-fix trial (do not merge).
 def test_scheduling_default_timeouts_match_spec():
     s = SchedulingConfig()
     assert s.tick_max_duration_seconds == 30.0
