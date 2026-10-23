@@ -90,11 +90,11 @@ func readSGLangLaunchArgs(container *corev1.Container) (sglangLaunchArgs, error)
 			value = args[i].Value
 		}
 		if size != nil {
-			n, err := strconv.ParseInt(value, 10, 32)
-			if err != nil || n <= 0 || args[i].MayExpand {
-				return launch, fmt.Errorf("%s must be a literal positive integer; use complete leader and worker podTemplates for dynamic topology", flag)
+			n, err := parseSGLangParallelSize(flag, launchArgument{Value: value, MayExpand: args[i].MayExpand})
+			if err != nil {
+				return launch, err
 			}
-			*size = int(n)
+			*size = n
 		} else {
 			if args[i].MayExpand {
 				return launch, fmt.Errorf("--kv-events-config must be literal JSON; use complete leader and worker podTemplates for dynamic topology")
@@ -115,6 +115,15 @@ func readSGLangLaunchArgs(container *corev1.Container) (sglangLaunchArgs, error)
 		return launch, fmt.Errorf("SGLang multinode model data parallelism is unsupported; use --attn-dp-size for attention-DP")
 	}
 	return launch, nil
+}
+
+// parseSGLangParallelSize validates a literal parallel dimension without expanding shell words.
+func parseSGLangParallelSize(flag string, arg launchArgument) (int, error) {
+	n, err := strconv.ParseInt(arg.Value, 10, 32)
+	if err != nil || n <= 0 || arg.MayExpand {
+		return 0, fmt.Errorf("%s must be a literal positive integer; use complete leader and worker podTemplates for dynamic topology", flag)
+	}
+	return int(n), nil
 }
 
 // sglangHasLocalKVPublisher mirrors the engine's advertised local-source requirement.

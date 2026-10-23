@@ -24,8 +24,10 @@ func ValidateDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpe
 	detail := fmt.Sprintf("component %q with a runtime init container", component.ComponentName)
 
 	// Validate each authored container at its original API path, including invalid role layouts.
-	templates := []*corev1.PodTemplateSpec{component.PodTemplate}
-	paths := []*field.Path{fldPath.Child("podTemplate")}
+	templates := make([]*corev1.PodTemplateSpec, 1, 1+len(component.Roles))
+	templates[0] = component.PodTemplate
+	paths := make([]*field.Path, 1, 1+len(component.Roles))
+	paths[0] = fldPath.Child("podTemplate")
 	for i := range component.Roles {
 		templates = append(templates, component.Roles[i].PodTemplate)
 		paths = append(paths, fldPath.Child("roles").Index(i).Child("podTemplate"))
