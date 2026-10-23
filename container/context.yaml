@@ -69,7 +69,7 @@ dynamo:
   etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 
   nixl_ref: v1.3.2
-  nixl_ucx_ref: v1.22.0
+  nixl_ucx_ref: v1.23.0-rc1
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
   # >= v2.5 for NIXL 1.5.0 (fi_mr_attr.device.rocr). <= the libfabric of
