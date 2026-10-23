@@ -13,7 +13,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 func TestRuntimePreservesAuthoredStartup(t *testing.T) {
@@ -48,31 +47,31 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 					{
 						Name: "sidecar", Image: "helper-runtime", Command: []string{"/custom-helper"}, Args: []string{"observe"},
 						Env: []corev1.EnvVar{{Name: "HELPER_SETTING", Value: "retained"}}, ReadinessProbe: testExecProbe("helper-ready"),
-						SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To(int64(1000)), RunAsNonRoot: ptr.To(true)},
+						SecurityContext: &corev1.SecurityContext{RunAsUser: new(int64(1000)), RunAsNonRoot: new(true)},
 					},
 					{
 						Name: "main", Image: "custom-runtime", Command: startup.command, Args: startup.args,
 						Env: []corev1.EnvVar{{Name: "LPX_ALLOCATION", Value: "forged-allocation"}},
 						EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: "user-environment"},
+							Name: "user-environment",
 						}}},
 					},
 				}}
 				if startup.args != nil {
 					pod.Containers[1].SecurityContext = &corev1.SecurityContext{
-						RunAsUser: ptr.To(int64(1000)), RunAsGroup: ptr.To(int64(2000)),
-						RunAsNonRoot: ptr.To(true), ReadOnlyRootFilesystem: ptr.To(true),
+						RunAsUser: new(int64(1000)), RunAsGroup: new(int64(2000)),
+						RunAsNonRoot: new(true), ReadOnlyRootFilesystem: new(true),
 					}
 				}
 				if startup.command == nil && startup.args != nil {
 					pod.Volumes = []corev1.Volume{
-						{Name: "credentials", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
-							DefaultMode: ptr.To(int32(0400)), Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{
-								LocalObjectReference: corev1.LocalObjectReference{Name: "custom.ssh"},
-								Items:                []corev1.KeyToPath{{Key: "private.key", Path: "id"}},
+						{Name: "credentials", Projected: &corev1.ProjectedVolumeSource{
+							DefaultMode: new(int32(0400)), Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{
+								Name:  "custom.ssh",
+								Items: []corev1.KeyToPath{{Key: "private.key", Path: "id"}},
 							}}},
-						}}},
-						{Name: "scratch", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "readonly"}}},
+						}},
+						{Name: "scratch", Secret: &corev1.SecretVolumeSource{SecretName: "readonly"}},
 					}
 					pod.Containers[1].VolumeMounts = []corev1.VolumeMount{
 						{Name: "credentials", MountPath: "/custom/ssh", ReadOnly: true},
@@ -82,7 +81,7 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				if startup.command != nil {
 					pod.Containers[1].Env = append(pod.Containers[1].Env,
 						corev1.EnvVar{Name: "TEMPLATE_SECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "value",
+							Name: "settings", Key: "value",
 						}}},
 					)
 					pod.Containers[1].StartupProbe = testExecProbe("custom-started")
@@ -287,7 +286,7 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 
 func testExecProbe(command string) *corev1.Probe {
 	return &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{command}}},
+		Exec: &corev1.ExecAction{Command: []string{command}},
 	}
 }
 

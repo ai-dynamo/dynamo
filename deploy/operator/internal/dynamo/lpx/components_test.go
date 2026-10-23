@@ -14,7 +14,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -53,7 +52,7 @@ func TestLPXSchedulerSelectionUsesComponents(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Construct the DGD selection input")
 			dgd := &dynamov1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Annotations: test.annotations},
+				Annotations: test.annotations,
 				Spec: dynamov1beta1.DynamoGraphDeploymentSpec{
 					Components: test.components,
 				},

@@ -201,7 +201,7 @@ func serveFromAgent(dgd *v1beta1.DynamoGraphDeployment) {
 		Env:          []corev1.EnvVar{{Name: "DYN_SYSTEM_PORT", Value: "18090"}},
 		VolumeMounts: []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs", ReadOnly: true}},
 		ReadinessProbe: &corev1.Probe{
-			ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)}},
+			HTTPGet:       &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)},
 			PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
 		},
 	})
@@ -303,7 +303,7 @@ func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
 	require.Nil(t, runtime.StartupProbe)
 	require.Nil(t, runtime.LivenessProbe)
 	require.Equal(t, &corev1.Probe{
-		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)}},
+		HTTPGet:       &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)},
 		PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
 	}, runtime.ReadinessProbe)
 }
@@ -492,13 +492,13 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	for _, name := range []string{"CYBORG_BATCH_SIZE", "CYBORG_FPGA_GPI_IO_FPGA_COUNT", "CYBORG_SWA_CACHE_IDS"} {
 		leader.Spec.Containers[0].Env = append(leader.Spec.Containers[0].Env, corev1.EnvVar{
 			Name: name, ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "runtime-settings"}, Key: name,
+				Name: "runtime-settings", Key: name,
 			}},
 		})
 	}
 	authoredConfig := corev1.Volume{
-		Name:         "config",
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		Name:     "config",
+		EmptyDir: &corev1.EmptyDirVolumeSource{},
 	}
 	leader.Spec.Volumes = append(leader.Spec.Volumes, authoredConfig)
 
@@ -699,11 +699,11 @@ func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	require.NotEqual(t, -1, cyborgIndex)
 	cyborg := before.Spec.Template.Cliques[cyborgIndex]
 	require.EqualValues(t, 4, cyborg.Spec.Replicas)
-	require.Equal(t, ptr.To(int32(1)), cyborg.Spec.MinAvailable)
+	require.Equal(t, new(int32(1)), cyborg.Spec.MinAvailable)
 
 	t.Log("Persist explicit Cyborg capacity while preserving the group seed, configuration and graph digest")
-	dgd.Spec.Components[0].Replicas = ptr.To(int32(12))
-	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(8))
+	dgd.Spec.Components[0].Replicas = new(int32(12))
+	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = new(int32(8))
 	workloads, plans, err = r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 	after, afterResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
@@ -1382,9 +1382,9 @@ func TestStampClientIdentity(t *testing.T) {
 	require.NoError(t, err)
 	custom := []corev1.KeyToPath{{Key: "private.key.pub", Path: "authorized_keys"}}
 	spec := &fresh.Spec.Template.Cliques[0].Spec.PodSpec
-	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "ssh-projected", VolumeSource: corev1.VolumeSource{
+	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "ssh-projected",
 		Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{
-			LocalObjectReference: corev1.LocalObjectReference{Name: "ssh-secret"}, Items: custom}}}}}})
+			Name: "ssh-secret", Items: custom}}}}})
 	require.NoError(t, r.stampClientIdentity(ctx, dgd, fresh))
 	plain := 0
 	for _, clique := range fresh.Spec.Template.Cliques {
@@ -1416,7 +1416,7 @@ func TestRecreatedClientIdentityRollsEveryClique(t *testing.T) {
 	live := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
 
 	t.Log("The Secret is deleted while the workload runs; the next render generates new keys under the same name")
-	require.NoError(t, r.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: dgd.Namespace, Name: "lpx-id-" + string(dgd.UID)}}))
+	require.NoError(t, r.Delete(ctx, &corev1.Secret{Namespace: dgd.Namespace, Name: "lpx-id-" + string(dgd.UID)}))
 	recreated := renderLPXTestPodCliqueSet(t, ctx, r, child, dgd, desired)
 
 	t.Log("Every clique template changes, so Grove rolls each Pod without replacing the PodCliqueSet")
@@ -1429,10 +1429,10 @@ func TestRecreatedClientIdentityRollsEveryClique(t *testing.T) {
 func TestClientIdentityRejectsAuthoredVolumeOrMount(t *testing.T) {
 	for name, author := range map[string]func(*corev1.PodSpec){
 		"volume": func(spec *corev1.PodSpec) {
-			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, EmptyDir: &corev1.EmptyDirVolumeSource{}})
 		},
 		"mount": func(spec *corev1.PodSpec) {
-			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "authored", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "authored", EmptyDir: &corev1.EmptyDirVolumeSource{}})
 			spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "authored", MountPath: identityMountPath + "/"})
 		},
 	} {
@@ -1521,7 +1521,7 @@ func newLPXGPUClient(t *testing.T) client.Client {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, resourcev1.AddToScheme(scheme))
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}, Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "gpu.nvidia.com"`}}}}},
-		&resourcev1.ResourceClaimTemplate{ObjectMeta: metav1.ObjectMeta{Name: "decode-gpu", Namespace: "test"}, Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{Name: "gpu", Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "gpu.nvidia.com", AllocationMode: resourcev1.DeviceAllocationModeExactCount, Count: 1}}}}}}},
+		&resourcev1.DeviceClass{Name: "gpu.nvidia.com", Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{CEL: &resourcev1.CELDeviceSelector{Expression: `device.driver == "gpu.nvidia.com"`}}}}},
+		&resourcev1.ResourceClaimTemplate{Name: "decode-gpu", Namespace: "test", Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{Name: "gpu", Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: "gpu.nvidia.com", AllocationMode: resourcev1.DeviceAllocationModeExactCount, Count: 1}}}}}}},
 	).Build()
 }

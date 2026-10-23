@@ -78,7 +78,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}))
 	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "ordinary-decode", ComponentType: v1beta1.ComponentTypeDecode,
-		Replicas:    ptr.To(int32(0)),
+		Replicas:    new(int32(0)),
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "ordinary"}}}},
 	})
 
@@ -99,7 +99,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 
 	t.Log("Scale Nova workloads without changing their model or workload digest")
 	for _, replicas := range []int32{2, 10, 12, 123} {
-		dgd.Spec.Components[0].Replicas = ptr.To(replicas)
+		dgd.Spec.Components[0].Replicas = new(replicas)
 		scaled, err := ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), staticModelRegistry{"build": hxSnapshot})
 		require.NoError(t, err)
 		require.Equal(t, hx.Digest(), scaled.Digest())
@@ -174,11 +174,11 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Provide GPU and network claims in the deployment namespace")
 			gpuClass := &resourcev1.DeviceClass{
-				ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"},
-				Spec:       resourcev1.DeviceClassSpec{ExtendedResourceName: ptr.To(commonconsts.KubeResourceGPUNvidia)},
+				Name: "gpu.nvidia.com",
+				Spec: resourcev1.DeviceClassSpec{ExtendedResourceName: ptr.To(commonconsts.KubeResourceGPUNvidia)},
 			}
 			claim := &resourcev1.ResourceClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "external-gpu", Namespace: dgd.Namespace},
+				Name: "external-gpu", Namespace: dgd.Namespace,
 				Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
 					Name: "gpus", Exactly: &resourcev1.ExactDeviceRequest{DeviceClassName: gpuClass.Name, Count: 1},
 				}}}},
@@ -188,8 +188,8 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 				Spec:       resourcev1.ResourceClaimTemplateSpec{Spec: *claim.Spec.DeepCopy()},
 			}
 			networkClass := &resourcev1.DeviceClass{
-				ObjectMeta: metav1.ObjectMeta{Name: "network.example.com"},
-				Spec:       resourcev1.DeviceClassSpec{ExtendedResourceName: ptr.To("rdma/hca")},
+				Name: "network.example.com",
+				Spec: resourcev1.DeviceClassSpec{ExtendedResourceName: new("rdma/hca")},
 			}
 			networkClaim := claim.DeepCopy()
 			networkClaim.Name = "network"
@@ -204,12 +204,12 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 				podClaim := corev1.PodResourceClaim{Name: "gpu"}
 				objectName := defaultTestString(test.claimObject, "external-gpu")
 				if test.template {
-					podClaim.ResourceClaimTemplateName = ptr.To(objectName)
+					podClaim.ResourceClaimTemplateName = new(objectName)
 				} else {
-					podClaim.ResourceClaimName = ptr.To(objectName)
+					podClaim.ResourceClaimName = new(objectName)
 				}
 				pod.ResourceClaims = []corev1.PodResourceClaim{
-					{Name: "other", ResourceClaimName: ptr.To("external-other")},
+					{Name: "other", ResourceClaimName: new("external-other")},
 					podClaim,
 				}
 			}
@@ -256,7 +256,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	conductor.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
 		corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 	}
-	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
+	dgd.Spec.Components[0].Replicas = new(int32(2))
 
 	t.Log("Project two complete hybrid replicas")
 	xt, err := ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
@@ -284,7 +284,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	require.Zero(t, localWorkload.modelProjections[0].AgentReplicas())
 
 	t.Log("A scheduling deadline does not change hybrid launch")
-	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(30))}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: new(int64(30))}
 	scheduled, err := ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)
 	require.Equal(t, xt, scheduled)
@@ -341,8 +341,8 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 				testLPXComponent("lpx", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 				testLPXComponent("small", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 			)
-			dgd.Spec.Components[1].Replicas = ptr.To(int32(2))
-			dgd.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(agentCounts[0])
+			dgd.Spec.Components[1].Replicas = new(int32(2))
+			dgd.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = new(agentCounts[0])
 			source := staticModelRegistry{
 				"draft-build":  snapshots[0],
 				"target-build": snapshots[1],
@@ -400,7 +400,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 
 			t.Log("Agent replica assertions count one compiled model instance, not draft fanout")
 			invalidCount := dgd.DeepCopy()
-			invalidCount.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(agentCounts[0] * 2)
+			invalidCount.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = new(agentCounts[0] * 2)
 			_, err = ResolveWorkload(t.Context(), reader, invalidCount, singleGroupComponents(t, invalidCount), source)
 			require.ErrorContains(t, err, "must match the compiled count")
 
@@ -444,7 +444,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 					draft := &dgd.Spec.Components[1]
 					draft.Replicas = nil
 					if expansion.count > 1 {
-						draft.Replicas = ptr.To(expansion.count)
+						draft.Replicas = new(expansion.count)
 					}
 					expanded, err := ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
 					require.NoError(t, err)
@@ -573,7 +573,7 @@ func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 			v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("agent")},
 			v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor")},
 		)
-		component.Replicas = ptr.To(int32(index + 2))
+		component.Replicas = new(int32(index + 2))
 		dgd.Spec.Components = append(dgd.Spec.Components, component)
 	}
 	snapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
@@ -595,7 +595,7 @@ func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 
 	t.Log("Require a singleton conductor independently of component replica counts")
 	conductor := dgd.GetComponentByName("second").ComponentRole(v1beta1.ComponentRoleLPXConductor)
-	conductor.Replicas = ptr.To(int32(2))
+	conductor.Replicas = new(int32(2))
 	_, err := ResolveWorkload(t.Context(), reader, dgd, groups["second"], staticModelRegistry{"second-build": snapshot})
 	require.ErrorContains(t, err, `component "second" conductor replicas must be one`)
 }

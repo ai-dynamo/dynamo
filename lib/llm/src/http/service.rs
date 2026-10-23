@@ -22,6 +22,7 @@ mod anthropic;
 mod batch_proxy;
 pub mod metadata;
 mod openai;
+mod server;
 mod write_timeout;
 
 pub mod busy_threshold;
@@ -89,7 +90,10 @@ fn apply_request_tool_call_parsing_options(
         .as_ref()
         .is_some_and(|format| !matches!(format, dynamo_protocols::types::ResponseFormat::Text));
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
-        parsing_options.tool_call_parser.as_deref(),
+        (
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ),
         &converted_tool_choice,
         &converted_tools,
         request.inner.parallel_tool_calls,

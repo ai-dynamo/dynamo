@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -28,7 +27,7 @@ func TestLPXStatusUsesOneCurrentChild(t *testing.T) {
 			third.ComponentName = "third"
 			third.Roles = []v1beta1.ComponentRoleSpec{*third.ComponentRole(v1beta1.ComponentRoleLPXAgent)}
 			third.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
-				{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+				{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)},
 			}
 			source.Spec.Components = append(source.Spec.Components, other, third)
 			kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(source).Build()
@@ -52,10 +51,8 @@ func TestLPXStatusUsesOneCurrentChild(t *testing.T) {
 			for i, component := range source.Spec.Components {
 				replicas := int32(i + 1)
 				child.Status.Components[component.ComponentName] = v1alpha1.LPXComponentStatus{
-					ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{
-						Replicas: replicas, UpdatedReplicas: replicas, ReadyReplicas: ptr.To(replicas),
-						AvailableReplicas: ptr.To(replicas), ScheduledReplicas: ptr.To(replicas),
-					},
+					Replicas: replicas, UpdatedReplicas: replicas, ReadyReplicas: new(replicas),
+					AvailableReplicas: new(replicas), ScheduledReplicas: new(replicas),
 					Conditions: []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
 				}
 			}

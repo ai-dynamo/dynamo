@@ -18,7 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -111,11 +110,11 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				}
 			}
 			template := corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				Annotations: map[string]string{
 					"user":                         "kept",
 					lpxv1alpha1.PodModelAnnotation: "spoofed",
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
-				}},
+				},
 				Spec: renderTestPodSpec(),
 			}
 			template.Spec.Tolerations = []corev1.Toleration{
@@ -125,9 +124,9 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			if test.configPath != "" {
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
 					Name: lpuConfigVolumeName,
-					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "authored-config"}, DefaultMode: ptr.To[int32](0440),
-					}},
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						Name: "authored-config", DefaultMode: ptr.To[int32](0440),
+					},
 				})
 			}
 			template.Spec.Containers[0].VolumeMounts = slices.DeleteFunc(template.Spec.Containers[0].VolumeMounts,
@@ -255,7 +254,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	draft := testLPXComponent(runtimeModelDraft, "draft-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
-	draft.Replicas = ptr.To(int32(2))
+	draft.Replicas = new(int32(2))
 	target := testLPXComponent(testTargetStageName, "target-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
@@ -274,13 +273,12 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 				}},
 			})
 			spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "conductor", Image: "setup"})
-			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "resources", VolumeSource: corev1.VolumeSource{
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "resources",
 				DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{
 					Path: "main-memory", ResourceFieldRef: &corev1.ResourceFieldSelector{
 						ContainerName: "main", Resource: "limits.memory",
 					},
-				}}},
-			}})
+				}}}})
 		}
 	}
 
@@ -435,7 +433,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 			PodSpec: corev1.PodSpec{
 				SchedulerName: corev1.DefaultSchedulerName,
 				Volumes: []corev1.Volume{
-					{Name: "model-storage", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}},
+					{Name: "model-storage", PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}},
 				},
 				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
 					{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
@@ -445,7 +443,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
 					Name:                      "candidate",
-					ResourceClaimTemplateName: ptr.To("candidate"),
+					ResourceClaimTemplateName: new("candidate"),
 				}},
 			},
 		},
@@ -457,14 +455,14 @@ func renderTestPodSpec() corev1.PodSpec {
 	return corev1.PodSpec{
 		Volumes: []corev1.Volume{{
 			Name: "model-storage",
-			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: "model-storage",
-			}},
+			},
 		},
-			{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			{Name: "ssh-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
-			{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
-			{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
+			{Name: "single-v2-ssh-key", EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			{Name: "ssh-secret", Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}},
+			{Name: "host-dev", HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}},
+			{Name: "host-sys", HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}},
 		},
 		Containers: []corev1.Container{{
 			Name: "main", Image: "runtime",

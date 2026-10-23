@@ -205,9 +205,9 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/configs"})
 			require.Contains(t, cyborg.Spec.PodSpec.Volumes, corev1.Volume{
 				Name: lpuConfigVolumeName,
-				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: servers.Name},
-				}},
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					Name: servers.Name,
+				},
 			})
 			require.NotEmpty(t, cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash])
 		})

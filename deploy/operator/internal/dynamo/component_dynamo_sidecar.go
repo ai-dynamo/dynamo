@@ -79,15 +79,15 @@ func dynamoSidecarBaseContainer(context ComponentContext) corev1.Container {
 
 	// Startup covers only the independent HTTP listener, not engine model loading.
 	container.StartupProbe = &corev1.Probe{
-		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString(commonconsts.DynamoSystemPortName)}},
+		HTTPGet:       &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString(commonconsts.DynamoSystemPortName)},
 		PeriodSeconds: 2, TimeoutSeconds: 1, FailureThreshold: 30,
 	}
 	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString(commonconsts.DynamoSystemPortName)}},
+		HTTPGet:       &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString(commonconsts.DynamoSystemPortName)},
 		PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
 	}
 	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString(commonconsts.DynamoSystemPortName)}},
+		HTTPGet:       &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString(commonconsts.DynamoSystemPortName)},
 		PeriodSeconds: 5, TimeoutSeconds: 4, FailureThreshold: 3,
 	}
 	return container
