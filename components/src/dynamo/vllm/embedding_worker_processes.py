@@ -13,7 +13,6 @@ embedding worker while keeping generation workers unchanged.
 from __future__ import annotations
 
 import copy
-import importlib
 import json
 import logging
 import os
@@ -30,24 +29,19 @@ from typing import Any, Callable
 import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine import utils as engine_utils
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.utils import launch_core_engines
 from vllm.v1.executor import Executor
-
-launch_core_engines: Callable[..., Any] | None = None
 
 
 def _resolve_engine_utils(
     vllm_config: VllmConfig, process_count: int
-) -> tuple[Any, Any, Callable[..., Any]]:
-    global launch_core_engines
-    engine_utils = importlib.import_module("vllm.v1.engine.utils")
-
-    if launch_core_engines is None:
-        launch_core_engines = engine_utils.launch_core_engines
+) -> tuple[Any, Any]:
     # vLLM 0.32 replaces address allocation with supervisor-bound listeners.
     get_addresses = getattr(engine_utils, "get_engine_zmq_addresses", None)
     if get_addresses is not None:
-        return get_addresses(vllm_config, process_count), None, launch_core_engines
+        return get_addresses(vllm_config, process_count), None
     bind_listeners = getattr(engine_utils, "bind_engine_zmq_listeners", None)
     if bind_listeners is None:
         raise RuntimeError(
@@ -55,7 +49,7 @@ def _resolve_engine_utils(
             "nor bind_engine_zmq_listeners"
         )
     listeners = bind_listeners(vllm_config, process_count)
-    return listeners.addresses, listeners, launch_core_engines
+    return listeners.addresses, listeners
 
 
 def _client_listeners(
@@ -510,9 +504,7 @@ def create_shared_embedding_engine_client(
         vllm_config.parallel_config._api_process_count = process_count
         vllm_config.parallel_config._api_process_rank = -1
         executor_class = Executor.get_class(vllm_config)
-        addresses, zmq_listeners, core_engines_launcher = _resolve_engine_utils(
-            vllm_config, process_count
-        )
+        addresses, zmq_listeners = _resolve_engine_utils(vllm_config, process_count)
 
         parent_logger_config = _client_config(
             vllm_config,
@@ -525,7 +517,7 @@ def create_shared_embedding_engine_client(
         with ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="dynamo-embedding-client"
         ) as client_pool:
-            with core_engines_launcher(
+            with launch_core_engines(
                 vllm_config,
                 executor_class,
                 not disable_log_stats,
