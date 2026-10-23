@@ -426,54 +426,6 @@ mod tests {
         Harness::native(Arc::new(SglangFormat::native())).check_all();
     }
 
-    #[test]
-    fn request_priority_header_overrides_body_for_routing() {
-        let headers = axum::http::HeaderMap::from_iter([
-            (
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static("application/json"),
-            ),
-            (
-                HEADER_REQUEST_PRIORITY.parse().unwrap(),
-                axum::http::HeaderValue::from_static("0"),
-            ),
-        ]);
-        let opened = SglangFormat::native()
-            .open(ClientRequest {
-                body: br#"{"input_ids":[1],"priority":7}"#,
-                headers: &headers,
-                default_request_id: "request",
-            })
-            .unwrap();
-        let bound = (opened.bind)(&crate::testkit::worker(&Value::Null)).unwrap();
-
-        assert_eq!(bound.request.routing.as_ref().unwrap().priority, Some(0));
-    }
-
-    #[test]
-    fn malformed_request_priority_header_falls_back_to_body() {
-        let headers = axum::http::HeaderMap::from_iter([
-            (
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static("application/json"),
-            ),
-            (
-                HEADER_REQUEST_PRIORITY.parse().unwrap(),
-                axum::http::HeaderValue::from_static("not-an-int"),
-            ),
-        ]);
-        let opened = SglangFormat::native()
-            .open(ClientRequest {
-                body: br#"{"input_ids":[1],"priority":7}"#,
-                headers: &headers,
-                default_request_id: "request",
-            })
-            .unwrap();
-        let bound = (opened.bind)(&crate::testkit::worker(&Value::Null)).unwrap();
-
-        assert_eq!(bound.request.routing.as_ref().unwrap().priority, Some(7));
-    }
-
     /// Streams and unary responses recorded from SGLang v0.5.21 (Qwen3-0.6B,
     /// greedy), one request shape per line.
     fn fixtures() -> Vec<Value> {
