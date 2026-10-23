@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 
 use super::super::ThunderAgentConfig;
 use super::ThunderAgentError;
+use super::accounting::PrefixAccounting;
 use super::capacity::WorkerCapacitySnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,7 @@ pub(crate) struct Program {
     pub(crate) lifecycle: ProgramLifecycle,
     pub(crate) assigned_worker: Option<WorkerWithDpRank>,
     token_total: usize,
+    prefix_hashes: Arc<[u64]>,
     request_progress: Option<RequestProgress>,
     pub(crate) step_count: usize,
     marked_for_pause: bool,
@@ -46,6 +48,7 @@ impl Program {
             lifecycle: ProgramLifecycle::Active,
             assigned_worker: None,
             token_total: input_tokens,
+            prefix_hashes: Arc::from([]),
             request_progress: None,
             step_count: 1,
             marked_for_pause: false,
@@ -64,6 +67,7 @@ enum RequestPhase {
 pub(crate) struct RequestState {
     session_id: String,
     input_tokens: usize,
+    prefix_hashes: Arc<[u64]>,
     progress: RequestProgress,
     session_final: bool,
     pinned_worker: Option<WorkerWithDpRank>,
@@ -78,6 +82,7 @@ pub(crate) struct RequestRegistration {
     request_id: String,
     session_id: String,
     input_tokens: usize,
+    prefix_hashes: Arc<[u64]>,
     progress: RequestProgress,
     session_final: bool,
     pinned_worker: Option<WorkerWithDpRank>,
@@ -97,8 +102,14 @@ impl RequestRegistration {
             input_tokens,
             progress,
             session_final,
+            prefix_hashes: Arc::from([]),
             pinned_worker: None,
         }
+    }
+
+    pub(crate) fn with_prefix_hashes(mut self, hashes: Arc<[u64]>) -> Self {
+        self.prefix_hashes = hashes;
+        self
     }
 
     pub(crate) fn with_pinned_worker(mut self, worker: Option<WorkerWithDpRank>) -> Self {
@@ -143,6 +154,10 @@ pub(crate) struct StateTelemetry {
     pub(crate) marked_for_pause: usize,
     pub(crate) waiting_requests: usize,
     pub(crate) tracked_requests: usize,
+    pub(crate) gross_budget_tokens: usize,
+    pub(crate) shared_prefix_savings_tokens: usize,
+    pub(crate) effective_budget_tokens: usize,
+    pub(crate) growth_reserve_tokens: usize,
 }
 
 pub(crate) struct ReconcileOutcome {
@@ -180,6 +195,8 @@ pub(crate) struct State {
     paused_programs: HashSet<String>,
     marked_for_pause: usize,
     normal_usage: HashMap<WorkerWithDpRank, usize>,
+    charged_programs: usize,
+    prefix_accounting: PrefixAccounting,
     pub(crate) requests: HashMap<String, RequestState>,
     sessions: HashMap<String, SessionRequests>,
     pub(crate) arrival_order: VecDeque<WaitingRequest>,
@@ -196,6 +213,8 @@ impl State {
             paused_programs: HashSet::new(),
             marked_for_pause: 0,
             normal_usage: HashMap::new(),
+            charged_programs: 0,
+            prefix_accounting: PrefixAccounting::default(),
             requests: HashMap::new(),
             sessions: HashMap::new(),
             arrival_order: VecDeque::new(),
@@ -203,6 +222,11 @@ impl State {
             next_retention_expiry: None,
             capacity_snapshot_id: None,
         }
+    }
+
+    pub(crate) fn with_block_size(mut self, block_size: usize) -> Self {
+        self.prefix_accounting.block_size = block_size;
+        self
     }
 
     pub(crate) fn register(
@@ -218,7 +242,19 @@ impl State {
             progress,
             session_final,
             pinned_worker,
+            prefix_hashes,
         } = request;
+        let prefix_hashes =
+            if self.config.shared_prefix_accounting && self.prefix_accounting.block_size > 0 {
+                let complete_blocks = input_tokens / self.prefix_accounting.block_size;
+                if prefix_hashes.len() > complete_blocks {
+                    Arc::from(&prefix_hashes[..complete_blocks])
+                } else {
+                    prefix_hashes
+                }
+            } else {
+                Arc::from([])
+            };
         if self.requests.contains_key(&request_id) {
             return Err(ThunderAgentError::DuplicateRequestId(request_id));
         }
@@ -252,6 +288,7 @@ impl State {
             RequestState {
                 session_id,
                 input_tokens,
+                prefix_hashes,
                 progress,
                 session_final,
                 pinned_worker,
@@ -279,7 +316,24 @@ impl State {
 
     pub(crate) fn telemetry(&self) -> StateTelemetry {
         let paused_programs = self.paused_programs.len();
+        let gross_budget_tokens = self
+            .normal_usage
+            .values()
+            .copied()
+            .fold(0usize, usize::saturating_add);
+        let effective_budget_tokens = self
+            .normal_usage
+            .keys()
+            .map(|worker| self.worker_used(*worker))
+            .fold(0usize, usize::saturating_add);
         StateTelemetry {
+            gross_budget_tokens,
+            effective_budget_tokens,
+            shared_prefix_savings_tokens: gross_budget_tokens
+                .saturating_sub(effective_budget_tokens),
+            growth_reserve_tokens: self
+                .charged_programs
+                .saturating_mul(self.config.buffer_per_program),
             programs: self.programs.len(),
             active_programs: self.programs.len().saturating_sub(paused_programs),
             paused_programs,
@@ -330,10 +384,27 @@ impl State {
         ))
     }
 
+    fn worker_used(&self, worker: WorkerWithDpRank) -> usize {
+        self.normal_usage
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(self.prefix_accounting.savings(worker))
+    }
+
+    fn incremental_cost(&self, session_id: &str, worker: WorkerWithDpRank) -> usize {
+        self.prefix_accounting.incremental_cost(
+            worker,
+            &self.programs[session_id].prefix_hashes,
+            self.buffered_program_tokens(session_id),
+        )
+    }
+
     fn subtract_charge(&mut self, charge: Option<(WorkerWithDpRank, usize)>) {
         let Some((worker, tokens)) = charge else {
             return;
         };
+        self.charged_programs -= 1;
         let Some(used) = self.normal_usage.get_mut(&worker) else {
             return;
         };
@@ -345,6 +416,7 @@ impl State {
 
     fn add_charge(&mut self, charge: Option<(WorkerWithDpRank, usize)>) {
         if let Some((worker, tokens)) = charge {
+            self.charged_programs += 1;
             let used = self.normal_usage.entry(worker).or_default();
             *used = used.saturating_add(tokens);
         }
@@ -368,6 +440,7 @@ impl State {
     ) -> Option<R> {
         let program = self.programs.get(session_id)?;
         let before = self.program_charge(program);
+        let old_hashes = Arc::clone(&program.prefix_hashes);
         self.marked_for_pause -= usize::from(program.marked_for_pause);
         self.subtract_charge(before);
         let result = update(self.programs.get_mut(session_id)?);
@@ -378,6 +451,17 @@ impl State {
                 program.marked_for_pause,
             )
         })?;
+        let hashes = Arc::clone(&self.programs[session_id].prefix_hashes);
+        if before.map(|(worker, _)| worker) != after.map(|(worker, _)| worker)
+            || !Arc::ptr_eq(&old_hashes, &hashes)
+        {
+            if let Some((worker, _)) = before {
+                self.prefix_accounting.remove(worker, &old_hashes);
+            }
+            if let Some((worker, _)) = after {
+                self.prefix_accounting.add(worker, &hashes);
+            }
+        }
         self.marked_for_pause += usize::from(marked_for_pause);
         self.add_charge(after);
         if paused {
@@ -390,6 +474,9 @@ impl State {
 
     fn insert_program(&mut self, session_id: String, program: Program) {
         let charge = self.program_charge(&program);
+        if let Some((worker, _)) = charge {
+            self.prefix_accounting.add(worker, &program.prefix_hashes);
+        }
         let paused = program.lifecycle == ProgramLifecycle::Paused;
         debug_assert!(!self.programs.contains_key(&session_id));
         self.marked_for_pause += usize::from(program.marked_for_pause);
@@ -404,6 +491,10 @@ impl State {
         let program = self.programs.remove(session_id)?;
         self.marked_for_pause -= usize::from(program.marked_for_pause);
         let charge = self.program_charge(&program);
+        if let Some((worker, _)) = charge {
+            self.prefix_accounting
+                .remove(worker, &program.prefix_hashes);
+        }
         self.subtract_charge(charge);
         self.paused_programs.remove(session_id);
         Some(program)
@@ -445,6 +536,10 @@ impl State {
 
     pub(crate) fn needs_reconcile(&self) -> bool {
         !self.programs.is_empty()
+    }
+
+    pub(crate) fn has_waiting_demand(&self) -> bool {
+        !self.waiting_arrivals.is_empty()
     }
 
     fn admit_front_requests(&mut self, capacities: &WorkerCapacitySnapshot, now: Instant) -> bool {
@@ -491,7 +586,6 @@ impl State {
             return false;
         };
         let session_id = request.session_id.clone();
-        let input_tokens = request.input_tokens;
         let pinned_worker = request.pinned_worker;
         let was_new = request.prior_program.is_none();
         let Some(program) = self.programs.get(&session_id) else {
@@ -511,14 +605,12 @@ impl State {
             && capacities.is_live(pin)
             && let Some(capacity) = capacities.capacity(pin)
         {
-            let used = self.normal_usage.get(&pin).copied().unwrap_or(0);
-            let current_charge = (assigned_worker == Some(pin))
-                .then(|| self.program_charge(program))
-                .flatten()
-                .map_or(0, |(_, tokens)| tokens);
-            let projected = used
-                .saturating_sub(current_charge)
-                .saturating_add(self.buffered_program_tokens(&session_id));
+            let used = self.worker_used(pin);
+            let projected = if assigned_worker == Some(pin) {
+                used
+            } else {
+                used.saturating_add(self.incremental_cost(&session_id, pin))
+            };
             if projected > capacity {
                 return self.defer_program(&session_id, now);
             }
@@ -549,12 +641,12 @@ impl State {
             return self.defer_program(&session_id, now) || changed;
         }
 
-        let required = self.request_cost(input_tokens);
         let selected = capacities
             .iter()
             .filter(|(worker, _)| capacities.is_live(*worker))
             .filter_map(|(worker, capacity)| {
-                let used = self.normal_usage.get(&worker).copied().unwrap_or(0);
+                let used = self.worker_used(worker);
+                let required = self.incremental_cost(&session_id, worker);
                 capacity
                     .checked_sub(used)
                     .is_some_and(|remaining| remaining >= required)
@@ -598,11 +690,13 @@ impl State {
         let session_id = request.session_id.clone();
         let input_tokens = request.input_tokens;
         let progress = request.progress.clone();
+        let hashes = Arc::clone(&request.prefix_hashes);
         let prior_program = self.programs.get(&session_id).cloned();
 
         if self.programs.contains_key(&session_id) {
             self.update_program(&session_id, |program| {
                 program.status = ProgramStatus::Reasoning;
+                program.prefix_hashes = hashes;
                 if input_tokens > 0 {
                     program.token_total = input_tokens;
                 }
@@ -612,6 +706,7 @@ impl State {
             });
         } else {
             let mut program = Program::new(input_tokens);
+            program.prefix_hashes = hashes;
             program.request_progress = Some(progress);
             self.insert_program(session_id, program);
         }
@@ -702,6 +797,9 @@ impl State {
         usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
         now: Instant,
     ) -> bool {
+        if self.config.shared_prefix_accounting {
+            return self.greedy_resume_shared(capacities, usage, now);
+        }
         let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
         let mut remaining: Vec<(WorkerWithDpRank, usize)> = capacities
             .iter()
@@ -805,6 +903,177 @@ impl State {
         changed
     }
 
+    fn shared_resume_candidates(&self) -> Vec<String> {
+        let mut pending: Vec<_> = self
+            .paused_programs
+            .iter()
+            .filter(|session| self.has_waiting_request(session))
+            .cloned()
+            .collect();
+        pending.sort_unstable_by_key(|session| {
+            (
+                self.resume_group(session),
+                current_token_total(&self.programs[session]),
+                session.clone(),
+            )
+        });
+        pending
+    }
+
+    fn greedy_resume_shared(
+        &mut self,
+        capacities: &WorkerCapacitySnapshot,
+        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        now: Instant,
+    ) -> bool {
+        let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
+        let mut changed = false;
+        for session in self.shared_resume_candidates() {
+            let pin = self.waiting_pin(&session);
+            let target = capacities
+                .iter()
+                .filter(|(worker, _)| {
+                    capacities.is_live(*worker) && pin.is_none_or(|pin| pin == *worker)
+                })
+                .filter_map(|(worker, capacity)| {
+                    let used = self.worker_used(worker);
+                    let required = self.incremental_cost(&session, worker);
+                    (used.saturating_add(required) <= scale_tokens(capacity, ceiling))
+                        .then_some((worker, required, used))
+                })
+                .min_by_key(|(worker, required, used)| (*required, *used, *worker))
+                .map(|(worker, _, _)| worker);
+            if let Some(worker) = target {
+                changed |= self.resume_shared(&session, worker, usage, now);
+            }
+        }
+        changed
+    }
+
+    fn resume_shared(
+        &mut self,
+        session: &str,
+        worker: WorkerWithDpRank,
+        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        now: Instant,
+    ) -> bool {
+        if !self.resume_program(session, Some(worker)) {
+            return false;
+        }
+        let u = usage.entry(worker).or_default();
+        u.used = self.worker_used(worker);
+        u.decayed = u
+            .decayed
+            .saturating_add(self.program_tokens(&self.programs[session], true, now))
+            .saturating_add(self.config.buffer_per_program);
+        true
+    }
+
+    fn reclaim_idle_shared(
+        &mut self,
+        capacities: &WorkerCapacitySnapshot,
+        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        now: Instant,
+    ) -> bool {
+        let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
+        let pending = self.shared_resume_candidates();
+        if pending.is_empty() {
+            return false;
+        }
+        let mut idle: HashMap<WorkerWithDpRank, Vec<_>> = HashMap::new();
+        for (session, program) in &self.programs {
+            if program.lifecycle == ProgramLifecycle::Active
+                && program.status == ProgramStatus::Acting
+                && !self.sessions.contains_key(session)
+                && let Some(worker) = program.assigned_worker
+            {
+                idle.entry(worker)
+                    .or_default()
+                    .push((program.acting_since, session.clone()));
+            }
+        }
+        let mut workers: Vec<_> = capacities
+            .iter()
+            .filter(|(worker, _)| capacities.is_live(*worker))
+            .collect();
+        workers.sort_unstable();
+        let mut changed = false;
+        for (worker, capacity) in workers {
+            let Some(mut candidates) = idle.remove(&worker) else {
+                continue;
+            };
+            candidates.sort_unstable();
+            let limit = scale_tokens(capacity, ceiling);
+            let block_size = self.prefix_accounting.block_size;
+            // Check feasibility after reclaim before changing any reservation. Removing
+            // a shared owner releases only its private tail and last-owned blocks.
+            let mut without_idle = self.prefix_accounting.snapshot(worker);
+            let mut gross_without_idle = self.normal_usage.get(&worker).copied().unwrap_or(0);
+            for (_, session) in &candidates {
+                let program = &self.programs[session];
+                without_idle.remove(&program.prefix_hashes);
+                gross_without_idle =
+                    gross_without_idle.saturating_sub(self.program_charge(program).unwrap().1);
+            }
+            let used_before = self.worker_used(worker);
+            let mut candidates = candidates.into_iter();
+            let mut reclaimed = 0;
+            for session in &pending {
+                if !self.paused_programs.contains(session)
+                    || self.waiting_pin(session).is_some_and(|pin| pin != worker)
+                {
+                    continue;
+                }
+                let program = &self.programs[session];
+                let full = self.buffered_program_tokens(session);
+                let possible_cost =
+                    without_idle.incremental_cost(&program.prefix_hashes, full, block_size);
+                let possible_used =
+                    gross_without_idle.saturating_sub(without_idle.savings(block_size));
+                if possible_used.saturating_add(possible_cost) > limit {
+                    continue;
+                }
+                while self
+                    .worker_used(worker)
+                    .saturating_add(self.incremental_cost(session, worker))
+                    > limit
+                {
+                    let Some((_, idle_session)) = candidates.next() else {
+                        break;
+                    };
+                    let program = &self.programs[&idle_session];
+                    let decayed = self
+                        .program_tokens(program, true, now)
+                        .saturating_add(self.config.buffer_per_program);
+                    if self.pause_acting(&idle_session) {
+                        let u = usage.entry(worker).or_default();
+                        u.used = self.worker_used(worker);
+                        u.decayed = u.decayed.saturating_sub(decayed);
+                        reclaimed += 1;
+                        changed = true;
+                    }
+                }
+                if self
+                    .worker_used(worker)
+                    .saturating_add(self.incremental_cost(session, worker))
+                    <= limit
+                    && self.resume_shared(session, worker, usage, now)
+                {
+                    without_idle.add(&self.programs[session].prefix_hashes);
+                    gross_without_idle = gross_without_idle.saturating_add(full);
+                    changed = true;
+                }
+            }
+            if reclaimed > 0 {
+                tracing::debug!(target: "thunderagent_admission", ?worker,
+                    resume_limit_tokens = limit, used_before, used_after = self.worker_used(worker),
+                    idle_programs_reclaimed = reclaimed,
+                    "Reclaimed idle reservations for waiting model calls");
+            }
+        }
+        changed
+    }
+
     fn resume_group(&self, session_id: &str) -> u8 {
         let program = &self.programs[session_id];
         if program.step_count <= 1 {
@@ -836,6 +1105,9 @@ impl State {
         usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
         now: Instant,
     ) -> bool {
+        if self.config.shared_prefix_accounting {
+            return self.reclaim_idle_shared(capacities, usage, now);
+        }
         let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
         let mut limits: Vec<_> = capacities
             .iter()
@@ -917,6 +1189,7 @@ impl State {
                         decayed,
                         self.config.buffer_per_program,
                     );
+                    usage.entry(worker).or_default().used = self.worker_used(worker);
                     reclaimed += 1;
                     changed = true;
                 }
@@ -1000,6 +1273,7 @@ impl State {
                         self.program_tokens(program, true, now),
                         self.config.buffer_per_program,
                     );
+                    usage.entry(worker).or_default().used = self.worker_used(worker);
                 }
                 forced_resumes += 1;
             }
@@ -1111,6 +1385,7 @@ impl State {
                         decayed,
                         self.config.buffer_per_program,
                     );
+                    usage.entry(worker).or_default().used = self.worker_used(worker);
                     changed = true;
                 }
             }
@@ -1395,7 +1670,15 @@ impl State {
     fn normal_worker_usage(&self) -> HashMap<WorkerWithDpRank, WorkerUsage> {
         self.normal_usage
             .iter()
-            .map(|(&worker, &used)| (worker, WorkerUsage { used, decayed: 0 }))
+            .map(|(&worker, _)| {
+                (
+                    worker,
+                    WorkerUsage {
+                        used: self.worker_used(worker),
+                        decayed: 0,
+                    },
+                )
+            })
             .collect()
     }
 
@@ -1413,10 +1696,6 @@ impl State {
             self.config.acting_token_weight
         };
         scale_tokens(token_total, weight)
-    }
-
-    fn request_cost(&self, input_tokens: usize) -> usize {
-        input_tokens.saturating_add(self.config.buffer_per_program)
     }
 
     fn set_assignment(&mut self, session_id: &str, worker: Option<WorkerWithDpRank>) {
@@ -1513,6 +1792,7 @@ mod tests {
             lifecycle: ProgramLifecycle::Paused,
             assigned_worker: None,
             token_total: tokens,
+            prefix_hashes: Arc::from([]),
             request_progress: None,
             step_count: 2,
             marked_for_pause: false,
@@ -2565,3 +2845,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "shared_tests.rs"]
+mod shared_tests;
