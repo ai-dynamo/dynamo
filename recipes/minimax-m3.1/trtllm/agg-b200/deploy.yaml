@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# MiniMax-M3.1-Flash on TensorRT-LLM, aggregated serving on B200.
+# Topology: one TP4 + EP4 worker on a single B200 node.
+# Profile: 1M-token context, up to 256 concurrent sequences, prefix caching.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minimax-m3-1-trtllm-agg-b200-config
+data:
+  agg.yaml: |
+    backend: pytorch
+    dtype: bfloat16
+    tensor_parallel_size: 4
+    moe_expert_parallel_size: 4
+    gpus_per_node: 4
+    max_seq_len: 1048576
+    max_num_tokens: 16384
+    max_batch_size: 256
+    trust_remote_code: true
+    enable_chunked_prefill: true
+    # Required for structured output and named tool choice.
+    guided_decoding_backend: xgrammar
+    kv_cache_config:
+      # The checkpoint has no KV quantization, so auto resolves to BF16.
+      dtype: auto
+      # Prefix caching on 128-token blocks.
+      enable_block_reuse: true
+      tokens_per_block: 128
+      # The MiniMax-M3 sparse attention runs on the V2 KV cache manager.
+      use_kv_cache_manager_v2: true
+      free_gpu_memory_fraction: 0.9
+    sparse_attention_config:
+      algorithm: minimax_m3
+      implementation: msa
+      indexer_kv_dtype: bf16
+      fuse_qkv_index_projection: false
+    # The checkpoint's DSpark draft model is not enabled.
+    speculative_config: null
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: minimax-m3-1-trtllm-agg-b200
+  labels:
+    app.kubernetes.io/name: minimax-m3-1-trtllm-agg-b200
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: trtllm
+  components:
+    - name: Frontend
+      type: frontend
+      runtimeVersionOverride: "1.6.0"
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-minimax-m3.1-flash-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args:
+                - -m
+                - dynamo.frontend
+                - --http-host
+                - 0.0.0.0
+                - --http-port
+                - "8000"
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 8Gi
+                limits:
+                  cpu: "8"
+                  memory: 24Gi
+
+    - name: Worker
+      type: worker
+      runtimeVersionOverride: "1.6.0"
+      replicas: 1
+      sharedMemorySize: 16Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0-minimax-m3.1-flash-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args:
+                - -m
+                - dynamo.trtllm
+                - --model
+                - $(MODEL_PATH)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --tensor-parallel-size
+                - "4"
+                - --expert-parallel-size
+                - "4"
+                - --gpus-per-node
+                - "4"
+                - --max-batch-size
+                - "256"
+                - --max-num-tokens
+                - "16384"
+                - --max-seq-len
+                - "1048576"
+                - --extra-engine-args
+                - /config/agg.yaml
+                - --enable-multimodal
+                - --dyn-reasoning-parser
+                - minimax_m3
+                - --dyn-tool-call-parser
+                - minimax_m3
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              env:
+                - name: MODEL_PATH
+                  value: /shared-model-cache/MiniMax-M3.1-Flash
+                - name: SERVED_MODEL_NAME
+                  value: minimax-m3.1
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                # The tensor-parallel ranks are MPI processes, and the worker runs as root.
+                - name: OMPI_ALLOW_RUN_AS_ROOT
+                  value: "1"
+                - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
+                  value: "1"
+                # One checkpoint-loader thread per rank keeps host memory bounded.
+                - name: TLLM_LOAD_WEIGHTS_NUM_WORKERS
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  cpu: "32"
+                  memory: 384Gi
+                  nvidia.com/gpu: "4"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+                - name: engine-config
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: engine-config
+              configMap:
+                name: minimax-m3-1-trtllm-agg-b200-config
