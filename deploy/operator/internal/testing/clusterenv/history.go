@@ -16,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -44,13 +45,15 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 	restoreCRDs := func(ctx context.Context) error {
 		var errs []error
 		for name, spec := range originals {
-			var current extensions.CustomResourceDefinition
-			if err := c.Get(ctx, client.ObjectKey{Name: name}, &current); err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			current.Spec = *spec.DeepCopy()
-			errs = append(errs, c.Update(ctx, &current))
+			// The API server rewrites CRD status after each spec change, which races this read.
+			errs = append(errs, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				var current extensions.CustomResourceDefinition
+				if err := c.Get(ctx, client.ObjectKey{Name: name}, &current); err != nil {
+					return err
+				}
+				current.Spec = *spec.DeepCopy()
+				return c.Update(ctx, &current)
+			}))
 		}
 		return errors.Join(errs...)
 	}
