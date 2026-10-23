@@ -3,9 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated KV-aware serving through two OpenEngine gRPC servers (2 GPUs).
-#
-# Requires TensorRT-LLM with native KVCM2 events and OpenEngine load metrics,
-# plus a Dynamo frontend and sidecar built with KV routing support.
 
 set -e
 
@@ -49,8 +46,8 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1        First sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2        Second sidecar system port (default: 8082)"
-            echo "  TRTLLM_WORKER1_GRPC_PORT     First gRPC port (default: 50051)"
-            echo "  TRTLLM_WORKER2_GRPC_PORT     Second gRPC port (default: 50052)"
+            echo "  TRTLLM_WORKER1_GRPC_PORT     First gRPC port (default: 30001)"
+            echo "  TRTLLM_WORKER2_GRPC_PORT     Second gRPC port (default: 30011)"
             echo "  TRTLLM_WORKER1_KV_EVENT_PORT First ZMQ port (default: 5557)"
             echo "  TRTLLM_WORKER2_KV_EVENT_PORT Second ZMQ port (default: 5558)"
             echo "  TRTLLM_CONTEXT_LENGTH   Context length for both engines and sidecars (default: 4096)"
@@ -80,8 +77,8 @@ trtllm_exit_trap() {
 trap trtllm_exit_trap EXIT
 
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
-TRTLLM_WORKER1_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${TRTLLM_WORKER1_GRPC_PORT:-50051}")
-TRTLLM_WORKER2_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${TRTLLM_WORKER2_GRPC_PORT:-50052}")
+TRTLLM_WORKER1_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${TRTLLM_WORKER1_GRPC_PORT:-30001}")
+TRTLLM_WORKER2_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${TRTLLM_WORKER2_GRPC_PORT:-30011}")
 TRTLLM_WORKER1_KV_EVENT_PORT="${TRTLLM_WORKER1_KV_EVENT_PORT:-5557}"
 TRTLLM_WORKER2_KV_EVENT_PORT="${TRTLLM_WORKER2_KV_EVENT_PORT:-5558}"
 TRTLLM_WORKER1_GPU="${TRTLLM_WORKER1_GPU:-0}"

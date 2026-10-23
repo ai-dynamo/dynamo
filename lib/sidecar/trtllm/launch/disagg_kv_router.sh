@@ -4,9 +4,6 @@
 #
 # Disaggregated KV-aware serving through four OpenEngine gRPC servers (4 GPUs).
 #
-# Requires TensorRT-LLM with native KVCM2 events and OpenEngine load metrics,
-# plus a Dynamo frontend and sidecar built with KV routing support.
-#
 # KV cache moves prefill -> decode engine-to-engine over the cache transceiver,
 # not through the sidecars. Dynamo carries only the handoff: the prefill worker
 # returns a `KvSessionRef` and the decode worker replays it.
@@ -49,7 +46,7 @@ while [[ $# -gt 0 ]]; do
             echo "  MODEL                     Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  TRTLLM_PYTHON             Python with TensorRT-LLM installed (default: python3)"
             echo "  TRTLLM_WORKER{1..4}_GPU            GPU per worker (defaults: 0..3)"
-            echo "  TRTLLM_WORKER{1..4}_GRPC_PORT      gRPC ports (defaults: 50051..50054)"
+            echo "  TRTLLM_WORKER{1..4}_GRPC_PORT      gRPC ports (defaults: 30001, 30011, 30021, 30031)"
             echo "  TRTLLM_WORKER{1..4}_KV_EVENT_PORT  ZMQ ports (defaults: 5557..5560)"
             echo "  DYN_SYSTEM_PORT{1..4}             Sidecar ports (defaults: 8081..8084)"
             echo "  TRTLLM_CACHE_TRANSCEIVER_BACKEND  KV transfer backend (default: NIXL)"
@@ -106,7 +103,7 @@ for worker in 1 2 3 4; do
     kv_var="TRTLLM_WORKER${worker}_KV_EVENT_PORT"
     system_var="DYN_SYSTEM_PORT${worker}"
     gpu="${!gpu_var:-$((worker - 1))}"
-    grpc_port=$(dyn_port DYN_ENGINE_GRPC_PORT "$worker" "${!grpc_var:-$((50050 + worker))}")
+    grpc_port=$(dyn_port DYN_ENGINE_GRPC_PORT "$worker" "${!grpc_var:-$((30001 + 10 * (worker - 1)))}")
     kv_port="${!kv_var:-$((5556 + worker))}"
     system_port="${!system_var:-$((8080 + worker))}"
     config=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-disagg-kv.XXXXXX.yaml")

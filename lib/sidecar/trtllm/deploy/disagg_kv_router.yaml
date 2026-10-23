@@ -126,7 +126,7 @@ spec:
                 import grpc
                 from google.protobuf.wrappers_pb2 import Int32Value
 
-                channel = grpc.insecure_channel("127.0.0.1:50051")
+                channel = grpc.insecure_channel("127.0.0.1:30001")
                 response = channel.unary_unary("/openengine.v1.Control/Health")(
                     b"", timeout=3
                 )
@@ -195,7 +195,7 @@ spec:
           - --host
           - 127.0.0.1
           - --port
-          - "50051"
+          - "30001"
           # Workaround, not a requirement: `GetModelInfo` reads the unresolved
           # `llm.args.max_seq_len`, which stays `None` on the PyTorch path even
           # though the executor has already resolved the real window from the
@@ -219,7 +219,7 @@ spec:
           - --disaggregation-mode
           - prefill
           - --grpc-endpoint
-          - 127.0.0.1:50051
+          - 127.0.0.1:30001
           - --model-path
           - Qwen/Qwen3-0.6B
           # Matches the engine's --max_seq_len above.
@@ -301,7 +301,7 @@ spec:
           - --host
           - 127.0.0.1
           - --port
-          - "50051"
+          - "30001"
           - --max_seq_len
           - "4096"
           - --extra_llm_api_options
@@ -316,7 +316,7 @@ spec:
           - --disaggregation-mode
           - decode
           - --grpc-endpoint
-          - 127.0.0.1:50051
+          - 127.0.0.1:30001
           - --model-path
           - Qwen/Qwen3-0.6B
           - --context-length
