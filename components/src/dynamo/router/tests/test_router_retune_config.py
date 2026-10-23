@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 pytest.importorskip(
@@ -18,7 +16,6 @@ pytest.importorskip(
 
 from pydantic import ValidationError
 
-from dynamo.aisimulate.domains import finite_values
 from dynamo.llm import KvRouterConfig
 from dynamo.router.simulation.config import (
     ROUTER_KNOB_DEFAULTS,
@@ -36,34 +33,26 @@ pytestmark = [
 ]
 
 
+# Replay reports no shared cache hits, so a candidate value of this parameter
+# would score exactly like every other one.
+_NOT_RETUNABLE = {"shared_cache_multiplier"}
+
+
 def test_public_and_extension_names_cover_every_policy_parameter() -> None:
     # A new PolicyParameters field must be classified before retune can see it.
     policy_parameters = set(KvRouterConfig().policy_parameters("aggregated"))
+    public = set(ROUTER_PUBLIC_TO_LIVE.values())
+    extensions = set(ROUTER_RETUNE_EXTENSIONS)
     assert len(policy_parameters) == 8
-    assert (
-        set(ROUTER_PUBLIC_TO_LIVE.values()) | set(ROUTER_RETUNE_EXTENSIONS)
-        == policy_parameters
-    )
-    assert not set(ROUTER_PUBLIC_TO_LIVE.values()) & set(ROUTER_RETUNE_EXTENSIONS)
+    assert public | extensions | _NOT_RETUNABLE == policy_parameters
+    assert len(public) + len(extensions) + len(_NOT_RETUNABLE) == 8
     assert list(ROUTER_KNOB_DEFAULTS) == list(ROUTER_PUBLIC_TO_LIVE)
 
 
-def test_default_retune_config_is_the_recommendation_default_domain() -> None:
+def test_retune_config_defaults_to_kv_router_without_extensions() -> None:
     public = RouterRetuneConfig.model_validate({})
     assert public.model_fields_set == set()
     assert public.policy == "kv_router"
-    domain = {
-        ROUTER_PUBLIC_TO_LIVE[name]: finite_values(
-            name, getattr(public, name), defaults, limit=512
-        )
-        for name, defaults in ROUTER_KNOB_DEFAULTS.items()
-    }
-    assert math.prod(len(values) for values in domain.values()) == 108
-    assert set(domain) == {
-        "overlap_score_credit",
-        "prefill_load_scale",
-        "router_temperature",
-    }
     assert all(getattr(public, name) is None for name in ROUTER_RETUNE_EXTENSIONS)
 
 
@@ -81,12 +70,6 @@ def test_retune_config_accepts_recommendation_output_and_extension_domains() -> 
         }
     )
     assert public.prefill_load_model.type == "ais"
-    assert finite_values("t", public.temperature, None, limit=10) == [0.0, 0.1, 0.2]
-    assert finite_values("w", public.host_cache_hit_weight, None, limit=10) == [
-        0.25,
-        0.5,
-        0.75,
-    ]
     assert public.model_fields_set == {
         "policy",
         "prefill_load_model",
@@ -119,7 +102,8 @@ def test_retune_config_accepts_recommendation_output_and_extension_domains() -> 
         ),
         ({"overlap_score_credit": [0.5, 1.0]}, "overlap_score_credit"),
         ({"temperature": None}, "do not accept null"),
-        ({"shared_cache_multiplier": None}, "do not accept null"),
+        ({"decode_active_request_weight": None}, "do not accept null"),
+        ({"shared_cache_multiplier": 0.5}, "Extra inputs are not permitted"),
         ({"disk_cache_hit_weight": -0.5}, "greater than or equal to 0"),
         (
             {

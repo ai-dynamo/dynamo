@@ -44,13 +44,16 @@ ROUTER_PUBLIC_TO_LIVE: dict[str, str] = {
     "temperature": "router_temperature",
 }
 # ``PolicyParameters`` without an AISimulate public name. Retune accepts them
-# under their live names; recommend and predict do not search them.
+# under their live names; recommend and predict do not search them. A
+# candidate's host_cache_hit_weight and disk_cache_hit_weight also weight the
+# replay router's own cache accounting, which an applied update leaves at its
+# startup value. shared_cache_multiplier is not retunable: replay reports no
+# shared cache hits, so every value would score the same.
 ROUTER_RETUNE_EXTENSIONS: tuple[str, ...] = (
     "overlap_score_credit_decay",
     "decode_active_request_weight",
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
-    "shared_cache_multiplier",
 )
 
 
@@ -233,7 +236,6 @@ class RouterRetuneConfig(RouterRecommendationConfig):
     decode_active_request_weight: RouterKnobDomain | None = None
     host_cache_hit_weight: RouterKnobDomain | None = None
     disk_cache_hit_weight: RouterKnobDomain | None = None
-    shared_cache_multiplier: RouterKnobDomain | None = None
 
     @model_validator(mode="before")
     @classmethod
