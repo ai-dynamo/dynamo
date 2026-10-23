@@ -24,9 +24,10 @@ rules:
   - ""
   resources:
   - nodes
-  - pods/log
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -51,12 +52,28 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -296,6 +313,7 @@ rules:
   resources:
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
+  - dynamographdeploymentruns/status
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
@@ -352,6 +370,7 @@ rules:
   - delete
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -362,6 +381,7 @@ rules:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:

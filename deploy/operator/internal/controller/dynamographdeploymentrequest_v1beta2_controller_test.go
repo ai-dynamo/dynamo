@@ -201,7 +201,7 @@ func TestV1beta2RequestControllerCreatesTheRunOfTheCurrentGeneration(t *testing.
 	if got := run.Spec.AISimulate.VersionOverride; got != "0.13.0" {
 		t.Fatalf("run versionOverride = %q, want the resolved 0.13.0", got)
 	}
-	parameters, err := aisimulate.InputForRun(run)
+	parameters, err := aisimulate.DecodeParameters(run.Spec.AISimulate.Parameters)
 	if err != nil {
 		t.Fatalf("input of the run: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestV1beta2RequestControllerKeepsNullDeletedKeysOutOfTheRunInput(t *testing
 	if err != nil {
 		t.Fatalf("build run: %v", err)
 	}
-	input, err := aisimulate.InputForRun(run)
+	input, err := aisimulate.DecodeParameters(run.Spec.AISimulate.Parameters)
 	if err != nil {
 		t.Fatalf("input of the run: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
@@ -44,6 +45,14 @@ type DynamoGraphDeploymentRequestSetupOptions struct {
 	OperatorImagePullPolicy corev1.PullPolicy
 }
 
+type DynamoGraphDeploymentRunSetupOptions struct {
+	SetupOptions
+	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
+	GPUDiscovery            *gpu.GPUDiscovery
+	OperatorImage           string
+	OperatorImagePullPolicy corev1.PullPolicy
+}
+
 type DynamoModelSetupOptions struct {
 	SetupOptions
 	ModelEndpointClient *modelendpoint.Client
@@ -57,6 +66,20 @@ func (o DynamoGraphDeploymentRequestSetupOptions) gpuDiscoveryCache() *gpu.GPUDi
 }
 
 func (o DynamoGraphDeploymentRequestSetupOptions) gpuDiscovery() *gpu.GPUDiscovery {
+	if o.GPUDiscovery != nil {
+		return o.GPUDiscovery
+	}
+	return gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint)
+}
+
+func (o DynamoGraphDeploymentRunSetupOptions) gpuDiscoveryCache() *gpu.GPUDiscoveryCache {
+	if o.GPUDiscoveryCache != nil {
+		return o.GPUDiscoveryCache
+	}
+	return gpu.NewGPUDiscoveryCache()
+}
+
+func (o DynamoGraphDeploymentRunSetupOptions) gpuDiscovery() *gpu.GPUDiscovery {
 	if o.GPUDiscovery != nil {
 		return o.GPUDiscovery
 	}
@@ -145,6 +168,29 @@ func SetupDynamoGraphDeploymentRequestV1beta2(mgr ctrl.Manager, opts SetupOption
 		RuntimeConfig: opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest v1beta2 controller: %w", err)
+	}
+	return nil
+}
+
+// SetupDynamoGraphDeploymentRunV1beta2 registers the controller that executes immutable
+// v1beta2 Runs as AISimulate Jobs and observes their lifecycle.
+func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDeploymentRunSetupOptions) error {
+	if err := (&DynamoGraphDeploymentRunV1beta2Reconciler{
+		Client:        mgr.GetClient(),
+		Config:        opts.Config,
+		RuntimeConfig: opts.RuntimeConfig,
+		Hardware: &gpu.Discoverer{
+			Reader: mgr.GetClient(),
+			DCGM:   opts.gpuDiscovery(),
+			Cache:  opts.gpuDiscoveryCache(),
+			NodeLabels: func() bool {
+				return opts.RuntimeConfig != nil && opts.RuntimeConfig.Gate.Enabled(features.GPUDiscovery)
+			},
+		},
+		OperatorImage:           opts.OperatorImage,
+		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRun v1beta2 controller: %w", err)
 	}
 	return nil
 }

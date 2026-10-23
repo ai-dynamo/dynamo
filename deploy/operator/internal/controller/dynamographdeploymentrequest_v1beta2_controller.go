@@ -201,7 +201,7 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 
 // buildRun resolves the optional inputs of the Request into an immutable Run spec. The effective
 // AISimulate input is frozen into aisimulate.parameters: that object is the complete resolved input.
-// Run execution reads it with aisimulate.InputForRun and never lowers the Run again, because the
+// Run execution decodes it directly and never lowers the Run again, because the
 // merge-patch deletions (null) that shaped it are not part of the stored result.
 func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) buildRun(
 	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
@@ -400,11 +400,14 @@ func dgdrV1beta2SplitRuns(
 	return active, terminal, nil
 }
 
-// requireDGDRV1beta2API fails when the cluster does not serve the v1beta2 Request and Run APIs.
-// Without them the controller's caches never sync and the manager would hang at startup.
+// requireDGDRV1beta2API fails when the cluster does not serve the v1beta2 Request, Run and
+// Candidate APIs. Without them either the manager caches cannot sync or a Run's publisher
+// cannot start.
 func requireDGDRV1beta2API(mgr ctrl.Manager) error {
 	group, version := nvidiacomv1beta2.GroupVersion.Group, nvidiacomv1beta2.GroupVersion.Version
-	for _, kind := range []string{"DynamoGraphDeploymentRequest", "DynamoGraphDeploymentRun"} {
+	for _, kind := range []string{
+		"DynamoGraphDeploymentRequest", "DynamoGraphDeploymentRun", "DynamoGraphDeploymentCandidate",
+	} {
 		_, err := mgr.GetRESTMapper().RESTMapping(schema.GroupKind{Group: group, Kind: kind}, version)
 		if meta.IsNoMatchError(err) {
 			return fmt.Errorf("--dgdr-v1beta2-enabled is set but the cluster does not serve %s/%s %s; "+

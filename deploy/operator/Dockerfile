@@ -53,6 +53,7 @@ FROM base AS builder
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o dgdr-run-publisher ./cmd/dgdr-run-publisher && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o dgd-apply-overrides ./cmd/dgd-apply-overrides
 
 # Emit a CycloneDX SBOM for the operator's Go module set so the licenses
@@ -60,7 +61,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cm
 # v1.7.0 to keep the SBOM tool itself reproducible.
 #
 # `app -main ./cmd` covers the manager binary (./cmd/main.go = package
-# main in ./cmd). crd-apply and dgd-apply-overrides are separate mains in
+# main in ./cmd). crd-apply, dgdr-run-publisher and dgd-apply-overrides are separate mains in
 # the same module, so their deps are a subset of manager's — a single SBOM
 # is sufficient. Tried `mod` first but its license detection is weaker than
 # `app`'s — everything came back UNKNOWN.
@@ -208,6 +209,7 @@ FROM nvcr.io/nvidia/distroless/go:v4.1.5
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/crd-apply .
+COPY --from=builder /workspace/dgdr-run-publisher .
 COPY --from=builder /workspace/dgd-apply-overrides .
 COPY --from=builder /workspace/config/crd/bases/ /opt/dynamo-operator/crds/
 COPY --from=licenses /legal /legal
