@@ -156,9 +156,14 @@ pub(crate) fn selected_family(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax.
+    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax, and a
+    // reasoning-only Nemotron 3 card does not say which tool grammar it serves; both
+    // keep the legacy path unless V2 is selected explicitly.
     let selected = if tool_call_parser.is_none()
-        && reasoning_parser == Some("qwen3")
+        && matches!(
+            reasoning_parser,
+            Some("qwen3" | "nemotron_v3" | "nemotron3")
+        )
         && selection == dynamo_runtime::config::ParserVersion::Auto
     {
         None
@@ -11474,6 +11479,16 @@ pub(crate) mod tests {
             selected_family(None, Some("qwen3")),
             (selection == "2").then_some(QWEN3_UNIFIED_FAMILY)
         );
+        // Nemotron 3 shares Qwen's tool grammar: the explicit pair routes like Qwen3,
+        // and a reasoning-only card stays legacy unless V2 is selected explicitly.
+        assert_eq!(
+            selected_family(Some("qwen3_coder"), Some("nemotron_v3")),
+            (selection != "1").then_some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            selected_family(None, Some("nemotron_v3")),
+            (selection == "2").then_some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
         for &parser in FAMILY_NAMES.iter() {
             let family = canonical_family(parser).unwrap();
             for (tool, reasoning) in [
@@ -11481,8 +11496,10 @@ pub(crate) mod tests {
                 (Some(parser), None),
                 (None, Some(parser)),
             ] {
-                let reasoning_only_qwen3 = tool.is_none() && reasoning == Some("qwen3");
-                let expected = (selection != "1" && (selection == "2" || !reasoning_only_qwen3))
+                let reasoning_only_shared_grammar = tool.is_none()
+                    && matches!(reasoning, Some("qwen3" | "nemotron_v3" | "nemotron3"));
+                let expected = (selection != "1"
+                    && (selection == "2" || !reasoning_only_shared_grammar))
                     .then_some(family);
                 assert_eq!(
                     selected_family(tool, reasoning),
