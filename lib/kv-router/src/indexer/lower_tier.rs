@@ -188,6 +188,7 @@ impl OwnerTable {
 #[derive(Clone, Copy)]
 struct OwnerView<'a> {
     owners: &'a [IndexedResidencyOwner],
+    ids: &'a FxHashMap<IndexedResidencyOwner, OwnerId>,
     projection: &'a ResidencyProjection,
 }
 
@@ -195,8 +196,15 @@ impl<'a> OwnerView<'a> {
     fn new(snapshot: &'a OwnerSnapshot, projection: &'a ResidencyProjection) -> Self {
         Self {
             owners: &snapshot.owners,
+            ids: &snapshot.ids,
             projection,
         }
+    }
+
+    /// `None` for an owner interned after the query began.
+    #[inline]
+    fn exact_id(&self, key: ResidencyOwnerKey) -> Option<OwnerId> {
+        self.ids.get(&IndexedResidencyOwner::Exact(key)).copied()
     }
 
     /// `None` for an id newer than the snapshot: that owner was interned after
@@ -444,6 +452,18 @@ impl EdgeOwnersEntry {
                         .iter()
                         .any(|owner| view.projection.project_key(*owner).as_ref() == Some(worker))
             }
+        }
+    }
+
+    /// `id` is `owner`'s id in the query's owner snapshot, if it has one.
+    #[inline]
+    fn contains_exact_owner(&self, owner: ResidencyOwnerKey, id: Option<OwnerId>) -> bool {
+        match self {
+            Self::Single {
+                owner: existing, ..
+            } => Some(*existing) == id,
+            Self::Pair(pair) => id.is_some_and(|id| pair.owners.contains(&id)),
+            Self::Multi(multi) => multi.exact_owners.contains(&owner),
         }
     }
 
@@ -1338,25 +1358,6 @@ fn advance_state_to_breakpoint(
     let mut active_workers = frontier.workers;
     let mut active_hint_sources = frontier.hint_sources;
 
-    // When only one worker is active we can skip all set bookkeeping and just
-    // do a straight edge-lookup loop.
-    if active_workers.len() == 1 && active_hint_sources.is_empty() {
-        let worker = active_workers.into_iter().next().unwrap();
-        advance_single_worker(
-            index,
-            local_hashes,
-            worker,
-            &mut cur_pos,
-            &mut cur_hash,
-            next_breakpoint,
-            overflow,
-            final_states,
-            kv_transfer_extensions.as_deref_mut(),
-            view,
-        );
-        return;
-    }
-
     // Reusable scratch buffer for partitioning workers each iteration, avoids
     // allocating new HashSets on every step.
     let mut worker_scratch = WorkerSet::default();
@@ -1367,6 +1368,25 @@ fn advance_state_to_breakpoint(
     while cur_pos < next_breakpoint
         && (!active_workers.is_empty() || !active_hint_sources.is_empty())
     {
+        // At most one worker and one hint source left (e.g. a cache owner
+        // projected to its own worker): finish without set overhead.
+        if active_workers.len() <= 1 && active_hint_sources.len() <= 1 {
+            advance_scalar(
+                index,
+                local_hashes,
+                active_workers.into_iter().next(),
+                active_hint_sources.into_iter().next(),
+                cur_pos,
+                cur_hash,
+                next_breakpoint,
+                overflow,
+                final_states,
+                kv_transfer_extensions,
+                view,
+            );
+            return;
+        }
+
         // Look up the edge for the current (parent_hash, local_hash) pair.
         // If no edge exists, no worker can continue — finalize everyone.
         let Some(edge) = index
@@ -1456,25 +1476,6 @@ fn advance_state_to_breakpoint(
         }
         cur_hash = Some(child_hash);
         cur_pos += 1;
-
-        // If we're down to one worker, switch to the scalar loop for the
-        // remaining positions to avoid set overhead.
-        if active_workers.len() == 1 && active_hint_sources.is_empty() {
-            let worker = active_workers.into_iter().next().unwrap();
-            advance_single_worker(
-                index,
-                local_hashes,
-                worker,
-                &mut cur_pos,
-                &mut cur_hash,
-                next_breakpoint,
-                overflow,
-                final_states,
-                kv_transfer_extensions.as_deref_mut(),
-                view,
-            );
-            return;
-        }
     }
 
     if active_workers.is_empty() && active_hint_sources.is_empty() {
@@ -1496,54 +1497,72 @@ fn advance_state_to_breakpoint(
     }
 }
 
-/// Simplified walk for exactly one worker. Just does sequential edge lookups
-/// without any set operations — either the worker owns each edge and continues,
-/// or it stops.
+/// Scalar form of the walk loop for at most one worker and at most one hint source.
 #[allow(clippy::too_many_arguments)]
-fn advance_single_worker(
+fn advance_scalar(
     index: &LowerTierIndexer,
     local_hashes: &[LocalBlockHash],
-    worker: WorkerWithDpRank,
-    cur_pos: &mut usize,
-    cur_hash: &mut Option<ExternalSequenceBlockHash>,
+    mut worker: Option<WorkerWithDpRank>,
+    mut hint_source: Option<ResidencyOwnerKey>,
+    mut cur_pos: usize,
+    mut cur_hash: Option<ExternalSequenceBlockHash>,
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
     mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
     view: OwnerView<'_>,
 ) {
-    while *cur_pos < next_breakpoint {
-        let Some(edge) = index
+    let hint_source_id = hint_source.and_then(|source| view.exact_id(source));
+    while cur_pos < next_breakpoint {
+        let edge = index
             .edges
-            .get(&TransitionKey::new(*cur_hash, local_hashes[*cur_pos]))
-        else {
-            final_states.insert(worker, (*cur_pos, *cur_hash));
+            .get(&TransitionKey::new(cur_hash, local_hashes[cur_pos]));
+        let owners = edge.as_deref();
+
+        if let Some(active) = worker
+            && !owners.is_some_and(|owners| owners.contains_worker(&active, view))
+        {
+            final_states.insert(active, (cur_pos, cur_hash));
+            worker = None;
+        }
+        // A source missing from this edge matched every block before it.
+        if let Some(source) = hint_source
+            && !owners.is_some_and(|owners| owners.contains_exact_owner(source, hint_source_id))
+        {
+            if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
+                extensions.record_prefix(KvTransferCandidateSource::CacheOwner(source), cur_pos);
+            }
+            hint_source = None;
+        }
+        let Some(owners) = owners else {
             return;
         };
-
-        if !edge.contains_worker(&worker, view) {
-            final_states.insert(worker, (*cur_pos, *cur_hash));
+        if worker.is_none() && hint_source.is_none() {
             return;
         }
 
-        let child_hash = edge.child_hash();
+        let child_hash = owners.child_hash();
         if let Some(extensions) = kv_transfer_extensions.as_deref_mut()
-            && !extensions.record_block(*cur_pos, child_hash)
+            && !extensions.record_block(cur_pos, child_hash)
         {
-            extensions.record_prefix(KvTransferCandidateSource::Worker(worker), *cur_pos);
+            if let Some(worker) = worker {
+                extensions.record_prefix(KvTransferCandidateSource::Worker(worker), cur_pos);
+            }
+            extensions.record_hint_source_prefixes(hint_source, cur_pos);
         }
-        *cur_hash = Some(child_hash);
-        *cur_pos += 1;
+        cur_hash = Some(child_hash);
+        cur_pos += 1;
     }
 
-    if *cur_pos >= local_hashes.len() {
-        final_states.insert(worker, (*cur_pos, *cur_hash));
+    if cur_pos >= local_hashes.len() {
+        finalize_workers(final_states, worker, cur_pos, cur_hash);
+        if let Some(extensions) = kv_transfer_extensions {
+            extensions.record_hint_source_prefixes(hint_source, cur_pos);
+        }
     } else {
-        overflow
-            .entry(*cur_hash)
-            .or_default()
-            .workers
-            .insert(worker);
+        let next = overflow.entry(cur_hash).or_default();
+        next.workers.extend(worker);
+        next.hint_sources.extend(hint_source);
     }
 }
 
@@ -2224,6 +2243,72 @@ mod tests {
         assert_eq!(
             details.kv_transfer_extensions.unwrap().owner_prefix_blocks,
             FxHashMap::from_iter([(key(owner_a), 3), (key(owner_b), 1)])
+        );
+    }
+
+    #[test]
+    fn projected_worker_and_own_hint_source_leave_independently() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = cache_owner_id();
+        let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
+        let mut index = TestLowerTierIndex::new();
+        let store = |event_id, local: &[u64], external: &[u64], domain| {
+            store_event_in_domain(7, event_id, None, local, external, domain)
+        };
+        index
+            .apply_event(store(
+                0,
+                &[11, 12],
+                &[101, 102],
+                ResidencyDomain::CacheOwner,
+            ))
+            .unwrap();
+        index
+            .apply_event(store(
+                1,
+                &[11, 12, 13],
+                &[101, 102, 103],
+                ResidencyDomain::Worker,
+            ))
+            .unwrap();
+        let snapshot = ResidencyRoutingSnapshot::new(
+            projection(worker),
+            [(
+                owner,
+                RouterHintSourceMetadata {
+                    source_control_endpoint: "tcp://owner:23280".to_string(),
+                    worker_type: "prefill".to_string(),
+                    topology_domains: Default::default(),
+                },
+                None,
+            )],
+        );
+        let continuations = FxHashMap::from_iter([(worker, LowerTierContinuation::from_root(0))]);
+
+        // The source leaves at the worker-only third edge; the worker continues.
+        let details = index.index.query_match_details_with_options_and_snapshot(
+            &local_hashes(&[11, 12, 13, 14]),
+            &continuations,
+            true,
+            &snapshot,
+        );
+
+        assert_eq!(details.hits, FxHashMap::from_iter([(worker, 3)]));
+        let extensions = details.kv_transfer_extensions.unwrap();
+        assert_eq!(
+            extensions.block_hashes,
+            vec![
+                (0, ExternalSequenceBlockHash(101)),
+                (1, ExternalSequenceBlockHash(102)),
+                (2, ExternalSequenceBlockHash(103)),
+            ]
+        );
+        assert_eq!(
+            extensions.owner_prefix_blocks,
+            FxHashMap::from_iter([
+                (KvTransferCandidateSource::CacheOwner(owner_key), 2),
+                (KvTransferCandidateSource::Worker(worker), 3),
+            ])
         );
     }
 
