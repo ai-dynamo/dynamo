@@ -1,11 +1,8 @@
 package dynamo
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/url"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -23,173 +20,6 @@ const (
 
 type SGLangBackend struct {
 	roleLaunchOwnership roleLaunchOwnership
-}
-
-type sglangLaunchArgs struct {
-	TensorParallelSize   int
-	PipelineParallelSize int
-	AttentionDPSize      int
-	AttentionCPSize      int
-	KVEventsEnabled      bool
-}
-
-// readSGLangLaunchArgs normalizes the SGLang arguments used for publisher placement.
-// container must not be nil. Config files and runtime expansions are never evaluated.
-func readSGLangLaunchArgs(container *corev1.Container) (sglangLaunchArgs, error) {
-	args, err := pythonModuleArgs(container, "sglang.launch_server")
-	if err != nil {
-		return sglangLaunchArgs{}, fmt.Errorf("cannot determine SGLang topology: %w; use complete leader and worker podTemplates", err)
-	}
-
-	// SGLang defaults each parallel dimension to one. The last spelling of an option wins.
-	launch := sglangLaunchArgs{TensorParallelSize: 1, PipelineParallelSize: 1, AttentionDPSize: 1, AttentionCPSize: 1}
-	modelDPSize := 1
-	legacyDPAttention := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		flag, value, hasValue := strings.Cut(arg.Value, "=")
-		if flag == "--config" || strings.ContainsAny(flag, "$`") || arg.MayExpand {
-			return launch, fmt.Errorf("cannot determine SGLang publisher topology from config files or expanded flags; use complete leader and worker podTemplates")
-		}
-
-		// Only topology options need literal numeric values; keep unrelated model values opaque.
-		var size *int
-		switch flag {
-		case "--tp-size", "--tensor-parallel-size":
-			size = &launch.TensorParallelSize
-		case "--pp-size", "--pipeline-parallel-size":
-			size = &launch.PipelineParallelSize
-		case "--dp-size", "--data-parallel-size":
-			size = &modelDPSize
-		case "--attn-dp-size", "--attention-data-parallel-size":
-			size = &launch.AttentionDPSize
-		case "--attn-cp-size", "--attention-context-parallel-size":
-			size = &launch.AttentionCPSize
-		case "--enable-dp-attention":
-			if hasValue {
-				return launch, fmt.Errorf("--enable-dp-attention takes no value; use the standalone flag")
-			}
-			legacyDPAttention = true
-			continue
-		case "--model-path", "--model", "--tokenizer-path", "--served-model-name", "--download-dir":
-			if !hasValue && i+1 < len(args) && !args[i+1].MayExpand {
-				i++
-			}
-			continue
-		}
-		if size == nil && flag != "--kv-events-config" {
-			continue
-		}
-
-		// Preserve both --option value and --option=value, without resolving Kubernetes variables.
-		if !hasValue {
-			if i+1 == len(args) || strings.HasPrefix(args[i+1].Value, "--") {
-				return launch, fmt.Errorf("%s requires a value", flag)
-			}
-			i++
-			value = args[i].Value
-		}
-		if size != nil {
-			n, err := parseSGLangParallelSize(flag, launchArgument{Value: value, MayExpand: args[i].MayExpand})
-			if err != nil {
-				return launch, err
-			}
-			*size = n
-		} else {
-			if args[i].MayExpand {
-				return launch, fmt.Errorf("--kv-events-config must be literal JSON; use complete leader and worker podTemplates for dynamic topology")
-			}
-			launch.KVEventsEnabled, err = sglangHasLocalKVPublisher(value)
-			if err != nil {
-				return launch, err
-			}
-		}
-	}
-
-	// SGLang 0.5.22 moves legacy DP into attention-DP only when canonical attention-DP is one.
-	if legacyDPAttention && launch.AttentionDPSize == 1 {
-		launch.AttentionDPSize = modelDPSize
-		modelDPSize = 1
-	}
-	if modelDPSize > 1 {
-		return launch, fmt.Errorf("SGLang multinode model data parallelism is unsupported; use --attn-dp-size for attention-DP")
-	}
-	return launch, nil
-}
-
-// parseSGLangParallelSize validates a literal parallel dimension without expanding shell words.
-func parseSGLangParallelSize(flag string, arg launchArgument) (int, error) {
-	n, err := strconv.ParseInt(arg.Value, 10, 32)
-	if err != nil || n <= 0 || arg.MayExpand {
-		return 0, fmt.Errorf("%s must be a literal positive integer; use complete leader and worker podTemplates for dynamic topology", flag)
-	}
-	return int(n), nil
-}
-
-// sglangHasLocalKVPublisher mirrors the engine's advertised local-source requirement.
-func sglangHasLocalKVPublisher(value string) (bool, error) {
-	if value == "" {
-		return false, nil
-	}
-
-	// A disabled or connect-style publisher has no node-local source for a follower relay.
-	config := struct {
-		Publisher string `json:"publisher"`
-		Endpoint  string `json:"endpoint"`
-		Bind      *bool  `json:"bind"`
-	}{Endpoint: "tcp://*:5557"}
-	if err := json.Unmarshal([]byte(value), &config); err != nil {
-		return false, fmt.Errorf("--kv-events-config must be literal JSON: %w", err)
-	}
-	switch config.Publisher {
-	case "", "null":
-		return false, nil
-	case "zmq":
-	default:
-		return false, fmt.Errorf("cannot determine local KV sources for publisher %q; use complete leader and worker podTemplates", config.Publisher)
-	}
-	endpoint, err := url.Parse(config.Endpoint)
-	if err != nil {
-		return false, fmt.Errorf("invalid KV-event endpoint: %w", err)
-	}
-	bind := endpoint.Scheme == "ipc" || endpoint.Hostname() == "*" || endpoint.Hostname() == "0.0.0.0" || endpoint.Hostname() == "::"
-	if config.Bind != nil {
-		bind = *config.Bind
-	}
-	return bind && (endpoint.Scheme == "tcp" || endpoint.Scheme == "ipc"), nil
-}
-
-// sglangWorkerRoleRequiresRuntimeContainer requires uniform placement because both
-// Grove and LeaderWorkerSet use one Pod template for all follower node ranks.
-func sglangWorkerRoleRequiresRuntimeContainer(launch sglangLaunchArgs, numberOfNodes int32) (bool, error) {
-	if numberOfNodes <= 1 || !launch.KVEventsEnabled {
-		return false, nil
-	}
-
-	// Match SGLang's TP/PP node partition and attention (DP, CP, TP) rank layout.
-	nodes := int(numberOfNodes)
-	tp, pp := launch.TensorParallelSize, launch.PipelineParallelSize
-	if tp%launch.AttentionDPSize != 0 || (tp/launch.AttentionDPSize)%launch.AttentionCPSize != 0 {
-		return false, fmt.Errorf("attention-DP and attention-CP sizes must divide --tp-size")
-	}
-	if nodes%pp != 0 && pp%nodes != 0 {
-		return false, fmt.Errorf("--pp-size and multinode.nodeCount must divide one another")
-	}
-	nodesPerPP := max(nodes/pp, 1)
-	if tp%nodesPerPP != 0 {
-		return false, fmt.Errorf("nodes per pipeline stage must divide --tp-size")
-	}
-
-	// Only PP rank zero publishes. Its publishers are spaced TP/attention-DP ranks
-	// apart; they occupy min(attention-DP, nodes-per-PP) distinct nodes, including the leader.
-	publisherNodes := min(launch.AttentionDPSize, nodesPerPP)
-	if publisherNodes == 1 {
-		return false, nil
-	}
-	if publisherNodes == nodes {
-		return true, nil
-	}
-	return false, fmt.Errorf("SGLang topology has mixed publisher and non-publisher followers (%d of %d nodes publish KV events); a shared worker template cannot place runtime selectively; use a topology where every follower publishes or only the leader publishes", publisherNodes, nodes)
 }
 
 // isPythonCommand checks if the command is a Python interpreter
@@ -432,27 +262,8 @@ func nixlPrometheusPort(env *corev1.EnvVar) (int32, bool, error) {
 	return int32(port), true, nil
 }
 
-func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) error {
-	// Validate shared-template publisher placement before rendering either role.
-	if numberOfNodes <= 1 || b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate || GetDynamoSidecar(component) == nil {
-		return nil
-	}
-
-	// Keep a follower runtime only when every follower has a local KV publisher.
-	launch, err := readSGLangLaunchArgs(GetMainContainer(component))
-	if err != nil {
-		return err
-	}
-	workerRuntime, err := sglangWorkerRoleRequiresRuntimeContainer(launch, numberOfNodes)
-	if err != nil {
-		return err
-	}
-	if role == RoleWorker && !workerRuntime {
-		podSpec.InitContainers = slices.DeleteFunc(podSpec.InitContainers, func(c corev1.Container) bool {
-			return c.Name == commonconsts.RuntimeContainerName
-		})
-	}
-	return nil
+func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	// do nothing
 }
 
 // getMultinodeFlags returns the multinode flags and whether shell interpretation

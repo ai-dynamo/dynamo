@@ -221,12 +221,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, decode, and LPX components`}},
 
 		// SGLang multinode sidecars resolve runtime compatibility independently of engine images.
-		{name: "sglang sidecar multinode alpha=False roles=False dp=False", deployment: sglangMultinodeDCDForAdmission(t, false, false, false)},
-		{name: "sglang sidecar multinode alpha=False roles=False dp=True", deployment: sglangMultinodeDCDForAdmission(t, false, false, true)},
+		{name: "sglang sidecar multinode alpha=False roles=False dp=False", deployment: sglangMultinodeDCDForAdmission(t, false, false, false), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=False roles=False dp=True", deployment: sglangMultinodeDCDForAdmission(t, false, false, true), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "sglang sidecar multinode alpha=False roles=True dp=False", deployment: sglangMultinodeDCDForAdmission(t, false, true, false)},
 		{name: "sglang sidecar multinode alpha=False roles=True dp=True", deployment: sglangMultinodeDCDForAdmission(t, false, true, true)},
-		{name: "sglang sidecar multinode alpha=True roles=False dp=False", deployment: sglangMultinodeDCDForAdmission(t, true, false, false)},
-		{name: "sglang sidecar multinode alpha=True roles=False dp=True", deployment: sglangMultinodeDCDForAdmission(t, true, false, true)},
+		{name: "sglang sidecar multinode alpha=True roles=False dp=False", deployment: sglangMultinodeDCDForAdmission(t, true, false, false), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=True roles=False dp=True", deployment: sglangMultinodeDCDForAdmission(t, true, false, true), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "sglang sidecar multinode alpha=True roles=True dp=False", deployment: sglangMultinodeDCDForAdmission(t, true, true, false)},
 		{name: "sglang sidecar multinode alpha=True roles=True dp=True", deployment: sglangMultinodeDCDForAdmission(t, true, true, true)},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.

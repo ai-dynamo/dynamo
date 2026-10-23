@@ -1509,7 +1509,7 @@ const (
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) error
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
@@ -1520,9 +1520,8 @@ func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	return nil
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) error {
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
-	return nil
 }
 
 type MultinodeDeployer interface {
@@ -1909,11 +1908,9 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
-	// Backends own pod-level launch details, including multinode runtime placement.
-	if !nativeSidecar || numberOfNodes > 1 {
-		if err := backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer); err != nil {
-			return nil, fmt.Errorf("failed to update pod spec for backend %s: %w", backendFramework, err)
-		}
+	// Native sidecar role templates own pod-level engine setup and runtime placement.
+	if !nativeSidecar {
+		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
 	}
 
 	// Runtime defaults apply only where a runtime container is actually declared.
