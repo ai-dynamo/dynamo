@@ -280,20 +280,20 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	}
 
 	t.Run("no discoverer", func(t *testing.T) {
-		if got := (DGDRV1beta2Options{}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); !(got == hardwareDefaultsV1beta2{}) {
+		if got := (DGDRV1beta2Options{}).resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil)); !(got == hardwareDefaultsV1beta2{}) {
 			t.Fatalf("got %+v", got)
 		}
 	})
 	t.Run("complete hardware never asks the cluster", func(t *testing.T) {
 		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h100_sxm", GPUs: 4}}
-		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, spec(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))))
+		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))))
 		if d.calls != 0 || !(got == hardwareDefaultsV1beta2{}) {
 			t.Fatalf("calls=%d got=%+v", d.calls, got)
 		}
 	})
 	t.Run("everything missing", func(t *testing.T) {
 		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 16}}
-		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil))
+		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil))
 		if got.sku != "h200_sxm" || got.budget != 16 || d.filter != "" {
 			t.Fatalf("got %+v, filter %q", got, d.filter)
 		}
@@ -303,42 +303,42 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	})
 	t.Run("a pinned SKU filters discovery and keeps its value", func(t *testing.T) {
 		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "b200_sxm", GPUs: 4}}
-		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, spec(v1beta2Ptr("b200_sxm"), nil))
+		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), nil))
 		if d.filter != "b200_sxm" || got.sku != "" || got.budget != 4 {
 			t.Fatalf("got %+v, filter %q", got, d.filter)
 		}
 	})
 	t.Run("a pinned budget keeps its value", func(t *testing.T) {
 		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 64}}
-		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, spec(nil, v1beta2Ptr(int32(3))))
+		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, v1beta2Ptr(int32(3))))
 		if got.sku != "h200_sxm" || got.budget != 0 {
 			t.Fatalf("got %+v", got)
 		}
 	})
 	t.Run("the budget is capped", func(t *testing.T) {
 		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 1024}}
-		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); got.budget != 32 {
+		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil)); got.budget != 32 {
 			t.Fatalf("default cap: %+v", got)
 		}
-		if got := (DGDRV1beta2Options{Hardware: d, MaxHardwareBudget: 8}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); got.budget != 8 {
+		if got := (DGDRV1beta2Options{Hardware: d, MaxHardwareBudget: 8}).resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil)); got.budget != 8 {
 			t.Fatalf("explicit cap: %+v", got)
 		}
 	})
 	t.Run("an unknown GPU model yields no SKU", func(t *testing.T) {
 		d := &fakeDiscoverer{found: DiscoveredHardware{GPUs: 8}}
-		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); got.sku != "" || got.budget != 8 {
+		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil)); got.sku != "" || got.budget != 8 {
 			t.Fatalf("got %+v", got)
 		}
 	})
 	t.Run("a discovery failure leaves everything unset", func(t *testing.T) {
 		d := &fakeDiscoverer{err: errors.New("no DCGM")}
-		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); !(got == hardwareDefaultsV1beta2{}) {
+		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil)); !(got == hardwareDefaultsV1beta2{}) {
 			t.Fatalf("got %+v", got)
 		}
 	})
 	t.Run("the timeout is configurable", func(t *testing.T) {
 		d := &fakeDiscoverer{found: DiscoveredHardware{GPUs: 1}}
-		DGDRV1beta2Options{Hardware: d, HardwareDiscoveryTimeout: time.Hour}.resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil))
+		DGDRV1beta2Options{Hardware: d, HardwareDiscoveryTimeout: time.Hour}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil))
 		if d.timeout < time.Minute {
 			t.Fatalf("timeout = %v", d.timeout)
 		}
@@ -348,7 +348,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 func TestResolveDefaultsV1beta2(t *testing.T) {
 	d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}
 	got := DGDRV1beta2Options{Hardware: d, AISimulateImage: "registry.example.com/aisimulate:1.2.0"}.
-		resolveDefaults(context.Background(), admissionv1.Create, v1beta2SchemaDefaulted())
+		resolveDefaults(context.Background(), admissionv1.Create, nil, v1beta2SchemaDefaulted())
 	if got.aisimulateImage != "registry.example.com/aisimulate:1.2.0" || got.hardware.sku != "h200_sxm" || got.hardware.budget != 8 {
 		t.Fatalf("got %+v", got)
 	}
@@ -372,7 +372,7 @@ func TestDefaultEnvelopeV1beta2(t *testing.T) {
 	}
 	dgdr := v1beta2Envelope(t, v1beta2SchemaDefaulted())
 
-	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, options); err != nil {
+	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, nil, options); err != nil {
 		t.Fatal(err)
 	}
 	var got nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
@@ -391,7 +391,7 @@ func TestDefaultEnvelopeV1beta2(t *testing.T) {
 
 	// A second admission of the defaulted object changes nothing, byte for byte.
 	first := string(dgdr.Spec.V1Beta2.Raw)
-	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, options); err != nil {
+	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, nil, options); err != nil {
 		t.Fatal(err)
 	}
 	if string(dgdr.Spec.V1Beta2.Raw) != first {
@@ -409,7 +409,7 @@ func TestDefaultEnvelopeV1beta2LeavesUnchangedEnvelopeUntouched(t *testing.T) {
 	dgdr := v1beta2Envelope(t, spec)
 	dgdr.Spec.V1Beta2.Raw = append([]byte(" "), raw...)
 	original := string(dgdr.Spec.V1Beta2.Raw)
-	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, DGDRV1beta2Options{}); err != nil {
+	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, nil, DGDRV1beta2Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if string(dgdr.Spec.V1Beta2.Raw) != original {
@@ -420,21 +420,73 @@ func TestDefaultEnvelopeV1beta2LeavesUnchangedEnvelopeUntouched(t *testing.T) {
 func TestDefaultEnvelopeV1beta2RejectsMalformedSpec(t *testing.T) {
 	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
 	dgdr.Spec.V1Beta2 = &apiextensionsv1.JSON{Raw: []byte(`{"model": 3}`)}
-	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, DGDRV1beta2Options{}); err == nil {
+	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Create, nil, DGDRV1beta2Options{}); err == nil {
 		t.Fatal("want a decode error")
 	}
 }
 
-func TestHardwareIsDiscoveredOnlyOnCreate(t *testing.T) {
-	for _, op := range []admissionv1.Operation{admissionv1.Update, admissionv1.Delete, admissionv1.Connect, ""} {
+func hardwareSpecV1beta2(sku *string, budget *int32) *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
+	spec := v1beta2SchemaDefaulted()
+	if sku != nil || budget != nil {
+		spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: sku, Budget: budget}}
+	}
+	return spec
+}
+
+func TestHardwareIsNeverDiscoveredOnOtherOperations(t *testing.T) {
+	for _, op := range []admissionv1.Operation{admissionv1.Delete, admissionv1.Connect, ""} {
 		t.Run("operation "+string(op), func(t *testing.T) {
 			d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}
-			options := DGDRV1beta2Options{Hardware: d}
-			if got := options.resolveHardware(context.Background(), op, v1beta2SchemaDefaulted()); !(got == hardwareDefaultsV1beta2{}) {
-				t.Fatalf("hardware resolved on %q: %+v", op, got)
+			old := hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), v1beta2Ptr(int32(4)))
+			got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), op, old, hardwareSpecV1beta2(nil, nil))
+			if got != (hardwareDefaultsV1beta2{}) || d.calls != 0 {
+				t.Fatalf("hardware resolved on %q: %+v, calls %d", op, got, d.calls)
 			}
-			if d.calls != 0 {
-				t.Fatalf("the cluster was asked on %q", op)
+		})
+	}
+}
+
+func TestResolveHardwareByOperationV1beta2(t *testing.T) {
+	full := func() *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
+		return hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), v1beta2Ptr(int32(4)))
+	}
+	tests := []struct {
+		name       string
+		op         admissionv1.Operation
+		old, spec  *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
+		want       hardwareDefaultsV1beta2
+		wantCalls  int
+		wantFilter string
+	}{
+		{"create discovers everything", admissionv1.Create, nil, hardwareSpecV1beta2(nil, nil),
+			hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8}, 1, ""},
+		{"metadata-only update without hardware does not discover", admissionv1.Update,
+			hardwareSpecV1beta2(nil, nil), hardwareSpecV1beta2(nil, nil), hardwareDefaultsV1beta2{}, 0, ""},
+		{"update with unchanged incomplete hardware does not discover", admissionv1.Update,
+			hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil), hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil),
+			hardwareDefaultsV1beta2{}, 0, ""},
+		{"update without a stored spec does not discover", admissionv1.Update,
+			nil, hardwareSpecV1beta2(nil, nil), hardwareDefaultsV1beta2{}, 0, ""},
+		{"removing only the budget discovers only the budget", admissionv1.Update,
+			full(), hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil),
+			hardwareDefaultsV1beta2{budget: 8}, 1, "h100_sxm"},
+		{"removing only the SKU discovers only the SKU", admissionv1.Update,
+			full(), hardwareSpecV1beta2(nil, v1beta2Ptr(int32(4))),
+			hardwareDefaultsV1beta2{sku: "h200_sxm"}, 1, ""},
+		{"removing all typed hardware discovers both", admissionv1.Update,
+			full(), hardwareSpecV1beta2(nil, nil),
+			hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8}, 1, ""},
+		{"changing to complete hardware does not discover", admissionv1.Update,
+			full(), hardwareSpecV1beta2(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))),
+			hardwareDefaultsV1beta2{}, 0, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}
+			got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), tt.op, tt.old, tt.spec)
+			if got != tt.want || d.calls != tt.wantCalls || (tt.wantCalls > 0 && d.filter != tt.wantFilter) {
+				t.Fatalf("got %+v, calls %d, filter %q; want %+v, calls %d, filter %q",
+					got, d.calls, d.filter, tt.want, tt.wantCalls, tt.wantFilter)
 			}
 		})
 	}
@@ -442,7 +494,7 @@ func TestHardwareIsDiscoveredOnlyOnCreate(t *testing.T) {
 
 // A Request created while discovery had nothing to offer keeps its spec through a later
 // metadata-only update, even after the cluster recovers.
-func TestUpdateKeepsHardwareUnresolved(t *testing.T) {
+func TestUpdateKeepsUnchangedHardwareUnresolved(t *testing.T) {
 	options := DGDRV1beta2Options{Hardware: &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}}
 	// The objective metric is still defaulted on update, so the spec already carries it.
 	spec := v1beta2SchemaDefaulted()
@@ -450,11 +502,48 @@ func TestUpdateKeepsHardwareUnresolved(t *testing.T) {
 	spec.Objective.Metric = &metric
 	dgdr := v1beta2Envelope(t, spec)
 	first := string(dgdr.Spec.V1Beta2.Raw)
-	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Update, options); err != nil {
+	if err := defaultDynamoGraphDeploymentRequestV1beta2(
+		context.Background(), dgdr, admissionv1.Update, hardwareSpecV1beta2(nil, nil), options); err != nil {
 		t.Fatal(err)
 	}
 	if string(dgdr.Spec.V1Beta2.Raw) != first {
 		t.Fatalf("update changed the spec:\n%s\n%s", first, dgdr.Spec.V1Beta2.Raw)
+	}
+}
+
+func TestUpdateRediscoversRemovedHardware(t *testing.T) {
+	options := DGDRV1beta2Options{Hardware: &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}}
+	dgdr := v1beta2Envelope(t, v1beta2SchemaDefaulted())
+	old := hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), v1beta2Ptr(int32(4)))
+	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Update, old, options); err != nil {
+		t.Fatal(err)
+	}
+	var got nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
+	if err := json.Unmarshal(dgdr.Spec.V1Beta2.Raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Hardware == nil || got.Hardware.GPU == nil || *got.Hardware.GPU.SKU != "h200_sxm" || *got.Hardware.GPU.Budget != 8 {
+		t.Fatalf("hardware not rediscovered: %+v", got.Hardware)
+	}
+}
+
+func TestDecodeOldSpecV1beta2(t *testing.T) {
+	old, err := json.Marshal(v1beta2Envelope(t, hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeOldSpecV1beta2(admissionv1.Update, old)
+	if err != nil || got == nil || got.Hardware == nil || *got.Hardware.GPU.SKU != "h100_sxm" {
+		t.Fatalf("got %+v, err %v", got, err)
+	}
+	if got, err := decodeOldSpecV1beta2(admissionv1.Create, old); got != nil || err != nil {
+		t.Fatalf("create has no old spec: %+v, %v", got, err)
+	}
+	if got, err := decodeOldSpecV1beta2(admissionv1.Update, []byte(`{}`)); got != nil || err != nil {
+		t.Fatalf("an old object without the envelope has no old spec: %+v, %v", got, err)
+	}
+	if _, err := decodeOldSpecV1beta2(admissionv1.Update, []byte(`{`)); err == nil {
+		t.Fatal("want a decode error")
 	}
 }
 

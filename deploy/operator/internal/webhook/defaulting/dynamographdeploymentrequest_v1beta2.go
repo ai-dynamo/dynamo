@@ -57,15 +57,16 @@ const (
 // values later, when the input is lowered.
 
 // defaultDynamoGraphDeploymentRequestV1beta2 defaults the v1beta2 spec that dgdr carries in
-// spec.v1beta2. The environment is read once, before any mutation, and only on CREATE:
-// discovered hardware is persisted with the Request, so a later write never replaces what
-// the Request was created with. The envelope is rewritten
+// spec.v1beta2. The environment is read once, before any mutation, and only for a CREATE or
+// an UPDATE that changes spec.hardware (see resolveHardware). oldSpec is the stored spec on
+// UPDATE and nil otherwise. The envelope is rewritten
 // only when defaulting changed the spec, so a defaulted object stays byte-identical across
 // repeated admissions.
 func defaultDynamoGraphDeploymentRequestV1beta2(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	operation admissionv1.Operation,
+	oldSpec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 	options DGDRV1beta2Options,
 ) error {
 	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
@@ -77,7 +78,7 @@ func defaultDynamoGraphDeploymentRequestV1beta2(
 		return fmt.Errorf("encode spec.v1beta2: %w", err)
 	}
 
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(&spec, options.resolveDefaults(ctx, operation, &spec))
+	defaultDynamoGraphDeploymentRequestSpecV1beta2(&spec, options.resolveDefaults(ctx, operation, oldSpec, &spec))
 
 	after, err := json.Marshal(&spec)
 	if err != nil {
@@ -87,6 +88,30 @@ func defaultDynamoGraphDeploymentRequestV1beta2(
 		dgdr.Spec.V1Beta2 = &apiextensionsv1.JSON{Raw: after}
 	}
 	return nil
+}
+
+// decodeOldSpecV1beta2 returns the stored v1beta2 spec an UPDATE replaces. The API server
+// converts the old object to the same v1beta1 carrier view as the new one, so the spec sits
+// in the same spec.v1beta2 envelope. It returns nil when there is nothing to compare with.
+func decodeOldSpecV1beta2(
+	operation admissionv1.Operation,
+	oldObject []byte,
+) (*nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec, error) {
+	if operation != admissionv1.Update || len(oldObject) == 0 {
+		return nil, nil
+	}
+	var old nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	if err := json.Unmarshal(oldObject, &old); err != nil {
+		return nil, fmt.Errorf("decode old object: %w", err)
+	}
+	if old.Spec.V1Beta2 == nil {
+		return nil, nil
+	}
+	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
+	if err := json.Unmarshal(old.Spec.V1Beta2.Raw, &spec); err != nil {
+		return nil, fmt.Errorf("decode old spec.v1beta2: %w", err)
+	}
+	return &spec, nil
 }
 
 // dynamoGraphDeploymentRequestV1beta2DefaultOptions carries the request-scoped values the
