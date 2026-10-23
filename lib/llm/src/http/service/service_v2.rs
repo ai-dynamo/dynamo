@@ -100,7 +100,8 @@ fn path_within_namespace(path: &str, namespace: &str) -> bool {
 
 fn draining_inference_response(version: Version) -> axum::response::Response {
     let mut response = super::openai::ErrorMessage::_service_unavailable().into_response();
-    if version == Version::HTTP_11 {
+    if version <= Version::HTTP_11 {
+        *response.version_mut() = version;
         // Do not let connection pools keep sending requests to a retiring frontend.
         response.headers_mut().insert(
             header::CONNECTION,
