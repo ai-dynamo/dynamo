@@ -319,16 +319,18 @@ fn sparse_and_ambiguous_multimodal_layouts_are_handled() {
 
 #[test]
 fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
-    for (name, token_ids, features) in [
+    for (name, token_ids, features, expected_error) in [
         (
             "unrelated features",
             serde_json::json!([1, 2, 3, 4]),
             serde_json::json!({"future_feature": [1, 2, 3]}),
+            None,
         ),
         (
             "malformed hashes",
             serde_json::json!([1, 2, 3, 4]),
             serde_json::json!({"mm_hashes": ["not-an-object"]}),
+            Some("features.mm_hashes must be a JSON object"),
         ),
         (
             "empty identifier",
@@ -338,6 +340,7 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
                 "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
                 "kwargs_data": {"image": ["opaque"]}
             }),
+            Some("multimodal hashes must be non-empty strings"),
         ),
         (
             "overlapping placeholders",
@@ -347,32 +350,40 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
                 "mm_placeholders": {"image": [
                     {"offset": 0, "length": 2},
                     {"offset": 1, "length": 2}
-                ]}
+                ]},
+                "kwargs_data": {"image": ["YQ==", "Yg=="]}
             }),
+            Some("multimodal placeholder ranges must not overlap"),
         ),
         (
             "unsupported modality",
             serde_json::json!([1, 2, 3, 4]),
             serde_json::json!({
                 "mm_hashes": {"audio": ["audio-0"]},
-                "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"audio": ["YQ=="]}
             }),
+            Some("exact /generate MM routing currently supports image placeholders only"),
         ),
         (
             "unpaired image metadata",
             serde_json::json!([1, 2, 3, 4]),
             serde_json::json!({
                 "mm_hashes": {"image": ["image-0"]},
-                "mm_placeholders": {}
+                "mm_placeholders": {},
+                "kwargs_data": {"image": ["YQ=="]}
             }),
+            Some("image hashes, placeholders, and kwargs_data must all be present"),
         ),
         (
             "unequal item counts",
             serde_json::json!([1, 2, 3, 4]),
             serde_json::json!({
                 "mm_hashes": {"image": ["image-0", "image-1"]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["YQ==", "Yg=="]}
             }),
+            Some("image hashes, placeholders, and kwargs_data must have equal lengths"),
         ),
         (
             "out-of-order placeholders",
@@ -382,8 +393,10 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
                 "mm_placeholders": {"image": [
                     {"offset": 3, "length": 1},
                     {"offset": 0, "length": 2}
-                ]}
+                ]},
+                "kwargs_data": {"image": ["YQ==", "Yg=="]}
             }),
+            Some("multimodal placeholders must be ordered by offset"),
         ),
     ] {
         let raw = serde_json::json!({
@@ -393,6 +406,17 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
         });
         let request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize request");
+        match expected_error {
+            Some(error) => assert_eq!(
+                generate_mm_routing_info(&request, 4).unwrap_err(),
+                error,
+                "{name}"
+            ),
+            None => assert!(
+                generate_mm_routing_info(&request, 4).unwrap().is_none(),
+                "{name}"
+            ),
+        }
         let expected_token_ids = request.token_ids.clone();
 
         let preprocessed = preprocessed_from_generate(

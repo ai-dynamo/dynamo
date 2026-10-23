@@ -1293,29 +1293,43 @@ fn configured_generate_routes(
     enable_engine_apis: bool,
 ) -> Result<Vec<(String, crate::generate_format::SharedFormat)>> {
     use crate::generate_format::{named, selected};
+    resolve_generate_routes(
+        [
+            (
+                (enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV))
+                    .then(|| named("vllm")),
+                HTTP_SVC_VLLM_GENERATE_PATH_ENV,
+                "/inference/v1/generate",
+            ),
+            (
+                (enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV)).then(selected),
+                HTTP_SVC_SGLANG_GENERATE_PATH_ENV,
+                "/generate",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(format, path_env, default_path)| {
+            format.map(|format| {
+                (
+                    format,
+                    var(path_env).unwrap_or_else(|_| default_path.to_string()),
+                )
+            })
+        }),
+    )
+}
+
+fn resolve_generate_routes(
+    entries: impl IntoIterator<Item = (Result<crate::generate_format::SharedFormat>, String)>,
+) -> Result<Vec<(String, crate::generate_format::SharedFormat)>> {
     let mut routes = Vec::new();
-    for (format, path_env, default_path) in [
-        (
-            (enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV))
-                .then(|| named("vllm")),
-            HTTP_SVC_VLLM_GENERATE_PATH_ENV,
-            "/inference/v1/generate",
-        ),
-        (
-            (enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV)).then(selected),
-            HTTP_SVC_SGLANG_GENERATE_PATH_ENV,
-            "/generate",
-        ),
-    ] {
-        if let Some(format) = format {
-            let path = var(path_env).unwrap_or_else(|_| default_path.to_string());
-            validate_generate_route_path(&path)?;
-            anyhow::ensure!(
-                !routes.iter().any(|(existing, _)| existing == &path),
-                "duplicate Generate route path: {path}"
-            );
-            routes.push((path, format?));
-        }
+    for (format, path) in entries {
+        validate_generate_route_path(&path)?;
+        anyhow::ensure!(
+            !routes.iter().any(|(existing, _)| existing == &path),
+            "duplicate Generate route path: {path}"
+        );
+        routes.push((path, format?));
     }
     Ok(routes)
 }
@@ -3695,7 +3709,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn generate_route_paths_use_overrides_and_reject_collisions() {
+    fn generate_route_paths_use_overrides() {
         install_readiness_formats();
         temp_env::with_vars(
             [
@@ -3717,18 +3731,24 @@ mod tests {
                 assert!(route_docs.contains(&"PUT /native/sglang".to_string()));
                 assert!(!route_docs.contains(&"POST /generate".to_string()));
                 assert!(!route_docs.contains(&"POST /inference/v1/generate".to_string()));
-                temp_env::with_var(
-                    HTTP_SVC_SGLANG_GENERATE_PATH_ENV,
-                    Some("/native/vllm"),
-                    || {
-                        let error = HttpService::builder()
-                            .build()
-                            .err()
-                            .expect("duplicate path must fail");
-                        assert!(error.to_string().contains("duplicate Generate route path"));
-                    },
-                );
             },
+        );
+    }
+
+    #[test]
+    fn generate_route_paths_reject_collisions() {
+        install_readiness_formats();
+        let error = resolve_generate_routes(["vllm", "sglang"].map(|name| {
+            (
+                crate::generate_format::named(name),
+                "/native/shared".to_string(),
+            )
+        }))
+        .err()
+        .expect("duplicate path must fail");
+        assert_eq!(
+            error.to_string(),
+            "duplicate Generate route path: /native/shared"
         );
     }
 
