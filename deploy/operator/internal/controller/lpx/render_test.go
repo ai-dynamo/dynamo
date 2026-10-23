@@ -308,6 +308,29 @@ func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
 	}, runtime.ReadinessProbe)
 }
 
+// TestLPXAgentRuntimeSidecarKeepsAuthoredSystemPort pins template ownership of a
+// host-network sidecar's port and probes: authored ones that name the system port
+// render as written.
+func TestLPXAgentRuntimeSidecarKeepsAuthoredSystemPort(t *testing.T) {
+	t.Log("Author the system port with HTTP readiness and TCP liveness on the Agent runtime sidecar")
+	dgd := loadLPXInput(t, "node-local-v3-hx-lpu-only")
+	serveFromAgent(dgd)
+	authored := &dgd.GetComponentByName("lpu").Roles[0].PodTemplate.Spec.InitContainers[1]
+	ports := []corev1.ContainerPort{{Name: consts.DynamoSystemPortName, ContainerPort: 18090, Protocol: corev1.ProtocolTCP}}
+	readiness := &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString(consts.DynamoSystemPortName)}}
+	liveness := &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString(consts.DynamoSystemPortName)}}
+	authored.Ports, authored.ReadinessProbe, authored.LivenessProbe = ports, readiness, liveness
+
+	t.Log("Rendering keeps the authored port and probes and adds no startup probe")
+	_, serving := renderLPXServing(t, dgd)
+	runtime := serving.Spec.PodSpec.InitContainers[1]
+	require.Equal(t, consts.RuntimeContainerName, runtime.Name)
+	require.Equal(t, ports, runtime.Ports)
+	require.Equal(t, readiness, runtime.ReadinessProbe)
+	require.Equal(t, liveness, runtime.LivenessProbe)
+	require.Nil(t, runtime.StartupProbe)
+}
+
 // TestLPXConductorRuntimeSidecarRendering pins the runtime sidecar of a hybrid
 // model, whose Cyborg conductor hosts the engine: the model path comes first,
 // and sidecar mode keeps the serving suffix separate, as for an ordinary worker.
@@ -333,6 +356,41 @@ func TestLPXConductorRuntimeSidecarRendering(t *testing.T) {
 	namespace := dgd.GetDynamoNamespaceForComponent(dgd.GetComponentByName("lpu"))
 	require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: namespace})
 	require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: servingHash})
+
+	t.Log("On the Pod network the sidecar keeps the system port and its default probes")
+	require.Equal(t, []corev1.ContainerPort{{
+		Name: consts.DynamoSystemPortName, ContainerPort: int32(consts.DynamoSystemPort), Protocol: corev1.ProtocolTCP,
+	}}, runtime.Ports)
+	require.NotNil(t, runtime.StartupProbe)
+	require.NotNil(t, runtime.LivenessProbe)
+	require.NotNil(t, runtime.ReadinessProbe)
+}
+
+// TestLPXHostNetworkConductorRuntimeSidecarRendering pins template ownership of a
+// host-network hybrid conductor's sidecar ports and probes: defaults are dropped
+// and only the authored numeric readiness probe remains.
+func TestLPXHostNetworkConductorRuntimeSidecarRendering(t *testing.T) {
+	t.Log("Render a hybrid model whose host-network conductor hosts the runtime sidecar")
+	dgd := loadLPXInput(t, "node-local-v2-hybrid")
+	conductor := &dgd.GetComponentByName("lpu").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
+	conductor.HostNetwork = true
+	readiness := &corev1.Probe{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt(18090)}}
+	conductor.InitContainers = []corev1.Container{{
+		Name: consts.RuntimeContainerName, Image: lpxSidecarImage, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+		Args:           []string{"lpx", "--model-path", "$(LPX_MODEL_PATH)/tokenizer"},
+		Env:            []corev1.EnvVar{{Name: "DYN_SYSTEM_PORT", Value: "18090"}},
+		VolumeMounts:   []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs", ReadOnly: true}},
+		ReadinessProbe: readiness,
+	}}
+	_, serving := renderLPXServing(t, dgd)
+
+	t.Log("The sidecar declares no ports and keeps only its authored readiness probe")
+	runtime := serving.Spec.PodSpec.InitContainers[0]
+	require.Equal(t, consts.RuntimeContainerName, runtime.Name)
+	require.Empty(t, runtime.Ports)
+	require.Nil(t, runtime.StartupProbe)
+	require.Nil(t, runtime.LivenessProbe)
+	require.Equal(t, readiness, runtime.ReadinessProbe)
 }
 
 func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {

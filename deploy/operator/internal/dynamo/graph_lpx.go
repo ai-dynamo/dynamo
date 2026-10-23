@@ -428,25 +428,18 @@ func renderSelectedLPXRole(
 	// The shared renderer's filesystem-group fallback is not part of the LPX template contract.
 	basePodSpec.SecurityContext = component.PodTemplate.Spec.SecurityContext
 
-	// LPX places host-network Pods itself and refuses declared host ports, so templates own sidecar ports and probes.
-	if basePodSpec.HostNetwork {
+	// LPX places host-network Pods itself and refuses declared container ports, so only the
+	// template's own sidecar ports and probes remain.
+	if authored := GetDynamoSidecar(component); authored != nil && basePodSpec.HostNetwork {
 		for i := range basePodSpec.InitContainers {
 			runtime := &basePodSpec.InitContainers[i]
 			if runtime.Name != commonconsts.RuntimeContainerName {
 				continue
 			}
-			runtime.Ports = slices.DeleteFunc(runtime.Ports, func(port corev1.ContainerPort) bool {
-				return port.Name == commonconsts.DynamoSystemPortName
-			})
-			for _, probe := range []**corev1.Probe{&runtime.StartupProbe, &runtime.LivenessProbe, &runtime.ReadinessProbe} {
-				if *probe == nil {
-					continue
-				}
-				if (*probe).HTTPGet != nil && (*probe).HTTPGet.Port.StrVal == commonconsts.DynamoSystemPortName ||
-					(*probe).TCPSocket != nil && (*probe).TCPSocket.Port.StrVal == commonconsts.DynamoSystemPortName {
-					*probe = nil
-				}
-			}
+			runtime.Ports = slices.Clone(authored.Ports)
+			runtime.StartupProbe = authored.StartupProbe.DeepCopy()
+			runtime.LivenessProbe = authored.LivenessProbe.DeepCopy()
+			runtime.ReadinessProbe = authored.ReadinessProbe.DeepCopy()
 		}
 	}
 
