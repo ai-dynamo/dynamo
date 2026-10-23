@@ -51,6 +51,31 @@ func HasRolePodTemplates(component *v1beta1.DynamoComponentDeploymentSharedSpec)
 	return false
 }
 
+// HasCompleteMultinodeRolePodTemplates reports whether both leader and worker
+// roles declare a PodTemplate. A nil component has no role templates. Template
+// contents and duplicate role names are checked by the shared role validation.
+func HasCompleteMultinodeRolePodTemplates(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if component == nil {
+		return false
+	}
+
+	// Check each required role independently of the authored role order.
+	var leader, worker bool
+	for i := range component.Roles {
+		role := &component.Roles[i]
+		if role.PodTemplate == nil {
+			continue
+		}
+		switch role.Name {
+		case v1beta1.ComponentRoleLeader:
+			leader = true
+		case v1beta1.ComponentRoleWorker:
+			worker = true
+		}
+	}
+	return leader && worker
+}
+
 // EffectiveComponentForRole returns an independently owned component whose
 // component-level PodTemplate is the complete source selected for role.
 // component must not be nil. Invalid or incomplete template-source modes are
