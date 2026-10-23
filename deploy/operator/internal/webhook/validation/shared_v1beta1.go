@@ -1539,7 +1539,6 @@ func (v *sharedValidation) validateObjectMetaUpdate(newObjectMeta, oldObjectMeta
 	annotationsPath := fldPath.Child("annotations")
 	newOrigin, newOriginExists := newObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
 	oldOrigin, oldOriginExists := oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
-	// Keep creation provenance immutable, including whether it exists at all.
 	if newOriginExists != oldOriginExists || newOrigin != oldOrigin {
 		var invalidValue any
 		if newOriginExists {

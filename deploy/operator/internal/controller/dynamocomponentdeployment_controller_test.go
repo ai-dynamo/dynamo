@@ -3672,3 +3672,66 @@ func TestRenderMultinodePodTemplateSpecs_UsesCompleteRolePodTemplates(t *testing
 	assert.NotContains(t, strings.Join(worker.Spec.Containers[0].Args, " "), "LWS_")
 
 }
+
+func TestDCDWorkloadRenderer_FrontendStartupProbeOrigin(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		origin         string
+		templateOrigin string
+		graphChild     bool
+		sidecar        bool
+		roleTemplate   bool
+		wantEnabled    bool
+	}{
+		{name: "legacy standalone ignores authored origin", templateOrigin: "1.7.0"},
+		{name: "1.6 standalone keeps old defaults", origin: "1.6.0", templateOrigin: "1.7.0"},
+		{name: "new standalone overrides old template origin", origin: "1.7.0", templateOrigin: "1.6.0", wantEnabled: true},
+		{name: "new standalone frontend sidecar", origin: "1.7.0", sidecar: true, wantEnabled: true},
+		{name: "role template uses standalone origin", origin: "1.7.0", templateOrigin: "1.6.0", roleTemplate: true, wantEnabled: true},
+		{name: "role template cannot enable legacy standalone", templateOrigin: "1.7.0", roleTemplate: true},
+		{name: "old graph child keeps parent origin", templateOrigin: "1.6.0", graphChild: true},
+		{name: "new graph child uses parent origin", templateOrigin: "1.7.0", graphChild: true, wantEnabled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DCD with conflicting metadata and template origins")
+			dcd := &v1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.templateOrigin}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "frontend:1.6.0"}}},
+					},
+				}},
+			}
+			if tt.origin != "" {
+				dcd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.origin}
+			}
+			if tt.graphChild {
+				dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph", Controller: ptr.To(true)}}
+			}
+			index := 0
+			if tt.sidecar {
+				dcd.Spec.ComponentType = v1beta1.ComponentTypeWorker
+				dcd.Spec.BackendFramework = "vllm"
+				dcd.Spec.FrontendSidecar = ptr.To("frontend")
+				dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: "frontend:1.6.0"})
+				index = 1
+			}
+			role := dynamo.RoleMain
+			if tt.roleTemplate {
+				dcd.Spec.Roles = []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLeader, PodTemplate: dcd.Spec.PodTemplate}}
+				dcd.Spec.PodTemplate = nil
+				role = dynamo.RoleLeader
+			}
+			original := dcd.DeepCopy()
+			t.Log("Render through the controller workload path without mutating the DCD")
+			renderer := newDCDWorkloadRenderer(fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+				&configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }})
+			pod, err := renderer.generatePodTemplateSpec(t.Context(), dcd, role, noContainerGPUs())
+			require.NoError(t, err)
+			require.Equal(t, tt.wantEnabled, pod.Spec.Containers[index].StartupProbe != nil)
+			require.Equal(t, original, dcd)
+		})
+	}
+}
