@@ -57,3 +57,19 @@ func has(obj map[string]any, path ...string) bool {
 	_, found, _ := unstructured.NestedFieldNoCopy(obj, path...)
 	return found
 }
+
+// HardwareNamed reports whether the native input names both a GPU SKU and a GPU budget, as the
+// search needs. A null or blank value does not count: the key is deleted or left empty.
+func HardwareNamed(input map[string]any) bool {
+	return hasValue(input, searchSpaceHardwareSKU...) && hasValue(input, searchSpaceGPUBudget...)
+}
+
+// hasValue reports whether obj holds a non-null, non-blank value at the path.
+func hasValue(obj map[string]any, path ...string) bool {
+	value, found, err := unstructured.NestedFieldNoCopy(obj, path...)
+	if err != nil || !found || value == nil {
+		return false
+	}
+	text, isString := value.(string)
+	return !isString || text != ""
+}

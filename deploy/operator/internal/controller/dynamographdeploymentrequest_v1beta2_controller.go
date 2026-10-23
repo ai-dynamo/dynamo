@@ -38,7 +38,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -219,8 +218,7 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) buildRun(
 	if err != nil {
 		return nil, err
 	}
-	if !dgdrV1beta2HasEffectiveValue(input, aisimulate.SearchSpaceHardwareSKU) ||
-		!dgdrV1beta2HasEffectiveValue(input, aisimulate.SearchSpaceGPUBudget) {
+	if !aisimulate.HardwareNamed(input) {
 		return nil, errors.New("the effective AISimulate input names no GPU SKU or budget; set spec.hardware.gpu")
 	}
 	raw, err := json.Marshal(input)
@@ -400,16 +398,6 @@ func dgdrV1beta2SplitRuns(
 		}
 	}
 	return active, terminal, nil
-}
-
-// dgdrV1beta2HasEffectiveValue reports whether input holds a non-null, non-empty value at path.
-func dgdrV1beta2HasEffectiveValue(input map[string]any, path []string) bool {
-	value, found, err := unstructured.NestedFieldNoCopy(input, path...)
-	if err != nil || !found || value == nil {
-		return false
-	}
-	text, isString := value.(string)
-	return !isString || text != ""
 }
 
 // requireDGDRV1beta2API fails when the cluster does not serve the v1beta2 Request and Run APIs.
