@@ -4221,7 +4221,7 @@ pub(crate) mod tests {
                 );
                 assert_eq!(
                     collect_choices(&output).last().unwrap().finish_reason,
-                    Some(FinishReason::Stop)
+                    terminal.then_some(FinishReason::Stop)
                 );
             }
         }
