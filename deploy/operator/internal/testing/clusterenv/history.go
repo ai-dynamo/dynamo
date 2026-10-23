@@ -41,7 +41,7 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 	originals := map[string]extensions.CustomResourceDefinitionSpec{}
 	namespaces := []string{}
 	restoreCRDs := func(ctx context.Context) error {
-		var errs []error
+		errs := make([]error, 0, len(originals))
 		for name, spec := range originals {
 			// The API server rewrites CRD status after each spec change, which races this read.
 			errs = append(errs, retry.RetryOnConflict(retry.DefaultRetry, func() error {
