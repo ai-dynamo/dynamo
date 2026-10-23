@@ -181,6 +181,7 @@ is set. The decision logs identify the missing capacity metadata.
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration |
 | [Planner Design](planner-design.md) | Architecture and algorithm internals |
 | [Planner Examples](planner-examples.md) | Planner-specific configuration examples |
+| [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) | Replay a trace through the Planner offline, including the experimental retune |
 | [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) | DGDR YAML examples, sample configurations, advanced patterns |
 | [Global Planner Guide](global-planner-guide.md) | Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments |
 
