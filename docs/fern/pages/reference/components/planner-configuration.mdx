@@ -329,7 +329,9 @@ These fields default from environment variables and are excluded from serialized
 ## Advisory mode
 
 <ParamField path="advisory" type="boolean" default="false">
-  Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts without executing scaling actions or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic.
+  Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts and [retune](#retune-experimental-simulation-only) decisions without executing any of them or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic. The runtime configuration APIs, such as `PATCH /v1/min-endpoints`, still change the Planner's own settings.
+
+  Planner-in-the-loop replay honors it too: an advisory replay keeps the simulated deployment at its starting replicas and router parameters, reports the recommendations in `planner.recommended_scaling_events`, and records a retune decision that would apply with outcome `advisory`. See [Replay in Advisory Mode](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 </ParamField>
 
 ## Diagnostics and reporting
@@ -586,7 +588,9 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
 
   To retune with fixed replicas (retune-only mode), set **both** `enable_load_scaling: false` and `enable_throughput_scaling: false` explicitly. Only that combination skips the easy-mode forcing and the "at least one scaling mode" rule; every other combination keeps them. A retune-only Planner never scales, not even to fit `min_gpu_budget`/`max_gpu_budget` or a minimum endpoint count, runs no load loop, and pulls no forward-pass metrics. It still ticks every `scheduling.scale_interval_seconds` (by default the 5-second load interval); to tick less often, set `scheduling.scale_interval_seconds` and `load_adjustment_interval_seconds` together.
 
-  With load or throughput scaling enabled, `scheduling.external_plugins` must be empty and `scheduling.gateway.enabled` must be `false`, because every candidate replay runs an inner Planner.
+  With load or throughput scaling enabled, `scheduling.external_plugins` must be empty and `scheduling.gateway.enabled` must be `false`, because every candidate replay runs an inner Planner. That inner Planner always scales and never runs batch scheduling, even when the Planner is advisory.
+
+  With [`advisory: true`](#advisory-mode), retune keeps sweeping and scoring, but a decision that would apply is recorded with outcome `advisory` and the point it recommends, and nothing changes.
 </ParamField>
 
 <Indent>
@@ -622,9 +626,6 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
   </ParamField>
   <ParamField path="max_parallel" type="integer" default="2">
     Number of sweep worker processes. Must be at least 1. Each worker replays one candidate at a time, so memory grows with this value and the window size.
-  </ParamField>
-  <ParamField path="dry_run" type="boolean" default="false">
-    Decide and record without applying anything: a decision that would apply is recorded as `dry_run`.
   </ParamField>
   <ParamField path="router" type="object | string" default="null">
     Router search domain, written like the `router` section of `aisimulate recommend --stack dynamo` (see [Search domains](#search-domains)). A knob omitted from the map searches its AISimulate default domain; write a scalar to pin it. `default` searches the whole AISimulate default domain. `null` (or no `router` field) keeps every router parameter at its startup value; an empty map `{}` is rejected. A searched router requires `router_mode="kv_router"` (`router.policy: kv_router` in `aisimulate predict`) with the default worker-selection policy, no `overlap_score_weight`, and conditional disaggregation disabled.

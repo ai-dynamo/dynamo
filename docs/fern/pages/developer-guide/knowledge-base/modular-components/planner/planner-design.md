@@ -444,7 +444,7 @@ decision has one outcome:
 |---|---|
 | `applied` | The best candidate replaces the current point |
 | `kept` | No candidate cleared the threshold, the window was empty, or the best candidate equals the current configuration |
-| `dry_run` | `dry_run: true` and the best candidate would be applied: the decision is recorded with its chosen point and not applied |
+| `advisory` | The Planner runs with `advisory: true` and the decision would be `applied`: it records the chosen point and the `planner_changes` it recommends, and nothing changes. A decision that would fail, such as a predictor swap without enough warmup, is `failed` |
 | `busy` | The window came due while a sweep was in flight and was skipped |
 | `stale` | A searched parameter changed while the sweep ran |
 | `timeout` | The sweep exceeded `timeout_seconds` |
@@ -496,6 +496,15 @@ trace that ends at or before the first replayed request; without throughput scal
   those two weights is scored on a router the outer replay does not run after the patch.
 - It applies the `planner_changes` of `applied` decisions through `apply_runtime_configuration`,
   warming a new load predictor from the decision's observations.
+- With `advisory: true`, it hands the Rust replay no scaling targets and no router parameters, so
+  the deployment keeps its starting replicas and router parameters, and it records the
+  recommendations in `PlannerReplayDetails.recommended_scaling_events`. It never sets the pending
+  scaling targets, so the Planner sees its starting replicas as the expected counts. The controller
+  records a decision that would apply as `advisory` before it changes its desired router map or
+  pending Planner changes, so the next sweep searches from the deployed point; the adapter fails
+  the replay if an `applied` decision arrives anyway. The inner Planner of the candidate replays
+  (with load-based or throughput-based scaling) always runs with `advisory: false` and batch
+  scheduling off.
 - It keeps every decision for `PlannerReplayDetails.retune_events`, a list, possibly empty, whenever
   `retune` is set, and `None` otherwise. With tick capture, each tick record also holds
   `router_policies`, the replay router's revision and parameters before the tick's update. Tick

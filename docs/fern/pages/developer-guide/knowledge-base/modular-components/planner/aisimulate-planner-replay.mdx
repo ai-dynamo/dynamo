@@ -64,10 +64,10 @@ The other accepted keys keep their `PlannerConfig` names: `enable_throughput_sca
 `load_adjustment_interval_seconds`, `max_throughput_scaling_replicas`, `max_num_fpm_samples`,
 `fpm_sample_bucket_size`, `load_scaling_down_sensitivity`, `load_min_observations`,
 `load_predictor`, `load_predictor_log1p`, `prophet_window_size`, `kalman_q_level`,
-`kalman_q_trend`, `kalman_r`, `kalman_min_points`, `load_predictor_warmup_trace`, and
-[`retune`](#simulate-retune-experimental). Any other key fails with
-`Extra inputs are not permitted`. `load_predictor_warmup_trace` resolves a relative path against the
-working directory and must name a file.
+`kalman_q_trend`, `kalman_r`, `kalman_min_points`, `load_predictor_warmup_trace`,
+[`advisory`](#replay-in-advisory-mode), and [`retune`](#simulate-retune-experimental). Any other
+key fails with `Extra inputs are not permitted`. `load_predictor_warmup_trace` resolves a relative
+path against the working directory and must name a file.
 
 The adapter sets the remaining fields from the rest of the config:
 
@@ -310,13 +310,14 @@ The `planner` object holds:
 
 | Key | Contents |
 |---|---|
-| `metadata` | `mode`, `planner_config_digest`, the plugin pipeline, and `bootstrap` (see [Planner Performance Model](#planner-performance-model)) |
+| `metadata` | `mode`, `advisory`, `planner_config_digest`, the plugin pipeline, and `bootstrap` (see [Planner Performance Model](#planner-performance-model)) |
 | `scaling_events` | One entry per replica change: `at_s`, `component` (`agg`, `prefill`, or `decode`), `from_count`, `to_count`, and `reason` (`scale_up` or `scale_down`) |
 | `lifecycle_operations` | Worker transitions (`worker_starting`, `worker_ready`, `worker_draining`, `worker_removed`) with `at_ms`, `pool`, and `cause` |
 | `ticks` | One record per Planner tick, described below |
 | `total_ticks` | Number of Planner ticks |
 | `html_report_path` | Always `null` in predict; see [Run from Python](#run-from-python) for the HTML report |
 | `retune_events` | Retune decisions; present whenever `retune` is set, and empty when retune made no decision |
+| `recommended_scaling_events` | Replica changes the Planner recommended but did not apply; present only with `advisory: true` (see [Replay in Advisory Mode](#replay-in-advisory-mode)) |
 
 Each `ticks` entry has `ordinal`, `at_ms`, `scheduled_tick` (which scaling loops ran),
 `input` (traffic, worker counts, and forward-pass observations), `topology` (active, starting, and
@@ -408,6 +409,63 @@ print(report.planner.html_report_path)
   keeps `scaling_events`, `total_ticks`, `metadata`, and `retune_events`.
 - `report.planner.scaling_events` holds `ScalingEvent` objects; `report.to_dict()` returns the
   same JSON as `prediction.json`.
+
+## Replay in Advisory Mode
+
+Set `advisory: true` to replay the Planner as it runs in [advisory mode](../../../../reference/components/planner-configuration.mdx#advisory-mode)
+in production: it makes every decision and changes nothing.
+
+```yaml
+planner:
+  policy: enabled
+  advisory: true
+```
+
+In Python, set `"advisory": True` in `planner_config`. A Planner configuration copied from a
+deployment that runs in advisory mode replays the same way; set `advisory: false`, or pass
+`--set planner.advisory=false` to predict, to simulate the scaling it would do. If that
+configuration enables `batch_scheduling`, also set `batch_scheduling.enabled: false`: replay does not
+run batch scheduling, and non-advisory batch scheduling requires Redis settings. An advisory replay
+logs an `[ADVISORY]` warning at startup. `policy: disabled` rejects `advisory: true`, and
+`aisimulate recommend` rejects the `advisory` key.
+
+What runs:
+
+- Every Planner tick, with the same observations, load predictions, and load-based and
+  throughput-based decisions as an active Planner.
+- Retune sweeps and scoring. With load-based or throughput-based scaling, the candidate replays run
+  an active inner Planner, so a candidate is scored on the replicas it would drive; retune-only
+  candidates keep the replicas fixed.
+
+What stays fixed:
+
+- The replica counts and router parameters keep their starting values, and `lifecycle_operations`
+  is empty. The Planner sees no scaling in progress and its starting replicas as the expected
+  counts, as a live advisory Planner sees a deployment that never changes.
+- `summary` reports the starting deployment serving the whole trace.
+
+What is reported:
+
+- `planner.metadata.advisory` is `true` and `planner.scaling_events` is empty.
+- `planner.recommended_scaling_events` lists the recommendations with the fields of
+  `scaling_events`. An entry is added each time a component's recommended count changes to a value
+  other than its current count, which is `from_count`. A scaling decision that keeps a component
+  at its current count resets that component's recommendation, so the same recommendation after a
+  hold is listed again. The recommendation of every tick stays in `ticks[].effects.scale_to`.
+- A retune decision that would apply has outcome `advisory`, with the `chosen` point and the
+  `planner_changes` it recommends, and `predictor_warmup: null`. Every tick's
+  `runtime_decision.router_parameters` is `null`, so the recommended router parameters appear only
+  in `retune_events[].chosen.router`.
+- With `run_trace_replay` and the `PlannerConfig` report defaults, the HTML diagnostics report shows
+  the fixed replica counts with the recommendation markers. Predict writes no HTML report.
+
+<Note>
+Each recommendation is one step from the starting deployment, decided on traffic that the starting
+deployment served. It is not the path an active Planner would take: after its first scale-up, an
+active Planner observes the larger deployment and decides from there, and every later retune sweep
+searches from the point it applied. To predict what an active Planner does, replay with
+`advisory: false`.
+</Note>
 
 ## Simulate Retune (Experimental)
 
@@ -616,7 +674,7 @@ Each record has these fields. Times are Planner-clock seconds from the start of 
 | Field | Meaning |
 |---|---|
 | `decision_id` | `retune-<start>-w<k>` |
-| `outcome` | `applied`, `kept`, `dry_run`, `busy`, `stale`, `timeout`, or `failed`; see [outcomes](planner-design.md#scoring-and-outcomes) |
+| `outcome` | `applied`, `kept`, `advisory`, `busy`, `stale`, `timeout`, or `failed`; see [outcomes](planner-design.md#scoring-and-outcomes) |
 | `reason` | Why a decision was kept or failed, for example `empty window` |
 | `window_index`, `window_start_s`, `window_end_s` | The window that was replayed |
 | `as_of_s`, `launched_at_s`, `decided_at_s` | Scheduled launch time, the tick that launched the sweep, and the tick that decided; `launched_at_s` is `null` when no sweep ran |
@@ -625,7 +683,7 @@ Each record has these fields. Times are Planner-clock seconds from the start of 
 | `planner_changes` | Planner fields the decision changes |
 | `baseline_score`, `best_score`, `top` | The current point's score, the best score, and up to five `[candidate, score]` pairs |
 | `predictor_presweep` | Load-predictor pre-sweep: `winner`, `fields`, per-candidate `losses`, `eval_steps`, `warmup_steps`, and `wall_s` |
-| `predictor_warmup` | Number of traffic observations that warm a newly selected load predictor |
+| `predictor_warmup` | Number of traffic observations that warm a newly selected load predictor; `null` unless an `applied` decision replaces the predictor |
 | `sweep_wall_s`, `decision_latency_s` | The sweep's wall-clock time, and the delay after launch at which the decision could land; `null` for `busy` and decisions that fail before a sweep runs |
 
 Each tick also records the router state. `runtime_decision.router_parameters` is the desired
@@ -690,9 +748,10 @@ for run in static router; do
 done
 ```
 
-`--set planner.retune.dry_run=true` keeps the sweeps and records a decision that would apply as
-`dry_run`, with the point it would choose, without applying it. Other decisions keep their
-outcomes, such as `kept` when no candidate clears the threshold.
+`--set planner.advisory=true` keeps the sweeps and records a decision that would apply as
+`advisory`, with the point it would choose, without applying it. Other decisions keep their
+outcomes, such as `kept` when no candidate clears the threshold. Advisory mode also keeps the
+replica counts fixed; see [Replay in Advisory Mode](#replay-in-advisory-mode).
 
 Each candidate is replayed once. All candidate replays of a window, the current point's included,
 use the same router seed and request ids, so a candidate that changes no routing or scaling

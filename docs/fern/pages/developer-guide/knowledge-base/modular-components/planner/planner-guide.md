@@ -69,7 +69,7 @@ spec:
       advisory: true
 ```
 
-Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment.
+Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 ### Optimization Target
 
@@ -184,7 +184,7 @@ spec:
 | `backend` | string | `vllm` | Backend: `vllm`, `sglang`, `trtllm`, or `mocker`. |
 | `environment` | string | `kubernetes` | Runtime environment: `kubernetes`, `virtual`, or `global-planner`. |
 | `namespace` | string | env `DYN_NAMESPACE` | Dynamo logical/runtime namespace for the deployment. |
-| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. |
+| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. Planner-in-the-loop replay honors it too and records retune decisions without applying them. |
 
 ### Traffic Prediction Settings
 
@@ -356,6 +356,9 @@ Retune supports two scenarios:
 |---|---|---|---|
 | Fixed replicas | Retune-only mode: `retune` set with both `enable_load_scaling: false` and `enable_throughput_scaling: false`. The Planner never scales | Router parameters | Keeps the replica counts fixed |
 | Autoscaling | Load-based or throughput-based scaling, or both | Router parameters, Planner fields, or both | Runs the current Planner with the candidate's fields |
+
+With `advisory: true`, the Planner still runs every sweep but only records the decision it would
+apply, with outcome `advisory`; the router and Planner parameters keep their starting values.
 
 A sweep takes time, so the decision lands at least one Planner tick after the sweep launches, and
 later when `decision_latency_seconds` models the sweep's duration. The old parameters serve traffic
