@@ -356,7 +356,7 @@ func TestLeaseManager_Guard_CleansUpAmbiguousAcquisition(t *testing.T) {
 				transportErr := errors.New("response lost after commit")
 				resource := coordinationv1.SchemeGroupVersion.WithResource("leases")
 				if verb == "update" {
-					lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: LeaseName, Namespace: testNamespace}}
+					lease := &coordinationv1.Lease{Name: LeaseName, Namespace: testNamespace}
 					if err := client.Tracker().Create(resource, lease, testNamespace); err != nil {
 						t.Fatal(err)
 					}
