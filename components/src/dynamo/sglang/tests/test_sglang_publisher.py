@@ -547,12 +547,12 @@ async def test_handle_non_leader_node_marks_ready_until_cancel(
     entered = asyncio.Event()
     runtime = FakeRuntime()
 
-    async def wait_forever(generate_endpoint, server_args):
+    async def wait_forever(generate_endpoint, server_args, expected):
         entered.set()
         await asyncio.Event().wait()
 
     monkeypatch.setattr(
-        publisher_mod, "_resolve_multinode_leader_worker_id", wait_forever
+        publisher_mod, "_resolve_multinode_leader_worker_ids", wait_forever
     )
     metrics_task = asyncio.create_task(asyncio.Event().wait())
     task = asyncio.create_task(
@@ -593,10 +593,10 @@ async def test_handle_non_leader_node_clears_ready_on_error(
 ):
     runtime = FakeRuntime()
 
-    async def fail(generate_endpoint, server_args):
+    async def fail(generate_endpoint, server_args, expected):
         raise RuntimeError("non-leader failed")
 
-    monkeypatch.setattr(publisher_mod, "_resolve_multinode_leader_worker_id", fail)
+    monkeypatch.setattr(publisher_mod, "_resolve_multinode_leader_worker_ids", fail)
     metrics_task = asyncio.create_task(asyncio.Event().wait())
 
     with pytest.raises(RuntimeError, match="non-leader failed"):
@@ -625,7 +625,7 @@ async def test_handle_non_leader_node_clears_ready_on_error(
 
 
 @pytest.mark.asyncio
-async def test_handle_non_leader_node_cleans_up_when_metrics_task_fails_on_cancel():
+async def test_handle_non_leader_node_preserves_cancel_when_metrics_task_fails():
     runtime = FakeRuntime()
     cleanup_called = asyncio.Event()
 
@@ -661,7 +661,7 @@ async def test_handle_non_leader_node_cleans_up_when_metrics_task_fails_on_cance
     assert runtime.health_calls == [True]
 
     task.cancel()
-    with pytest.raises(RuntimeError, match="metrics failed during shutdown"):
+    with pytest.raises(asyncio.CancelledError):
         await task
 
     assert cleanup_called.is_set()
