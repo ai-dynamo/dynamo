@@ -101,7 +101,21 @@ for worker in 1 2; do
     port_var="TRTLLM_WORKER${worker}_KV_EVENT_PORT"
     printf -v "$config_var" '%s' "$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-agg-kv.XXXXXX.yaml")"
     build_trtllm_override_args_with_mem \
-        --merge-with-json "{\"guided_decoding_backend\":\"xgrammar\",\"kv_cache_config\":{\"use_kv_cache_manager_v2\":true,\"enable_block_reuse\":true,\"kv_cache_event_hash_algo\":\"v1_block_key\",\"kv_events_config\":{\"enable_kv_cache_events\":true,\"endpoint\":\"tcp://127.0.0.1:${!port_var}\"}}}" \
+        --merge-with-json "$(cat <<EOF
+{
+  "guided_decoding_backend": "xgrammar",
+  "kv_cache_config": {
+    "use_kv_cache_manager_v2": true,
+    "enable_block_reuse": true,
+    "kv_cache_event_hash_algo": "v1_block_key",
+    "kv_events_config": {
+      "enable_kv_cache_events": true,
+      "endpoint": "tcp://127.0.0.1:${!port_var}"
+    }
+  }
+}
+EOF
+)" \
         > "${!config_var}"
 done
 

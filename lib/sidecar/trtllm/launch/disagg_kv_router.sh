@@ -100,7 +100,24 @@ for worker in 1 2 3 4; do
     config=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-disagg-kv.XXXXXX.yaml")
     TRTLLM_CONFIG_FILES+=("$config")
     build_trtllm_override_args_with_mem \
-        --merge-with-json "{\"cache_transceiver_config\":{\"backend\":\"${TRTLLM_CACHE_TRANSCEIVER_BACKEND}\"},\"guided_decoding_backend\":\"xgrammar\",\"kv_cache_config\":{\"use_kv_cache_manager_v2\":true,\"enable_block_reuse\":true,\"kv_cache_event_hash_algo\":\"v1_block_key\",\"kv_events_config\":{\"enable_kv_cache_events\":true,\"endpoint\":\"tcp://127.0.0.1:${kv_port}\"}}}" \
+        --merge-with-json "$(cat <<EOF
+{
+  "cache_transceiver_config": {
+    "backend": "${TRTLLM_CACHE_TRANSCEIVER_BACKEND}"
+  },
+  "guided_decoding_backend": "xgrammar",
+  "kv_cache_config": {
+    "use_kv_cache_manager_v2": true,
+    "enable_block_reuse": true,
+    "kv_cache_event_hash_algo": "v1_block_key",
+    "kv_events_config": {
+      "enable_kv_cache_events": true,
+      "endpoint": "tcp://127.0.0.1:${kv_port}"
+    }
+  }
+}
+EOF
+)" \
         > "$config"
     echo "${role} ${worker}: GPU ${gpu}, gRPC 127.0.0.1:${grpc_port}, KV events tcp://127.0.0.1:${kv_port}"
     CUDA_VISIBLE_DEVICES="$gpu" \
