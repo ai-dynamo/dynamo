@@ -87,6 +87,22 @@ fn router_consumer_builds_a_live_pool_view_and_browns_out_after_last_relay_loss(
 }
 
 #[test]
+fn pool_views_iterator_does_not_borrow_the_lookup_key() {
+    let mut receiver = GlobalViewReceiver::<&str, String, u64>::new();
+    let relay = receiver.open("relay-a");
+    receiver
+        .replace_snapshot(&relay, [(String::from("blue-dgd"), 10)])
+        .unwrap();
+
+    let views;
+    {
+        let key = String::from("blue-dgd");
+        views = receiver.pool_views(&key);
+    }
+    assert_eq!(views.map(|(_, value)| *value).collect::<Vec<_>>(), vec![10]);
+}
+
+#[test]
 fn mock_connections_apply_events_and_remove_views_on_eof_or_error() {
     let mut receiver = GlobalViewReceiver::<&str, &str, u64>::new();
     let (relay_a_sender, relay_a) = mock_connection(&mut receiver, "relay-a");
