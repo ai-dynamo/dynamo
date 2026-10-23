@@ -1613,23 +1613,17 @@ async fn postprocessor_parsing_stream_disabled_reasoning_orders_eof_flush_by_cho
         .expect("postprocessor_parsing_stream should build");
     let output_chunks: Vec<_> = output_stream.collect().await;
 
-    let recovered = output_chunks
+    let indices: Vec<_> = output_chunks
         .iter()
         .filter_map(|output| output.data.as_ref())
-        .find(|data| {
-            data.inner.choices.iter().any(|choice| {
-                choice
-                    .delta
-                    .content
-                    .as_ref()
-                    .is_some_and(|content| get_text(content) == "<thi")
-            })
+        .flat_map(|data| &data.inner.choices)
+        .filter(|choice| {
+            choice
+                .delta
+                .content
+                .as_ref()
+                .is_some_and(|content| get_text(content) == "<thi")
         })
-        .expect("synthetic recovery chunk");
-    let indices: Vec<_> = recovered
-        .inner
-        .choices
-        .iter()
         .map(|choice| choice.index)
         .collect();
     assert_eq!(indices, vec![0, 1, 2]);
@@ -4845,20 +4839,22 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flush_drops_llm
     assert_eq!(recovered, "<thi", "the recovery itself must still happen");
 }
 
-/// A backend that keeps streaming after a choice's `finish_reason` is out of
-/// protocol, but those bytes still reach the parser, so they still need a
-/// destination. The terminal drain marks the choice drained; a later content
-/// chunk reopens it, so `r2` is emitted rather than stranded.
-///
-/// What is NOT recovered is whatever the parser is still buffering internally at
-/// that point — here the dangling `</th`. Recovering it would mean calling
-/// `finish_reasoning_stream` a second time on the same parser, and the trait does
-/// not promise that is idempotent, so a parser that re-emits on a second
-/// finalize would duplicate text. Losing it is the better trade twice over: the
-/// stream is already out of protocol, and the bytes in question are a truncated
-/// marker fragment, which should never reach `content` anyway.
+/// V2 discards late payload after a choice finishes; V1 retains its legacy tolerance.
 #[tokio::test]
-async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_content_after_finish_survives() {
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior() {
+    const CHILD: &str = "DYNAMO_NEMOTRON_POST_FINISH_CHILD";
+    let Ok(version) = std::env::var(CHILD) else {
+        for version in ["1", "2"] {
+            let mut command = test_utils::isolated_command(
+                "postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior",
+            );
+            command
+                .env(CHILD, version)
+                .env(env_llm::DYN_PARSER_VERSION, version);
+            test_utils::assert_isolated_success(&command.output().unwrap());
+        }
+        return;
+    };
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 
     let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
@@ -4896,9 +4892,9 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_content_after_f
 
     assert_eq!(content, "A", "the answer is unchanged by the stray chunk");
     assert_eq!(
-        reasoning, "r1r2",
-        "post-finish content is emitted, but the parser's dangling marker fragment is not \
-         re-finalized into the stream"
+        reasoning,
+        if version == "1" { "r1r2" } else { "r1" },
+        "only the legacy parser accepts reasoning after the choice has finished"
     );
 }
 

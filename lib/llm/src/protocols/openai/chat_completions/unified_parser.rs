@@ -2967,8 +2967,13 @@ where
                 }
             }
 
+            // A finished choice cannot reopen its parser; preserve envelope metadata below.
+            chat.inner.choices.retain(|choice| {
+                !records.get(&choice.index).is_some_and(|record| record.finished)
+            });
+
             if chat.inner.choices.is_empty() {
-                // A usage-only chunk. OpenAI stream ordering requires every choice's
+                // A metadata-only chunk. OpenAI stream ordering requires every choice's
                 // terminal finish_reason to precede it, so flush first.
                 if chat.inner.usage.is_some()
                     && let Some(template) = &template {
@@ -8251,6 +8256,94 @@ pub(crate) mod tests {
             "the already-explicitly-finished choice must not be finished a second \
              time by the EOF backstop"
         );
+    }
+
+    #[tokio::test]
+    async fn finished_choices_keep_other_choices_and_late_metadata() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let mut first = chunk("A", true);
+        let mut active = empty_choice(1);
+        active.delta.content = Some(ChatCompletionMessageContent::Text("B".into()));
+        first.data.as_mut().unwrap().inner.choices.push(active);
+
+        let mut mixed = chunk("<think>late</think>", false);
+        let mut terminal = empty_choice(1);
+        terminal.delta.content = Some(ChatCompletionMessageContent::Text("C".into()));
+        terminal.delta.reasoning_content = Some("r".into());
+        terminal.finish_reason = Some(FinishReason::Stop);
+        mixed.data.as_mut().unwrap().inner.choices.push(terminal);
+
+        let mut late = chunk("late raw payload", false);
+        late.id = Some("late-metadata".into());
+        let data = late.data.as_mut().unwrap();
+        let mut parsed = empty_choice(1);
+        parsed.delta.reasoning_content = Some("late parsed payload".into());
+        parsed.finish_reason = Some(FinishReason::Stop);
+        data.inner.choices.push(parsed);
+        data.inner.usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3
+            }))
+            .unwrap(),
+        );
+        data.nvext = Some(serde_json::json!({"completion_token_ids": [42]}));
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            chunk_tokens: 2,
+            ..Default::default()
+        });
+
+        let responses: Vec<_> = apply_stream(
+            stream::iter([first, mixed, late]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect()
+        .await;
+        let payloads: Vec<_> = collect_choices(&responses)
+            .into_iter()
+            .map(|choice| {
+                let text = match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                };
+                (
+                    choice.index,
+                    text,
+                    choice.delta.reasoning_content.as_deref(),
+                    choice.finish_reason,
+                )
+            })
+            .collect();
+        assert_eq!(
+            payloads,
+            [
+                (0, Some("A"), None, Some(FinishReason::Stop)),
+                (1, Some("B"), None, None),
+                (1, Some("C"), Some("r"), Some(FinishReason::Stop)),
+            ]
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .filter(|data| data.inner.usage.is_some())
+                .count(),
+            1
+        );
+        let tail = responses.last().unwrap();
+        assert_eq!(tail.id.as_deref(), Some("late-metadata"));
+        let metadata = tail.data.as_ref().unwrap();
+        assert!(metadata.inner.choices.is_empty());
+        assert_eq!(metadata.inner.usage.as_ref().unwrap().total_tokens, 3);
+        assert_eq!(
+            metadata.nvext,
+            Some(serde_json::json!({"completion_token_ids": [42]}))
+        );
+        assert_eq!(metadata.llm_metrics.as_ref().unwrap().chunk_tokens, 2);
     }
 
     #[tokio::test]
