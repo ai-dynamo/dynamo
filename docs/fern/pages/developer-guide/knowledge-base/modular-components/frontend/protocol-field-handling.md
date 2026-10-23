@@ -176,7 +176,8 @@ Chat completion and completion requests currently capture extra top-level fields
 map named `unsupported_fields`. The name describes the capture mechanism, not the final admission
 decision. A small named set is accepted and validated for downstream handling. Other fields are
 rejected by default. When `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy, those other fields
-are ignored and dropped; the switch does not enable general forwarding. See the
+are ignored and dropped. Otherwise, fields named in `DYN_OPENAI_FE_IGNORED_FIELDS` are dropped the
+same way while the rest are still rejected. Neither setting enables general forwarding. See the
 [frontend configuration reference](../../../../reference/components/frontend-configuration.mdx)
 for the exact switch behavior.
 
