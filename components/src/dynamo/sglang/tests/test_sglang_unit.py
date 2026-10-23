@@ -2002,7 +2002,13 @@ def test_systemone_serial_capability_registration_gate(
         ("0.5.19", True),
         ("0.5.19+cu129", True),
         ("0.5.20", False),
-        ("0.5.22", False),
+        ("0.5.22", True),
+        ("0.5.22+cu130", True),
+        ("0.5.19+debug", False),
+        ("0.5.22+debug", False),
+        ("0.5.22+cu130.debug", False),
+        ("0.5.22.post1", False),
+        ("0.5.22rc1", False),
     ],
 )
 def test_systemone_serial_capability_version_gate(monkeypatch, installed, expected):
