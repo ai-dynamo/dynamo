@@ -6,7 +6,7 @@
 RUN set -eu; \
     . /etc/os-release; \
     case "${ID}:${VERSION_ID:-unknown}" in \
-        ubuntu:22.04|ubuntu:24.04|ubuntu:26.04|ubuntu:26.10) ca_min="20260816ubuntu0.${VERSION_ID}.1" ;; \
+        ubuntu:22.04|ubuntu:24.04) ca_min="20260816ubuntu0.${VERSION_ID}.1" ;; \
         debian:12) ca_min="20250419~deb12u2" ;; \
         debian:13) ca_min="20250419+deb13u1" ;; \
         *) echo "Unsupported CA package baseline: ${ID}:${VERSION_ID:-unknown}" >&2; exit 1 ;; \
@@ -15,6 +15,3 @@ RUN set -eu; \
     dpkg --compare-versions "$ca_version" ge "$ca_min" || { \
         echo "ca-certificates $ca_version is below required $ca_min" >&2; exit 1; \
     }
-
-# grpcio bundles its own roots; use the refreshed system bundle instead.
-ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt

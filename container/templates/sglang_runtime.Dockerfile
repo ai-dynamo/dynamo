@@ -14,9 +14,11 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    update-ca-certificates && rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*
 
 {% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 ARG MODELEXPRESS_VERSION
 {% if device == "cuda" %}

@@ -271,6 +271,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 {% include "templates/verify_ca_certificates.Dockerfile" %}
 
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
 ENV PATH=/opt/uv/bin:${PATH}

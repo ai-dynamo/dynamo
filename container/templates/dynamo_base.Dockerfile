@@ -19,10 +19,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     rm -rf /var/lib/apt/lists/*
 
 {% include "templates/verify_ca_certificates.Dockerfile" %}
-RUN git clone --depth 1 --branch "${NATS_VERSION}" https://github.com/nats-io/nats-server.git /src/nats && \
+RUN for attempt in 1 2 3; do \
+        git clone --depth 1 --branch "${NATS_VERSION}" https://github.com/nats-io/nats-server.git /src/nats && break; \
+        rm -rf /src/nats; \
+        [ "$attempt" -lt 3 ] || exit 1; \
+        sleep 5; \
+    done && \
     test "$(git -C /src/nats rev-parse HEAD)" = "${NATS_COMMIT}" && \
     cd /src/nats && go build -trimpath -o /out/nats-server .
-RUN git clone --depth 1 --branch "${ETCD_VERSION}" https://github.com/etcd-io/etcd.git /src/etcd && \
+RUN for attempt in 1 2 3; do \
+        git clone --depth 1 --branch "${ETCD_VERSION}" https://github.com/etcd-io/etcd.git /src/etcd && break; \
+        rm -rf /src/etcd; \
+        [ "$attempt" -lt 3 ] || exit 1; \
+        sleep 5; \
+    done && \
     test "$(git -C /src/etcd rev-parse HEAD)" = "${ETCD_COMMIT}" && \
     cd /src/etcd && ./build.sh && \
     mkdir -p /out/etcd && cp bin/etcd bin/etcdctl bin/etcdutl /out/etcd/
@@ -45,7 +55,7 @@ USER root
 WORKDIR /opt/dynamo
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    update-ca-certificates && rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*
 
 {% include "templates/verify_ca_certificates.Dockerfile" %}
 

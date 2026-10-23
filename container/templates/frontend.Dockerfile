@@ -37,7 +37,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             python${PYTHON_VERSION}-dev \
             python${PYTHON_VERSION}-venv \
         && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
-        && update-ca-certificates \
         && apt-get clean \
         && rm -rf /var/lib/apt/lists/*; \
     fi
@@ -72,11 +71,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
-    && update-ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 {% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so

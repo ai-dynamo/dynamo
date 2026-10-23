@@ -76,7 +76,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates python3-venv && \
-    update-ca-certificates && \
     test -d /opt/tritonserver/backends && \
     printf '%s\n' /opt/tritonserver/lib /opt/tritonserver/backends \
         > /etc/ld.so.conf.d/00-dynamo-triton.conf && \
@@ -84,6 +83,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -f /usr/local/bin/etcd
 
 {% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
