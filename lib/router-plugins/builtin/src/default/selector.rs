@@ -17,9 +17,9 @@ use super::runtime_policy;
 /// Synchronous adapter for direct callers and replay. Scheduler actors use `default_policy`
 /// directly and do not acquire this adapter's mutex.
 ///
-/// The policy accepts runtime parameter updates, either through [`WorkerSelector`] or through a
-/// [`DefaultWorkerSelectorControl`] from [`Self::runtime_control`]. Updates apply between
-/// selections and keep the selector's random stream.
+/// The policy accepts runtime parameter updates through a [`DefaultWorkerSelectorControl`] from
+/// [`Self::runtime_control`]. Updates apply between selections and keep the selector's random
+/// stream.
 pub struct DefaultWorkerSelector {
     kv_router_config: KvRouterConfig,
     worker_type: &'static str,
@@ -65,7 +65,6 @@ impl DefaultWorkerSelector {
     /// selection. A clone of the selector has its own policy and needs its own handle.
     pub fn runtime_control(&self) -> DefaultWorkerSelectorControl {
         DefaultWorkerSelectorControl {
-            worker_type: self.worker_type,
             policy: Arc::clone(&self.policy),
         }
     }
@@ -90,15 +89,6 @@ impl std::fmt::Debug for DefaultWorkerSelector {
     }
 }
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
-    fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
-        self.policy.lock().runtime_config()
-    }
-    fn update_runtime_config(
-        &mut self,
-        update: RuntimePolicyUpdate,
-    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
-        self.policy.lock().update_runtime_config(update)
-    }
     fn required_worker_inputs(&self) -> WorkerInputs {
         <WorkerSelectionPolicy as WorkerSelector<C>>::required_worker_inputs(&self.policy.lock())
     }
@@ -120,7 +110,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 /// validated before they replace the policy, and rejected when the patch is empty.
 #[derive(Clone)]
 pub struct DefaultWorkerSelectorControl {
-    worker_type: &'static str,
     policy: Arc<Mutex<WorkerSelectionPolicy>>,
 }
 impl DefaultWorkerSelectorControl {
@@ -139,7 +128,6 @@ impl DefaultWorkerSelectorControl {
 impl std::fmt::Debug for DefaultWorkerSelectorControl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DefaultWorkerSelectorControl")
-            .field("worker_type", &self.worker_type)
             .finish_non_exhaustive()
     }
 }

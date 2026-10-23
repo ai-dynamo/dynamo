@@ -95,13 +95,14 @@ pub(in crate::replay) struct KvReplayComposition {
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
-    // TODO: Expose opt-in, per-replay selector seeding through the public CLI/Python
-    // APIs, separate from arrival_seed, and retain stable ordering for seeded ties.
+    /// Set by the Replayer from its capture options. Only an explicit
+    /// [`ReplayDeterminism::CanonicalV1`] seeds the selectors; seeded selection breaks ties in
+    /// stable worker order.
     determinism: ReplayDeterminism,
-    /// Captured from [`crate::replay::with_kv_event_lag_ms`] at construction.
+    /// Captured from [`crate::replay::ReplayScope`] at construction.
     kv_event_lag_ms: f64,
-    /// Captured from [`crate::replay::with_replay_router_controls`] at construction. Each
-    /// placement registers its selector control here under its worker type.
+    /// Captured from [`crate::replay::ReplayScope`] at construction. Each placement registers its
+    /// selector control here under its worker type.
     router_controls: Option<ReplayRouterControls>,
 }
 
@@ -114,6 +115,7 @@ impl KvReplayComposition {
         scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     ) -> Self {
         let scaling_enabled = scaling_policy.is_some();
+        let scope = crate::replay::replay_scope();
         Self {
             topology: KvTopologyConfig::Aggregated {
                 args: Box::new(args),
@@ -124,8 +126,8 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
-            kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
-            router_controls: crate::replay::replay_router_controls(),
+            kv_event_lag_ms: scope.kv_event_lag_ms,
+            router_controls: scope.router_controls,
         }
     }
 
@@ -139,6 +141,7 @@ impl KvReplayComposition {
         scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     ) -> Self {
         let scaling_enabled = scaling_policy.is_some();
+        let scope = crate::replay::replay_scope();
         Self {
             topology: KvTopologyConfig::Disaggregated {
                 prefill_args: Box::new(prefill_args),
@@ -151,8 +154,8 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
-            kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
-            router_controls: crate::replay::replay_router_controls(),
+            kv_event_lag_ms: scope.kv_event_lag_ms,
+            router_controls: scope.router_controls,
         }
     }
 }
@@ -268,12 +271,6 @@ impl ReplayComposition for KvReplayComposition {
         &mut self,
         determinism: ReplayDeterminism,
     ) -> aisimulate_core::replay::ReplayResult<()> {
-        #[cfg(not(feature = "replay-bench"))]
-        if determinism == ReplayDeterminism::CanonicalV1 {
-            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
-                "canonical KV Router replay requires the replay-bench feature".to_string(),
-            ));
-        }
         self.determinism = determinism;
         Ok(())
     }
@@ -516,6 +513,13 @@ mod tests {
         assert_eq!(mid_pass_route.reported_overlap_tokens, Some(0));
     }
 
+    fn lag_scope(kv_event_lag_ms: f64) -> crate::replay::ReplayScope {
+        crate::replay::ReplayScope {
+            kv_event_lag_ms,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn kv_event_lag_hides_a_finished_requests_blocks_until_due() {
         let args = MockerConfig::from_value(serde_json::json!({
@@ -544,7 +548,7 @@ mod tests {
         // Request 2 arrives 10 s after request 1, long after it finished. Request 1's cached
         // blocks attract it unless the KV event lag exceeds that gap.
         let routes = |lag_ms: f64| {
-            let report = crate::replay::with_kv_event_lag_ms(lag_ms, || {
+            let report = crate::replay::with_replay_scope(lag_scope(lag_ms), || {
                 crate::replay::offline::entrypoints::simulate_trace_with_scaling_policy(
                     args.clone(),
                     Some(router_config.clone()),
@@ -591,7 +595,7 @@ mod tests {
                 scheduler_ids: vec![0],
             }]
         };
-        let mut composition = crate::replay::with_kv_event_lag_ms(25.0, || {
+        let mut composition = crate::replay::with_replay_scope(lag_scope(25.0), || {
             KvReplayComposition::disaggregated(
                 MockerConfig::default(),
                 MockerConfig::default(),
@@ -631,6 +635,13 @@ mod tests {
         }]
     }
 
+    fn registry_scope(registry: &ReplayRouterControls) -> crate::replay::ReplayScope {
+        crate::replay::ReplayScope {
+            router_controls: Some(registry.clone()),
+            ..Default::default()
+        }
+    }
+
     fn registered_parameters(
         registry: &ReplayRouterControls,
     ) -> Vec<(WorkerType, serde_json::Map<String, serde_json::Value>)> {
@@ -654,17 +665,20 @@ mod tests {
 
         let config = retune_router_config();
         let registry = ReplayRouterControls::new();
-        let mut composition =
-            crate::replay::with_replay_router_controls(Some(registry.clone()), || {
-                KvReplayComposition::aggregated(
-                    MockerConfig::default(),
-                    1,
-                    Some(config.clone()),
-                    None,
-                    None,
-                )
-            });
-        assert!(registry.is_empty(), "registration happens at placement");
+        let mut composition = crate::replay::with_replay_scope(registry_scope(&registry), || {
+            KvReplayComposition::aggregated(
+                MockerConfig::default(),
+                1,
+                Some(config.clone()),
+                None,
+                None,
+            )
+        })
+        .unwrap();
+        assert!(
+            registry.runtime_configs().unwrap().is_empty(),
+            "registration happens at placement"
+        );
         composition
             .create_aggregated_placement(1, single_worker_topology())
             .unwrap();
@@ -677,18 +691,18 @@ mod tests {
         );
 
         let registry = ReplayRouterControls::new();
-        let mut composition =
-            crate::replay::with_replay_router_controls(Some(registry.clone()), || {
-                KvReplayComposition::disaggregated(
-                    MockerConfig::default(),
-                    MockerConfig::default(),
-                    1,
-                    1,
-                    Some(config.clone()),
-                    None,
-                    None,
-                )
-            });
+        let mut composition = crate::replay::with_replay_scope(registry_scope(&registry), || {
+            KvReplayComposition::disaggregated(
+                MockerConfig::default(),
+                MockerConfig::default(),
+                1,
+                1,
+                Some(config.clone()),
+                None,
+                None,
+            )
+        })
+        .unwrap();
         composition
             .create_disaggregated_placements(
                 1,
@@ -713,7 +727,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "replay-bench")]
     #[test]
     fn kv_composition_uses_only_explicit_canonical_determinism() {
         let mut composition =

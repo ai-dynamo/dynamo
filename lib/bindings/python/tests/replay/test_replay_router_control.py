@@ -3,9 +3,10 @@
 
 """Replay router control through the optional ``router_parameters`` scaling decision key.
 
-A Python scaling policy passed to ``run_mocker_trace_replay`` may return desired default-policy
-parameters keyed by worker type. Rust applies them to the replay's KV routers at the tick's
-simulated time and reports each router's revision back in the next snapshot.
+A Python scaling policy passed to an offline replay may return desired default-policy parameters
+keyed by worker type. Rust applies them to the replay's KV routers at the tick's simulated time and
+reports each router's revision back in the next snapshot. ``deterministic=True`` seeds the KV
+routers, so replays of one trace are comparable.
 """
 
 import json
@@ -263,18 +264,58 @@ def test_invalid_router_parameters_fail_the_replay(
         )
 
 
-def test_synthetic_replay_rejects_router_parameters():
-    policy = _RouterPolicy([1.0], [{"aggregated": {"router_temperature": 1.0}}])
-    with pytest.raises(ValueError, match="only supported by trace replay"):
-        run_mocker_synthetic_trace_replay(
-            input_tokens=64,
-            output_tokens=8,
-            request_count=8,
-            replay_concurrency=2,
+def test_synthetic_replay_applies_router_parameters():
+    policy = _RouterPolicy(
+        [1.0, 2.0], [{"aggregated": {"router_temperature": 1.0}}, _ABSENT]
+    )
+    run_mocker_synthetic_trace_replay(
+        input_tokens=64,
+        output_tokens=64,
+        request_count=8,
+        replay_concurrency=2,
+        router_mode="kv_router",
+        extra_engine_args=normalize_mocker_config(_engine_payload()),
+        scaling_policy=policy,
+    )
+    revisions = [_router_policies(s)["aggregated"][0] for s in policy.snapshots]
+    assert revisions == [0, 1]
+
+
+@pytest.mark.parametrize("disagg", [False, True], ids=["agg", "disagg"])
+def test_deterministic_replays_are_identical(tmp_path, disagg):
+    # Overlapping requests in three prefix groups, so routing sees ties, overlap and load.
+    trace = _write_trace(
+        tmp_path,
+        [
+            {
+                "timestamp": 3.0 * index,
+                "input_length": 2 * _TRACE_BLOCK_SIZE,
+                "output_length": 4 + index % 5,
+                "hash_ids": [index % 3, 100 + index],
+            }
+            for index in range(32)
+        ],
+    )
+
+    def per_request(**kwargs):
+        report = run_mocker_trace_replay(
+            [str(trace)],
+            router_config=KvRouterConfig(router_temperature=0.5),
             router_mode="kv_router",
-            extra_engine_args=normalize_mocker_config(_engine_payload()),
-            scaling_policy=policy,
+            trace_block_size=_TRACE_BLOCK_SIZE,
+            capture_per_request=True,
+            **_topology_kwargs(disagg, workers=3),
+            **kwargs,
         )
+        return report.per_request
+
+    first = per_request(deterministic=True)
+    assert len(first) == 32
+    assert per_request(deterministic=True) == first
+    # The default keeps random request IDs.
+    assert per_request() != first
+    with pytest.raises(ValueError, match="deterministic"):
+        run_mocker_trace_replay([str(trace)], replay_mode="online", deterministic=True)
 
 
 def test_nested_replay_does_not_register_into_the_outer_replay(tmp_path):

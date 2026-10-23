@@ -15,15 +15,15 @@ use dynamo_mocker::loadgen::{
     TraceFileFormat, WekaImportOptions, WekaNestedTimestampBasis, WekaResolvedTimestampBasis,
 };
 use dynamo_mocker::replay::{
-    AgenticReplayOptions, ReplayArgsMode, ReplayRouterControls, ReplayRouterParameters,
-    ReplayRuntimeObservers, ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
-    ReplayTelemetryObserver, ReplayTelemetryOptions, ReplayTelemetrySnapshot,
+    AgenticReplayOptions, ReplayArgsMode, ReplayDeterminism, ReplayRouterControls,
+    ReplayRouterParameters, ReplayRuntimeObservers, ReplayScalingDecision, ReplayScalingPolicy,
+    ReplayScalingSnapshot, ReplayScope, ReplayTelemetryObserver, ReplayTelemetryOptions,
+    ReplayTelemetrySnapshot, with_replay_scope,
 };
 use parking_lot::Mutex;
 use pyo3::{
     exceptions::{PyException, PyKeyError, PyTypeError, PyValueError},
     prelude::*,
-    types::PyDict,
 };
 use pythonize::pythonize;
 use serde::Serialize;
@@ -242,7 +242,7 @@ fn replay_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None, deterministic=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -283,6 +283,7 @@ pub fn run_mocker_trace_replay(
     agentic_snapshot: Option<&Bound<'_, PyAny>>,
     agentic_warmup: bool,
     agentic_profile: Option<&Bound<'_, PyAny>>,
+    deterministic: bool,
 ) -> PyResult<PyObject> {
     let kv_event_lag_ms = validate_kv_event_lag_ms(kv_event_lag_ms, replay_mode, router_mode)?;
     if telemetry_jsonl_path.as_deref().is_some_and(|path| {
@@ -304,6 +305,11 @@ pub fn run_mocker_trace_replay(
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
+        ));
+    }
+    if deterministic && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "deterministic only supports replay_mode='offline'",
         ));
     }
     let args_selection = load_replay_args_selection(
@@ -625,11 +631,22 @@ pub fn run_mocker_trace_replay(
         }
         .map(|report| (report, None))
     };
+    let scope = ReplayScope {
+        kv_event_lag_ms,
+        router_controls: None,
+        determinism: if deterministic {
+            ReplayDeterminism::CanonicalV1
+        } else {
+            ReplayDeterminism::Random
+        },
+    };
     let report_result = if let Some(callback) = scaling_policy {
-        // Only a Python-backed trace replay can retune its KV routers: the policy applies the
-        // optional `router_parameters` decision key through the controls registered here.
         let router_controls = ReplayRouterControls::new();
-        with_replay_scopes(kv_event_lag_ms, Some(router_controls.clone()), || {
+        let scope = ReplayScope {
+            router_controls: Some(router_controls.clone()),
+            ..scope
+        };
+        with_replay_scope(scope, || {
             run(
                 Some(Box::new(PyReplayScalingPolicy {
                     callback,
@@ -637,7 +654,7 @@ pub fn run_mocker_trace_replay(
                     callback_error: scaling_callback_error
                         .clone()
                         .expect("scaling error slot exists with callback"),
-                    router_controls: Some(router_controls),
+                    router_controls,
                 })),
                 telemetry,
             )
@@ -645,8 +662,7 @@ pub fn run_mocker_trace_replay(
         .and_then(|result| result)
     } else {
         py.allow_threads(move || {
-            with_replay_scopes(kv_event_lag_ms, None, || run(None, telemetry))
-                .and_then(|result| result)
+            with_replay_scope(scope, || run(None, telemetry)).and_then(|result| result)
         })
     };
     // Always finish the sink so buffered I/O errors are observed even when the
@@ -1239,8 +1255,17 @@ pub fn run_mocker_synthetic_trace_replay(
             }
         }
     };
+    let scope = ReplayScope {
+        kv_event_lag_ms,
+        ..Default::default()
+    };
     let report_result = if let Some(callback) = scaling_policy {
-        with_replay_scopes(kv_event_lag_ms, None, || {
+        let router_controls = ReplayRouterControls::new();
+        let scope = ReplayScope {
+            router_controls: Some(router_controls.clone()),
+            ..scope
+        };
+        with_replay_scope(scope, || {
             run(
                 Some(Box::new(PyReplayScalingPolicy {
                     callback,
@@ -1248,7 +1273,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     callback_error: scaling_callback_error
                         .clone()
                         .expect("scaling error slot exists with callback"),
-                    router_controls: None,
+                    router_controls,
                 })),
                 telemetry,
             )
@@ -1256,8 +1281,7 @@ pub fn run_mocker_synthetic_trace_replay(
         .and_then(|result| result)
     } else {
         py.allow_threads(move || {
-            with_replay_scopes(kv_event_lag_ms, None, || run(None, telemetry))
-                .and_then(|result| result)
+            with_replay_scope(scope, || run(None, telemetry)).and_then(|result| result)
         })
     };
     // Always finish the sink so buffered I/O errors are observed even when the
@@ -2119,40 +2143,22 @@ impl PyCallbackErrorSlot {
     }
 }
 
-/// Run one replay with its thread-scoped settings: the simulated KV event lag and the router
-/// control registry. `None` hides any outer registry, so only the caller that owns a registry
-/// sees the routers this replay constructs.
-fn with_replay_scopes<T>(
-    kv_event_lag_ms: f64,
-    router_controls: Option<ReplayRouterControls>,
-    replay: impl FnOnce() -> T,
-) -> anyhow::Result<T> {
-    dynamo_mocker::replay::with_replay_router_controls(router_controls, || {
-        dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, replay)
-    })
-}
-
 /// Read the optional `router_parameters` key of a scaling decision. A missing key and `None` both
 /// leave the routers unchanged.
 fn decision_router_parameters(
     decision: &Bound<'_, PyAny>,
 ) -> PyResult<Option<ReplayRouterParameters>> {
-    let value = match decision.downcast::<PyDict>() {
-        Ok(decision) => decision.get_item("router_parameters")?,
-        Err(_) => match decision.get_item("router_parameters") {
-            Ok(value) => Some(value),
-            Err(error) if error.is_instance_of::<PyKeyError>(decision.py()) => None,
-            Err(error) => return Err(error),
-        },
+    let value = match decision.get_item("router_parameters") {
+        Ok(value) if !value.is_none() => value,
+        Ok(_) => return Ok(None),
+        Err(error) if error.is_instance_of::<PyKeyError>(decision.py()) => return Ok(None),
+        Err(error) => return Err(error),
     };
-    match value {
-        Some(value) if !value.is_none() => value.extract().map(Some).map_err(|error| {
-            PyTypeError::new_err(format!(
-                "router_parameters must be a dict[str, dict[str, float]] or None: {error}"
-            ))
-        }),
-        _ => Ok(None),
-    }
+    value.extract().map(Some).map_err(|error| {
+        PyTypeError::new_err(format!(
+            "router_parameters must be a dict[str, dict[str, float]] or None: {error}"
+        ))
+    })
 }
 
 /// Adapts a Python object to [`ReplayScalingPolicy`]. The high-level replay call
@@ -2166,18 +2172,15 @@ struct PyReplayScalingPolicy {
     callback: Py<PyAny>,
     capture_lifecycle_evidence: bool,
     callback_error: PyCallbackErrorSlot,
-    /// Routers this replay registered, or `None` for an entry point without router control.
-    router_controls: Option<ReplayRouterControls>,
+    /// The KV routers this replay registered.
+    router_controls: ReplayRouterControls,
 }
 
 impl PyReplayScalingPolicy {
     /// Revision and resolved parameters of each registered router, reported to `on_tick` as
     /// `router_policies` before this tick's decision is applied. Omitted without KV routers.
     fn router_policies(&self) -> anyhow::Result<Option<serde_json::Value>> {
-        let Some(controls) = self.router_controls.as_ref() else {
-            return Ok(None);
-        };
-        let policies = controls.runtime_configs()?;
+        let policies = self.router_controls.runtime_configs()?;
         if policies.is_empty() {
             return Ok(None);
         }
@@ -2200,16 +2203,7 @@ impl PyReplayScalingPolicy {
         desired: &ReplayRouterParameters,
         now_ms: f64,
     ) -> PyResult<()> {
-        if desired.is_empty() {
-            return Ok(());
-        }
-        let Some(controls) = self.router_controls.as_ref() else {
-            return Err(PyValueError::new_err(
-                "router_parameters is only supported by trace replay (run_mocker_trace_replay) \
-                 with router_mode='kv_router'",
-            ));
-        };
-        dynamo_mocker::replay::apply_router_parameters(controls, desired)
+        dynamo_mocker::replay::apply_router_parameters(&self.router_controls, desired)
             .map(|_| ())
             .map_err(|error| {
                 PyValueError::new_err(format!(

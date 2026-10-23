@@ -2420,6 +2420,7 @@ def run_mocker_trace_replay(
     agentic_snapshot: Optional[Dict[str, Any]] = None,
     agentic_warmup: bool = False,
     agentic_profile: Optional[Dict[str, Any]] = None,
+    deterministic: bool = False,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2472,6 +2473,12 @@ def run_mocker_trace_replay(
     request completions stay immediate, as a live router observes them in-band
     on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
     KV-router replay only.
+
+    ``deterministic`` makes the replay reproducible: request IDs are ordinal
+    and every KV router breaks ties and samples with a fixed seed, so two
+    replays of the same trace and configuration produce identical simulated
+    results (wall-clock timings still vary). The default keeps random request
+    IDs and unseeded routing. Offline replay only.
     """
     ...
 
@@ -2543,9 +2550,8 @@ def run_mocker_synthetic_trace_replay(
 
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
-    policy in online mode raises ``ValueError``. Synthetic replay has no router
-    control: a non-empty ``router_parameters`` decision key raises
-    ``ValueError``.
+    policy in online mode raises ``ValueError``. ``on_tick`` may return
+    ``router_parameters`` as described for ``run_mocker_trace_replay``.
 
     Replay telemetry uses the same policy-neutral capture, callback, and JSONL
     options as ``run_mocker_trace_replay``. Its cadence is simulated time and

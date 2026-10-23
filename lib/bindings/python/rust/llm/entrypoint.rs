@@ -15,7 +15,6 @@ use pyo3::{
 use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::TrackingHashAlgorithm as RsTrackingHashAlgorithm;
-use dynamo_kv_router::WorkerType as RsWorkerType;
 use dynamo_kv_router::config::{
     ApproximateCachePolicyKind as RsApproximateCachePolicyKind,
     ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind,
@@ -273,16 +272,8 @@ impl KvRouterConfig {
     /// the configuration (or `DYN_ROUTER_WORKER_SELECTION_POLICY`) selects a worker-selection
     /// policy instance for `worker_type`: its own parameters are not resolved here.
     fn policy_parameters(&self, worker_type: &str) -> PyResult<BTreeMap<String, f64>> {
-        let role = match worker_type {
-            "aggregated" => RsWorkerType::Aggregated,
-            "prefill" => RsWorkerType::Prefill,
-            "decode" => RsWorkerType::Decode,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "worker_type must be 'aggregated', 'prefill' or 'decode', got {other:?}"
-                )));
-            }
-        };
+        let role = dynamo_mocker::replay::parse_router_worker_type(worker_type)
+            .map_err(|e| PyValueError::new_err(format!("worker_type: {e}")))?;
         let selected = self
             .inner
             .selected_worker_selection_policy_instance_for(role)

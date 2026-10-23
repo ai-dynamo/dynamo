@@ -840,19 +840,17 @@ fn selector_runtime_update_keeps_the_seeded_random_stream() {
 }
 
 #[test]
-fn selector_control_and_trait_share_runtime_state_and_clones_start_fresh() {
+fn selector_controls_share_runtime_state_and_clones_start_fresh() {
     use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
 
     let config = KvRouterConfig {
         router_temperature: 0.5,
         ..Default::default()
     };
-    let mut selector = DefaultWorkerSelector::new(Some(config), "replay");
+    let selector = DefaultWorkerSelector::new(Some(config), "replay");
     let control = selector.runtime_control();
-    let initial =
-        <DefaultWorkerSelector as WorkerSelector<TestWorker>>::runtime_config(&selector).unwrap();
+    let initial = control.runtime_config().unwrap();
     assert_eq!(initial.revision(), 0);
-    assert_eq!(control.runtime_config().unwrap(), initial);
 
     control
         .update_runtime_config(RuntimePolicyUpdate::patch(
@@ -860,23 +858,14 @@ fn selector_control_and_trait_share_runtime_state_and_clones_start_fresh() {
             patch(serde_json::json!({"router_temperature": 1.5})),
         ))
         .unwrap();
-    let after_control =
-        <DefaultWorkerSelector as WorkerSelector<TestWorker>>::runtime_config(&selector).unwrap();
-    assert_eq!(after_control.revision(), 1);
-    assert_eq!(after_control.parameters()["router_temperature"], 1.5);
-
-    <DefaultWorkerSelector as WorkerSelector<TestWorker>>::update_runtime_config(
-        &mut selector,
-        RuntimePolicyUpdate::patch(1, patch(serde_json::json!({"prefill_load_scale": 3.0}))),
-    )
-    .unwrap();
-    assert_eq!(control.runtime_config().unwrap().revision(), 2);
+    // A handle taken later reads the same policy.
+    let after = selector.runtime_control().runtime_config().unwrap();
+    assert_eq!(after.revision(), 1);
+    assert_eq!(after.parameters()["router_temperature"], 1.5);
 
     let clone = selector.clone();
-    let cloned =
-        <DefaultWorkerSelector as WorkerSelector<TestWorker>>::runtime_config(&clone).unwrap();
-    assert_eq!(cloned, initial);
-    assert_eq!(control.runtime_config().unwrap().revision(), 2);
+    assert_eq!(clone.runtime_control().runtime_config().unwrap(), initial);
+    assert_eq!(control.runtime_config().unwrap().revision(), 1);
 }
 
 #[test]

@@ -5,12 +5,11 @@
 //!
 //! A host that changes router policy parameters during a replay (for example, a planner that
 //! retunes the router at a scaling tick) creates a [`ReplayRouterControls`] registry and runs the
-//! replay inside [`with_replay_router_controls`]. Offline KV-router compositions constructed in
-//! that scope register each placement's selector under its worker type. The host then applies
-//! desired parameters with [`apply_router_parameters`] between replay events, so an update takes
-//! effect at the current virtual time.
+//! replay with it as [`ReplayScope::router_controls`](crate::replay::ReplayScope). Offline
+//! KV-router compositions constructed in that scope register each placement's selector under its
+//! worker type. The host then applies desired parameters with [`apply_router_parameters`] between
+//! replay events, so an update takes effect at the current virtual time.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -42,13 +41,8 @@ impl ReplayRouterControls {
         self.controls.lock().push((worker_type, control));
     }
 
-    /// Whether no router selector has registered.
-    pub fn is_empty(&self) -> bool {
-        self.controls.lock().is_empty()
-    }
-
     /// Worker types of the registered controls, in registration order.
-    pub fn worker_types(&self) -> Vec<WorkerType> {
+    fn worker_types(&self) -> Vec<WorkerType> {
         self.controls
             .lock()
             .iter()
@@ -167,36 +161,6 @@ pub fn parse_router_worker_type(name: &str) -> Result<WorkerType> {
     }
 }
 
-thread_local! {
-    static REPLAY_ROUTER_CONTROLS: RefCell<Option<ReplayRouterControls>> =
-        const { RefCell::new(None) };
-}
-
-/// Run `replay` with `controls` as the router control registry for this thread.
-///
-/// Offline KV-router replays constructed on this thread inside `replay` register their selectors
-/// in `controls`. `None` hides any outer registry, so a nested replay never registers into a scope
-/// it does not own. The previous registry is restored when `replay` returns or unwinds.
-pub fn with_replay_router_controls<T>(
-    controls: Option<ReplayRouterControls>,
-    replay: impl FnOnce() -> T,
-) -> T {
-    struct Restore(Option<ReplayRouterControls>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let previous = self.0.take();
-            REPLAY_ROUTER_CONTROLS.with(|current| *current.borrow_mut() = previous);
-        }
-    }
-    let _restore = Restore(REPLAY_ROUTER_CONTROLS.with(|current| current.replace(controls)));
-    replay()
-}
-
-/// The registry installed by the innermost [`with_replay_router_controls`] scope on this thread.
-pub(crate) fn replay_router_controls() -> Option<ReplayRouterControls> {
-    REPLAY_ROUTER_CONTROLS.with(|current| current.borrow().clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,41 +205,6 @@ mod tests {
             .into_iter()
             .map(|(worker_type, config)| (worker_type, config.revision()))
             .collect()
-    }
-
-    #[test]
-    fn scopes_nest_and_restore() {
-        let outer = ReplayRouterControls::new();
-        let inner = ReplayRouterControls::new();
-        let is =
-            |expected: Option<&ReplayRouterControls>| match (replay_router_controls(), expected) {
-                (None, None) => true,
-                (Some(current), Some(expected)) => {
-                    Arc::ptr_eq(&current.controls, &expected.controls)
-                }
-                _ => false,
-            };
-
-        assert!(is(None));
-        with_replay_router_controls(Some(outer.clone()), || {
-            assert!(is(Some(&outer)));
-            with_replay_router_controls(None, || {
-                assert!(is(None));
-                with_replay_router_controls(Some(inner.clone()), || {
-                    assert!(is(Some(&inner)));
-                });
-                assert!(is(None));
-            });
-            assert!(is(Some(&outer)));
-        });
-        assert!(is(None));
-
-        // A replay that unwinds also restores the previous registry.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            with_replay_router_controls(Some(outer.clone()), || panic!("replay failed"))
-        }));
-        assert!(result.is_err());
-        assert!(is(None));
     }
 
     #[test]

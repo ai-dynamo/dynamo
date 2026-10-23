@@ -2513,16 +2513,10 @@ policy_classes:
     }
 
     #[test]
-    fn kv_event_lag_is_validated_and_scoped_to_the_call() {
+    fn kv_event_lag_is_validated() {
         let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         assert!(router.set_kv_event_lag_ms(-1.0).is_err());
         assert!(router.set_kv_event_lag_ms(f64::NAN).is_err());
-        assert!(crate::replay::with_kv_event_lag_ms(f64::INFINITY, || ()).is_err());
-
-        let inside =
-            crate::replay::with_kv_event_lag_ms(25.0, crate::replay::kv_event_lag_ms).unwrap();
-        assert_eq!(inside, 25.0);
-        assert_eq!(crate::replay::kv_event_lag_ms(), 0.0);
     }
 
     fn session_router_config() -> KvRouterConfig {
