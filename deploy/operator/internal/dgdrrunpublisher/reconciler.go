@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -160,7 +161,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	}
 	switch {
 	case desired.Terminal:
-		r.Completion.Finish(terminalResult(desired.Phase))
+		r.Completion.Finish(terminalResult(desired))
 	case exited:
 		r.Completion.Finish(exitResult(state))
 	}
@@ -202,13 +203,38 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		return fmt.Errorf("listing candidates: %w", err)
 	}
 	current := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
+	ownedObsolete := make([]string, 0, len(list.Items))
 	uids := make(map[string]types.UID, len(list.Items))
 	versions := make(map[string]string, len(list.Items)) // cached resourceVersion per candidate
+	expectedIDs := make(map[string]string, len(desired.Names))
+	for id, name := range desired.Names {
+		expectedIDs[name] = id
+	}
 	for i := range list.Items {
 		item := &list.Items[i]
+
+		// A label match scopes the cache but does not establish ownership. Foreign
+		// candidates must never satisfy desired state or become deletion targets.
+		owner := metav1.GetControllerOf(item)
+		if owner == nil || owner.UID != run.UID {
+			continue
+		}
+
+		// The deterministic name is the authoritative identity. An owned object under
+		// another name is obsolete; an expected object with a stale identity label is
+		// reapplied in place instead of deleted.
+		expectedID, isExpected := expectedIDs[item.Name]
+		if !isExpected {
+			ownedObsolete = append(ownedObsolete, item.Name)
+			uids[item.Name] = item.UID
+			continue
+		}
+		if item.Labels[LabelCandidateID] != expectedID {
+			continue
+		}
 		current = append(current, dgdcreconcile.CurrentDGDC{
 			Name:       item.Name,
-			ID:         item.Labels[LabelCandidateID],
+			ID:         expectedID,
 			Incomplete: item.Status.Metrics == nil,
 		})
 		uids[item.Name] = item.UID
@@ -218,6 +244,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 	if err != nil {
 		return err
 	}
+	actions.Deletes = append(actions.Deletes, ownedObsolete...)
 	// populated names the candidates whose status the API server already has; they are
 	// known from the live read that follows each apply, not from the cache.
 	populated := map[string]struct{}{}

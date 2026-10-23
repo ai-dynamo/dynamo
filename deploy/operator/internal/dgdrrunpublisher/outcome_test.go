@@ -20,7 +20,10 @@ package dgdrrunpublisher
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 )
 
 func TestExitCodes(t *testing.T) {
@@ -30,6 +33,7 @@ func TestExitCodes(t *testing.T) {
 	}{
 		{nil, ExitAcknowledged},
 		{ErrRunFailed, ExitRunFailed},
+		{fmt.Errorf("%w: details", ErrRunFailed), ExitRunFailed},
 		{ErrMissingTerminalSnapshot, ExitProtocolViolation},
 		{violation("bad"), ExitProtocolViolation},
 		{fmt.Errorf("reconciling last snapshot: %w", violation("bad")), ExitProtocolViolation},
@@ -43,11 +47,16 @@ func TestExitCodes(t *testing.T) {
 }
 
 func TestTerminalResult(t *testing.T) {
-	if err := terminalResult(PhaseSucceeded); err != nil {
+	if err := terminalResult(DesiredState{Phase: PhaseSucceeded, Candidates: []dgdcreconcile.DesiredCandidate{{ID: "a"}}}); err != nil {
 		t.Fatalf("succeeded: %v", err)
 	}
-	if err := terminalResult(PhaseFailed); !errors.Is(err, ErrRunFailed) {
-		t.Fatalf("failed: %v", err)
+	failed := terminalResult(DesiredState{Phase: PhaseFailed, Message: "search failed", Error: "backend unavailable"})
+	if !errors.Is(failed, ErrRunFailed) || !strings.Contains(failed.Error(), "search failed") || !strings.Contains(failed.Error(), "backend unavailable") {
+		t.Fatalf("failed: %v", failed)
+	}
+	empty := terminalResult(DesiredState{Phase: PhaseSucceeded, Failed: 2})
+	if !errors.Is(empty, ErrRunFailed) || !strings.Contains(empty.Error(), "2 candidate materialization failures") || !strings.Contains(empty.Error(), "no candidate was materialized") {
+		t.Fatalf("empty success: %v", empty)
 	}
 }
 

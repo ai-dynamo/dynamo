@@ -20,6 +20,7 @@ package dgdrrunpublisher
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -35,9 +36,9 @@ const (
 // terminal snapshot, which violates the producer protocol.
 var ErrMissingTerminalSnapshot = fmt.Errorf("%w: sweeper exited without publishing a terminal snapshot", ErrProtocolViolation)
 
-// ErrRunFailed means the Sweeper published a terminal Failed snapshot. The snapshot is
-// reconciled first; the error keeps a producer that reports failure but exits 0 from
-// letting the Job complete successfully.
+// ErrRunFailed means the Sweeper reported failure or produced no usable recommendation.
+// The snapshot is reconciled first; the error keeps that outcome from letting the Job
+// complete successfully.
 var ErrRunFailed = errors.New("sweeper reported a failed run")
 
 // ExitCode maps the result of Run to the process exit code.
@@ -60,12 +61,35 @@ type SweeperState struct {
 	ExitCode int32
 }
 
-// terminalResult is the outcome once a terminal snapshot has been reconciled.
-func terminalResult(phase string) error {
-	if phase == PhaseFailed {
+// terminalResult is the outcome once a terminal snapshot has been reconciled. A
+// successful run must have produced at least one materialized recommendation.
+func terminalResult(desired DesiredState) error {
+	if desired.Phase == PhaseSucceeded && len(desired.Candidates) > 0 {
+		return nil
+	}
+
+	// Preserve the producer's diagnostics in the process result consumed by the command.
+	details := make([]string, 0, 3)
+	if desired.Message != "" {
+		details = append(details, desired.Message)
+	}
+	if desired.Error != "" {
+		details = append(details, desired.Error)
+	}
+	if desired.Failed > 0 {
+		failure := "failures"
+		if desired.Failed == 1 {
+			failure = "failure"
+		}
+		details = append(details, fmt.Sprintf("%d candidate materialization %s", desired.Failed, failure))
+	}
+	if desired.Phase == PhaseSucceeded && len(desired.Candidates) == 0 {
+		details = append(details, "no candidate was materialized")
+	}
+	if len(details) == 0 {
 		return ErrRunFailed
 	}
-	return nil
+	return fmt.Errorf("%w: %s", ErrRunFailed, strings.Join(details, "; "))
 }
 
 // exitResult is the outcome when the Sweeper exited and the last snapshot it wrote (if

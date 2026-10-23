@@ -90,7 +90,7 @@ func (w *memWriter) record(op string, err error) error {
 	return err
 }
 
-func (w *memWriter) CreateCandidate(ctx context.Context, _ *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
+func (w *memWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
 	if err := w.record("create:"+name, w.fail("create")); err != nil {
 		return StoredCandidate{}, err
 	}
@@ -102,10 +102,11 @@ func (w *memWriter) CreateCandidate(ctx context.Context, _ *v1beta2.DynamoGraphD
 		return stored, nil
 	}
 	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      name,
-		UID:       types.UID("uid-" + name),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
+		Namespace:       testNamespace,
+		Name:            name,
+		UID:             types.UID("uid-" + name),
+		Labels:          map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(run, v1beta2.DynamoGraphDeploymentRunGVK)},
 	}}
 	return stored, client.IgnoreAlreadyExists(w.c.Create(ctx, object))
 }
@@ -259,6 +260,24 @@ func (f *fixture) lastStatus() RunStatus {
 		f.t.Fatal("no run status was written")
 	}
 	return f.w.status[len(f.w.status)-1]
+}
+
+func (f *fixture) currentRun() *v1beta2.DynamoGraphDeploymentRun {
+	f.t.Helper()
+	var run v1beta2.DynamoGraphDeploymentRun
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testRunName}, &run); err != nil {
+		f.t.Fatal(err)
+	}
+	return &run
+}
+
+func candidateForRun(name, id string, run *v1beta2.DynamoGraphDeploymentRun) *v1beta2.DynamoGraphDeploymentCandidate {
+	return &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
+		Namespace:       run.Namespace,
+		Name:            name,
+		Labels:          map[string]string{LabelRunUID: string(run.UID), LabelCandidateID: id},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(run, v1beta2.DynamoGraphDeploymentRunGVK)},
+	}}
 }
 
 // withProgress rewrites a snapshot's progress counters.
@@ -429,11 +448,7 @@ func TestFailedMaterializationIsNotCreatedButCounted(t *testing.T) {
 
 func TestCandidateWithoutStatusIsCompletedNotRecreated(t *testing.T) {
 	f := newFixture(t)
-	existing := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      cn("a"),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "a"},
-	}}
+	existing := candidateForRun(cn("a"), "a", f.currentRun())
 	if err := f.c.Create(context.Background(), existing); err != nil {
 		t.Fatal(err)
 	}
@@ -475,13 +490,28 @@ func TestTerminalSucceededSnapshotIsReconciledThenAcknowledged(t *testing.T) {
 
 func TestTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
 	f := newFixture(t)
-	f.publish(snapshotJSON(t, PhaseFailed, cand{id: "a"}))
+	f.publish(withRunDiagnostics(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), "search failed", "backend unavailable"))
 	f.mustReconcile()
-	if err := f.r.Completion.Err(); !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed {
+	if err := f.r.Completion.Err(); !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed ||
+		!strings.Contains(err.Error(), "search failed") || !strings.Contains(err.Error(), "backend unavailable") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(f.w.status) != 1 {
 		t.Fatal("the failed snapshot must still be reconciled")
+	}
+}
+
+func TestTerminalSucceededSnapshotWithoutAMaterializedCandidateFails(t *testing.T) {
+	f := newFixture(t)
+	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "x", failed: true}))
+	f.mustReconcile()
+
+	err := f.r.Completion.Err()
+	if !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed || !strings.Contains(err.Error(), "1 candidate materialization failure") {
+		t.Fatalf("err = %v", err)
+	}
+	if ops := f.takeOps(); len(ops) != 0 {
+		t.Fatalf("a failed materialization must not produce cluster writes, got %v", ops)
 	}
 }
 
@@ -594,23 +624,56 @@ func TestFinalReconcileFailureEndsTheProcessAfterBoundedRetries(t *testing.T) {
 	}
 }
 
-func TestMalformedProjectionFailsImmediately(t *testing.T) {
+func TestForeignLabeledCandidateDoesNotSatisfyOrGetDeleted(t *testing.T) {
 	f := newFixture(t)
-	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
-	// Two live candidates claiming the same id make the diff input malformed.
-	for _, name := range []string{"x-1", "x-2"} {
-		object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace, Name: name,
-			Labels: map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "dup"},
-		}}
-		if err := f.c.Create(context.Background(), object); err != nil {
-			t.Fatal(err)
-		}
+	foreignRun := &v1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{
+		Namespace: testNamespace,
+		Name:      "foreign-run",
+		UID:       "foreign-run-uid",
+	}}
+	foreign := candidateForRun("foreign-candidate", "a", foreignRun)
+	foreign.Labels[LabelRunUID] = testRunUID
+	if err := f.c.Create(context.Background(), foreign); err != nil {
+		t.Fatal(err)
 	}
+
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.mustReconcile()
-	var inputErr *dgdcreconcile.DiffInputError
-	if err := f.r.Completion.Err(); !errors.As(err, &inputErr) || ExitCode(err) != ExitReconcileFailed {
-		t.Fatalf("err = %v", err)
+	if got, want := f.takeOps(), []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ops = %v, want %v", got, want)
+	}
+	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(foreign), &v1beta2.DynamoGraphDeploymentCandidate{}); err != nil {
+		t.Fatalf("foreign candidate must remain untouched: %v", err)
+	}
+}
+
+func TestOwnedCandidateWithWrongNameIsReplacedBeforeDeletion(t *testing.T) {
+	f := newFixture(t)
+	wrong := candidateForRun("wrong-name", "a", f.currentRun())
+	if err := f.c.Create(context.Background(), wrong); err != nil {
+		t.Fatal(err)
+	}
+
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status", "delete:wrong-name"}
+	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ops = %v, want %v", got, want)
+	}
+}
+
+func TestOwnedCandidateWithWrongIdentityLabelIsReappliedNotDeleted(t *testing.T) {
+	f := newFixture(t)
+	wrong := candidateForRun(cn("a"), "wrong-id", f.currentRun())
+	if err := f.c.Create(context.Background(), wrong); err != nil {
+		t.Fatal(err)
+	}
+
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}
+	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ops = %v, want %v", got, want)
 	}
 }
 
@@ -862,11 +925,7 @@ func TestNewCandidateStatusUsesTheVersionReturnedByTheCreate(t *testing.T) {
 
 func TestExistingCandidateStatusUsesItsCachedVersion(t *testing.T) {
 	f := newFixture(t)
-	existing := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      cn("a"),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "a"},
-	}}
+	existing := candidateForRun(cn("a"), "a", f.currentRun())
 	if err := f.c.Create(context.Background(), existing); err != nil {
 		t.Fatal(err)
 	}

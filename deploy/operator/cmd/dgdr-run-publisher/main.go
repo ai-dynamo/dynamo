@@ -29,10 +29,16 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+)
+
+const (
+	terminationMessagePath = "/dev/termination-log"
+	maxTerminationMessage  = 4 * 1024
 )
 
 func main() {
@@ -68,6 +74,22 @@ func run() int {
 	err := dgdrrunpublisher.Run(ctx, ctrl.GetConfigOrDie(), cfg)
 	if err != nil {
 		ctrl.Log.WithName("dgdr-run-publisher").Error(err, "publisher stopped")
+		if writeErr := writeTerminationMessage(terminationMessagePath, err); writeErr != nil {
+			ctrl.Log.WithName("dgdr-run-publisher").Error(writeErr, "writing termination message")
+		}
 	}
 	return dgdrrunpublisher.ExitCode(err)
+}
+
+// writeTerminationMessage exposes the publisher's bounded failure detail through the
+// standard Kubernetes container termination-message channel.
+func writeTerminationMessage(path string, err error) error {
+	message := []byte(err.Error())
+	if len(message) > maxTerminationMessage {
+		message = message[:maxTerminationMessage]
+		for !utf8.Valid(message) {
+			message = message[:len(message)-1]
+		}
+	}
+	return os.WriteFile(path, message, 0o600)
 }

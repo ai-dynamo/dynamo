@@ -21,6 +21,8 @@ package dgdrrunpublisher
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +30,13 @@ import (
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -44,6 +50,7 @@ type writerFixture struct {
 	t      *testing.T
 	ctx    context.Context
 	client client.Client
+	config *rest.Config
 	run    *v1beta2.DynamoGraphDeploymentRun
 	writer *clientWriter
 }
@@ -70,6 +77,7 @@ func newWriterFixture(t *testing.T) *writerFixture {
 		t:      t,
 		ctx:    ctx,
 		client: c,
+		config: env.RESTConfig(),
 		run:    run,
 		writer: &clientWriter{
 			Client:    c,
@@ -153,6 +161,45 @@ func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	}
 	if again.ResourceVersion != stored.ResourceVersion {
 		t.Errorf("re-applying the same candidate changed resourceVersion %s -> %s", stored.ResourceVersion, again.ResourceVersion)
+	}
+}
+
+func TestEnvtestCandidateApplyDoesNotAdoptAForeignObject(t *testing.T) {
+	f := newWriterFixture(t)
+	name := f.name("a")
+	candidate := envtestCandidate()
+	spec, _, err := decodeManifest(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, err := json.Marshal(candidate.Parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := &v1beta2.DynamoGraphDeploymentCandidate{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: f.run.Namespace,
+			Name:      name,
+			Labels:    map[string]string{"owner": "foreign"},
+		},
+		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{
+			DynamoGraphDeploymentSpec: *spec,
+			Parameters:                runtime.RawExtension{Raw: parameters},
+		},
+	}
+	if err := f.client.Create(f.ctx, foreign); err != nil {
+		t.Fatalf("create foreign candidate: %v", err)
+	}
+
+	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, candidate); err == nil {
+		t.Fatal("applying a candidate over a foreign object succeeded")
+	}
+	got := f.candidate(name)
+	if owner := metav1.GetControllerOf(got); owner != nil {
+		t.Fatalf("foreign candidate was adopted by %+v", owner)
+	}
+	if got.Labels["owner"] != "foreign" || got.Labels[LabelRunUID] != "" {
+		t.Fatalf("foreign candidate was modified: labels = %v", got.Labels)
 	}
 }
 
@@ -262,4 +309,73 @@ func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
 	if err := f.writer.DeleteCandidate(f.ctx, name, uid); err != nil {
 		t.Fatalf("deleting a missing candidate must not fail: %v", err)
 	}
+}
+
+func TestEnvtestCandidateUpdateTriggersStatusRepair(t *testing.T) {
+	f := newWriterFixture(t)
+	dir := t.TempDir()
+	podName := "publisher-pod"
+
+	t.Log("Create the publisher Pod and a running snapshot")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: f.run.Namespace, Name: podName},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sweeper", Image: "example.invalid/sweeper"}}},
+	}
+	if err := f.client.Create(f.ctx, pod); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	writeSnapshot(t, dir, snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: map[string]any{"throughput": 12.5}}))
+
+	t.Log("Start the real manager and wait for its initial publication")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, f.config, Config{
+			Namespace:        f.run.Namespace,
+			RunName:          f.run.Name,
+			RunUID:           string(f.run.UID),
+			PodName:          podName,
+			SweeperContainer: "sweeper",
+			SnapshotDir:      dir,
+			MinPollInterval:  10 * time.Millisecond,
+			MaxPollInterval:  20 * time.Millisecond,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("publisher stopped: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("publisher did not stop")
+		}
+	})
+
+	name := f.name("a")
+	require.Eventually(t, func() bool {
+		var candidate v1beta2.DynamoGraphDeploymentCandidate
+		if err := f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: name}, &candidate); err != nil {
+			return false
+		}
+		return candidate.Status.Metrics != nil
+	}, 10*time.Second, 25*time.Millisecond, "publisher did not create and populate the candidate")
+
+	t.Log("Clear the Candidate status and let its update event trigger repair")
+	var candidate v1beta2.DynamoGraphDeploymentCandidate
+	if err := f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: name}, &candidate); err != nil {
+		t.Fatalf("get candidate: %v", err)
+	}
+	candidate.Status.Metrics = nil
+	if err := f.client.Status().Update(f.ctx, &candidate); err != nil {
+		t.Fatalf("clear candidate status: %v", err)
+	}
+	require.Eventually(t, func() bool {
+		var repaired v1beta2.DynamoGraphDeploymentCandidate
+		if err := f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: name}, &repaired); err != nil {
+			return false
+		}
+		return repaired.Status.Metrics != nil
+	}, 10*time.Second, 25*time.Millisecond, "candidate status update did not trigger repair")
 }

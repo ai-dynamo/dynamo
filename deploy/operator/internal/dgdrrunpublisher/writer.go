@@ -20,10 +20,12 @@ package dgdrrunpublisher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -87,6 +89,18 @@ func (w *clientWriter) apply(ctx context.Context, object *unstructured.Unstructu
 // tells the caller whether the status is populated already: the cache cannot, because it
 // is exactly what may be stale.
 func (w *clientWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
+	// A cache miss may still find an object at the deterministic name through the API
+	// reader. Never let server-side apply adopt an object controlled by another owner.
+	var existing v1beta2.DynamoGraphDeploymentCandidate
+	if err := w.Reader.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: name}, &existing); err == nil {
+		owner := metav1.GetControllerOf(&existing)
+		if owner == nil || owner.UID != run.UID {
+			return StoredCandidate{}, fmt.Errorf("candidate %s already exists without controller ownership by run %s", name, run.Name)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return StoredCandidate{}, fmt.Errorf("checking candidate %s ownership: %w", name, err)
+	}
+
 	object, err := buildCandidateApply(w.Client.Scheme(), w.Namespace, w.RunUID, run, name, candidate)
 	if err != nil {
 		return StoredCandidate{}, err

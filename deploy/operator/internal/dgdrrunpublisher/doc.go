@@ -37,8 +37,7 @@
 // The publisher's own writes come back as watch events and the cache can trail them. The
 // Reconciler keeps no record of what it wrote: it decides from the current observations,
 // constrains its status writes to the resourceVersion it observed (a stale decision
-// conflicts and is retried through the workqueue), and ignores candidate update events;
-// see Reconciler.
+// conflicts and is retried through the workqueue); see Reconciler.
 //
 // The manager's cache covers only this Run, its candidates (by the run-UID label) and the
 // publisher's own Pod, so there is no API-server polling and no spec comparison:
@@ -47,7 +46,8 @@
 // The sidecar is a regular container of the same Job pod as the Sweeper. The Job only
 // completes once the publisher has exited, so a successful exit acknowledges that the
 // final snapshot was reconciled. The run controller derives the terminal Completed
-// condition from the Job result; the publisher never writes a phase.
+// condition from the Job result and the publisher's bounded container termination
+// message; the publisher never writes a phase.
 //
 // Termination (see Reconciler):
 //
