@@ -249,7 +249,16 @@ impl LLMEngine for LpxSidecarEngine {
             &request_id,
             &self.discovered,
         ) {
-            Ok(proto_request) => (proto_request, None),
+            Ok(proto_request) => {
+                let proto_request = if let Some(prefill) = &request.prefill_result
+                    && ctx.is_stopped()
+                {
+                    build_handoff_cleanup_request(&request.token_ids, prefill, &request_id)?
+                } else {
+                    proto_request
+                };
+                (proto_request, None)
+            }
             Err(error) => {
                 let Some(prefill) = &request.prefill_result else {
                     return Ok(single(Err(error)));
@@ -268,12 +277,10 @@ impl LLMEngine for LpxSidecarEngine {
             }
         };
         let mut state = ResponseState::new(&request, &self.discovered);
-        // A decode leg, the one request with a prefill result, carries the
-        // prefill worker's KV blocks, which only this leg's `Generate`
-        // releases. The frontend dispatches it even after the client left, so
-        // it is sent even when the request is already cancelled. The engine
-        // then runs a detached decode request for one token, which pulls the
-        // blocks, so the sidecar can drop the stream at once.
+        // A decode leg must dispatch even after cancellation to release staged
+        // prefill KV. Cancellation known before dispatch uses a one-token cleanup.
+        // Dropping a hybrid engine's stream only detaches delivery; a request
+        // already dispatched runs until its own stopping conditions are met.
         let needs_handoff_dispatch = request.prefill_result.is_some();
         let stopped_ctx = ctx.inner_arc();
         // Hoisted so the loop below does not rebuild the boxed future per token.
@@ -286,6 +293,15 @@ impl LLMEngine for LpxSidecarEngine {
             _ = &mut request_cancellation, if !needs_handoff_dispatch => None,
             // The process is going away; nothing would read the response.
             _ = &mut shutdown_cancellation => None,
+            _ = tokio::time::sleep(client::RPC_TIMEOUT), if rejection.is_some() => {
+                tracing::warn!(
+                    %request_id,
+                    engine = &*self.discovered.engine_name,
+                    timeout = ?client::RPC_TIMEOUT,
+                    "Decode handoff cleanup attempt abandoned after timeout; prefill blocks stay held until their lease expires"
+                );
+                None
+            },
             result = client.generate(proto_request, trace_headers()) => Some(result),
         };
         if let Some(error) = rejection {

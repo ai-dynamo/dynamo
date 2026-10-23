@@ -13,14 +13,16 @@ use dynamo_sidecar_common::{
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tonic::transport::Channel;
 
-pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, status_to_dynamo};
+pub(crate) use dynamo_sidecar_common::{
+    engine_shutdown, invalid_argument, protocol_error, status_to_dynamo,
+};
 
 use crate::pb;
 use crate::pb::control_client::ControlClient;
 use crate::pb::inference_client::InferenceClient;
 
-/// Bound on one `Control` RPC once the server is up, so a connected but
-/// unresponsive server cannot hang startup or cancellation.
+/// Bound on a `Control` RPC or rejected-request cleanup dispatch, so an
+/// unresponsive server cannot hang startup, cancellation, or rejection.
 pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often a still-starting engine is reported while the bootstrap waits.
 const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(30);
@@ -227,9 +229,4 @@ fn is_request_itself_wrong(status: &tonic::Status) -> bool {
         status.code(),
         tonic::Code::InvalidArgument | tonic::Code::NotFound | tonic::Code::Unimplemented
     )
-}
-
-/// A response that breaks the OpenEngine contract, named after `peer`.
-pub(crate) fn protocol_error(peer: &str, message: impl Into<String>) -> DynamoError {
-    dynamo_sidecar_common::protocol_error(peer, message)
 }

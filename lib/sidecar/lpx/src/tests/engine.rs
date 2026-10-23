@@ -196,6 +196,42 @@ async fn a_rejected_decode_leg_still_dispatches_its_handoff() {
     );
 }
 
+#[tokio::test]
+async fn a_rejected_decode_leg_returns_its_error_when_cleanup_dispatch_times_out() {
+    let fake = FakeEngine::new(DECODE).with_behavior(Behavior::NeverOpens);
+    let server = FakeServer::start(fake).await;
+    let engine = started(&server, DECODE).await;
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut request = decode_request();
+    request.output_options.logprobs = Some(1);
+    let expected_error =
+        crate::convert::build_generate_request(&request, context.id(), &discovered(DECODE))
+            .expect_err("logprobs are unsupported");
+
+    tokio::time::pause();
+    let dispatch = open(&engine, request, context);
+    tokio::pin!(dispatch);
+    let waiting_since = std::time::Instant::now();
+    while server.fake.requests().is_empty() {
+        assert!(
+            waiting_since.elapsed() < Duration::from_secs(5),
+            "Generate was sent"
+        );
+        assert!(futures::poll!(&mut dispatch).is_pending());
+        // Keep the runtime runnable so networking cannot advance paused time.
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::advance(crate::client::RPC_TIMEOUT).await;
+    let mut stream = tokio::time::timeout(Duration::from_secs(1), dispatch)
+        .await
+        .expect("cleanup dispatch stops at its deadline");
+    let error = next_within(&mut stream).await.expect_err("local rejection");
+    assert_backend(&error, BackendError::InvalidArgument);
+    assert_eq!(error.to_string(), expected_error.to_string());
+    assert!(stream.next().await.is_none());
+}
+
 // ---------------------------------------------------------------------------
 // Abort
 // ---------------------------------------------------------------------------
@@ -220,8 +256,9 @@ async fn abort_is_sent_with_the_request_id() {
 
 /// The frontend dispatches a decode leg whose prefill finished even after the
 /// client left, and only that leg's `Generate` releases the prefill worker's
-/// blocks. So it is sent, with the client's token budget; once the engine has
-/// it, the sidecar drops the stream at once without waiting for a token.
+/// blocks. Known cancellation before dispatch uses a one-token cleanup;
+/// cancellation after dispatch cannot reduce the budget already sent. Once the
+/// engine has the cleanup, the sidecar drops the stream without waiting for a token.
 #[tokio::test]
 async fn a_decode_leg_cancelled_before_dispatch_is_still_sent() {
     let fake = FakeEngine::new(DECODE).with_behavior(Behavior::HangBeforeFirstToken);
@@ -234,12 +271,9 @@ async fn a_decode_leg_cancelled_before_dispatch_is_still_sent() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
     let sent = server.fake.requests();
     assert_eq!(sent.len(), 1, "Generate was sent");
-    // A stop signal reaches the engine asynchronously, so a dispatch-time
-    // clamp (to one token, say) would race; the engine alone limits a decode
-    // request it holds detached.
     let stopping = sent[0].stopping.as_ref().expect("stopping");
-    assert_eq!(stopping.max_tokens, Some(16));
-    assert_eq!(stopping.min_tokens, Some(1));
+    assert_eq!(stopping.max_tokens, Some(1));
+    assert_eq!(stopping.min_tokens, None);
     server.fake.wait_for_drop(context.id()).await;
 }
 

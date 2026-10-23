@@ -84,7 +84,8 @@ pub(crate) fn build_generate_request(
     })
 }
 
-/// Builds a minimal Generate to release a rejected decode leg's staged KV.
+/// Builds a minimal one-token Generate that releases the staged KV of a decode
+/// leg that is rejected or already cancelled.
 pub(crate) fn build_handoff_cleanup_request(
     token_ids: &[u32],
     prefill: &PrefillResult,
