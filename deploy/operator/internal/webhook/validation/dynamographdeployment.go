@@ -91,12 +91,10 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	ratchetRuntimeVersion bool,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: ratchetRuntimeVersion,
-		},
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: ratchetRuntimeVersion,
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
@@ -121,14 +119,12 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: true,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: true,
+		userInfo:              userInfo,
+		operatorPrincipal:     operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
@@ -174,13 +170,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 	// it, and the Disabled variant went away when runtime-version validation
 	// moved to the ratchet flag, so this carries the v1beta1 default.
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                  ctx,
-			mgr:                  v.mgr,
-			runtimeVersionSource: runtimeVersionSourceV1Beta1,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                  ctx,
+		mgr:                  v.mgr,
+		runtimeVersionSource: runtimeVersionSourceV1Beta1,
+		userInfo:             userInfo,
+		operatorPrincipal:    operatorPrincipal,
 	}
 
 	allErrs := validation.validateObjectMetaUpdate(

@@ -43,8 +43,8 @@ func dgdControllerOwnerReference(dgd *nvidiacomv1beta1.DynamoGraphDeployment) *m
 		Kind:               dynamoGraphDeploymentKind,
 		Name:               dgd.Name,
 		UID:                dgd.UID,
-		Controller:         ptr.To(true),
-		BlockOwnerDeletion: ptr.To(true),
+		Controller:         new(true),
+		BlockOwnerDeletion: new(true),
 	}
 }
 

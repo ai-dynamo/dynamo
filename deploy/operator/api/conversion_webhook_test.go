@@ -65,10 +65,8 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 
 			t.Log("Submit the partial object to the conversion webhook")
 			review := apiextensionsv1.ConversionReview{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: apiextensionsv1.SchemeGroupVersion.String(),
-					Kind:       "ConversionReview",
-				},
+				APIVersion: apiextensionsv1.SchemeGroupVersion.String(),
+				Kind:       "ConversionReview",
 				Request: &apiextensionsv1.ConversionRequest{
 					UID:               types.UID("partial-" + test.kind),
 					DesiredAPIVersion: test.destinationVersion,
@@ -130,10 +128,8 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 func TestV1Beta2EnvelopeRoundTripsThroughV1Alpha1(t *testing.T) {
 	t.Log("Create a native v1beta2 request and move it into the v1beta1 storage envelope")
 	src := &v1beta2.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "structural-alpha-carrier",
-			Namespace: "default",
-		},
+		Name:      "structural-alpha-carrier",
+		Namespace: "default",
 		Spec: v1beta2.DynamoGraphDeploymentRequestSpec{
 			NativeSearchInput: v1beta2.NativeSearchInput{
 				Model: &v1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
