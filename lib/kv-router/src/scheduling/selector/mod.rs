@@ -173,7 +173,6 @@ struct MaterializedSelectionInput<'a> {
     // Track the maximum over the eligible ranks row() already visits; no second scan.
     max_raw_cached_tokens: Cell<Option<usize>>,
     cache_snapshot: CacheSnapshot<'a>,
-    has_kv_transfer_candidates: bool,
     // Built at most once and shared by every row's fetch credit and the
     // selected worker's fetch source, so the two cannot disagree.
     kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
@@ -201,7 +200,6 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .and_then(|config| config.router_temperature),
             },
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
-            has_kv_transfer_candidates: request.kv_transfer_candidates.is_some(),
             kv_transfer_sources: OnceCell::new(),
         }
     }
@@ -249,9 +247,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         workers: &HashMap<WorkerId, C>,
         worker: WorkerWithDpRank,
     ) -> Option<KvTransferSourceChoice> {
-        if !self.has_kv_transfer_candidates {
-            return None;
-        }
+        self.request.kv_transfer_candidates.as_ref()?;
         let target = workers
             .get(&worker.worker_id)?
             .kv_transfer_keys()

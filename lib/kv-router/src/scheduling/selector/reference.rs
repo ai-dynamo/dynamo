@@ -290,19 +290,18 @@ fn default_row<C: WorkerConfigLike>(
     row
 }
 
-/// A row's fetch input from the sources [`pick_default_worker`] built before scoring.
+/// A row's fetch input from the sources [`pick_default_worker`] built before
+/// scoring; `None` when the request has no transfer candidates.
 fn kv_transfer_input<C: WorkerConfigLike>(
     input: &MaterializedSelectionInput<'_>,
     worker: WorkerWithDpRank,
     config: &C,
 ) -> Option<WorkerTransferInput> {
-    if !input.has_kv_transfer_candidates {
-        return None;
-    }
-    let source = input.kv_transfer_sources.get().and_then(|sources| {
+    let sources = input.kv_transfer_sources.get()?;
+    let source = config.kv_transfer_keys().target().and_then(|target| {
         sources.source_for(
             worker,
-            config.kv_transfer_keys().target()?,
+            target,
             input.request.transfer_local_prefix_blocks_for(worker),
         )
     });

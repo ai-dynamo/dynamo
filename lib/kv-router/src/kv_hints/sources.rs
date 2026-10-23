@@ -124,9 +124,17 @@ pub struct KvTransferScope {
     /// Whether some target takes a source from any island: it has no
     /// transfer domain, or `preferred` enforcement allows a fallback.
     any_island: bool,
-    /// The transfer domains targets fetch within, each with its island while
-    /// every target in it shares one; `None` for all.
-    domains: Option<Vec<(u64, Option<u64>)>>,
+    /// The islands targets fetch within.
+    islands: IslandScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IslandScope {
+    /// No target fetches within an island.
+    Unused,
+    /// Every target that fetches within an island uses this `(domain, island)`.
+    One(u64, u64),
+    Any,
 }
 
 impl KvTransferScope {
@@ -135,39 +143,34 @@ impl KvTransferScope {
         Self {
             min_local_prefix_blocks: 0,
             any_island: true,
-            domains: None,
+            islands: IslandScope::Any,
         }
     }
 
     /// Exactly these targets, each with its local prefix in blocks.
     pub fn of(targets: impl IntoIterator<Item = (KvTransferTarget, usize)>) -> Self {
-        let mut min_local_prefix_blocks = usize::MAX;
-        let mut any_island = false;
-        let mut domains = Vec::new();
+        let mut scope = Self {
+            min_local_prefix_blocks: usize::MAX,
+            any_island: false,
+            islands: IslandScope::Unused,
+        };
         for (target, local_prefix_blocks) in targets {
-            min_local_prefix_blocks = min_local_prefix_blocks.min(local_prefix_blocks);
-            any_island |= target.transfer_domain.is_none() || target.preferred;
+            scope.min_local_prefix_blocks = scope.min_local_prefix_blocks.min(local_prefix_blocks);
+            scope.any_island |= target.transfer_domain.is_none() || target.preferred;
             if let (Some(domain), Some(island)) = (target.transfer_domain, target.transfer_island) {
-                match domains.iter_mut().find(|(known, _)| *known == domain) {
-                    Some((_, only)) if *only != Some(island) => *only = None,
-                    Some(_) => {}
-                    None => domains.push((domain, Some(island))),
-                }
+                let one = IslandScope::One(domain, island);
+                scope.islands = match scope.islands {
+                    IslandScope::Unused => one,
+                    islands if islands == one => one,
+                    _ => IslandScope::Any,
+                };
             }
         }
-        Self {
-            min_local_prefix_blocks,
-            any_island,
-            domains: Some(domains),
-        }
+        scope
     }
 
     fn covers(&self, domain: u64, island: u64) -> bool {
-        self.domains.as_ref().is_none_or(|domains| {
-            domains
-                .iter()
-                .any(|&(known, only)| known == domain && only.is_none_or(|only| only == island))
-        })
+        self.islands == IslandScope::Any || self.islands == IslandScope::One(domain, island)
     }
 }
 
@@ -304,10 +307,7 @@ impl KvTransferSourceSummary {
         scope: KvTransferScope,
     ) -> Self {
         let min_local_prefix_blocks = scope.min_local_prefix_blocks;
-        let needs_islands = scope
-            .domains
-            .as_ref()
-            .is_none_or(|domains| !domains.is_empty());
+        let needs_islands = scope.islands != IslandScope::Unused;
         let mut summary = Self {
             by_type: FxHashMap::default(),
             by_island: FxHashMap::default(),
