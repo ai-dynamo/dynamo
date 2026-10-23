@@ -88,7 +88,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
 
-RUN uv pip install --python /usr/bin/python3 --break-system-packages --no-deps \
+RUN uv pip install --no-cache --python /usr/bin/python3 --break-system-packages --no-deps \
     certifi==2026.10.19 pip==26.2.2
 
 # dynamo user (group 0 for OpenShift), clear upstream /workspace baggage, and

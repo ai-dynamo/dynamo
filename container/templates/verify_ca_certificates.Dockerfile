@@ -15,3 +15,6 @@ RUN set -eu; \
     dpkg --compare-versions "$ca_version" ge "$ca_min" || { \
         echo "ca-certificates $ca_version is below required $ca_min" >&2; exit 1; \
     }
+
+# grpcio bundles its own roots; use the refreshed system bundle instead.
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
