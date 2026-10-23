@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Validate rolling history or capture a pinned release operator."""
+"""Validate immutable history or append a pinned release baseline."""
 
 import argparse
 import hashlib
@@ -122,9 +122,9 @@ def minor(version):
     return tuple(map(int, match.groups()))
 
 
-def validate_versions(current, reconciled, previous=None):
+def validate_versions(current, baseline_version, previous=None):
     major, number = minor(current)
-    old_major, old_number = minor(reconciled)
+    old_major, old_number = minor(baseline_version)
     if major != old_major or number - old_number not in (0, 1):
         raise ValueError(
             "Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
@@ -134,7 +134,7 @@ def validate_versions(current, reconciled, previous=None):
         and minor(previous) != minor(current)
         and (
             minor(current) != (minor(previous)[0], minor(previous)[1] + 1)
-            or minor(reconciled) != minor(previous)
+            or minor(baseline_version) != minor(previous)
         )
     ):
         raise ValueError(
@@ -150,7 +150,8 @@ def fixture_inputs(role):
     return sorted((FIXTURES / role).rglob("input.yaml"))
 
 
-def require_complete_matrix():
+def require_complete_matrix(release_tag=None):
+    """Require full coverage or the exact one-time v1.6.0 input inventory."""
     required = set(
         json.loads((FIXTURES / "required-matrix.json").read_text())["requiredScenarios"]
     )
@@ -159,10 +160,31 @@ def require_complete_matrix():
         for p in fixture_inputs("latest")
     }
     missing = required - available
-    if missing:
-        raise ValueError(
-            "Incomplete release matrix; missing: " + ", ".join(sorted(missing))
-        )
+    if not missing:
+        return None
+    if (
+        release_tag == "v1.6.0"
+        and app_version((ROOT / CHART).read_text()) == "1.6.0"
+        and (FIXTURES / "RECONCILED_VERSION").read_text().strip() == "1.5.0"
+    ):
+        inventory = json.loads((FIXTURES / "capture-v1.6.0.json").read_text())
+        inputs = {
+            str(p.relative_to(FIXTURES)): digest(p)
+            for role in ("history", "latest")
+            for p in fixture_inputs(role)
+        }
+        if (
+            inventory["sourceRef"] != release_tag
+            or inventory["inputs"] != inputs
+            or inventory["requiredScenarios"] != sorted(required)
+            or inventory["missingScenarios"] != sorted(missing)
+            or inventory["promotedScenarios"] != sorted(required & available)
+        ):
+            raise ValueError("The frozen v1.6.0 capture inventory has changed")
+        return inventory
+    raise ValueError(
+        "Incomplete release matrix; missing: " + ", ".join(sorted(missing))
+    )
 
 
 def check(base=None):
@@ -175,36 +197,70 @@ def check(base=None):
                 ["git", "show", f"{base}:{CHART}"], cwd=ROOT, text=True
             )
         )
-    validate_versions(current, reconciled, previous)
-    if previous and minor(previous) != minor(current):
-        require_complete_matrix()
     lock = json.loads((FIXTURES / "history.lock.json").read_text())
-    # The original bootstrap predates sourceKind; only its exact pinned inventory is exempt.
-    if "sourceKind" not in lock:
-        bootstrap = json.loads((FIXTURES / "bootstrap.json").read_text())
-        if lock["inputs"] != bootstrap["inputs"] or lock["sourceRevision"] != bootstrap[
-            "releases"
-        ].get(reconciled):
-            raise ValueError(
-                "Non-bootstrap history requires explicit released-tag provenance"
-            )
-    if "sourceKind" in lock and (
-        lock["sourceKind"] != "release-tag"
-        or lock.get("sourceRef") != f"v{reconciled}"
-        or not re.fullmatch(r"[0-9a-f]{40}", lock.get("sourceRevision", ""))
+    bootstrap = json.loads((FIXTURES / "bootstrap.json").read_text())
+    # Bootstrap provenance describes only the original, immutable three inputs.
+    original = lock.get("bootstrap", lock)
+    if (
+        original["reconciledVersion"] != reconciled
+        or original["inputs"] != bootstrap["inputs"]
+        or original["sourceRevision"] != bootstrap["releases"].get(reconciled)
     ):
-        raise ValueError(
-            "Published history requires released-tag provenance, not a candidate capture"
-        )
-    if lock["reconciledVersion"] != reconciled:
-        raise ValueError("History provenance and RECONCILED_VERSION disagree")
+        raise ValueError("Original bootstrap provenance or input hashes changed")
     inputs = {
         str(p.relative_to(FIXTURES)): digest(p) for p in fixture_inputs("history")
     }
     if not inputs or inputs != lock["inputs"]:
         raise ValueError(
-            "Historical input inventory or bytes changed; regenerate through production controllers, not by editing inputs"
+            "Historical input inventory or bytes changed; inputs are immutable"
         )
+    owned = dict(original["inputs"])
+    captures = lock.get("captures", {})
+    for version, capture in captures.items():
+        if (
+            capture["sourceKind"] != "release-tag"
+            or capture["sourceRef"] != f"v{version}"
+            or not re.fullmatch(r"[0-9a-f]{40}", capture["sourceRevision"])
+            or not capture["inputs"]
+            or any(
+                not p.startswith(f"history/{minor(version)[0]}.{minor(version)[1]}.0/")
+                for p in capture["inputs"]
+            )
+            or owned.keys() & capture["inputs"].keys()
+        ):
+            raise ValueError(
+                "Each baseline requires distinct inputs and released-tag provenance"
+            )
+        if "captureInventory" in capture:
+            inventory = json.loads((FIXTURES / "capture-v1.6.0.json").read_text())
+            expected = {
+                f"history/1.6.0/{scenario}/input.yaml"
+                for scenario in inventory["promotedScenarios"]
+            }
+            frozen_history = {
+                p: checksum
+                for p, checksum in inventory["inputs"].items()
+                if p.startswith("history/")
+            }
+            if (
+                version != "1.6.0"
+                or capture["sourceRevision"] != inventory["sourceRevision"]
+                or capture["captureInventory"] != inventory
+                or set(capture["inputs"]) != expected
+                or any(
+                    inputs.get(p) != checksum for p, checksum in frozen_history.items()
+                )
+            ):
+                raise ValueError(
+                    "Published v1.6.0 baseline differs from its frozen scope"
+                )
+        owned.update(capture["inputs"])
+    if owned != inputs:
+        raise ValueError(
+            "Historical inputs differ from their individual baseline provenance"
+        )
+    latest_baseline = max([reconciled, *captures], key=minor)
+    validate_versions(current, latest_baseline, previous)
     for path in fixture_inputs("history"):
         if not path.with_name("output.yaml").exists():
             raise ValueError(f"Missing golden: {path.parent}")
@@ -217,12 +273,12 @@ def check(base=None):
     for origin in (FIXTURES / "history").iterdir():
         if not origin.is_dir():
             continue
-        if minor(origin.name) > minor(reconciled):
-            raise ValueError("Origin cannot be newer than the last reconciler")
+        if minor(origin.name) > minor(latest_baseline):
+            raise ValueError("Origin cannot be newer than the newest captured baseline")
     print(
-        f"operator appVersion={current}; history last reconciled={reconciled}; {len(inputs)} historical inputs"
+        f"operator appVersion={current}; newest captured baseline={latest_baseline}; {len(inputs)} historical inputs"
     )
-    return current, reconciled
+    return current, latest_baseline
 
 
 def golden_objects(objects, latest=False):
@@ -354,13 +410,15 @@ def write_golden(path, objects, latest=False):
 def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
     import yaml
 
-    current, reconciled = check()
-    require_complete_matrix()
-    if minor(current) == minor(reconciled):
+    current, latest_baseline = check()
+    if minor(current) == minor(latest_baseline):
         raise ValueError(
-            "History is already reconciled by this minor; do not advance it twice"
+            "A baseline is already captured for this minor; existing inputs cannot be replaced"
         )
+    inventory = require_complete_matrix(release_tag)
     source = capture_source(current, release_tag, candidate_sha)
+    if inventory and source["sourceRevision"] != inventory["sourceRevision"]:
+        raise ValueError("The release source differs from the frozen v1.6.0 source")
     if candidate_sha:
         if (
             candidate_output is None
@@ -391,16 +449,24 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
             env=env,
             check=True,
         )
-        expected = list(fixture_inputs("history")) + list(fixture_inputs("latest"))
+        # Only catalog scenarios become new baselines; legacy latest remains CREATE coverage.
+        catalog = set(
+            json.loads((FIXTURES / "required-matrix.json").read_text())[
+                "requiredScenarios"
+            ]
+        )
+        expected = [
+            p
+            for p in fixture_inputs("latest")
+            if p.parent.relative_to(FIXTURES / "latest").as_posix() in catalog
+        ]
         captures = {}
         for original in expected:
-            relative = original.relative_to(FIXTURES)
-            if relative.parts[0] == "latest":
-                relative = (
-                    Path("history")
-                    / f"{minor(current)[0]}.{minor(current)[1]}.0"
-                    / Path(*relative.parts[1:])
-                )
+            relative = (
+                Path("history")
+                / f"{minor(current)[0]}.{minor(current)[1]}.0"
+                / original.relative_to(FIXTURES / "latest")
+            )
             captured = capture / relative
             if not captured.is_file():
                 raise ValueError(f"Capture incomplete: {relative}")
@@ -453,18 +519,26 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                     not obj["metadata"].get("uid") for obj in objects
                 ):
                     raise ValueError(f"Non-concrete capture: {historical}")
+            previous = json.loads((FIXTURES / "history.lock.json").read_text())
+            # Retain each prior baseline's source and exact input bytes independently.
             lock = {
-                "reconciledVersion": current,
-                **source,
+                "bootstrap": previous.get("bootstrap", previous),
+                "captures": dict(previous.get("captures", {})),
                 "inputs": {
                     str(p.relative_to(stage)): digest(p)
                     for p in (stage / "history").rglob("input.yaml")
                 },
             }
+            baseline = {
+                **source,
+                "inputs": {str(p): digest(stage / p) for p in captures},
+            }
+            if inventory:
+                baseline["captureInventory"] = inventory
+            lock["captures"][current] = baseline
             (stage / "history.lock.json").write_text(
                 json.dumps(lock, indent=2, sort_keys=True) + "\n"
             )
-            (stage / "RECONCILED_VERSION").write_text(current + "\n")
             FIXTURES.rename(backup)
             try:
                 stage.rename(FIXTURES)
@@ -502,7 +576,7 @@ if __name__ == "__main__":
             regenerate(args.release_tag, args.candidate_sha, args.candidate_output)
         elif args.check_release_matrix:
             check(args.base)
-            require_complete_matrix()
+            require_complete_matrix(args.release_tag)
         else:
             check(args.base)
     except (
