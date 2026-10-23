@@ -28,8 +28,9 @@ nvtx==0.2.14
 opentelemetry-api<=1.38.0  # Pinned for tracing support
 opentelemetry-exporter-otlp<=1.38.0
 opentelemetry-sdk<=1.38.0
-# Transitive via imageio/matplotlib; floor keeps images on the current patch line.
-pillow>=12.3.0
+# Transitive via imageio/matplotlib; floor keeps images on the current release line.
+# aiperf caps pillow below this floor; overrides.{frontend,planner}.txt lift the cap.
+pillow>=13.0.0,<14
 pip==26.2.2
 prometheus_client==0.23.1
 protobuf==6.33.6

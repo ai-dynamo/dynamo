@@ -29,6 +29,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+// TestPodCheckpointRestoreMutatorNativeRestore checks native restore admission,
+// including candidate cleanup and preservation of the Snapshot restore annotations.
 func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
@@ -49,6 +51,9 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	t.Run("shapes one captured source into two engine destinations", func(t *testing.T) {
 		t.Log("Given a native restore candidate pinned to a Ready compatible PodSnapshot")
 		pod := nativeRestoreCandidatePod(snapshot)
+		// The pinned path ignores these, but they must still be stripped.
+		pod.Annotations[consts.SnapshotJobCandidateUIDAnnotation] = "stale-job-uid"
+		pod.Annotations[consts.CheckpointStartupPolicyAnnotation] = string(nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
 		original := mustMarshalPod(t, pod)
 		req := admission.Request{
 			Operation: admissionv1.Create,
@@ -63,8 +68,21 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		shaped := applyAdmissionPatches(t, original, resp)
 		assert.Equal(t, snapshot.Name, shaped.Annotations[podcontract.RestoreFromAnnotation])
 		assert.Equal(t, "main=engine-0,main=engine-1", shaped.Annotations[podcontract.RestoreContainerMapAnnotation])
-		assert.NotContains(t, shaped.Annotations, consts.CheckpointRestoreCandidateAnnotation)
-		assert.NotContains(t, shaped.Annotations, consts.RestoreCandidateTargetContainersAnnotation)
+		for _, key := range []string{
+			consts.CheckpointRestoreCandidateAnnotation,
+			consts.CheckpointNameAnnotation,
+			consts.RestoreCandidateSourceKindAnnotation,
+			consts.SnapshotJobCandidateUIDAnnotation,
+			consts.CheckpointStartupPolicyAnnotation,
+			consts.SnapshotCandidateUIDAnnotation,
+			consts.SnapshotCandidateContentAnnotation,
+			consts.SnapshotCandidateGMSModeAnnotation,
+			consts.SnapshotCandidateVersionAnnotation,
+			consts.SnapshotCandidateCompatibilityHashAnnotation,
+			consts.RestoreCandidateTargetContainersAnnotation,
+		} {
+			assert.NotContains(t, shaped.Annotations, key)
+		}
 		require.Len(t, shaped.Spec.Volumes, 1)
 		assert.Equal(t, podcontract.SnapshotControlVolumeName, shaped.Spec.Volumes[0].Name)
 		for _, container := range shaped.Spec.Containers {

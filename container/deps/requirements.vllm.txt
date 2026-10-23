@@ -41,9 +41,9 @@ lmcache==0.5.6
 mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
 # The Dynamo wheel is installed with --no-deps, so list artifact dependencies here.
 opendal==0.47.10
-# The upstream vllm-openai image bundles pillow at an older patch release;
-# floor it so the --no-deps install moves it to the current patch line.
-pillow>=12.3.0
+# The upstream vllm-openai image bundles pillow at an older release;
+# floor it so the --no-deps install moves it to the current release line.
+pillow>=13.0.0,<14
 # NVDEC hardware decode for H.264/H.265 video input (common/multimodal/
 # nvdec_decoder). The vllm-openai base ships 2.0.4, which bundles a full FFmpeg
 # including a libavcodec the codec gate rejects, so vllm_runtime.Dockerfile
