@@ -18,6 +18,7 @@ use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
 use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+use dynamo_llm::protocols::common::extensions::HEADER_REQUEST_PRIORITY;
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_llm::protocols::common::preprocessed_mm_identifier;
 use dynamo_llm::protocols::common::preprocessor::MmRoutingInfo;
@@ -335,10 +336,11 @@ fn generate_mm_routing_info(
     }))
 }
 
-fn preprocessed_from_generate(
+fn preprocessed_from_generate_with_priority(
     mut request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
+    priority_override: Option<i32>,
     request_id: &str,
     worker: &Worker<'_>,
 ) -> anyhow::Result<PreprocessedRequest> {
@@ -349,7 +351,8 @@ fn preprocessed_from_generate(
     let output_options = sampling
         .project_output_options()
         .map_err(anyhow::Error::msg)?;
-    let routing_priority = dynamo_routing_priority(request.priority);
+    let routing_priority =
+        priority_override.unwrap_or_else(|| dynamo_routing_priority(request.priority));
     // The sidecar protocol does not expose whether tower/connector LoRA is
     // active, so conservatively treat every adapter's MM identity as scoped.
     let mm_routing = if worker.lora_name.is_some() {
@@ -501,6 +504,16 @@ impl GenerateFormat for VllmFormat {
         });
         // vLLM keeps request metadata in headers first, then the body.
         let header = |name| client.headers.get(name).and_then(|v| v.to_str().ok());
+        // The Dynamo header uses higher-is-higher priority. vLLM's body field
+        // uses lower-is-higher, so translate the winning header before storing
+        // it in the engine-native body. Keep the canonical value separately for
+        // Dynamo routing, including i32::MIN where saturating negation is lossy.
+        let priority_override =
+            header(HEADER_REQUEST_PRIORITY).and_then(|value| value.trim().parse::<i32>().ok());
+        let mut request = request;
+        if let Some(priority) = priority_override {
+            request.priority = dynamo_routing_priority(priority);
+        }
         let request_id = header(X_REQUEST_ID_HEADER)
             .map(ToOwned::to_owned)
             .or_else(|| request.request_id.clone())
@@ -515,10 +528,11 @@ impl GenerateFormat for VllmFormat {
             validation,
             bind: Box::new(move |worker| {
                 let options = request.response_options();
-                let request = preprocessed_from_generate(
+                let request = preprocessed_from_generate_with_priority(
                     request,
                     worker.model,
                     data_parallel_rank,
+                    priority_override,
                     &request_id,
                     worker,
                 )

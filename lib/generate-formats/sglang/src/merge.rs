@@ -47,6 +47,7 @@ use crate::response_merge::{Assembler, RuleSet};
 use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened,
 };
+use dynamo_llm::protocols::common::extensions::HEADER_REQUEST_PRIORITY;
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_llm::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
@@ -202,7 +203,13 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             })
         })()
         .map_err(ClientError::new);
-        let priority = request.priority.unwrap_or_default();
+        // Dynamo's priority header uses the same higher-is-higher scale as
+        // SGLang's request field. A valid header wins; malformed values fall
+        // back to the body field.
+        let priority = header(HEADER_REQUEST_PRIORITY)
+            .and_then(|value| value.trim().parse().ok())
+            .or(request.priority)
+            .unwrap_or_default();
         let cache_namespace = request.cache_namespace().map(str::to_owned);
         let stream = request.stream;
         let (input_ids, body) = request.into_worker_envelope(&request_id);
@@ -409,6 +416,54 @@ mod tests {
     #[test]
     fn sglang_native_format_passes_every_law() {
         Harness::native(Arc::new(SglangFormat::native())).check_all();
+    }
+
+    #[test]
+    fn request_priority_header_overrides_body_for_routing() {
+        let headers = axum::http::HeaderMap::from_iter([
+            (
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            ),
+            (
+                HEADER_REQUEST_PRIORITY.parse().unwrap(),
+                axum::http::HeaderValue::from_static("0"),
+            ),
+        ]);
+        let opened = SglangFormat::native()
+            .open(ClientRequest {
+                body: br#"{"input_ids":[1],"priority":7}"#,
+                headers: &headers,
+                default_request_id: "request",
+            })
+            .unwrap();
+        let bound = (opened.bind)(&crate::testkit::worker(&Value::Null)).unwrap();
+
+        assert_eq!(bound.request.routing.as_ref().unwrap().priority, Some(0));
+    }
+
+    #[test]
+    fn malformed_request_priority_header_falls_back_to_body() {
+        let headers = axum::http::HeaderMap::from_iter([
+            (
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            ),
+            (
+                HEADER_REQUEST_PRIORITY.parse().unwrap(),
+                axum::http::HeaderValue::from_static("not-an-int"),
+            ),
+        ]);
+        let opened = SglangFormat::native()
+            .open(ClientRequest {
+                body: br#"{"input_ids":[1],"priority":7}"#,
+                headers: &headers,
+                default_request_id: "request",
+            })
+            .unwrap();
+        let bound = (opened.bind)(&crate::testkit::worker(&Value::Null)).unwrap();
+
+        assert_eq!(bound.request.routing.as_ref().unwrap().priority, Some(7));
     }
 
     /// Streams and unary responses recorded from SGLang v0.5.21 (Qwen3-0.6B,
