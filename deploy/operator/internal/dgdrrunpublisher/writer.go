@@ -47,9 +47,9 @@ type StoredCandidate struct {
 // writer is every write the reconciler makes to the API server. It is a seam so the
 // reconciler's behavior can be tested without server-side apply support in a fake client.
 type writer interface {
-	// CreateCandidate applies the candidate and returns the API server's own copy of it,
-	// read after the apply. It must be idempotent: applying a candidate that already
-	// exists changes nothing.
+	// CreateCandidate atomically creates a missing candidate or reapplies one already
+	// controlled by the Run, then returns the API server's own copy. It must never adopt
+	// an object that is not controlled by the Run.
 	CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error)
 	// PopulateStatus records the candidate's evaluation metrics. The
 	// write is constrained to resourceVersion, so a stale view of the candidate fails
@@ -83,34 +83,53 @@ func (w *clientWriter) apply(ctx context.Context, object *unstructured.Unstructu
 	return w.Client.Apply(ctx, configuration, client.FieldOwner(fieldOwner), client.ForceOwnership)
 }
 
-// CreateCandidate applies the candidate and reads it back from the API server. It is
-// only called for a candidate missing from the cache, and re-applying the same content
-// to a candidate that exists is a no-op, so no spec comparison is needed. The read-back
-// tells the caller whether the status is populated already: the cache cannot, because it
-// is exactly what may be stale.
+// CreateCandidate creates a candidate atomically, or reapplies it after a live ownership
+// check when the cache missed an existing object. The apply is constrained to the UID and
+// resourceVersion returned by Create or Get, so a concurrent delete/recreate or ownership
+// change conflicts instead of being adopted. The final live read tells the caller whether
+// status is populated already: the cache cannot, because it is exactly what may be stale.
 func (w *clientWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
-	// A cache miss may still find an object at the deterministic name through the API
-	// reader. Never let server-side apply adopt an object controlled by another owner.
-	var existing v1beta2.DynamoGraphDeploymentCandidate
-	if err := w.Reader.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: name}, &existing); err == nil {
-		owner := metav1.GetControllerOf(&existing)
-		if owner == nil || owner.UID != run.UID {
-			return StoredCandidate{}, fmt.Errorf("candidate %s already exists without controller ownership by run %s", name, run.Name)
-		}
-	} else if !apierrors.IsNotFound(err) {
-		return StoredCandidate{}, fmt.Errorf("checking candidate %s ownership: %w", name, err)
-	}
-
 	object, err := buildCandidateApply(w.Client.Scheme(), w.Namespace, w.RunUID, run, name, candidate)
 	if err != nil {
 		return StoredCandidate{}, err
 	}
+
+	// POST provides the missing-object precondition that server-side apply lacks. If the
+	// name is already occupied, classify the live object before applying anything to it.
+	var observedUID types.UID
+	created := object.DeepCopy()
+	if err := w.Client.Create(ctx, created, client.FieldOwner(fieldOwner)); err == nil {
+		object.SetResourceVersion(created.GetResourceVersion())
+		observedUID = created.GetUID()
+	} else if apierrors.IsAlreadyExists(err) {
+		var existing v1beta2.DynamoGraphDeploymentCandidate
+		if err := w.Reader.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: name}, &existing); err != nil {
+			return StoredCandidate{}, fmt.Errorf("reading existing candidate %s: %w", name, err)
+		}
+		owner := metav1.GetControllerOf(&existing)
+		if owner == nil || owner.UID != run.UID {
+			return StoredCandidate{}, fmt.Errorf("candidate %s already exists without controller ownership by run %s", name, run.Name)
+		}
+		object.SetResourceVersion(existing.ResourceVersion)
+		observedUID = existing.UID
+	} else {
+		return StoredCandidate{}, fmt.Errorf("creating candidate %s: %w", name, err)
+	}
+	object.SetUID(observedUID)
+
 	if err := w.apply(ctx, object, false); err != nil {
 		return StoredCandidate{}, err
 	}
 	var stored v1beta2.DynamoGraphDeploymentCandidate
 	if err := w.Reader.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: name}, &stored); err != nil {
 		return StoredCandidate{}, err
+	}
+	owner := metav1.GetControllerOf(&stored)
+	if stored.UID != observedUID {
+		return StoredCandidate{}, fmt.Errorf("candidate %s changed uid from %s to %s during apply", name, observedUID, stored.UID)
+	}
+	if owner == nil || owner.UID != run.UID {
+		return StoredCandidate{}, fmt.Errorf("candidate %s is no longer controlled by run %s after apply", name, run.Name)
 	}
 	return StoredCandidate{
 		ResourceVersion: stored.ResourceVersion,

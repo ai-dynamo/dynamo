@@ -40,8 +40,8 @@ import (
 const (
 	// LabelRunUID ties a candidate to one incarnation of its run. The run name can be
 	// reused after a delete and recreate; the UID cannot, so candidates left over from a
-	// previous run of the same name are never mistaken for current ones. The manager's
-	// cache selects candidates by this label.
+	// previous run of the same name are never mistaken for current ones. It is a repairable
+	// index; the controller owner UID remains the authoritative ownership relation.
 	LabelRunUID = "nvidia.com/dgdr-run-uid"
 	// LabelCandidateID records the stable candidate id (the identity read back on list).
 	LabelCandidateID = "nvidia.com/dgdr-candidate-id"
@@ -199,7 +199,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		ctrl.LoggerFrom(ctx).V(1).Info("candidates failed materialization and are not published", "count", desired.Failed)
 	}
 	var list v1beta2.DynamoGraphDeploymentCandidateList
-	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace), client.MatchingLabels{LabelRunUID: r.RunUID}); err != nil {
+	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace)); err != nil {
 		return fmt.Errorf("listing candidates: %w", err)
 	}
 	current := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
@@ -229,7 +229,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 			uids[item.Name] = item.UID
 			continue
 		}
-		if item.Labels[LabelCandidateID] != expectedID {
+		if item.Labels[LabelRunUID] != r.RunUID || item.Labels[LabelCandidateID] != expectedID {
 			continue
 		}
 		current = append(current, dgdcreconcile.CurrentDGDC{

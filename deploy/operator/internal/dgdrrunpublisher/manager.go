@@ -28,7 +28,6 @@ import (
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -50,7 +49,7 @@ type Config struct {
 	Namespace string
 	RunName   string
 	// RunUID is the UID of the run this pod serves. The run controller knows it when it
-	// builds the Job, which is what lets the cache select this run's candidates by label.
+	// builds the Job; the publisher uses it to establish Candidate ownership.
 	RunUID           string
 	PodName          string
 	SweeperContainer string
@@ -82,9 +81,9 @@ func NewScheme() (*runtime.Scheme, error) {
 	return scheme, nil
 }
 
-// cacheOptions limits the manager's informers to this run, its candidates and its own
-// pod: one namespace, plus a field selector on the names of the run and the pod and a
-// label selector on the run UID for the candidates.
+// cacheOptions limits the manager's informers to one namespace and selects this Run and
+// Pod by name. Candidates remain namespace-scoped because their labels are mutable;
+// reconciliation establishes membership from their controller owner reference.
 func cacheOptions(c Config) cache.Options {
 	return cache.Options{
 		DefaultNamespaces: map[string]cache.Config{c.Namespace: {}},
@@ -92,9 +91,7 @@ func cacheOptions(c Config) cache.Options {
 			&v1beta2.DynamoGraphDeploymentRun{}: {
 				Field: fields.OneTermEqualSelector("metadata.name", c.RunName),
 			},
-			&v1beta2.DynamoGraphDeploymentCandidate{}: {
-				Label: labels.SelectorFromSet(labels.Set{LabelRunUID: c.RunUID}),
-			},
+			&v1beta2.DynamoGraphDeploymentCandidate{}: {},
 			&corev1.Pod{}: {
 				Field: fields.OneTermEqualSelector("metadata.name", c.PodName),
 			},
@@ -164,17 +161,7 @@ func Run(ctx context.Context, restConfig *rest.Config, cfg Config) error {
 		Completion:       completion,
 	}
 
-	podToRun := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
-		return []reconcile.Request{{NamespacedName: key}}
-	})
-	if err := ctrl.NewControllerManagedBy(mgr).
-		Named("dgdr-run-publisher").
-		For(&v1beta2.DynamoGraphDeploymentRun{}).
-		Owns(&v1beta2.DynamoGraphDeploymentCandidate{}).
-		Watches(&corev1.Pod{}, podToRun).
-		WatchesRawSource(source.Channel(events, &handler.EnqueueRequestForObject{})).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
-		Complete(reconciler); err != nil {
+	if err := setupController(mgr, reconciler, key, events); err != nil {
 		return fmt.Errorf("building controller: %w", err)
 	}
 	if err := mgr.Add(manager.RunnableFunc(observer.Run)); err != nil {
@@ -202,6 +189,22 @@ func Run(ctx context.Context, restConfig *rest.Config, cfg Config) error {
 		return fmt.Errorf("manager stopped: %w", startErr)
 	}
 	return errors.New("manager stopped before the run finished")
+}
+
+// setupController centralizes the production event wiring: every Kubernetes and
+// local-input event reaches the one Run key.
+func setupController(mgr manager.Manager, reconciler reconcile.Reconciler, key types.NamespacedName, events <-chan event.GenericEvent) error {
+	podToRun := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
+		return []reconcile.Request{{NamespacedName: key}}
+	})
+	return ctrl.NewControllerManagedBy(mgr).
+		Named("dgdr-run-publisher").
+		For(&v1beta2.DynamoGraphDeploymentRun{}).
+		Owns(&v1beta2.DynamoGraphDeploymentCandidate{}).
+		Watches(&corev1.Pod{}, podToRun).
+		WatchesRawSource(source.Channel(events, &handler.EnqueueRequestForObject{})).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
+		Complete(reconciler)
 }
 
 // SnapshotPath is where the Sweeper writes the snapshot inside the shared directory.

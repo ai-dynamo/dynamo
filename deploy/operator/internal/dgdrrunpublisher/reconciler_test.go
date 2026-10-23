@@ -662,10 +662,41 @@ func TestOwnedCandidateWithWrongNameIsReplacedBeforeDeletion(t *testing.T) {
 	}
 }
 
+func TestOwnedObsoleteCandidateWithoutRunLabelIsDeleted(t *testing.T) {
+	f := newFixture(t)
+	obsolete := candidateForRun(cn("obsolete"), "obsolete", f.currentRun())
+	delete(obsolete.Labels, LabelRunUID)
+	if err := f.c.Create(context.Background(), obsolete); err != nil {
+		t.Fatal(err)
+	}
+
+	f.publish(snapshotJSON(t, PhaseRunning))
+	f.mustReconcile()
+	if got, want := f.takeOps(), []string{"delete:" + obsolete.Name}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ops = %v, want %v", got, want)
+	}
+}
+
 func TestOwnedCandidateWithWrongIdentityLabelIsReappliedNotDeleted(t *testing.T) {
 	f := newFixture(t)
 	wrong := candidateForRun(cn("a"), "wrong-id", f.currentRun())
 	if err := f.c.Create(context.Background(), wrong); err != nil {
+		t.Fatal(err)
+	}
+
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}
+	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ops = %v, want %v", got, want)
+	}
+}
+
+func TestOwnedCandidateWithMissingRunLabelIsReappliedNotDeleted(t *testing.T) {
+	f := newFixture(t)
+	drifted := candidateForRun(cn("a"), "a", f.currentRun())
+	delete(drifted.Labels, LabelRunUID)
+	if err := f.c.Create(context.Background(), drifted); err != nil {
 		t.Fatal(err)
 	}
 
@@ -754,7 +785,7 @@ func TestObservedStatusMirrorsTheRunStatus(t *testing.T) {
 	}
 }
 
-func TestCacheOptionsCoverOnlyThisRunItsCandidatesAndItsPod(t *testing.T) {
+func TestCacheOptionsCoverThisRunPodAndNamespaceCandidates(t *testing.T) {
 	cfg := Config{Namespace: "ns", RunName: "run", RunUID: "uid-1", PodName: "pod-1"}
 	opts := cacheOptions(cfg)
 	if _, ok := opts.DefaultNamespaces["ns"]; !ok || len(opts.DefaultNamespaces) != 1 {
@@ -770,8 +801,8 @@ func TestCacheOptionsCoverOnlyThisRunItsCandidatesAndItsPod(t *testing.T) {
 				t.Errorf("run selector = %q", selector.Field)
 			}
 		case *v1beta2.DynamoGraphDeploymentCandidate:
-			if selector.Label.String() != LabelRunUID+"=uid-1" {
-				t.Errorf("candidate selector = %q", selector.Label)
+			if selector.Field != nil || selector.Label != nil {
+				t.Errorf("candidates must remain visible after mutable label drift: %+v", selector)
 			}
 		case *corev1.Pod:
 			if selector.Field.String() != "metadata.name=pod-1" {
