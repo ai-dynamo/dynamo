@@ -958,7 +958,7 @@ class TestToolCallingMultiTurn:
             parallel_tool_calls=False,
         )
         assert_finish_reason(step1, {"tool_calls"})
-        assert len(step1.tool_calls) >= 1
+        assert len(step1.tool_calls) == 1
         parse_and_validate_tool_call(
             step1.tool_calls[0], schemas, expected_name="search_web"
         )
@@ -987,7 +987,7 @@ class TestToolCallingMultiTurn:
             parallel_tool_calls=False,
         )
         assert_finish_reason(step2, {"tool_calls"})
-        assert len(step2.tool_calls) >= 1
+        assert len(step2.tool_calls) == 1
         parse_and_validate_tool_call(
             step2.tool_calls[0], schemas, expected_name="calculate"
         )
