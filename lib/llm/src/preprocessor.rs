@@ -12462,6 +12462,18 @@ mod tests {
                 "Qwen-style templated <think> behavior remains",
             ),
             (
+                Some("nemotron_v3"),
+                Some("<|im_start|>assistant\n<think>\n"),
+                true,
+                "Nemotron 3 enable_thinking=true pre-opens the thought",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some("<|im_start|>assistant\n<think></think>"),
+                false,
+                "Nemotron 3 enable_thinking=false renders a closed pair",
+            ),
+            (
                 Some("kimi_k3"),
                 Some("...<|open|>think<|sep|>\n"),
                 true,
@@ -12513,6 +12525,62 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    #[test]
+    fn nemotron_pair_resolves_prompt_prefill_and_request_thinking_control() {
+        // The configured pair resolves to the Nemotron family before the prompt suffix
+        // is checked, so the shared Qwen tool parser does not change the answer.
+        let thinking_on = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            Some("qwen3_coder"),
+            Some("nemotron_v3"),
+            Some("<|im_start|>assistant\n<think>\n"),
+        );
+        assert!(thinking_on.unified);
+        assert!(thinking_on.legacy);
+        let thinking_off = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            Some("qwen3_coder"),
+            Some("nemotron_v3"),
+            Some("<|im_start|>assistant\n<think></think>"),
+        );
+        assert!(!thinking_off.unified);
+        assert!(!thinking_off.legacy);
+
+        let mut request = parser_route_test_request(ChatCompletionToolChoiceOption::Auto);
+        assert!(!OpenAIPreprocessor::request_disables_reasoning_with_family(
+            &request,
+            Some("qwen3_coder"),
+            Some("nemotron_v3"),
+            None,
+            Some("nemotron_v3"),
+        ));
+        request.chat_template_args = Some(
+            [("enable_thinking".to_string(), serde_json::json!(false))]
+                .into_iter()
+                .collect(),
+        );
+        assert!(OpenAIPreprocessor::request_disables_reasoning_with_family(
+            &request,
+            Some("qwen3_coder"),
+            Some("nemotron_v3"),
+            None,
+            Some("nemotron_v3"),
+        ));
+        request.chat_template_args = Some(
+            [(
+                "force_nonempty_content".to_string(),
+                serde_json::json!(true),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(!OpenAIPreprocessor::request_disables_reasoning_with_family(
+            &request,
+            Some("qwen3_coder"),
+            Some("nemotron_v3"),
+            None,
+            Some("nemotron_v3"),
+        ));
     }
 
     #[test]

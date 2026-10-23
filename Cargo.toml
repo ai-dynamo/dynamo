@@ -74,7 +74,7 @@ dynamo-parsers = { version = "=10.0.7" }
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
 # Native count-before-string early streaming still needs a frontend-crates fix.
-dynamo-parsers-v2 = { version = "=0.7.24" }
+dynamo-parsers-v2 = { version = "=0.7.27" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.6.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.6.0" }
 

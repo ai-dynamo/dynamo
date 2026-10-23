@@ -73,9 +73,27 @@ pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
 pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
+/// Nemotron 3 (Ultra, Super, 3.5 Super): `nemotron_v3` forced reasoning over the
+/// Qwen3-Coder XML tool grammar. Model cards pair `--dyn-tool-call-parser qwen3_coder`
+/// with `--dyn-reasoning-parser nemotron_v3`.
+pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
+
+fn uses_qwen_xml_grammar(family: &str) -> bool {
+    matches!(family, QWEN3_UNIFIED_FAMILY | NEMOTRON_V3_UNIFIED_FAMILY)
+}
+
+/// A family that borrows another family's tool grammar names the owner through its
+/// reasoning half: `qwen3_coder` + `nemotron_v3` is Nemotron, not Qwen3, because the
+/// forced-reasoning default lives in the reasoning parser and the XML grammar is shared.
+fn shared_grammar_family(tool_family: &str, reasoning_family: &str) -> Option<&'static str> {
+    match (tool_family, reasoning_family) {
+        (QWEN3_UNIFIED_FAMILY, NEMOTRON_V3_UNIFIED_FAMILY) => Some(NEMOTRON_V3_UNIFIED_FAMILY),
+        _ => None,
+    }
+}
 
 const DYNAMO_FAMILY_ALIASES: &[(&str, &str)] = &[
     ("deepseek-v4", DEEPSEEK_V4_UNIFIED_FAMILY),
@@ -110,8 +128,12 @@ pub(crate) fn configured_family(
 ) -> Option<&'static str> {
     match (tool_call_parser, reasoning_parser) {
         (Some(tool), Some(reasoning)) => {
-            let family = canonical_family(tool)?;
-            (canonical_family(reasoning)? == family).then_some(family)
+            let tool_family = canonical_family(tool)?;
+            let reasoning_family = canonical_family(reasoning)?;
+            if tool_family == reasoning_family {
+                return Some(tool_family);
+            }
+            shared_grammar_family(tool_family, reasoning_family)
         }
         (Some(parser), None) | (None, Some(parser)) => canonical_family(parser),
         (None, None) => None,
@@ -134,9 +156,14 @@ pub(crate) fn selected_family(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax.
+    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax, and a
+    // reasoning-only Nemotron 3 card does not say which tool grammar it serves; both
+    // keep the legacy path unless V2 is selected explicitly.
     let selected = if tool_call_parser.is_none()
-        && reasoning_parser == Some("qwen3")
+        && matches!(
+            reasoning_parser,
+            Some("qwen3" | "nemotron_v3" | "nemotron3")
+        )
         && selection == dynamo_runtime::config::ParserVersion::Auto
     {
         None
@@ -207,8 +234,10 @@ impl UnifiedRequestPolicy {
         family: &str,
         inferred: UnifiedParserStartingState,
     ) -> UnifiedParserStartingState {
-        if self.reasoning_disabled && family == "gemma4" {
+        if self.reasoning_disabled && matches!(family, "gemma4" | NEMOTRON_V3_UNIFIED_FAMILY) {
             // Gemma's Response state preserves literal thought delimiters and still parses tools.
+            // Nemotron 3 defaults to an implicit open thought; `enable_thinking=false` renders
+            // a closed `<think></think>` pair instead, so generation starts in the answer.
             UnifiedParserStartingState::Response
         } else {
             inferred
@@ -622,6 +651,11 @@ pub(crate) fn stream_prefill(
         // so the model emits `<think>` itself when it thinks.
         QWEN3_UNIFIED_FAMILY => UnifiedParserStartingState::None,
         DEEPSEEK_V41_UNIFIED_FAMILY => UnifiedParserStartingState::None,
+        // Nemotron 3's template pre-opens `<think>\n` whenever thinking is on, which the
+        // prompt check above normally reports. When the rendered prompt is unavailable,
+        // keep the v1 `nemotron_v3` contract: reasoning is on unless the request turned it
+        // off, and `UnifiedRequestPolicy::starting_state` moves that case to `Response`.
+        NEMOTRON_V3_UNIFIED_FAMILY => UnifiedParserStartingState::Reasoning,
         _ => UnifiedParserStartingState::None,
     }
 }
@@ -649,7 +683,12 @@ pub(crate) fn stream_prefill(
 /// Nonterminal empty and whitespace-only chunks are held by `apply_stream` until this
 /// check can classify the first non-whitespace content. A terminal empty stream keeps
 /// the prompt's `Reasoning` state because there is no later payload to classify.
+///
+/// `None` is the family default, and Nemotron 3's default is the implicit thought, so
+/// bare JSON for that family starts in `Response` explicitly; `None` would hand the
+/// payload back to reasoning.
 fn bare_guided_json_prefill(
+    family: &str,
     first_content: Option<&ChatCompletionMessageContent>,
 ) -> UnifiedParserStartingState {
     let Some(ChatCompletionMessageContent::Text(text)) = first_content else {
@@ -660,9 +699,18 @@ fn bare_guided_json_prefill(
         return UnifiedParserStartingState::Reasoning;
     }
     if starts_bare_json(trimmed) {
-        UnifiedParserStartingState::None
+        bare_json_starting_state(family)
     } else {
         UnifiedParserStartingState::Reasoning
+    }
+}
+
+/// The starting state that lets a bare guided JSON payload reach the tool parser.
+fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
+    if family == NEMOTRON_V3_UNIFIED_FAMILY {
+        UnifiedParserStartingState::Response
+    } else {
+        UnifiedParserStartingState::None
     }
 }
 
@@ -674,7 +722,7 @@ fn bare_guided_json_prefill(
 /// neither marker means reasoning never ran for this turn.
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" => {
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -694,6 +742,11 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 // An opener exists (and any closer does not precede it): the model will
                 // open reasoning itself later, currently visible as ordinary text.
                 (Some(_), _) => UnifiedParserStartingState::None,
+                // Marker-free text is the visible answer. This also holds for Nemotron
+                // 3, whose implicit thought is split by the streaming path before the
+                // aggregator re-reads a choice's text: starting that text in reasoning
+                // would relabel an already-parsed answer. A raw thought cut off before
+                // `</think>` is indistinguishable here and is read the same way.
                 (None, None) => UnifiedParserStartingState::Response,
             })
         }
@@ -719,7 +772,7 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
 
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
     match family {
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" => {
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
             Some(("<think>", "</think>"))
         }
         "gemma4" => Some(("<|channel>", "<channel|>")),
@@ -1025,7 +1078,7 @@ fn batch_tool_output_mode(
     content: &str,
     constraint: &GuidedToolConstraint,
 ) -> UnifiedToolOutputMode {
-    let tool_parser = if family == QWEN3_UNIFIED_FAMILY {
+    let tool_parser = if uses_qwen_xml_grammar(family) {
         QWEN3_TOOL_CALL_PARSER
     } else {
         family
@@ -1123,7 +1176,7 @@ fn unified_parser_control_markers(family: &str) -> Vec<String> {
 
 fn native_family_marker(family: &str) -> Option<&'static str> {
     match family {
-        "qwen3" | "glm47" => Some("<tool_call>"),
+        "qwen3" | "glm47" | "nemotron_v3" => Some("<tool_call>"),
         "deepseek_v4" => Some("<｜DSML｜tool_calls>"),
         "deepseek_v41" => Some("<｜DSML｜ calls>"),
         "gemma4" => Some("<|tool_call>"),
@@ -1720,7 +1773,7 @@ impl ChoiceState {
     }
 
     fn is_qwen_native_outside_block(&self) -> bool {
-        self.family == QWEN3_UNIFIED_FAMILY
+        uses_qwen_xml_grammar(&self.family)
             && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
             && self.qwen_native_lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
     }
@@ -1730,7 +1783,7 @@ impl ChoiceState {
             // EOF recovery needs source context; scan once there, not on every push.
             input.push_str(text);
         }
-        if self.family == QWEN3_UNIFIED_FAMILY
+        if uses_qwen_xml_grammar(&self.family)
             && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
         {
             self.qwen_native_lexical_state.observe(text);
@@ -3079,7 +3132,7 @@ where
                             .reasoning_content
                             .as_ref()
                             .is_some_and(|reasoning| !reasoning.is_empty())
-                        && family == QWEN3_UNIFIED_FAMILY
+                        && uses_qwen_xml_grammar(family)
                         && states.get(&original.index).is_some_and(|state| {
                             state.qwen_native_lexical_state.mode
                                 == QwenNativeLexicalMode::OutsideBlock
@@ -3228,7 +3281,7 @@ where
                 let new_native_call_after_detour = records
                     .get(&original.index)
                     .is_some_and(|record| record.detoured)
-                    && family == QWEN3_UNIFIED_FAMILY
+                    && uses_qwen_xml_grammar(family)
                     && states
                         .get(&original.index)
                         .is_some_and(|state| {
@@ -3359,7 +3412,7 @@ where
                                     _ => UnifiedParserStartingState::Reasoning,
                                 }
                             } else {
-                                bare_guided_json_prefill(original.delta.content.as_ref())
+                                bare_guided_json_prefill(family, original.delta.content.as_ref())
                             }
                         } else {
                             detected_prefill
@@ -3954,6 +4007,258 @@ pub(crate) mod tests {
             configured_family(Some("qwen3"), Some("qwen3")),
             Some("qwen3")
         );
+    }
+
+    #[test]
+    fn nemotron_pairs_qwen3_coder_with_nemotron_v3_reasoning() {
+        // The released reasoning parser also answers to `nemotron3`; the canonical
+        // spelling is covered by `eight_family_routing_all_modes`.
+        assert_eq!(
+            configured_family(Some("qwen3_coder"), Some("nemotron3")),
+            Some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            configured_family(None, Some("nemotron3")),
+            Some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
+        // The reverse pairing (Nemotron tool half, Qwen reasoning) names no owner.
+        assert_eq!(configured_family(Some("nemotron_v3"), Some("qwen3")), None);
+        assert_eq!(
+            configured_family(Some("kimi_k2"), Some("nemotron_v3")),
+            None
+        );
+        // The older Nemotron JSON tool grammar is not the shared XML one.
+        assert_eq!(
+            configured_family(Some("qwen3_coder"), Some("nemotron_nano")),
+            None
+        );
+    }
+
+    #[test]
+    fn nemotron_prefill_defaults_to_reasoning_unless_the_request_disables_it() {
+        assert_eq!(
+            stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, true),
+            UnifiedParserStartingState::Reasoning
+        );
+        assert_eq!(
+            stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, false),
+            UnifiedParserStartingState::Reasoning
+        );
+        let disabled = UnifiedRequestPolicy {
+            reasoning_disabled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            disabled.starting_state(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                UnifiedParserStartingState::Reasoning
+            ),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            UnifiedRequestPolicy::default().starting_state(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                UnifiedParserStartingState::Reasoning
+            ),
+            UnifiedParserStartingState::Reasoning
+        );
+        // Batch: a bare closer means the prompt pre-opened the thought; marker-free
+        // text is the answer (the streaming path already split any thought off it).
+        assert_eq!(
+            detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "reason</think>answer").unwrap(),
+            UnifiedParserStartingState::Reasoning
+        );
+        assert_eq!(
+            detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "Hello!").unwrap(),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "<think>reason</think>answer").unwrap(),
+            UnifiedParserStartingState::None
+        );
+        assert_eq!(
+            disabled
+                .batch_starting_state(NEMOTRON_V3_UNIFIED_FAMILY, "answer")
+                .unwrap(),
+            UnifiedParserStartingState::Response
+        );
+        // Bare guided JSON must reach the tool parser: `None` is the family default,
+        // which for Nemotron is the implicit thought, so the state is `Response`.
+        let json = ChatCompletionMessageContent::Text(r#"{"city":"Paris"}"#.into());
+        assert_eq!(
+            bare_guided_json_prefill(NEMOTRON_V3_UNIFIED_FAMILY, Some(&json)),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            bare_guided_json_prefill(QWEN3_UNIFIED_FAMILY, Some(&json)),
+            UnifiedParserStartingState::None
+        );
+        let prose = ChatCompletionMessageContent::Text("thinking first".into());
+        assert_eq!(
+            bare_guided_json_prefill(NEMOTRON_V3_UNIFIED_FAMILY, Some(&prose)),
+            UnifiedParserStartingState::Reasoning
+        );
+    }
+
+    #[tokio::test]
+    async fn nemotron_bare_guided_json_becomes_a_tool_call_in_stream_and_batch() {
+        // The prompt pre-opened reasoning (`prefill = Reasoning`) and guided decoding
+        // forbids the closer, so the payload's first byte is JSON. Both paths must
+        // return the forced call instead of consuming the JSON as reasoning.
+        let tools = weather_tools();
+        for (constraint, raw) in [
+            (
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".into(),
+                },
+                r#"{"city":"Paris"}"#,
+            ),
+            (
+                GuidedToolConstraint::GuidedJsonRequired,
+                r#"[{"name":"get_weather","arguments":{"city":"Paris"}}]"#,
+            ),
+        ] {
+            let batch = parse_complete_with_policy(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                raw,
+                &constraint,
+                &tools,
+                UnifiedRequestPolicy::default(),
+            )
+            .unwrap();
+            assert!(batch.reasoning.is_empty(), "batch {raw}");
+            assert!(batch.text.is_empty(), "batch {raw}");
+            assert_eq!(batch.tool_calls.len(), 1, "batch {raw}");
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city": "Paris"})
+            );
+            for split in 0..=raw.len() {
+                let outputs: Vec<_> = apply_stream_with_policy(
+                    futures::stream::iter([
+                        chunk(&raw[..split], false),
+                        chunk(&raw[split..], true),
+                    ]),
+                    Some(tools.clone()),
+                    constraint.clone(),
+                    stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, true),
+                    NEMOTRON_V3_UNIFIED_FAMILY,
+                    true,
+                    UnifiedRequestPolicy::default(),
+                )
+                .collect()
+                .await;
+                let choices = collect_choices(&outputs);
+                assert!(
+                    choices
+                        .iter()
+                        .all(|choice| choice.delta.reasoning_content.is_none()),
+                    "split {split}: {raw}: {choices:?}"
+                );
+                let names: Vec<_> = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                    .collect();
+                assert_eq!(names, ["get_weather"], "split {split}: {raw}");
+                let arguments: String = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                    .collect();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    serde_json::json!({"city": "Paris"}),
+                    "split {split}: {raw}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nemotron_thinking_on_and_off_split_channels_at_every_split() {
+        let call = "<tool_call><function=get_weather><parameter=city>Montréal</parameter></function></tool_call>";
+        let tools = weather_tools();
+        let cases = [
+            // enable_thinking=true: the prompt opened `<think>`, the model closes it.
+            (
+                format!("Check Montréal.</think>Sure.{call}"),
+                UnifiedRequestPolicy::default(),
+                "Check Montréal.",
+                "Sure.",
+            ),
+            // enable_thinking=false: the prompt rendered `<think></think>`; a literal
+            // marker in the answer stays visible text.
+            (
+                format!("Sure, </think> is literal.{call}"),
+                UnifiedRequestPolicy {
+                    reasoning_disabled: true,
+                    ..Default::default()
+                },
+                "",
+                "Sure, </think> is literal.",
+            ),
+        ];
+        for (raw, policy, want_reasoning, want_text) in cases {
+            let batch = parse_complete_with_policy(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                &raw,
+                &GuidedToolConstraint::None,
+                &tools,
+                policy,
+            )
+            .unwrap();
+            assert_eq!(batch.reasoning, want_reasoning, "batch {raw}");
+            assert_eq!(batch.text, want_text, "batch {raw}");
+            assert_eq!(batch.tool_calls.len(), 1, "batch {raw}");
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city": "Montréal"})
+            );
+            for split in (0..=raw.len()).filter(|split| raw.is_char_boundary(*split)) {
+                let outputs: Vec<_> = apply_stream_with_policy(
+                    futures::stream::iter([
+                        chunk(&raw[..split], false),
+                        chunk(&raw[split..], true),
+                    ]),
+                    Some(tools.clone()),
+                    GuidedToolConstraint::None,
+                    stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, false),
+                    NEMOTRON_V3_UNIFIED_FAMILY,
+                    true,
+                    policy,
+                )
+                .collect()
+                .await;
+                let choices = collect_choices(&outputs);
+                let reasoning: String = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                    .collect();
+                let text: String = choices
+                    .iter()
+                    .filter_map(|choice| match &choice.delta.content {
+                        Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(reasoning, want_reasoning, "stream split {split}: {raw}");
+                assert_eq!(text, want_text, "stream split {split}: {raw}");
+                let names: Vec<_> = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                    .collect();
+                assert_eq!(names, ["get_weather"], "stream split {split}: {raw}");
+            }
+        }
     }
 
     #[test]
@@ -10047,6 +10352,7 @@ pub(crate) mod tests {
             ("gemma4", "gemma4", GEMMA4_UNIFIED_FAMILY),
             ("glm47", "glm45", GLM47_UNIFIED_FAMILY),
             ("muse", "muse_glimmer", MUSE_UNIFIED_FAMILY),
+            ("qwen3_coder", "nemotron_v3", NEMOTRON_V3_UNIFIED_FAMILY),
         ] {
             assert_eq!(configured_family(Some(tool), Some(reason)), Some(family));
             for choice in [
@@ -10075,7 +10381,10 @@ pub(crate) mod tests {
                 }
             }
             if family != MUSE_UNIFIED_FAMILY {
-                assert_eq!(configured_family(Some(tool), None), Some(family));
+                // Nemotron borrows Qwen's tool parser, so that half alone stays Qwen3.
+                if family != NEMOTRON_V3_UNIFIED_FAMILY {
+                    assert_eq!(configured_family(Some(tool), None), Some(family));
+                }
                 assert_eq!(configured_family(None, Some(reason)), Some(family));
                 assert_eq!(configured_family(Some(tool), Some("unrelated")), None);
             }
@@ -11170,6 +11479,16 @@ pub(crate) mod tests {
             selected_family(None, Some("qwen3")),
             (selection == "2").then_some(QWEN3_UNIFIED_FAMILY)
         );
+        // Nemotron 3 shares Qwen's tool grammar: the explicit pair routes like Qwen3,
+        // and a reasoning-only card stays legacy unless V2 is selected explicitly.
+        assert_eq!(
+            selected_family(Some("qwen3_coder"), Some("nemotron_v3")),
+            (selection != "1").then_some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            selected_family(None, Some("nemotron_v3")),
+            (selection == "2").then_some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
         for &parser in FAMILY_NAMES.iter() {
             let family = canonical_family(parser).unwrap();
             for (tool, reasoning) in [
@@ -11177,8 +11496,10 @@ pub(crate) mod tests {
                 (Some(parser), None),
                 (None, Some(parser)),
             ] {
-                let reasoning_only_qwen3 = tool.is_none() && reasoning == Some("qwen3");
-                let expected = (selection != "1" && (selection == "2" || !reasoning_only_qwen3))
+                let reasoning_only_shared_grammar = tool.is_none()
+                    && matches!(reasoning, Some("qwen3" | "nemotron_v3" | "nemotron3"));
+                let expected = (selection != "1"
+                    && (selection == "2" || !reasoning_only_shared_grammar))
                     .then_some(family);
                 assert_eq!(
                     selected_family(tool, reasoning),
