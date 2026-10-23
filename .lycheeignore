@@ -60,10 +60,6 @@
 # (afterwards lychee validates the URL again, catching any later rename/move).
 ^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml
 
-# The v1.6.0 release entry lands with the current-release promotion; the tag
-# URL 404s from CI until v1.6.0 is cut. Remove after the tag exists.
-^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.6\.0$
-
 # The classic dynamo-platform 1.6.0 chart publishes to helm.ngc.nvidia.com in a
 # follow-up NGC publishing MR; the .tgz URL 404s until then. Remove once live.
 ^https://helm\.ngc\.nvidia\.com/nvidia/ai-dynamo/charts/dynamo-platform-1\.6\.0\.tgz$
@@ -110,3 +106,6 @@
 # examples/gpu-sharing is added in the same PR as the GPU sharing docs
 # that link to it on main. Remove this rule once that PR merges.
 ^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/gpu-sharing
+
+# Preserve historical attribution while this contributor profile is unavailable.
+^https://github\.com/Spycsh$

@@ -69,7 +69,7 @@ export interface Release {
 }
 
 export const CURRENT_VERSION = "v1.6.0";
-export const CURRENT_DATE = "Oct 21, 2026";
+export const CURRENT_DATE = "Oct 22, 2026";
 export const CURRENT_TAG = "1.6.0";
 export const CURRENT_WHEEL = "1.6.0";
 
@@ -87,7 +87,8 @@ const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
 export const RELEASES: Release[] = [
   {
     version: "v1.6.0",
-    date: "Oct 21, 2026",
+    notesHref: "/dynamo/dev/reference/releases/v1-6-0",
+    date: "Oct 22, 2026",
     kind: "stable",
     github: `${GH}v1.6.0`,
     docs: "https://docs.nvidia.com/dynamo",
@@ -96,7 +97,7 @@ export const RELEASES: Release[] = [
     delta:
       "vLLM worker services renamed to worker, prefill and decode; Dynamo Operator no longer adopts resources it does not own and validates multinode settings more strictly; Grove v0.1.0-alpha.14 required for new multinode deployments, with Coherent updates now opt-in; AIConfigurator options renamed to AISimulate (--aic-* to --ais-*); Router policy YAML takes precedence over the scoring flags, which are deprecated with removal targeted for v1.7.0; structural tags on by default for supported parsers; TensorRT-LLM AutoDeploy backend removed and the TensorRT-LLM sidecar moved to the OpenEngine gRPC API; invalid DYN_REQUEST_PLANE and DYN_EVENT_PLANE values fail at startup.",
     notesSummary:
-      "Pluggable flow control on one shared worker-selection core in the Router, TensorRT-LLM OpenEngine, LoRA and encode-prefill-decode support in the engine sidecars, V2 tool and reasoning parsers and a rerank endpoint in the Frontend, video-aware KV routing for SGLang, LPX components and role-specific pod templates on Kubernetes, Snapshot-backed engine failover, and runtime GPU budget reconfiguration in the Planner.",
+      "Pluggable flow control on one shared worker-selection core in the Router, V2 tool and reasoning parsers and a rerank endpoint in the Frontend, video-aware KV routing for SGLang, LPX components and role-specific pod templates on Kubernetes, Snapshot-backed engine failover, and runtime GPU budget reconfiguration in the Planner.",
   },
   {
     version: "v1.5.1",
@@ -750,7 +751,7 @@ export const ARTIFACTS: Artifact[] = [
     category: "container",
     group: "component",
     name: "dynamo-sidecar",
-    description: "Engine sidecars that run Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine",
+    description: "Dynamo Sidecar, which runs Dynamo beside a stock SGLang, TensorRT-LLM, or vLLM engine",
     meta: "CPU-only · AMD64/ARM64",
     href: `${NGC_C}/dynamo-sidecar/tags`,
     badge: "Experimental",
@@ -1425,8 +1426,9 @@ export interface ReleaseStats {
    published 930/603/896, missing in both directions, so it cannot be trusted
    to fill the rest. Leave them absent unless a method reproduces all three. */
 export const RELEASE_STATS: Record<string, ReleaseStats> = {
+  "v1.6.0": { prs: 654, contributors: 148, firstTimers: 45, breaking: 41, knownIssues: 15 },
   "v1.5.1": { breaking: 2, knownIssues: 2 },
-  "v1.5.0": { prs: 658, contributors: 123, breaking: 44, knownIssues: 12 },
+  "v1.5.0": { prs: 658, contributors: 123, firstTimers: 23, breaking: 44, knownIssues: 12 },
   "v1.4.0": { prs: 640, contributors: 127, firstTimers: 29, breaking: 51, knownIssues: 19 },
   "v1.3.0": { prs: 930, contributors: 125, firstTimers: 24, breaking: 24, knownIssues: 10 },
   "v1.2.0": { prs: 603, contributors: 82, breaking: 5, knownIssues: 11 },
