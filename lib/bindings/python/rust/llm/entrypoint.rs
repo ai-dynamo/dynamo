@@ -820,8 +820,13 @@ async fn select_engine(
 
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine =
-                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
+            let engine = make_mocker_engine(
+                distributed_runtime.inner,
+                endpoint,
+                mocker_args,
+                local_model.display_name().to_string(),
+            )
+            .await?;
 
             // This config is the mocker worker: every endpoint serving it, or a
             // clone of it, admits through this one gate.
