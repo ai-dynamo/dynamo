@@ -181,7 +181,7 @@ func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedDGDOverrideTarget
 			return
 		}
 		for _, value := range components {
-			component, ok := value.(map[string]interface{})
+			component, ok := value.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -214,7 +214,7 @@ func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedDGDOverrideTarget
 
 func rawExtensionToUnstructured(extension *k8sruntime.RawExtension) (*unstructured.Unstructured, bool) {
 	if len(extension.Raw) > 0 {
-		object := map[string]interface{}{}
+		object := map[string]any{}
 		if err := json.Unmarshal(extension.Raw, &object); err != nil {
 			return nil, false
 		}

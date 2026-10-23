@@ -52,8 +52,9 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
 - `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
-- `issue-first` — start from a tracked issue and reference it from the PR
+- `dynamo-issue-first` — start from a tracked issue and reference it from the PR
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `dynamo-release-cherry-pick` — land a fix on a release branch: cherry-pick, release-only fix, or external Cherry-Pick Request
 - `repo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
@@ -239,8 +240,8 @@ cargo fmt --all && cargo clippy --workspace
 - PR descriptions must include `Summary` and `Validation`.
 - Every PR references the tracked issue it implements, in the title, description, or
   branch name (`Closes #123`, `Closes DYN-1234`, `user/dyn-1234-description`). The
-  `PR Issue Link` check verifies the reference; it is advisory until 2026-10-21, then
-  required. Reference forms and remediation are in the `issue-first` skill.
+  `PR Issue Link` check verifies the reference; it is advisory until `release/1.7.0` is
+  cut, then required. Reference forms and remediation are in the `dynamo-issue-first` skill.
 - Sign every commit with DCO: `git commit -s`.
 - For fork PRs that qualify for automatic CI approval, GitHub must report every commit's
   signature as `Verified`. A DCO sign-off alone is not enough. Signing commits does not

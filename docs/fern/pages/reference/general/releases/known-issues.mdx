@@ -12,9 +12,15 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 Known issues are mirrored verbatim from each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
 
+<a id="v160"></a>
+
+## v1.6.0 — current release
+
+The v1.6.0 known issues come from the GitHub release notes and land here when the notes publish. Until then, the v1.5.1 entries below remain the latest recorded issues.
+
 <a id="v151"></a>
 
-## v1.5.1 — current release
+## v1.5.1
 
 <span className="dynref-badge dynref-badge--blue">SGLang</span> **SGLang Sidecar Inference 500 Errors:** Every inference request sent to the SGLang sidecar still fails with HTTP 500 and the error `'GenerateReqInput' object has no attribute 'batch_size'`. The cause is a protocol mismatch with the bundled SGLang version that is corrected in upstream SGLang v0.5.19. No workaround is available yet; the fix is targeted for v1.6.0.
 

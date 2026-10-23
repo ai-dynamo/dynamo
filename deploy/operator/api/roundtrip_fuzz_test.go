@@ -749,7 +749,7 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 	case 5:
 		n := int(c.Uint32() % 3)
 		out := make(map[string]any, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
 		}
 		return out
@@ -761,7 +761,7 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 func fuzzJSONObject(c randfill.Continue, depth int) map[string]any {
 	n := int(c.Uint32() % 3)
 	out := make(map[string]any, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
 	}
 	return out

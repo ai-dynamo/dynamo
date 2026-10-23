@@ -36,6 +36,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 
 use tokio::sync::mpsc;
 
+use dynamo_llm::admission_gate::{AdmissionRequest, AdmissionResponse, ResponseOutput};
 use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
@@ -51,7 +52,7 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 use crate::context::{Context, callable_accepts_kwarg};
 use crate::engine::{self, map_python_exception};
-use crate::python_payload::{self, PythonPayload};
+use crate::python_payload::{self, PythonPayload, WaitClassification};
 
 /// Whether this Python callable can be driven in push mode. This is the ONLY
 /// switch between the two egress paths.
@@ -179,7 +180,7 @@ impl EncodeBuffer {
 /// One response, already encoded for the request plane.
 ///
 /// Encoding happens in `send`, under the GIL the handler already holds, and the
-/// payload is still a [`PythonPayload`] at that moment — so it transcodes
+/// payload is still a [`python_payload::PythonPayload`] at that moment — so it transcodes
 /// straight into the codec in one pass, exactly as on the pull path, and
 /// nothing the codec can represent is narrowed on the way.
 ///
@@ -195,6 +196,9 @@ pub(crate) struct PushFrame {
     bytes: Bytes,
     is_error: bool,
     codec: RequestPlanePayloadCodec,
+    /// What the response carries for backend admission, read while it was
+    /// encoded under the handler's GIL.
+    output: ResponseOutput,
 }
 
 impl std::fmt::Debug for PushFrame {
@@ -203,7 +207,14 @@ impl std::fmt::Debug for PushFrame {
             .field("len", &self.bytes.len())
             .field("is_error", &self.is_error)
             .field("codec", &self.codec.name())
+            .field("output", &self.output)
             .finish()
+    }
+}
+
+impl AdmissionResponse for PushFrame {
+    fn admission_output(&self) -> ResponseOutput {
+        self.output
     }
 }
 
@@ -230,31 +241,37 @@ impl PushFrame {
     ///
     /// Either way the lock is released before returning, and so before the
     /// caller's enqueue, which can block.
+    ///
+    /// `classify` says whether backend admission still reads what the response
+    /// carries; when it does not, the response is not read for it.
     fn encode(
         py: Python<'_>,
         obj: &Bound<'_, PyAny>,
         codec: RequestPlanePayloadCodec,
         buffer: &parking_lot::Mutex<EncodeBuffer>,
+        classify: bool,
     ) -> PyResult<Self> {
         let Some(mut pooled) = buffer.try_lock() else {
             // Sized, not `new()`: growing from zero is the cost this whole
             // change exists to remove, and the fallback should not quietly
             // reintroduce it for the frame that takes it.
             let mut scratch = BytesMut::with_capacity(EncodeBuffer::SCRATCH_CAPACITY);
-            let is_error = Self::write(py, obj, codec, &mut scratch)?;
+            let (is_error, output) = Self::write(py, obj, codec, &mut scratch, classify)?;
             return Ok(Self {
                 bytes: scratch.freeze(),
                 is_error,
                 codec,
+                output,
             });
         };
 
         pooled.reserve();
-        match Self::write(py, obj, codec, &mut pooled.buf) {
-            Ok(is_error) => Ok(Self {
+        match Self::write(py, obj, codec, &mut pooled.buf, classify) {
+            Ok((is_error, output)) => Ok(Self {
                 bytes: pooled.take(),
                 is_error,
                 codec,
+                output,
             }),
             Err(error) => {
                 // The frame may be half-written. Drop those bytes so the next
@@ -266,14 +283,16 @@ impl PushFrame {
     }
 
     /// Write one response's frame into `out`, returning whether it is an error
-    /// frame. On failure `out` may be left holding a partial frame, so the
-    /// caller must discard it.
+    /// frame and, when `classify` asks, what it carries for backend admission,
+    /// which the same parse reads. On failure `out` may be left holding a
+    /// partial frame, so the caller must discard it.
     fn write(
         py: Python<'_>,
         obj: &Bound<'_, PyAny>,
         codec: RequestPlanePayloadCodec,
         out: &mut BytesMut,
-    ) -> PyResult<bool> {
+        classify: bool,
+    ) -> PyResult<(bool, ResponseOutput)> {
         let annotated =
             python_payload::parse_python_response(obj.clone().unbind(), py).map_err(|error| {
                 PyValueError::new_err(format!(
@@ -281,14 +300,21 @@ impl PushFrame {
                      application-logic-mismatch: {error}"
                 ))
             })?;
-        python_payload::write_annotated_response(codec, annotated, &mut out.writer()).map_err(
-            |error| {
-                PyValueError::new_err(format!(
-                    "critical error: failed serializing python response as {}: {error}",
-                    codec.name()
-                ))
-            },
-        )
+        let output = if classify {
+            python_payload::response_output(&annotated, py)
+        } else {
+            ResponseOutput::INTERIM
+        };
+        let is_error =
+            python_payload::write_annotated_response(codec, annotated, &mut out.writer()).map_err(
+                |error| {
+                    PyValueError::new_err(format!(
+                        "critical error: failed serializing python response as {}: {error}",
+                        codec.name()
+                    ))
+                },
+            )?;
+        Ok((is_error, output))
     }
 
     /// Encode a terminal error frame. Pure Rust — no Python object involved —
@@ -306,6 +332,7 @@ impl PushFrame {
             bytes: bytes.into(),
             is_error,
             codec,
+            output: ResponseOutput::INTERIM,
         }
     }
 
@@ -376,6 +403,11 @@ struct ResponseSink {
     /// `&self`. Uncontended in practice: one request's handler pushes from a
     /// single event-loop thread.
     encode_buffer: parking_lot::Mutex<EncodeBuffer>,
+    /// Which frames backend admission still reads the classification of: until
+    /// the channel accepts one that ends the request's wait. The handler can
+    /// push far ahead of the gate; the decisive frame carries its own
+    /// classification through the channel.
+    classification: WaitClassification,
 }
 
 impl ResponseSink {
@@ -410,7 +442,21 @@ impl ResponseSink {
         // The whole Python->Rust crossing for one response: the encode plus the
         // enqueue. Unlike the pull path neither step acquires the GIL — the
         // Python handler already holds it.
-        let frame = PushFrame::encode(py, obj, self.codec, &self.encode_buffer)?;
+        //
+        // Whether to classify is read before the encode, which can run Python
+        // that re-enters `send`: a re-entrant frame the channel accepts first
+        // is ahead of this one, so whichever ends the wait still reaches the
+        // gate first. No classification-state lock is held across Python
+        // execution; the encode buffer's own guard is only ever `try_lock`ed
+        // (see `PushFrame::encode`).
+        let frame = PushFrame::encode(
+            py,
+            obj,
+            self.codec,
+            &self.encode_buffer,
+            self.classification.classifies(),
+        )?;
+        let output = frame.output;
 
         let Some(tx) = self.sender() else {
             return Err(PyRuntimeError::new_err(
@@ -421,7 +467,10 @@ impl ResponseSink {
         // Fast path. `try_send` never blocks, so there is no reason to drop the
         // GIL for it, and dropping/reacquiring it would cost more than the send.
         let frame = match tx.try_send(frame) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                self.classification.accepted(output);
+                return Ok(());
+            }
             Err(mpsc::error::TrySendError::Full(frame)) => frame,
             Err(mpsc::error::TrySendError::Closed(_)) => return Err(self.consumer_gone()),
         };
@@ -443,7 +492,9 @@ impl ResponseSink {
         // if a handler managed to call `send` from an async tokio task while
         // holding the GIL.
         py.allow_threads(|| tx.blocking_send(frame))
-            .map_err(|_| self.consumer_gone())
+            .map_err(|_| self.consumer_gone())?;
+        self.classification.accepted(output);
+        Ok(())
     }
 
     /// Normal end of stream.
@@ -570,7 +621,8 @@ impl ResponseSender {
 
 // ── Factory ──────────────────────────────────────────────────────────────────
 
-/// Build one request's push channel.
+/// Build one request's push channel, classifying its frames for backend
+/// admission when `uses_admission` says the request uses the gate.
 ///
 /// The returned stream yields already-encoded [`PushFrame`]s; the ingress side
 /// (`lib/runtime/src/pipeline/network/ingress/push_handler.rs`) is unchanged and
@@ -578,6 +630,7 @@ impl ResponseSender {
 pub(crate) fn response_channel(
     depth: usize,
     ctx: Arc<dyn AsyncEngineContext>,
+    uses_admission: bool,
 ) -> (
     ResponseSender,
     impl Stream<Item = PushFrame> + Send + 'static,
@@ -590,6 +643,7 @@ pub(crate) fn response_channel(
             ctx,
             codec: RequestPlanePayloadCodec::configured(),
             encode_buffer: parking_lot::Mutex::new(EncodeBuffer::new()),
+            classification: WaitClassification::new(uses_admission),
         }),
     };
 
@@ -620,22 +674,58 @@ pub(crate) fn response_channel(
 pub(crate) struct PythonPushEngine {
     handler: Arc<PyObject>,
     event_loop: Arc<PyObject>,
+    /// The role its endpoint serves as a model backend, once one is recorded.
+    backend_role: engine::BackendRole,
+    /// The admission gate of the worker its endpoint serves for.
+    admission: engine::EndpointAdmission,
 }
 
 impl PythonPushEngine {
-    pub(crate) fn new(handler: PyObject, event_loop: PyObject) -> Self {
+    pub(crate) fn new(
+        handler: PyObject,
+        event_loop: PyObject,
+        backend_role: engine::BackendRole,
+        admission: engine::EndpointAdmission,
+    ) -> Self {
         Self {
             handler: Arc::new(handler),
             event_loop: Arc::new(event_loop),
+            backend_role,
+            admission,
         }
     }
 }
 
 #[async_trait::async_trait]
 impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushFrame>, Error> for PythonPushEngine {
+    /// A model backend's request is admitted through its worker's admission
+    /// gate before its handler is invoked or its driver task spawned; any other
+    /// endpoint's request goes straight to its handler.
     async fn generate(
         &self,
         request: SingleIn<PythonPayload>,
+    ) -> Result<ManyOut<PushFrame>, Error> {
+        if self.backend_role.uses_admission() {
+            let context = request.context();
+            let dp_rank = request.dp_rank();
+            self.admission
+                .gate()
+                .admit(&context, dp_rank, self.push(request, true))
+                .await
+        } else {
+            self.push(request, false).await
+        }
+    }
+}
+
+impl PythonPushEngine {
+    /// Invoke the handler with a response sender, and drive it to completion,
+    /// classifying its frames when `uses_admission` says the request uses the
+    /// gate.
+    async fn push(
+        &self,
+        request: SingleIn<PythonPayload>,
+        uses_admission: bool,
     ) -> Result<ManyOut<PushFrame>, Error> {
         let (request, context) = request.transfer(());
         let ctx = context.context();
@@ -645,7 +735,8 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushFrame>, Error> for PythonP
 
         // Same depth as the pull path's forwarder, so both paths buffer the
         // same amount and backpressure behaves identically.
-        let (sender, stream) = response_channel(engine::RESPONSE_CHANNEL_DEPTH, ctx.clone());
+        let (sender, stream) =
+            response_channel(engine::RESPONSE_CHANNEL_DEPTH, ctx.clone(), uses_admission);
         let sink = sender.sink();
 
         let python_input = request.into_inner();
@@ -737,7 +828,7 @@ mod tests {
     //! `send`/`close` and `handler_supports_push` are not; they are covered by
     //! pytest against the built `.so`.  Gaps are documented at the bottom.
 
-    use super::{EncodeBuffer, PushFrame};
+    use super::{EncodeBuffer, PushFrame, ResponseOutput};
     use crate::engine::RESPONSE_CHANNEL_DEPTH;
     use bytes::BufMut;
     use dynamo_runtime::pipeline::network::{NetworkStreamWrapper, RequestPlanePayloadCodec};
@@ -987,6 +1078,7 @@ mod tests {
                 .into(),
             is_error: false,
             codec: RequestPlanePayloadCodec::Msgpack,
+            output: ResponseOutput::INTERIM,
         };
 
         let encoded = frame
@@ -1084,6 +1176,7 @@ mod tests {
                 .into(),
             is_error: true,
             codec: RequestPlanePayloadCodec::Msgpack,
+            output: ResponseOutput::INTERIM,
         };
         let encoded = frame
             .into_encoded(RequestPlanePayloadCodec::Json)
@@ -1093,6 +1186,65 @@ mod tests {
             !encoded.stop_stream,
             "stop_stream must remain false after re-encode"
         );
+    }
+
+    // ── classification ahead of the gate ──────────────────────────────────
+    //
+    // `send` classifies a frame only while `WaitClassification` says the gate
+    // still reads it, and notes each frame the channel accepts. A handler can
+    // push its whole response before the gate reads the first frame.
+
+    /// Every frame is in the channel before the gate reads one. The decisive
+    /// frame — a token, or a completion without one — carries its own
+    /// classification through the channel, so the wait still ends there, and
+    /// every frame behind it went unclassified.
+    #[test]
+    fn a_producer_ahead_of_the_gate_keeps_the_decisive_frame_classified() {
+        use crate::python_payload::WaitClassification;
+        use dynamo_llm::admission_gate::AdmissionResponse;
+
+        let token = ResponseOutput {
+            generated_token: true,
+            completion: false,
+        };
+        let completion = ResponseOutput {
+            generated_token: false,
+            completion: true,
+        };
+        for decisive in [token, completion] {
+            let classification = WaitClassification::new(true);
+            let (tx, mut rx) = mpsc::channel::<PushFrame>(RESPONSE_CHANNEL_DEPTH);
+            for output in [ResponseOutput::INTERIM, decisive, token, completion] {
+                let output = if classification.classifies() {
+                    output
+                } else {
+                    ResponseOutput::INTERIM
+                };
+                let mut frame = PushFrame::error(Annotated::from_error("frame"));
+                frame.output = output;
+                tx.try_send(frame).expect("room");
+                classification.accepted(output);
+            }
+            drop(tx);
+
+            let read: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|frame| frame.admission_output())
+                .collect();
+            assert_eq!(
+                read,
+                [
+                    ResponseOutput::INTERIM,
+                    decisive,
+                    ResponseOutput::INTERIM,
+                    ResponseOutput::INTERIM
+                ]
+            );
+            assert_eq!(
+                read.iter().position(|output| output.ends_wait()),
+                Some(1),
+                "the gate's wait ends at the decisive frame"
+            );
+        }
     }
 
     // The rest of this module's surface -- ResponseSink send/close semantics,
