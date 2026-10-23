@@ -18,10 +18,10 @@
 // Package aisimulate lowers a v1beta2 DynamoGraphDeploymentRequest spec into the native
 // AISimulate input that a Run executes.
 //
-// Lowering sits below the Request reconciler. Admission calls Parameters to check that
-// spec.aisimulate.parameters is an object, and Lower to check the effective input, for
-// example that it names the hardware. The reconciler freezes the output of Lower into the Run,
-// so admission and the Run see the same bytes.
+// Lowering sits below the Request reconciler. Admission does not call it: spec.aisimulate.parameters
+// is opaque there, and the validation of the lowered input belongs to the schema of the AISimulate
+// release the Request selects. The reconciler lowers the Request once and freezes the output into the
+// Run, which executes that object as it is.
 //
 // Lower works in three steps. The typed spec (model, backends, hardware, workload, objective)
 // is first translated into the native input, the "underlay". The derived defaults that no API

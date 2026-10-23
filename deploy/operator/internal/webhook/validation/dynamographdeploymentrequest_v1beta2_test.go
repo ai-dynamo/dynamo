@@ -117,16 +117,22 @@ func TestValidateV1beta2TypedStage(t *testing.T) {
 		spec.Workload.Static.KVLoadRatio = nvidiacomv1beta2.KVLoadRatio{0.9, 0.1}
 		v1beta2RequireError(t, validateDynamoGraphDeploymentRequestV1beta2(spec), "spec.workload.static.kvLoadRatio")
 	})
-	t.Run("typed and parameter errors aggregate", func(t *testing.T) {
-		spec := v1beta2WithParameters(v1beta2DefaultedSpec(), `[1]`)
+	t.Run("typed errors aggregate", func(t *testing.T) {
+		spec := v1beta2DefaultedSpec()
 		spec.Model.Name = ""
+		spec.Backends = []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM, nvidiacomv1beta2.BackendVLLM}
 		errs := validateDynamoGraphDeploymentRequestV1beta2(spec)
 		v1beta2RequireError(t, errs, "spec.model.name")
-		v1beta2RequireError(t, errs, "spec.aisimulate.parameters")
+		v1beta2RequireError(t, errs, "spec.backends[1]")
 	})
-	t.Run("parameter content is not validated here", func(t *testing.T) {
-		v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestV1beta2(
-			v1beta2WithParameters(v1beta2DefaultedSpec(), `{"workload":{"isl":0},"goal":{"target":"nope"}}`)))
+	t.Run("parameters are opaque to admission", func(t *testing.T) {
+		for _, parameters := range []string{
+			`{"workload":{"isl":0},"goal":{"target":"nope"}}`,
+			`[1]`, // the CRD types parameters as an object; admission does not interpret it
+		} {
+			v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestV1beta2(
+				v1beta2WithParameters(v1beta2DefaultedSpec(), parameters)))
+		}
 	})
 }
 
@@ -152,11 +158,6 @@ func TestValidateV1beta2AISimulateImage(t *testing.T) {
 		spec.AISimulate.VersionOverride = "1.4.0"
 		v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestV1beta2(spec))
 	})
-}
-
-func TestValidateV1beta2MalformedParameters(t *testing.T) {
-	errs := validateDynamoGraphDeploymentRequestV1beta2(v1beta2WithParameters(v1beta2DefaultedSpec(), `[1]`))
-	v1beta2RequireError(t, errs, "spec.aisimulate.parameters: spec.aisimulate.parameters: must be a JSON object")
 }
 
 func v1beta2Envelope(raw string) *apiextensionsv1.JSON {

@@ -575,17 +575,16 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:         "v1beta2 failed discovery is rejected",
+			name:         "v1beta2 failed discovery leaves the hardware unresolved and is admitted",
 			request:      v1beta2DGDRForAdmission(nil, nil),
 			gpuDiscovery: true,
 			discoveryErr: errors.New("no GPUs found"),
-			wantWebhook: []string{
-				v1beta2SKURequired,
-				v1beta2BudgetRequired,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				v1beta2Absent(t, result, "spec", "hardware")
 			},
 		},
 		{
-			name: "v1beta2 failed discovery permits hardware given in the parameters",
+			name: "v1beta2 parameters are stored untouched and never decide hardware defaulting",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2SearchSpace(spec, map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": int64(4)})
 			}, nil),
@@ -599,22 +598,17 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1beta2 failed discovery with only one effective hardware key is rejected at the missing one",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				setV1beta2SearchSpace(spec, map[string]any{"hardware_sku": "h100_sxm"})
-			}, nil),
-			gpuDiscovery: true,
-			discoveryErr: errors.New("no GPUs found"),
-			wantWebhook:  []string{v1beta2BudgetRequired},
-		},
-		{
-			name: "v1beta2 parameters null that deletes discovered hardware is rejected",
+			name: "v1beta2 parameters null does not suppress hardware discovery",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2SearchSpace(spec, map[string]any{"hardware_sku": nil})
 			}, nil),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
-			wantWebhook:  []string{v1beta2SKURequired},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "hardware", "gpu", "sku"); got == "" {
+					t.Fatal("hardware.gpu.sku is empty: discovery must read the typed spec only")
+				}
+			},
 		},
 		{
 			name: "v1beta2 empty workload receives the static model-only default",
@@ -1186,13 +1180,7 @@ func setV1beta2SearchSpace(spec map[string]any, searchSpace map[string]any) {
 	aisimulate["parameters"] = map[string]any{"search_space": searchSpace}
 }
 
-const (
-	v1beta2SKURequired    = "spec.hardware.gpu.sku: Required value: the effective AISimulate input has no hardware SKU: set it, enable GPU discovery, or set spec.aisimulate.parameters.search_space.hardware_sku"
-	v1beta2BudgetRequired = "spec.hardware.gpu.budget: Required value: the effective AISimulate input has no GPU budget: set it, enable GPU discovery, or set spec.aisimulate.parameters.search_space.gpu_budget"
-)
-
-// setBeta2AdmissionHardware names the hardware, as admission requires when GPU discovery finds
-// none. Tests that are not about hardware use it so their requests are valid.
+// setBeta2AdmissionHardware names the hardware, so fixtures do not depend on GPU discovery.
 func setBeta2AdmissionHardware(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
 	sku, budget := "h100_sxm", int32(4)
 	request.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
