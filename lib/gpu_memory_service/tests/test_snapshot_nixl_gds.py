@@ -16,9 +16,11 @@ from blake3 import blake3
 from gpu_memory_service.snapshot.backends import nixl_gds
 from gpu_memory_service.snapshot.backends.nixl_gds import _NixlGDSTransferSession
 from gpu_memory_service.snapshot.transfer import (
+    FileIntegrity,
     FileTransferSource,
     GMSTransferTarget,
     blake3_threads_per_shard,
+    verify_file_source_digests,
 )
 
 pytestmark = [
@@ -42,15 +44,26 @@ def test_blake3_threads_require_an_active_worker():
         blake3_threads_per_shard(0)
 
 
+def test_one_integrity_record_covers_multiple_allocation_extents(tmp_path):
+    shard_path = tmp_path / "shard.bin"
+    shard_path.write_bytes(b"abcdefgh")
+    sources = [
+        FileTransferSource("first", str(shard_path), 0, 4),
+        FileTransferSource("second", str(shard_path), 4, 4),
+    ]
+    integrity = {str(shard_path): FileIntegrity(8, blake3(b"abcdefgh").hexdigest())}
+
+    assert verify_file_source_digests(sources, integrity, max_workers=1) == (1, 8)
+    with pytest.raises(RuntimeError, match="not contiguous"):
+        verify_file_source_digests(sources[1:], integrity, max_workers=1)
+
+
 def _session_and_targets(shard_path, expected_data):
     source = FileTransferSource(
         allocation_id="weight",
         file_path=str(shard_path),
         file_offset=0,
         byte_count=len(expected_data),
-        file_byte_count=len(expected_data),
-        file_hash_name="blake3",
-        file_hash_digest=blake3(expected_data).hexdigest(),
     )
     session = _NixlGDSTransferSession(
         agent=object(),
@@ -58,6 +71,11 @@ def _session_and_targets(shard_path, expected_data):
         device=0,
         max_workers=1,
         sources=[source],
+        integrity_by_path={
+            str(shard_path): FileIntegrity(
+                len(expected_data), blake3(expected_data).hexdigest()
+            )
+        },
     )
     targets = {"weight": GMSTransferTarget("weight", 100, 0, len(expected_data))}
     return session, targets

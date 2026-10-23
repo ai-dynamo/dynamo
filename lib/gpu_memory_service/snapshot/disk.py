@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 from collections import defaultdict
@@ -74,13 +73,9 @@ class DeviceToFileWriter:
             raise ValueError("chunk_size must be positive")
         if hash_threads <= 0:
             raise ValueError("hash_threads must be positive")
-        self._hasher = (
-            blake3(max_threads=hash_threads)
-            if hash_name == "blake3"
-            else hashlib.new(hash_name)
-            if hash_name is not None
-            else None
-        )
+        if hash_name not in (None, "blake3"):
+            raise ValueError(f"unsupported shard hash {hash_name!r}")
+        self._hasher = blake3(max_threads=hash_threads) if hash_name else None
         self._vmm = get_vmm()
         if device is not None:
             self._vmm.runtime_set_device(device)
@@ -183,51 +178,9 @@ def write_device_shards(
     shard_size_bytes: int,
     max_workers: int,
     relative_to: Optional[str] = None,
-) -> list[Tuple[str, int]]:
-    """Write ``(device_va, size)`` extents and return their file placements."""
-    placements, _digests = _write_device_shards(
-        extents,
-        shard_dirs,
-        device=device,
-        shard_size_bytes=shard_size_bytes,
-        max_workers=max_workers,
-        relative_to=relative_to,
-        hash_name=None,
-    )
-    return placements
-
-
-def write_device_shards_with_blake3(
-    extents: Sequence[Tuple[int, int]],
-    shard_dirs: Sequence[str],
-    *,
-    device: int,
-    shard_size_bytes: int,
-    max_workers: int,
-    relative_to: Optional[str] = None,
+    blake3: bool = False,
 ) -> tuple[list[Tuple[str, int]], dict[str, str]]:
-    """Write device shards and return placements plus streaming BLAKE3 digests."""
-    return _write_device_shards(
-        extents,
-        shard_dirs,
-        device=device,
-        shard_size_bytes=shard_size_bytes,
-        max_workers=max_workers,
-        relative_to=relative_to,
-        hash_name="blake3",
-    )
-
-
-def _write_device_shards(
-    extents: Sequence[Tuple[int, int]],
-    shard_dirs: Sequence[str],
-    *,
-    device: int,
-    shard_size_bytes: int,
-    max_workers: int,
-    relative_to: Optional[str],
-    hash_name: Optional[str],
-) -> tuple[list[Tuple[str, int]], dict[str, str]]:
+    """Write device shards; optionally return streaming BLAKE3 digests."""
     if not shard_dirs:
         raise ValueError("at least one shard directory is required")
     if max_workers <= 0:
@@ -254,13 +207,13 @@ def _write_device_shards(
             f"shard_{shard_index:04d}.bin",
         )
         manifest_path = os.path.relpath(path, relative_to) if relative_to else path
-        if hash_name is None:
+        if not blake3:
             writer = DeviceToFileWriter(path, device=device)
         else:
             writer = DeviceToFileWriter(
                 path,
                 device=device,
-                hash_name=hash_name,
+                hash_name="blake3",
                 hash_threads=hash_threads,
             )
         with writer:
@@ -268,7 +221,7 @@ def _write_device_shards(
                 va, size = extents[index]
                 writer.write_device(va, size)
                 placements[index] = (manifest_path, layout[index][1])
-        if hash_name is not None:
+        if blake3:
             shard_digests[shard_index] = (manifest_path, writer.hexdigest())
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -281,7 +234,7 @@ def _write_device_shards(
 
     if any(placement is None for placement in placements):
         raise RuntimeError("shard writer did not produce every extent")
-    if hash_name is not None and any(digest is None for digest in shard_digests):
+    if blake3 and any(digest is None for digest in shard_digests):
         raise RuntimeError("shard writer did not produce every digest")
     return (
         [placement for placement in placements if placement is not None],

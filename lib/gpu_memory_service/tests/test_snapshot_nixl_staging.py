@@ -25,7 +25,11 @@ from gpu_memory_service.snapshot.backends.nixl_staging import (
     _NixlPosixStagingTransferSession,
     restore_file_groups_with_nixl_staging,
 )
-from gpu_memory_service.snapshot.transfer import FileTransferSource, GMSTransferTarget
+from gpu_memory_service.snapshot.transfer import (
+    FileIntegrity,
+    FileTransferSource,
+    GMSTransferTarget,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -140,8 +144,6 @@ def _restore_staged_bytes(
     monkeypatch,
     data: bytes,
     expected_digest: str,
-    *,
-    hash_name: str = "blake3",
 ):
     from gpu_memory_service.snapshot.backends import nixl_staging
 
@@ -165,18 +167,12 @@ def _restore_staged_bytes(
             file_path="/checkpoint/shard.bin",
             file_offset=0,
             byte_count=4,
-            file_byte_count=8,
-            file_hash_name=hash_name,
-            file_hash_digest=expected_digest,
         ),
         FileTransferSource(
             allocation_id="weight-1",
             file_path="/checkpoint/shard.bin",
             file_offset=4,
             byte_count=4,
-            file_byte_count=8,
-            file_hash_name=hash_name,
-            file_hash_digest=expected_digest,
         ),
     ]
     targets = {
@@ -207,6 +203,7 @@ def _restore_staged_bytes(
         agent=object(),
         agent_name="test-agent",
         file_groups=[("/checkpoint/shard.bin", sources)],
+        integrity_by_path={"/checkpoint/shard.bin": FileIntegrity(8, expected_digest)},
         targets=targets,
         slots=[slot],
     )

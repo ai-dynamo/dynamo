@@ -23,8 +23,9 @@ from uuid import uuid4
 import msgspec
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice, get_vmm
-from gpu_memory_service.snapshot.disk import write_device_shards_with_blake3
+from gpu_memory_service.snapshot.disk import write_device_shards
 from gpu_memory_service.snapshot.transfer import (
+    FileIntegrity,
     FileTransferSource,
     GMSSnapshotConfig,
     GMSTransferTarget,
@@ -180,7 +181,7 @@ def save_weights(
                 resources.callback(_release_mapping, vmm, mapping)
 
             shard_roots = tuple(external_attempts) or (staging_path,)
-            placements, shard_digests = write_device_shards_with_blake3(
+            placements, shard_digests = write_device_shards(
                 [
                     (mapping.base, record.aligned_size)
                     for record, (mapping, _handle) in zip(
@@ -194,6 +195,7 @@ def save_weights(
                 shard_size_bytes=shard_size_bytes,
                 max_workers=max_workers,
                 relative_to=None if external_attempts else str(staging_path),
+                blake3=True,
             )
             allocations = [
                 WeightArtifactAllocation(
@@ -264,7 +266,7 @@ def load_weights(
     vmm.ensure_initialized()
     vmm.runtime_set_device(device)
     granularity = int(vmm.get_allocation_granularity(device))
-    manifest, sources = _load_manifest(
+    manifest, sources, integrity_by_path = _load_manifest(
         artifact_dir,
         granularity,
         roots,
@@ -277,6 +279,7 @@ def load_weights(
             logger.info("GMS V1 weights already committed on device=%d", device)
             return
 
+        # Some backends do expensive device setup; skip it for committed weights.
         backend = create_transfer_backend(
             transfer_backend,
             GMSSnapshotConfig(
@@ -322,7 +325,7 @@ def load_weights(
                 raise RuntimeError(
                     "GMS V1 artifact source and target allocation IDs do not match"
                 )
-            transfer = backend.start_restore(sources)
+            transfer = backend.start_restore(sources, integrity_by_path)
             with _Cleanup() as transfer_resources:
                 transfer_resources.callback(transfer.close)
                 transfer.restore(targets)
@@ -369,7 +372,9 @@ def _load_manifest(
     granularity: int,
     sharded_ssd_roots: Sequence[str] | None = None,
 ) -> tuple[
-    WeightArtifactManifest | _LegacyWeightArtifactManifest, list[FileTransferSource]
+    WeightArtifactManifest | _LegacyWeightArtifactManifest,
+    list[FileTransferSource],
+    dict[str, FileIntegrity],
 ]:
     if granularity <= 0:
         raise ValueError("allocation granularity must be positive")
@@ -397,17 +402,18 @@ def _load_manifest(
         raise RuntimeError("GMS V1 weight artifact has no shard integrity records")
 
     shard_records: dict[str, WeightArtifactShard] = {}
+    shard_integrity: dict[str, FileIntegrity] = {}
     for shard in shards:
         if not shard.path.strip():
             raise RuntimeError("GMS V1 weight artifact has an empty shard path")
         if shard.path in shard_records:
             raise RuntimeError(f"duplicate GMS V1 shard record {shard.path!r}")
-        if shard.byte_count <= 0:
-            raise RuntimeError(f"GMS V1 shard {shard.path!r} has invalid size")
-        if not _is_digest(shard.blake3):
+        try:
+            shard_integrity[shard.path] = FileIntegrity(shard.byte_count, shard.blake3)
+        except ValueError as exc:
             raise RuntimeError(
-                f"GMS V1 shard {shard.path!r} has an invalid BLAKE3 digest"
-            )
+                f"GMS V1 shard {shard.path!r} has invalid BLAKE3 or size: {exc}"
+            ) from exc
         shard_records[shard.path] = shard
 
     allocation_ids: set[str] = set()
@@ -437,13 +443,6 @@ def _load_manifest(
                 file_path=str(shard_path),
                 file_offset=allocation.offset,
                 byte_count=allocation.aligned_size,
-                file_byte_count=shard_records[allocation.shard].byte_count
-                if allocation.shard in shard_records
-                else None,
-                file_hash_name="blake3" if allocation.shard in shard_records else None,
-                file_hash_digest=shard_records[allocation.shard].blake3
-                if allocation.shard in shard_records
-                else None,
             )
         )
     _validate_file_extents(extents)
@@ -455,28 +454,24 @@ def _load_manifest(
             "saver to enable integrity verification.",
             root,
         )
-        return manifest, sources
+        return manifest, sources, {}
     if set(shard_records) != {allocation.shard for allocation in manifest.allocations}:
         raise RuntimeError(
             "GMS V1 shard integrity records do not match allocation shards"
         )
     resolved_paths: set[Path] = set()
+    integrity_by_path: dict[str, FileIntegrity] = {}
     for raw_path, shard in shard_records.items():
         resolved = _resolve_shard_path(root, raw_path, allowed_roots)
         if resolved in resolved_paths:
             raise RuntimeError(f"duplicate GMS V1 shard record resolves to {resolved}")
         resolved_paths.add(resolved)
+        integrity_by_path[str(resolved)] = shard_integrity[raw_path]
         if resolved.stat().st_size != shard.byte_count:
             raise RuntimeError(f"GMS V1 shard length does not match record: {resolved}")
     if {source.allocation_id for source in sources} != allocation_ids:
         raise RuntimeError("GMS V1 artifact source IDs do not match allocations")
-    return manifest, sources
-
-
-def _is_digest(value: str) -> bool:
-    return len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
-    )
+    return manifest, sources, integrity_by_path
 
 
 def _resolve_shard_path(

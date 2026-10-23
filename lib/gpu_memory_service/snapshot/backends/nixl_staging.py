@@ -14,6 +14,7 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_co
 from dataclasses import dataclass
 from typing import Callable, List, Mapping, Optional, Sequence
 
+from blake3 import blake3
 from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.snapshot.backends.nixl_common import (
     DRAM_MEM_TYPE,
@@ -35,13 +36,13 @@ from gpu_memory_service.snapshot.backends.pinned_host import (
     make_pinned_copy_slots,
 )
 from gpu_memory_service.snapshot.transfer import (
+    FileIntegrity,
     FileTransferSource,
     GMSSnapshotConfig,
     GMSTransferTarget,
     TransferSession,
     blake3_threads_per_shard,
-    file_integrity_for_sources,
-    new_file_hasher,
+    validate_file_integrity_extents,
     validate_transfer_targets,
 )
 
@@ -104,14 +105,18 @@ class NixlPosixStagingTransferBackend:
             "%s configured for device %d with %d workers using NIXL POSIX "
             "staging backend_params=%s; NIXL import is running in the "
             "background and agent setup starts in start_restore() so it can "
-            "overlap manifest planning, RW connect, and restore target allocation",
+            "overlap restore target allocation",
             backend_name,
             self._device,
             self._max_workers,
             self._posix_backend_params,
         )
 
-    def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
+    def start_restore(
+        self,
+        sources: Sequence[FileTransferSource],
+        integrity_by_path: Mapping[str, FileIntegrity] | None = None,
+    ) -> TransferSession:
         return _NixlPosixStagingTransferSession(
             backend_name=self._backend_name,
             device=self._device,
@@ -121,6 +126,7 @@ class NixlPosixStagingTransferBackend:
             warn_under_parallelized=self._warn_under_parallelized,
             posix_backend_params=self._posix_backend_params,
             sources=sources,
+            integrity_by_path=integrity_by_path,
             api_future=self._api_future,
         )
 
@@ -140,6 +146,7 @@ class _NixlPosixStagingTransferSession:
         warn_under_parallelized: bool,
         posix_backend_params: Mapping[str, str],
         sources: Sequence[FileTransferSource],
+        integrity_by_path: Mapping[str, FileIntegrity] | None = None,
         api_future: Optional[Future[object]] = None,
     ) -> None:
         self._backend_name = backend_name
@@ -148,6 +155,7 @@ class _NixlPosixStagingTransferSession:
         self._group_kind = group_kind
         self._posix_backend_params = dict(posix_backend_params)
         self._sources = list(sources)
+        self._integrity_by_path = dict(integrity_by_path or {})
         self._api_future = api_future
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
@@ -348,6 +356,7 @@ class _NixlPosixStagingTransferSession:
                 agent=prepared.agent,
                 agent_name=prepared.agent_name,
                 file_groups=prepared.file_groups,
+                integrity_by_path=self._integrity_by_path,
                 targets=targets,
                 cancel_event=self._cancel_event,
                 slots=prepared.slots,
@@ -387,6 +396,7 @@ def restore_file_groups_with_nixl_staging(
     agent: object,
     agent_name: str,
     file_groups: Sequence[NixlFileGroup],
+    integrity_by_path: Mapping[str, FileIntegrity] | None = None,
     targets: Mapping[str, GMSTransferTarget],
     cancel_event: Optional[threading.Event] = None,
     buffers_per_worker: int = _PINNED_COPY_BUFFERS_PER_WORKER,
@@ -405,14 +415,14 @@ def restore_file_groups_with_nixl_staging(
     try:
         if owned_slots:
             slots = make_pinned_copy_slots(get_vmm(), buffers_per_worker)
+        records = integrity_by_path or {}
         for file_path, sources in file_groups:
-            integrity = file_integrity_for_sources(sources)
-            hash_name = integrity[1] if integrity is not None else None
-            expected_digest = integrity[2] if integrity is not None else None
+            integrity = records.get(file_path)
+            if integrity is not None:
+                validate_file_integrity_extents(sources, integrity)
+            expected_digest = integrity.blake3 if integrity is not None else None
             digest = (
-                new_file_hasher(hash_name, blake3_threads=blake3_threads)
-                if hash_name is not None
-                else None
+                blake3(max_threads=blake3_threads) if integrity is not None else None
             )
             fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
             try:
@@ -459,7 +469,7 @@ def restore_file_groups_with_nixl_staging(
                 if digest.hexdigest() != expected_digest:
                     raise RuntimeError(f"GMS V1 shard BLAKE3 mismatch: {file_path}")
                 verified_files += 1
-                verified_bytes += integrity[0]
+                verified_bytes += integrity.byte_count
 
         for slot in slots:
             slot.wait()

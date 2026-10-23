@@ -104,15 +104,18 @@ class _Writer:
 
 
 class _Transfer:
-    def __init__(self, vmm, sources, *, fail=False):
+    def __init__(self, vmm, sources, integrity_by_path, *, fail=False):
         self._vmm = vmm
         self._sources = sources
+        self._integrity_by_path = integrity_by_path
         self._fail = fail
 
     def restore(self, targets):
         if self._fail:
             raise RuntimeError("restore failed")
-        verify_file_source_digests(self._sources, max_workers=1)
+        verify_file_source_digests(
+            self._sources, self._integrity_by_path, max_workers=1
+        )
         for source in self._sources:
             target = targets[source.allocation_id]
             shard = Path(source.file_path).read_bytes()
@@ -130,8 +133,8 @@ class _Backend:
         self._fail = fail
         self.closed = False
 
-    def start_restore(self, sources):
-        return _Transfer(self._vmm, sources, fail=self._fail)
+    def start_restore(self, sources, integrity_by_path=None):
+        return _Transfer(self._vmm, sources, integrity_by_path or {}, fail=self._fail)
 
     def close(self):
         self.closed = True
@@ -245,7 +248,7 @@ def test_legacy_shard_writer_does_not_require_hash_support(tmp_path, monkeypatch
             pass
 
     monkeypatch.setattr(snapshot_disk, "DeviceToFileWriter", LegacyWriter)
-    placements = snapshot_disk.write_device_shards(
+    placements, digests = snapshot_disk.write_device_shards(
         [(100, 64), (200, 64)],
         [str(tmp_path)],
         device=0,
@@ -255,6 +258,7 @@ def test_legacy_shard_writer_does_not_require_hash_support(tmp_path, monkeypatch
     )
 
     assert placements == [("shard_0000.bin", 0), ("shard_0001.bin", 0)]
+    assert digests == {}
     assert (100, 64) in calls
     assert (200, 64) in calls
 
@@ -485,12 +489,12 @@ def test_weight_artifact_rejects_same_length_shard_mutation_without_publish(
 def test_v2_blake3_artifact_detects_same_length_mutation(tmp_path) -> None:
     artifact = tmp_path / "artifact"
     _write_test_artifact(artifact, version=2)
-    _manifest, sources = weight_artifact._load_manifest(str(artifact), 64)
-    assert sources[0].file_hash_name == "blake3"
+    _manifest, sources, integrity = weight_artifact._load_manifest(str(artifact), 64)
+    assert integrity[sources[0].file_path].blake3 == blake3(bytes(64)).hexdigest()
     (artifact / "shard.bin").write_bytes(bytes([1]) + bytes(63))
 
     with pytest.raises(RuntimeError, match="BLAKE3 mismatch"):
-        verify_file_source_digests(sources, max_workers=1)
+        verify_file_source_digests(sources, integrity, max_workers=1)
 
 
 def test_v2_sha256_manifest_is_rejected_instead_of_ignoring_its_digest(
@@ -535,16 +539,15 @@ def test_weight_artifact_validates_external_sharded_ssd_digest(tmp_path) -> None
     )
     (artifact / "manifest.json").write_bytes(msgspec.json.encode(manifest))
 
-    _manifest, sources = weight_artifact._load_manifest(
+    _manifest, sources, integrity = weight_artifact._load_manifest(
         str(artifact), 64, (str(external_root),)
     )
-    assert sources[0].file_byte_count == len(shard_bytes)
-    assert sources[0].file_hash_name == "blake3"
-    assert sources[0].file_hash_digest == blake3(shard_bytes).hexdigest()
-    assert verify_file_source_digests(sources, max_workers=1) == (1, 64)
+    assert integrity[sources[0].file_path].byte_count == len(shard_bytes)
+    assert integrity[sources[0].file_path].blake3 == blake3(shard_bytes).hexdigest()
+    assert verify_file_source_digests(sources, integrity, max_workers=1) == (1, 64)
     shard_path.write_bytes(bytes([1]) + bytes(63))
     with pytest.raises(RuntimeError, match="BLAKE3 mismatch"):
-        verify_file_source_digests(sources, max_workers=1)
+        verify_file_source_digests(sources, integrity, max_workers=1)
 
 
 def test_weight_artifact_requires_integrity_record_for_every_shard(tmp_path) -> None:
@@ -622,11 +625,14 @@ def test_legacy_artifact_warns_and_cannot_detect_same_length_corruption(
     artifact = tmp_path / "artifact"
     _write_test_artifact(artifact, version=1, include_shard=False)
 
-    before, sources = weight_artifact._load_manifest(str(artifact), 64)
+    before, sources, integrity = weight_artifact._load_manifest(str(artifact), 64)
     (artifact / "shard.bin").write_bytes(bytes([1]) + bytes(63))
-    after, changed_sources = weight_artifact._load_manifest(str(artifact), 64)
+    after, changed_sources, changed_integrity = weight_artifact._load_manifest(
+        str(artifact), 64
+    )
     assert before == after
     assert sources == changed_sources
+    assert integrity == changed_integrity == {}
     assert before.version == 1
     assert len(warnings) == 2
     assert all(

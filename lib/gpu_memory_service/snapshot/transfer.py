@@ -50,9 +50,22 @@ class FileTransferSource:
     file_path: str
     file_offset: int
     byte_count: int
-    file_byte_count: Optional[int] = None
-    file_hash_name: Optional[str] = None
-    file_hash_digest: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FileIntegrity:
+    """Expected size and BLAKE3 digest for one complete shard file."""
+
+    byte_count: int
+    blake3: str
+
+    def __post_init__(self) -> None:
+        if self.byte_count <= 0:
+            raise ValueError("file integrity byte count must be positive")
+        if len(self.blake3) != 64 or any(
+            character not in "0123456789abcdef" for character in self.blake3
+        ):
+            raise ValueError("file integrity BLAKE3 digest must be lowercase hex")
 
 
 @dataclass(frozen=True)
@@ -92,7 +105,11 @@ class TransferSession(Protocol):
 class TransferBackend(Protocol):
     """Backend capable of restoring bytes into GMS targets."""
 
-    def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
+    def start_restore(
+        self,
+        sources: Sequence[FileTransferSource],
+        integrity_by_path: Mapping[str, FileIntegrity] | None = None,
+    ) -> TransferSession:
         """Start or stage restore work for the given sources."""
 
     def close(self) -> None:
@@ -178,45 +195,15 @@ def group_sources_by_path(
     return dict(groups)
 
 
-def file_integrity_for_sources(
+def validate_file_integrity_extents(
     sources: Sequence[FileTransferSource],
-) -> Optional[Tuple[int, str, str]]:
-    """Return and validate whole-file integrity metadata for one source group."""
+    integrity: FileIntegrity,
+) -> None:
+    """Ensure source extents cover exactly the file described by its record."""
     if not sources:
         raise ValueError("file source group must not be empty")
 
     file_path = sources[0].file_path
-    metadata = {
-        (source.file_byte_count, source.file_hash_name, source.file_hash_digest)
-        for source in sources
-    }
-    if metadata == {(None, None, None)}:
-        return None
-    if len(metadata) != 1:
-        raise RuntimeError(
-            f"Inconsistent file integrity metadata for transfer source {file_path}"
-        )
-
-    file_byte_count, file_hash_name, file_hash_digest = next(iter(metadata))
-    if file_byte_count is None or file_hash_name is None or file_hash_digest is None:
-        raise RuntimeError(
-            f"Incomplete file integrity metadata for transfer source {file_path}"
-        )
-    if file_byte_count <= 0:
-        raise RuntimeError(
-            f"Invalid file byte count in transfer source integrity metadata: {file_path}"
-        )
-    if file_hash_name != "blake3":
-        raise RuntimeError(
-            f"Unsupported hash in transfer source integrity metadata: {file_path}"
-        )
-    if len(file_hash_digest) != 64 or any(
-        character not in "0123456789abcdef" for character in file_hash_digest
-    ):
-        raise RuntimeError(
-            f"Invalid BLAKE3 in transfer source integrity " f"metadata: {file_path}"
-        )
-
     expected_offset = 0
     for source in sorted(sources, key=lambda item: item.file_offset):
         if source.file_path != file_path:
@@ -227,22 +214,15 @@ def file_integrity_for_sources(
                 f"{file_path}"
             )
         expected_offset += source.byte_count
-    if expected_offset != file_byte_count:
+    if expected_offset != integrity.byte_count:
         raise RuntimeError(
             f"File integrity extent coverage does not match byte count: {file_path}"
         )
-    return file_byte_count, file_hash_name, file_hash_digest
-
-
-def new_file_hasher(hash_name: str, *, blake3_threads: int) -> Any:
-    """Create a supported whole-file hasher for a transfer path."""
-    if hash_name == "blake3":
-        return blake3(max_threads=blake3_threads)
-    raise ValueError(f"unsupported file hash {hash_name!r}")
 
 
 def verify_file_source_digests(
     sources: Sequence[FileTransferSource],
+    integrity_by_path: Mapping[str, FileIntegrity] | None = None,
     *,
     max_workers: int,
 ) -> Tuple[int, int]:
@@ -250,30 +230,34 @@ def verify_file_source_digests(
     if max_workers <= 0:
         raise ValueError("max_workers must be positive")
 
-    pending: List[Tuple[str, int, str, str]] = []
+    records = integrity_by_path or {}
+    pending: List[Tuple[str, FileIntegrity]] = []
+    if set(records) - {source.file_path for source in sources}:
+        raise RuntimeError("File integrity record has no matching transfer source")
     for file_path, grouped_sources in group_sources_by_path(sources).items():
-        integrity = file_integrity_for_sources(grouped_sources)
+        integrity = records.get(file_path)
         if integrity is not None:
-            pending.append((file_path, *integrity))
+            validate_file_integrity_extents(grouped_sources, integrity)
+            pending.append((file_path, integrity))
     if not pending:
         return 0, 0
 
     worker_count = min(max_workers, len(pending))
     digest_threads = blake3_threads_per_shard(worker_count)
 
-    def verify(item: Tuple[str, int, str, str]) -> int:
-        file_path, expected_byte_count, hash_name, expected_digest = item
-        digest = new_file_hasher(hash_name, blake3_threads=digest_threads)
+    def verify(item: Tuple[str, FileIntegrity]) -> int:
+        file_path, integrity = item
+        digest = blake3(max_threads=digest_threads)
         byte_count = 0
         with open(file_path, "rb") as source_file:
             while chunk := source_file.read(8 * 1024**2):
                 digest.update(chunk)
                 byte_count += len(chunk)
-        if byte_count != expected_byte_count:
+        if byte_count != integrity.byte_count:
             raise RuntimeError(
                 f"GMS V1 shard length does not match record: {file_path}"
             )
-        if digest.hexdigest() != expected_digest:
+        if digest.hexdigest() != integrity.blake3:
             raise RuntimeError(f"GMS V1 shard BLAKE3 mismatch: {file_path}")
         return byte_count
 
