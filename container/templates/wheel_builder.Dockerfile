@@ -48,6 +48,8 @@ RUN apt clean && apt-get update -y && \
     libgl1 \
     libaio-dev \
     linux-libc-dev
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
 {% endif %}
 
 {% if device == "cuda" %}
@@ -134,6 +136,12 @@ RUN apt-get update -y \
 {% endif %}
 
 {% if device == "cuda" %}
+# Use the refreshed base-stage bundle until manylinux's CA package catches up.
+COPY --from=dynamo_base /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/source/anchors/dynamo-ca-bundle.pem
+RUN test -s /usr/share/pki/ca-trust-source/ca-bundle.trust.p11-kit && \
+    rm /usr/share/pki/ca-trust-source/ca-bundle.trust.p11-kit && \
+    update-ca-trust extract
+
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
 # --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux

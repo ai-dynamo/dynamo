@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 
@@ -29,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -1537,9 +1537,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
 
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, oldTarget) {
-			oldWorkerDCDReplicas[dcdName] = target
-		}
+		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, oldTarget))
 
 		logger.V(1).Info("Worker update replica calculation",
 			"component", componentName,
@@ -1560,9 +1558,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			continue
 		}
 		oldWorkerComponentReplicas[componentName] = 0
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0) {
-			oldWorkerDCDReplicas[dcdName] = target
-		}
+		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, 0))
 	}
 
 	return dynamo.RollingUpdateContext{
@@ -1625,7 +1621,7 @@ func cloneInt64(value *int64) *int64 {
 	if value == nil {
 		return nil
 	}
-	return ptr.To(*value)
+	return new(*value)
 }
 
 func componentReplicaResourceNames(status *nvidiacomv1beta1.ComponentReplicaStatus, fallback string) []string {
