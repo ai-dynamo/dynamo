@@ -287,24 +287,22 @@ pub(crate) fn structural_tag_decision(
 }
 
 impl OpenAIPreprocessor {
-    pub(super) fn apply_gpt_oss_required_array_tag(
+    pub(super) fn apply_gpt_oss_json_tag(
         &self,
         schema: &serde_json::Value,
         starts_in_reasoning: bool,
         request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
-        let Some(config) = self.runtime_config.structural_tag.as_ref() else {
-            return Ok(false);
-        };
-        // The caller gates this path on uses_gpt_oss_required_array, whose v2
-        // Harmony aliases both have registered structural-tag builders.
-        let parser_name = self
-            .tool_call_parser
-            .as_deref()
-            .expect("GPT-OSS parser selected");
+        let config = self
+            .runtime_config
+            .structural_tag
+            .clone()
+            .unwrap_or_default();
+        // The v2 GPT-OSS family gate also supports reasoning-parser-only deployments.
+        let parser_name = "gpt_oss";
         let builder = SelectedStructuralTagBuilder::for_parser(parser_name)
             .expect("GPT-OSS v2 structural tag builder is registered");
-        apply_structural_tag(
+        let applied = apply_structural_tag(
             parser_name,
             builder.build(&StructuralTagBuildRequest {
                 tool_choice: &ToolChoice::None,
@@ -318,7 +316,15 @@ impl OpenAIPreprocessor {
                 structured_output_schema: Some(schema),
             }),
             request,
-        )
+        )?;
+        if applied {
+            request
+                .sampling_options
+                .guided_decoding
+                .get_or_insert_default()
+                .json = None;
+        }
+        Ok(applied)
     }
 
     /// Apply structural tag guided decoding when enabled for this request.

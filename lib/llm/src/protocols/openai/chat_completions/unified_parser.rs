@@ -4188,6 +4188,45 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn gpt_oss_stranded_final_reaches_stream_and_batch_at_stop_and_eof() {
+        let input = "<|channel|>analysis<|message|>thought<|end|><|start|>assistant<|channel|>final*)__Hello!";
+        let batch = parse_complete("gpt_oss", input, &GuidedToolConstraint::None, &[]).unwrap();
+        assert_eq!(batch.text, "*)__Hello!");
+        assert_eq!(batch.reasoning, "thought");
+        assert!(batch.tool_calls.is_empty());
+        for terminal in [false, true] {
+            for split in 0..=input.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([
+                        chunk(&input[..split], false),
+                        chunk(&input[split..], terminal),
+                    ]),
+                    None,
+                    GuidedToolConstraint::None,
+                    UnifiedParserStartingState::None,
+                    "gpt_oss",
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(output.iter().all(|response| !response.is_error()));
+                assert_eq!(
+                    logical_events(&output),
+                    vec![
+                        LogicalEvent::Reasoning("thought".into()),
+                        LogicalEvent::Text("*)__Hello!".into()),
+                    ],
+                    "terminal={terminal} split={split}"
+                );
+                assert_eq!(
+                    collect_choices(&output).last().unwrap().finish_reason,
+                    Some(FinishReason::Stop)
+                );
+            }
+        }
+    }
+
     #[test]
     fn maps_tool_choice_onto_the_output_mode() {
         assert_eq!(
