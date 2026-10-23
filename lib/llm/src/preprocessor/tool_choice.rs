@@ -360,6 +360,22 @@ impl OpenAIPreprocessor {
             && !Self::has_guided_tool_choice(request)
             && !self.beam_frames_structured_response(request)
     }
+
+    /// Whether Beam's output is bare text an explicit `guided_json` / `guided_regex` /
+    /// `guided_choice` / `guided_grammar` constraint owns in full: with no
+    /// `response_format` and no forced tool choice the turn grammar is skipped, so no
+    /// channel framing ever arrives. The parser must read the stream as the final
+    /// answer (`Response`); under `None` the bare bytes are debris between messages and
+    /// are dropped (`guided_regex: "yes"` lost its `yes`).
+    pub(crate) fn beam_output_is_bare_guidance<R: OAIChatLikeRequest + CommonExtProvider>(
+        &self,
+        request: &R,
+    ) -> bool {
+        self.is_beam()
+            && has_explicit_guided_decoding_ext(request)
+            && !Self::has_guided_tool_choice(request)
+            && !Self::has_structured_response_format(request)
+    }
 }
 
 /// Beam route only: a tool declared `strict: true` whose schema lies outside

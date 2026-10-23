@@ -561,12 +561,13 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
         self.common.prompt_logprobs.or_else(|| {
-            // `echo` rebuilds the prompt positions from the engine's prompt logprobs,
-            // with as many alternatives per position as `logprobs` asks for.
+            // `echo` with `logprobs` rebuilds the prompt positions from the engine's
+            // prompt logprobs, with as many alternatives per position as `logprobs`
+            // asks for; `echo` alone only needs the prompt text.
             self.inner
                 .echo
                 .filter(|echo| *echo)
-                .map(|_| self.inner.logprobs.map_or(1, u32::from))
+                .and_then(|_| self.inner.logprobs.map(u32::from))
         })
     }
 
