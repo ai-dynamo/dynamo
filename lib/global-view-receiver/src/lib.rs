@@ -151,7 +151,7 @@ impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> GlobalViewReceiver<R, P, V> 
 
     /// Return every live Relay view of one pool. Consumers can reconcile redundant observations
     /// without accidentally adding the same pool's load from multiple Relays.
-    pub fn pool_views(&self, pool_id: &P) -> impl Iterator<Item = (&R, &V)> {
+    pub fn pool_views(&self, pool_id: &P) -> impl Iterator<Item = (&R, &V)> + use<'_, R, P, V> {
         self.pools
             .get(pool_id)
             .into_iter()
