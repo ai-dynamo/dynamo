@@ -419,10 +419,14 @@ struct CapacityWarning {
 }
 
 impl CapacityWarning {
-    /// Every limit in `limits` that exceeds `max_num_seqs` by more than the
-    /// warning factor. A per-rank limit is compared with per-rank capacity; the
-    /// worker-wide one with the worker's capacity, which is the same ratio.
-    fn check(limits: &AdmissionLimits, max_num_seqs: usize) -> Vec<Self> {
+    /// Limits that exceed `max_num_seqs` by more than the warning factor.
+    /// The fixed queue default is excluded; explicit queue limits still warn.
+    /// Per-rank and worker-wide comparisons have the same ratio.
+    fn check(
+        limits: &AdmissionLimits,
+        explicit: &ExplicitLimits,
+        max_num_seqs: usize,
+    ) -> Vec<Self> {
         let threshold = max_num_seqs.saturating_mul(CAPACITY_WARNING_FACTOR);
         [
             (
@@ -439,7 +443,11 @@ impl CapacityWarning {
             ),
         ]
         .into_iter()
-        .filter(|&(_, limit)| limit > threshold)
+        .filter(|&(setting, limit)| {
+            limit > threshold
+                && (setting != DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT
+                    || explicit.request_queue_limit.is_some())
+        })
         .map(|(setting, per_rank_limit)| Self {
             setting,
             per_rank_limit,
@@ -1499,7 +1507,7 @@ impl GateState {
         let warnings = match self.max_num_seqs {
             Some(max_num_seqs) if self.capacity_checked != Some((limits, max_num_seqs)) => {
                 self.capacity_checked = Some((limits, max_num_seqs));
-                CapacityWarning::check(&limits, max_num_seqs)
+                CapacityWarning::check(&limits, &self.explicit, max_num_seqs)
             }
             _ => Vec::new(),
         };
@@ -2597,19 +2605,18 @@ mod tests {
         );
     }
 
-    /// The warning compares each nonzero limit with the reported capacity, per
-    /// rank and process-wide, and fires only beyond ten times it. Engine
-    /// defaults never trigger it; the fixed queue default can.
+    /// Explicit limits warn only beyond ten times reported capacity.
+    /// Defaults do not warn, but explicitly setting the same queue size does.
     #[test]
-    fn capacity_warnings_name_every_limit_more_than_ten_times_the_capacity() {
-        let limits = AdmissionLimits {
-            engine_request_limit: 2_561,
-            engine_request_waiting_limit: 2_560,
-            request_queue_limit: 40_000,
-            rank_count: 2,
+    fn capacity_warnings_only_flag_explicit_limits_above_the_threshold() {
+        let configured = ExplicitLimits {
+            engine_request_limit: explicit(2_561),
+            engine_request_waiting_limit: explicit(2_560),
+            request_queue_limit: explicit(40_000),
         };
+        let limits = AdmissionLimits::resolve(&configured, Some(256), 2);
         assert_eq!(
-            CapacityWarning::check(&limits, 256),
+            CapacityWarning::check(&limits, &configured, 256),
             [
                 CapacityWarning {
                     setting: DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT,
@@ -2625,21 +2632,15 @@ mod tests {
                 },
             ]
         );
-        let automatic = AdmissionLimits::resolve(&ExplicitLimits::default(), Some(256), 2);
-        assert_eq!(
-            CapacityWarning::check(&automatic, 256),
-            [CapacityWarning {
-                setting: DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT,
-                per_rank_limit: 40_000,
-                max_num_seqs: 256,
-                rank_count: 2,
-            }]
-        );
-        let disabled_queue = AdmissionLimits {
-            request_queue_limit: 0,
-            ..automatic
+        let defaults = ExplicitLimits::default();
+        let automatic = AdmissionLimits::resolve(&defaults, Some(256), 2);
+        assert!(CapacityWarning::check(&automatic, &defaults, 256).is_empty());
+        let disabled_queue = ExplicitLimits {
+            request_queue_limit: explicit(0),
+            ..defaults
         };
-        assert!(CapacityWarning::check(&disabled_queue, 256).is_empty());
+        let limits = AdmissionLimits::resolve(&disabled_queue, Some(256), 2);
+        assert!(CapacityWarning::check(&limits, &disabled_queue, 256).is_empty());
     }
 
     /// The warning is evaluated when capacity first arrives, never guessed
@@ -2658,14 +2659,14 @@ mod tests {
                 .len()
         };
         assert_eq!(report(None, 1), 0, "no capacity, no guess");
-        assert_eq!(report(Some(256), 1), 2, "evaluated when capacity arrives");
+        assert_eq!(report(Some(256), 1), 1, "evaluated when capacity arrives");
         assert_eq!(report(Some(256), 1), 0, "not repeated");
         assert_eq!(
             report(Some(256), 2),
-            2,
+            1,
             "re-evaluated when the limits change"
         );
-        assert_eq!(report(Some(2_000), 2), 1, "and when capacity changes");
+        assert_eq!(report(Some(2_000), 2), 0, "and when capacity changes");
     }
 
     ///////////////////// RANK CLASSIFICATION /////////////////////
