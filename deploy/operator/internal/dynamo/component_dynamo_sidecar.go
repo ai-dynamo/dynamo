@@ -68,22 +68,14 @@ func ValidateDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpe
 		}
 	}
 
-	// Only validated engine launch modes are enabled; complete role templates own placement.
+	// Multinode sidecars require complete role templates; users own engine launches and placement.
 	if component.Multinode != nil {
 		if backendFramework != string(BackendFrameworkSGLang) {
 			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang"))
-		} else if HasRolePodTemplates(component) {
-			if GetComponentDynamoSidecar(component) == nil {
-				allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "the leader template must declare runtime to select sidecar mode"))
-			}
-		} else if main := GetMainContainer(component); main != nil {
-			launch, err := readSGLangLaunchArgs(main)
-			if err == nil {
-				_, err = sglangWorkerRoleRequiresRuntimeContainer(launch, component.GetNumberOfNodes())
-			}
-			if err != nil {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("podTemplate", "spec", "containers"), err.Error()))
-			}
+		} else if !HasRolePodTemplates(component) {
+			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "SGLang multinode sidecars require complete leader and worker podTemplates"))
+		} else if GetComponentDynamoSidecar(component) == nil {
+			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "the leader template must declare runtime to select sidecar mode"))
 		}
 	}
 
