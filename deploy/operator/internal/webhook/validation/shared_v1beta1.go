@@ -44,31 +44,32 @@ import (
 )
 
 // validatePodTemplateSpec checks LPX role templates beyond the admitted Pod schema.
-// template and fldPath are non-nil.
-func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateSpec, fldPath *field.Path, role string) field.ErrorList {
+// template and fldPath are non-nil; hostsEngine is whether the role's Pods host the engine.
+func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateSpec, fldPath *field.Path, role string, hostsEngine bool) field.ErrorList {
 	allErrs := apivalidation.ValidateAnnotations(template.Annotations, fldPath.Child("metadata", "annotations"))
-	return append(allErrs, v.validatePodSpec(&template.Spec, fldPath.Child("spec"), role)...)
+	return append(allErrs, v.validatePodSpec(&template.Spec, fldPath.Child("spec"), role, hostsEngine)...)
 }
 
 // validatePodSpec requires an LPX runtime container and protects controller-owned addressing and placement.
 // spec and fldPath are non-nil; Kubernetes schema validation runs before this method.
-func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.Path, role string) field.ErrorList {
+// hostsEngine is whether the role's Pods host the engine, and so may run the Dynamo runtime sidecar.
+func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.Path, role string, hostsEngine bool) field.ErrorList {
 	var allErrs field.ErrorList
 	if !hasContainerNamed(spec.Containers, consts.MainContainerName) {
 		allErrs = append(allErrs, field.Required(fldPath.Child("containers"), fmt.Sprintf("LPX %s component requires a %q runtime container", role, consts.MainContainerName)))
 	}
 
+	// Validate every container; only init containers of the role hosting the engine may be the runtime sidecar.
 	for _, group := range []struct {
-		name       string
-		containers []corev1.Container
+		name           string
+		containers     []corev1.Container
+		runtimeSidecar bool
 	}{
-		{"containers", spec.Containers},
-		{"initContainers", spec.InitContainers},
+		{"containers", spec.Containers, false},
+		{"initContainers", spec.InitContainers, hostsEngine},
 	} {
-		for index, container := range group.containers {
-			if strings.TrimSpace(container.Image) == "" {
-				allErrs = append(allErrs, field.Required(fldPath.Child(group.name).Index(index).Child("image"), "must specify a non-empty image"))
-			}
+		for index := range group.containers {
+			allErrs = append(allErrs, v.validateContainer(&group.containers[index], fldPath.Child(group.name).Index(index), group.runtimeSidecar)...)
 		}
 	}
 
@@ -105,6 +106,25 @@ func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.
 	}
 	if len(spec.ResourceClaims) != 0 {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("resourceClaims"), "node-local LPX Agents cannot use ResourceClaims"))
+	}
+	return allErrs
+}
+
+// validateContainer requires an image, and restartPolicy Always on the Dynamo runtime sidecar.
+// container and fldPath are non-nil; runtimeSidecar is whether container is an init container of the role hosting the engine.
+func (v *sharedValidation) validateContainer(container *corev1.Container, fldPath *field.Path, runtimeSidecar bool) field.ErrorList {
+	var allErrs field.ErrorList
+	if strings.TrimSpace(container.Image) == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("image"), "must specify a non-empty image"))
+	}
+
+	// The runtime sidecar must keep running beside the engine for the Pod's lifetime.
+	if runtimeSidecar && container.Name == consts.RuntimeContainerName && k8sptr.Deref(container.RestartPolicy, "") != corev1.ContainerRestartPolicyAlways {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("restartPolicy"),
+			k8sptr.Deref(container.RestartPolicy, ""),
+			"must be Always for the LPX runtime init container",
+		))
 	}
 	return allErrs
 }
@@ -679,41 +699,29 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
+	lpx := options.component != nil && options.component.IsLPX()
+	hostsEngine := lpx && role.Name == dynamolpx.RuntimeSidecarRole(options.component)
 
 	// Only the LPX role whose Pods host the engine may run the Dynamo sidecar; reconciliation checks the build.
-	if role.PodTemplate != nil {
-		lpx := options.component != nil && options.component.IsLPX()
-		hostsEngine := lpx && role.Name == dynamolpx.RuntimeSidecarRole(options.component)
-		for i := range role.PodTemplate.Spec.InitContainers {
-			container := &role.PodTemplate.Spec.InitContainers[i]
+	if role.PodTemplate != nil && !hostsEngine {
+		for i, container := range role.PodTemplate.Spec.InitContainers {
 			if container.Name != consts.RuntimeContainerName {
 				continue
 			}
-			runtimePath := fldPath.Child("podTemplate", "spec", "initContainers").Index(i)
 
 			// Only LPX authors have a role that may host the sidecar, so only they are pointed to it.
-			if !hostsEngine {
-				detail := "Dynamo sidecar mode is not supported in multinode or LPX role pod templates"
-				if lpx {
-					detail = "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
-				}
-				allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), detail))
-				continue
+			detail := "Dynamo sidecar mode is not supported in multinode or LPX role pod templates"
+			if lpx {
+				detail = "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
 			}
-			if k8sptr.Deref(container.RestartPolicy, "") != corev1.ContainerRestartPolicyAlways {
-				allErrs = append(allErrs, field.Invalid(
-					runtimePath.Child("restartPolicy"),
-					k8sptr.Deref(container.RestartPolicy, ""),
-					"must be Always for the LPX runtime init container",
-				))
-			}
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("podTemplate", "spec", "initContainers").Index(i).Child("name"), detail))
 		}
 	}
 
 	// LPX renders role templates directly and has no provider-override lowering.
-	if options.component != nil && options.component.IsLPX() {
+	if lpx {
 		if role.PodTemplate != nil {
-			allErrs = append(allErrs, v.validatePodTemplateSpec(role.PodTemplate, fldPath.Child("podTemplate"), role.Name)...)
+			allErrs = append(allErrs, v.validatePodTemplateSpec(role.PodTemplate, fldPath.Child("podTemplate"), role.Name, hostsEngine)...)
 		} else if role.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
 			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate"), "the LPX agent role requires a podTemplate"))
 		}

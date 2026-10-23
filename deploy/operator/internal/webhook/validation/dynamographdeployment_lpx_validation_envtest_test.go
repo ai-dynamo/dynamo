@@ -567,6 +567,20 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
+			name: "LPX reports container errors with the runtime sidecar restart policy in traversal order",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles = component.Roles[:1]
+				spec := &component.Roles[0].PodTemplate.Spec
+				spec.Containers[0].Image = ""
+				spec.InitContainers = []corev1.Container{{Name: consts.RuntimeContainerName, Image: "sidecar"}}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].roles[0].podTemplate.spec.containers[0].image: Required value: must specify a non-empty image",
+				`spec.components[0].roles[0].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for the LPX runtime init container`,
+			},
+		},
+		{
 			name: "LPX rejects an agent runtime sidecar as the shared speculative target",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, nil)
