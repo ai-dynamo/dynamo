@@ -4,6 +4,7 @@
 [package]
 name = "kvbm-kernels"
 version = "1.6.1"
+description = "CUDA kernels for KVBM tensor layout transformation and batched memory copies"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
