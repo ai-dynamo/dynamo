@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """The release gate must reject skipped capture even when both versions parse."""
 
-import io
 import json
 import re
 import shutil
@@ -34,9 +33,11 @@ class UpgradeVersionTest(unittest.TestCase):
 
     def test_premature_skipped_and_major_bumps_fail(self):
         for current, reconciled, previous in [
-            ("1.7.0", "1.4.0", "1.6.0"),
             ("1.7.0", "1.4.0", None),
+            ("1.6.0", "1.4.0", None),
+            ("1.8.0", "1.6.0", None),
             ("1.8.0", "1.5.0", "1.7.0"),
+            ("1.6.0", "1.7.0", None),
             ("1.8.0", "1.7.0", "1.6.0"),
             ("2.0.0", "1.9.0", "1.9.0"),
         ]:
@@ -91,18 +92,14 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             },
         )
 
-        # A minor bump with lagging history warns on a missing matrix; the release-matrix check still blocks.
+    def test_regeneration_cannot_skip_a_minor(self):
         (self.root / fixtures.CHART).write_text("appVersion: 1.7.0\n")
-        with (
-            patch.object(
-                fixtures.subprocess, "check_output", return_value="appVersion: 1.6.0\n"
-            ),
-            patch.object(fixtures.sys, "stderr", new_callable=io.StringIO) as stderr,
-        ):
-            fixtures.check("base")
-        self.assertIn("Incomplete release matrix", stderr.getvalue())
-        with self.assertRaisesRegex(ValueError, "Incomplete release matrix"):
-            fixtures.require_complete_matrix()
+        (self.tree / "RECONCILED_VERSION").write_text("1.5.0\n")
+        fixtures.check()
+        with patch.object(fixtures.subprocess, "run") as capture:
+            with self.assertRaisesRegex(ValueError, "skips a minor"):
+                fixtures.regenerate(release_tag="v1.7.0")
+            capture.assert_not_called()
 
     def capture_api_outputs(self, command, *, env, **kwargs):
         # Model the capture boundary only; production admission/reconciliation is tested by clustertest.
