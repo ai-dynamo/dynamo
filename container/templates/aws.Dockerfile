@@ -50,8 +50,13 @@ RUN --mount=from=wheel_builder,source=/opt/nvidia/nvda_nixl/lib64/plugins/libplu
     plugin_dir="/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins" && \
     test -d "${plugin_dir}" && \
     cp /tmp/libplugin_LIBFABRIC.so "${plugin_dir}/" && \
+    ln -sfnT "${plugin_dir}" /opt/nvidia/nvda_nixl/plugins && \
     LD_LIBRARY_PATH=/usr/local/cuda/compat/lib.real:${LD_LIBRARY_PATH} \
     python3 -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "${plugin_dir}/libplugin_LIBFABRIC.so"
+
+# TRT-LLM's native wrapper and Python bindings can load NIXL from different
+# upstream directories. Select the SDK plugins explicitly in either load order.
+ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/plugins
 {% endif %}
 
 {% if target == "runtime" %}

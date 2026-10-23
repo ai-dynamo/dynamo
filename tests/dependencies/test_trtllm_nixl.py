@@ -65,6 +65,10 @@ def _probe(order):
         load_native()
     sender = nixl_agent(f"packaging-{os.getpid()}-sender")
     receiver = nixl_agent(f"packaging-{os.getpid()}-receiver")
+    if os.environ.get("EFA_VERSION"):
+        assert "LIBFABRIC" in sender.get_plugin_list(), (
+            "EFA plugin must be discoverable in both native/Python load orders"
+        )
     source = ctypes.create_string_buffer(bytes(range(256)) * 2048)
     target = ctypes.create_string_buffer(len(source))
     local = [(ctypes.addressof(source), len(source), 0, "")]
