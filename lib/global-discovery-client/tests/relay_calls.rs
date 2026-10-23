@@ -1,9 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Tests the client against a fake Global Discovery Service that runs in the
-//! test process.
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
