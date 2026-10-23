@@ -113,7 +113,7 @@ spec:
   podTemplate:
     metadata:
       annotations:
-        nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
+        nvidia.com/dynamo-operator-origin-version: $pattern:[0-9]+\.[0-9]+\..*
       labels:
         nvidia.com/dynamo-worker-hash: "$var:worker-hash"
     spec:
@@ -612,7 +612,7 @@ spec:
   podTemplate:
     metadata:
       annotations:
-        nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
+        nvidia.com/dynamo-operator-origin-version: $pattern:[0-9]+\.[0-9]+\..*
     spec:
       containers:
         - args:
@@ -638,7 +638,7 @@ spec:
   podTemplate:
     metadata:
       annotations:
-        nvidia.com/dynamo-operator-origin-version: $pattern:1\.4\..*
+        nvidia.com/dynamo-operator-origin-version: $pattern:[0-9]+\.[0-9]+\..*
       labels:
         nvidia.com/dynamo-worker-hash: "$var:worker-hash"
     spec:

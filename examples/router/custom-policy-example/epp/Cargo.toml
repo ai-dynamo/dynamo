@@ -13,7 +13,7 @@ description = "Standalone EPP binary for Dynamo custom worker-selection policy e
 
 [dependencies]
 anyhow.workspace = true
-dynamo-custom-policy-example-catalog = { path = "../catalog" }
-dynamo-ext-proc = { path = "../../../../deploy/inference-gateway/ext-proc" }
+dynamo-custom-policy-example-catalog = { path = "../catalog", version = "1.6.1" }
+dynamo-ext-proc = { path = "../../../../deploy/inference-gateway/ext-proc", version = "1.6.1" }
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
 tokio.workspace = true

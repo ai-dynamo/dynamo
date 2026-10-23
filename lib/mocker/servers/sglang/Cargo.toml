@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
-dynamo-sglang-sidecar = { path = "../../../sidecar/sglang" }
+dynamo-sglang-sidecar = { path = "../../../sidecar/sglang", version = "1.6.1" }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }

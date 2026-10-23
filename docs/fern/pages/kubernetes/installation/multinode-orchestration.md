@@ -114,7 +114,7 @@ spec:
             example.com/engine-role: leader
           containers:
           - name: main
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.1
             command: [python3, -m, dynamo.vllm]
             args:
             - --model
@@ -139,7 +139,7 @@ spec:
             example.com/engine-role: worker
           containers:
           - name: main
-            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.1
             command: [python3, -m, dynamo.vllm]
             args:
             - --model

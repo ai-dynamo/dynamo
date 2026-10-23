@@ -21,7 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
-dynamo-llm = { path = "../../llm", version = "1.6.0", default-features = false }
+dynamo-llm = { path = "../../llm", version = "1.6.1", default-features = false }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
