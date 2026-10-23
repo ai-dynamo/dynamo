@@ -115,7 +115,7 @@
 //! |---|---|---|
 //! | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT`, `DYN_ENGINE_REQUEST_LIMIT` | `max_num_seqs` |
 //! | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT`, `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | `max_num_seqs` |
-//! | Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`, `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `40000` |
+//! | Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`, `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `40000 / rank_count` |
 //!
 //! Engine limits must be positive integers, and the queue limit a non-negative
 //! one. A value that is set but invalid is warned about and passed over. A
@@ -125,11 +125,11 @@
 //!
 //! Engine limits without explicit values follow the `max_num_seqs` the engine
 //! reports through its worker's model card, assuming [`FALLBACK_MAX_NUM_SEQS`]
-//! until then. The queue defaults to [`DEFAULT_REQUEST_QUEUE_LIMIT`] per rank.
-//! Capacity and rank reports update automatic engine limits and the rank count
-//! without resetting live occupancy; they never replace an explicit value or
-//! change the per-rank queue default. A lower limit evicts nothing: it holds
-//! further admission back until occupancy falls below it.
+//! until then. The queue defaults to `40000 / rank_count` per rank, using
+//! integer division and assuming one rank until the engine reports its ranks.
+//! Capacity and rank reports update defaults without resetting live occupancy;
+//! they never replace an explicit value. A lower limit evicts nothing: it holds
+//! further admission or queueing back until occupancy falls below it.
 //!
 //! TCP requests pass through the TCP work queue and worker pool before reaching
 //! this gate, then keep their worker-pool permit while waiting here. The TCP
@@ -190,8 +190,8 @@ const DYN_DYNAMO_REQUEST_QUEUE_LIMIT: &str = "DYN_DYNAMO_REQUEST_QUEUE_LIMIT";
 /// reports its own.
 const FALLBACK_MAX_NUM_SEQS: usize = 10_000;
 
-/// Default queued requests per DP rank, independent of engine capacity.
-const DEFAULT_REQUEST_QUEUE_LIMIT: usize = 40_000;
+/// Default queue budget per worker, divided evenly among its DP ranks.
+const DEFAULT_WORKER_REQUEST_QUEUE_LIMIT: usize = 40_000;
 
 /// How far a limit may exceed the engine's reported capacity before the gate
 /// warns that it is unlikely to hold any work back.
@@ -335,7 +335,8 @@ struct AdmissionLimits {
 impl AdmissionLimits {
     /// The limits for these explicit settings, reported `max_num_seqs` and
     /// rank count. Each setting resolves independently: an explicit value wins,
-    /// engine defaults follow `max_num_seqs`, and the queue default stays fixed.
+    /// engine defaults follow `max_num_seqs`, and the queue default divides the
+    /// worker budget by the nonzero rank count using integer division.
     fn resolve(explicit: &ExplicitLimits, max_num_seqs: Option<usize>, rank_count: usize) -> Self {
         let max_num_seqs = max_num_seqs.unwrap_or(FALLBACK_MAX_NUM_SEQS);
         Self {
@@ -347,7 +348,9 @@ impl AdmissionLimits {
                 .map_or(max_num_seqs, |setting| setting.value),
             request_queue_limit: explicit
                 .request_queue_limit
-                .map_or(DEFAULT_REQUEST_QUEUE_LIMIT, |setting| setting.value),
+                .map_or(DEFAULT_WORKER_REQUEST_QUEUE_LIMIT / rank_count, |setting| {
+                    setting.value
+                }),
             rank_count,
         }
     }
@@ -1809,8 +1812,8 @@ impl BackendAdmissionGate {
     /// `max_num_seqs` per rank, and the ranks `data_parallel_start_rank`
     /// through `data_parallel_start_rank + data_parallel_size - 1`.
     ///
-    /// Updates the automatic engine limits and the rank count the worker-wide limits
-    /// aggregate over, whenever a report arrives or changes. Explicit settings,
+    /// Updates default engine and queue limits and the rank count the worker-wide
+    /// limits aggregate over, whenever a report arrives or changes. Explicit settings,
     /// live occupancy, queued requests and outstanding permits are kept; a
     /// request already classified keeps its rank.
     pub fn record_engine_capacity(
@@ -2476,29 +2479,25 @@ mod tests {
         );
     }
 
-    /// Before any report the gate starts at `10000` / `10000` / `40000` with
-    /// one rank; a reported `max_num_seqs` `S` makes them `S` / `S` / `40000`, and
-    /// every process-wide limit is the per-rank one times the reported rank
-    /// count, multiplied once.
+    /// Engine defaults follow reported capacity; the queue default divides a
+    /// fixed worker budget across the reported ranks, without growing storage.
     #[test]
-    fn engine_defaults_follow_capacity_while_the_queue_default_stays_fixed() {
+    fn engine_defaults_follow_capacity_and_queue_defaults_follow_rank_count() {
         let automatic = ExplicitLimits::default();
-        assert_eq!(
-            AdmissionLimits::resolve(&automatic, None, 1),
-            AdmissionLimits {
-                engine_request_limit: 10_000,
-                engine_request_waiting_limit: 10_000,
-                request_queue_limit: 40_000,
-                rank_count: 1,
-            }
-        );
+        let startup = AdmissionLimits {
+            engine_request_limit: 10_000,
+            engine_request_waiting_limit: 10_000,
+            request_queue_limit: 40_000,
+            rank_count: 1,
+        };
+        assert_eq!(AdmissionLimits::resolve(&automatic, None, 1), startup);
         let reported = AdmissionLimits::resolve(&automatic, Some(256), 4);
         assert_eq!(
             reported,
             AdmissionLimits {
                 engine_request_limit: 256,
                 engine_request_waiting_limit: 256,
-                request_queue_limit: 40_000,
+                request_queue_limit: 10_000,
                 rank_count: 4,
             }
         );
@@ -2508,15 +2507,24 @@ mod tests {
                 reported.aggregate(reported.engine_request_waiting_limit),
                 reported.aggregate(reported.request_queue_limit),
             ),
-            (1_024, 1_024, 160_000)
+            (1_024, 1_024, 40_000)
         );
 
-        // The live gate applies the same, from its own reports.
         let gate = BackendAdmissionGate::new(automatic);
+        assert_eq!(gate.state.lock().limits, startup);
+        assert_eq!(gate.state.lock().slots.capacity(), 40_000);
+
+        // Rank information may arrive before engine capacity.
+        gate.record_engine_capacity(None, 4, 3);
         assert_eq!(
             gate.state.lock().limits,
-            AdmissionLimits::resolve(&automatic, None, 1)
+            AdmissionLimits {
+                request_queue_limit: 13_333,
+                rank_count: 3,
+                ..startup
+            }
         );
+
         gate.record_engine_capacity(Some(256), 4, 4);
         let state = gate.state.lock();
         assert_eq!(state.limits, reported);
@@ -2526,24 +2534,37 @@ mod tests {
                 state.engine_requests_waiting.aggregate_limit,
                 state.queued.aggregate_limit,
             ),
-            (1_024, 1_024, 160_000)
+            (1_024, 1_024, 40_000)
         );
-        assert!(
-            state.slots.capacity() >= 160_000,
-            "queue storage holds the whole aggregate queue"
-        );
+        assert_eq!(state.slots.capacity(), 40_000);
         drop(state);
-        gate.record_engine_capacity(Some(32), 4, 2);
-        assert_eq!(
-            gate.state.lock().limits,
-            AdmissionLimits {
-                engine_request_limit: 32,
-                engine_request_waiting_limit: 32,
-                request_queue_limit: 40_000,
-                rank_count: 2,
-            },
-            "later capacity and topology reports keep the per-rank queue default"
-        );
+
+        // Integer division leaves any remainder unused. Neither larger nor
+        // smaller rank counts require more than the startup allocation.
+        for (count, per_rank, aggregate) in [
+            (3, 13_333, 39_999),
+            (512, 78, 39_936),
+            (2, 20_000, 40_000),
+            (1, 40_000, 40_000),
+        ] {
+            gate.record_engine_capacity(Some(32), 4, count);
+            let state = gate.state.lock();
+            assert_eq!(
+                state.limits,
+                AdmissionLimits {
+                    engine_request_limit: 32,
+                    engine_request_waiting_limit: 32,
+                    request_queue_limit: per_rank,
+                    rank_count: count as usize,
+                }
+            );
+            assert_eq!(state.queued.aggregate_limit, aggregate);
+            assert_eq!(
+                state.slots.capacity(),
+                40_000,
+                "default storage never grows"
+            );
+        }
     }
 
     /// Overriding one setting leaves the others at their defaults. The queue
@@ -2560,7 +2581,7 @@ mod tests {
             AdmissionLimits {
                 engine_request_limit: 5,
                 engine_request_waiting_limit: 64,
-                request_queue_limit: 40_000,
+                request_queue_limit: 20_000,
                 rank_count: 2,
             }
         );
@@ -2578,6 +2599,20 @@ mod tests {
                 (queue, queue * 2)
             );
             assert_eq!(limits.engine_request_limit, 64);
+
+            let gate = BackendAdmissionGate::new(queue_only);
+            assert_eq!(gate.state.lock().slots.capacity(), queue);
+            for count in [3, 2] {
+                gate.record_engine_capacity(Some(64), 0, count);
+                let state = gate.state.lock();
+                assert_eq!(state.limits.request_queue_limit, queue);
+                assert_eq!(state.queued.aggregate_limit, queue * count as usize);
+                assert_eq!(
+                    state.slots.capacity(),
+                    queue * 3,
+                    "explicit capacity grows with ranks and retains allocated storage"
+                );
+            }
         }
     }
 
