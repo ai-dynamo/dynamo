@@ -581,7 +581,7 @@ fn update_cache_owner_hash(hasher: &mut blake3::Hasher, owner: CacheOwnerId) {
     hasher.update(&[domain.cache_semantics().source() as u8]);
     hasher.update(&domain.routing_scope().digest());
     hasher.update(&[domain.routing_scope().source() as u8]);
-    hasher.update(&owner.pool().dc_id().get().to_be_bytes());
+    hasher.update(&owner.pool().cluster_id().get().to_be_bytes());
     hasher.update(&owner.slot().digest());
     hasher.update(&[owner.slot().source() as u8]);
 }

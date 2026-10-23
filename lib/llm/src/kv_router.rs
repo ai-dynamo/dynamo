@@ -522,7 +522,7 @@ fn cache_hit_for_worker(
 
 // for metric publishing (push-based)
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
-/// Router scheduler views of per-worker load, consumed by the KV DC Relay.
+/// Router scheduler views of per-worker load, consumed by the Pool Relay.
 ///
 /// Kept separate from [`KV_METRICS_SUBJECT`] so one router's view never
 /// overwrites another router's worker-overload state.

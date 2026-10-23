@@ -71,15 +71,15 @@ areas:
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:
-  - components/src/dynamo/kv_dc_relay/
+  - components/src/dynamo/pool_relay/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
-  - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
-  - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
-  - lib/bindings/python/rust/llm/kv_dc_relay.rs
-  - lib/llm/src/kv_dc_relay.rs
-  - lib/llm/src/kv_dc_relay/
+  - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
+  - docs/fern/pages/reference/components/pool-relay-configuration.md
+  - lib/bindings/python/rust/llm/pool_relay.rs
+  - lib/llm/src/pool_relay.rs
+  - lib/llm/src/pool_relay/
   - lib/llm/tests/fixtures/relay-sources-canonical.json
-  - tests/router/test_kv_dc_relay_e2e.py
+  - tests/router/test_pool_relay_e2e.py
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:

@@ -563,7 +563,7 @@ pub mod llm {
     /// not parse or are above 1000000 use the default.
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
-    /// Publish the serving-load streams the KV DC Relay aggregates: frontend
+    /// Publish the serving-load streams the Pool Relay aggregates: frontend
     /// request load and router scheduler load. Off unless truthy.
     pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
 
