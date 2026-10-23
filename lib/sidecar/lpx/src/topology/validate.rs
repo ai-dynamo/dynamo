@@ -120,9 +120,10 @@ fn is_host(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok() || is_dns_name(host)
 }
 
-/// The last label must not be all digits (RFC 1123 section 2.1), so a name
-/// is never a numeric form such as `1.2.3` or `010.0.0.1` that libc would
-/// resolve as IPv4 shorthand.
+/// The last label must not be numeric (RFC 1123 section 2.1): neither all
+/// digits nor `0x` and hex digits, so a name is never a form such as `1.2.3`,
+/// `010.0.0.1` or `0x7f000001` that libc's `inet_aton` resolves as IPv4
+/// shorthand.
 fn is_dns_name(name: &str) -> bool {
     name.len() <= MAX_DNS_NAME_BYTES
         && name.split('.').all(|label| {
@@ -136,5 +137,15 @@ fn is_dns_name(name: &str) -> bool {
         && name
             .rsplit('.')
             .next()
-            .is_some_and(|last| !last.bytes().all(|byte| byte.is_ascii_digit()))
+            .is_some_and(|last| !is_numeric_label(last))
+}
+
+fn is_numeric_label(label: &str) -> bool {
+    let hex = label
+        .strip_prefix("0x")
+        .or_else(|| label.strip_prefix("0X"));
+    match hex {
+        Some(digits) => !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        None => label.bytes().all(|byte| byte.is_ascii_digit()),
+    }
 }

@@ -213,6 +213,14 @@ fn complete_snapshots_are_accepted_in_any_order() {
             mutated(|snapshot| control_at(snapshot, 1).host = "agt-0.0a".to_string()),
         ),
         (
+            "a last label that is 0x without hex digits",
+            mutated(|snapshot| control_at(snapshot, 1).host = "agt-0.0x".to_string()),
+        ),
+        (
+            "a last label that is 0x and a non-hex letter",
+            mutated(|snapshot| control_at(snapshot, 1).host = "agt-0.0xg".to_string()),
+        ),
+        (
             "the port range's ends",
             mutated(|snapshot| {
                 control_at(snapshot, 1).port = 1;
@@ -386,9 +394,10 @@ fn incomplete_or_unusable_snapshots_are_rejected() {
         }
     }
 
-    // A name whose last label is all digits is no DNS name, and none of
-    // these is an IP literal in standard form, though libc resolves most of
-    // them as IPv4 shorthand: `1.2.3` as 1.2.0.3, `010.0.0.1` as 8.0.0.1.
+    // A name whose last label is all digits, or `0x` and hex digits, is no
+    // DNS name, and none of these is an IP literal in standard form, though
+    // libc resolves most of them as IPv4 shorthand: `1.2.3` as 1.2.0.3,
+    // `010.0.0.1` as 8.0.0.1, `0x7f000001` as 127.0.0.1.
     for host in [
         "0",
         "123",
@@ -399,6 +408,11 @@ fn incomplete_or_unusable_snapshots_are_rejected() {
         "1.2.3.4.5",
         "010.0.0.1",
         "agt-0.123",
+        "0x7f000001",
+        "0X7F000001",
+        "0x7f",
+        "1.0x2",
+        "1.2.3.0x4",
     ] {
         let snapshot = mutated(|snapshot| control_at(snapshot, 1).host = host.to_string());
         let error = check_snapshot(&snapshot).expect_err(host);
