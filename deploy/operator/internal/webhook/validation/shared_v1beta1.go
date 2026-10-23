@@ -259,6 +259,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 	allErrs = append(allErrs, validateComponentPodTemplateMode(spec, fldPath)...)
 
+	// Warn on the deprecated Ray executor selection that Dynamo 1.8.0 rejects.
+	if spec.PodTemplate != nil {
+		if warning := vllmRayExecutorDeprecationWarning(spec.PodTemplate.Annotations, fldPath.Child("podTemplate", "metadata", "annotations")); warning != "" {
+			v.warn(warning)
+		}
+	}
+
 	// Reject invalid shared-memory quantities before resource-specific validation.
 	if spec.SharedMemorySize != nil && spec.SharedMemorySize.Sign() < 0 {
 		allErrs = append(allErrs, field.Invalid(
@@ -722,6 +729,9 @@ func (v *sharedValidation) validateComponentRoleSpec(
 					value,
 					`must be "mp" or "ray"`,
 				))
+			}
+			if warning := vllmRayExecutorDeprecationWarning(role.PodTemplate.Annotations, podTemplatePath.Child("metadata", "annotations")); warning != "" {
+				v.warn(warning)
 			}
 			if _, exists := role.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit]; exists {
 				allErrs = append(allErrs, field.Forbidden(

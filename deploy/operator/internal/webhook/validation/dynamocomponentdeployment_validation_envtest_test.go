@@ -870,10 +870,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "vLLM ray service annotation reaches the webhook",
+			name: "vLLM ray service annotation reaches the webhook and warns about the deprecated generated launch",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"},
 			}),
+			wantWarnings: []string{`spec.annotations[nvidia.com/vllm-distributed-executor-backend]: value "ray" is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead`},
 		},
 		{
 			name: "vLLM mp service annotation reaches the webhook",
@@ -1637,6 +1638,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
 				consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
 			},
+			wantWarnings: []string{`spec.podTemplate.metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: value "RaY" is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead`},
 		},
 		{
 			name: "v1alpha1 invalid extra pod metadata annotation reaches the webhook",

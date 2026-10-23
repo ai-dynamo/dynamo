@@ -278,6 +278,10 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			`must be "mp" or "ray"`,
 		))
 	}
+	// The DGD-level Ray selection propagates to every component; warn here once.
+	if warning := vllmRayExecutorDeprecationWarning(objectMeta.Annotations, annotationsPath); warning != "" {
+		v.warn(warning)
+	}
 	// Parse strategy annotations with the same value set used by the renderer.
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists {
 		strategy, err := dynamo.ParseGroveUpdateStrategy(value)

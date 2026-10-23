@@ -278,6 +278,22 @@ func invalidVLLMDistributedExecutorBackendAnnotation(annotations map[string]stri
 	}
 }
 
+// vllmRayExecutorDeprecationWarning returns the admission warning for a Ray
+// value of the vLLM executor annotation found under annotationsPath, or "" when
+// the annotation is absent or selects another executor. The value matches the
+// renderer's case-insensitive reading. annotationsPath must not be nil.
+func vllmRayExecutorDeprecationWarning(annotations map[string]string, annotationsPath *field.Path) string {
+	value, exists := annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]
+	if !exists || strings.ToLower(value) != vllmDistributedExecutorBackendRay {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s: value %q is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead",
+		annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend).String(),
+		value,
+	)
+}
+
 // inferencePoolAvailabilityError checks the InferencePool API.
 // ctx and mgr must not be nil.
 func inferencePoolAvailabilityError(ctx context.Context, mgr ctrl.Manager) error {

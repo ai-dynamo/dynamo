@@ -864,6 +864,49 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
 				consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
 			},
+			wantWarnings: []string{`spec.components[1].podTemplate.metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: value "RaY" is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead`},
+		},
+
+		// The generated Ray launch is deprecated: every annotation site warns, mp stays silent.
+		{
+			name: "DGD-level Ray executor annotation warns about the deprecated generated launch",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"}
+			}),
+			wantWarnings: []string{`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: value "ray" is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead`},
+		},
+		{
+			name: "role pod template Ray executor annotation warns about the deprecated generated launch",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 2)
+				worker.Roles[1].PodTemplate.Annotations = map[string]string{
+					consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+				}
+			}),
+			wantWarnings: []string{`spec.components[1].roles[1].podTemplate.metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: value "ray" is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead`},
+		},
+		{
+			name: "mp executor annotation does not warn",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "mp"}
+				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "MP",
+					}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}},
+				}
+			}),
+		},
+		{
+			name: "Ray executor annotation keeps warning on an unrelated update",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"}
+			}),
+			deployment: dgdAdmissionWithLabel(t, betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"}
+			})),
+			wantWarnings: []string{`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: value "ray" is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead`},
 		},
 		{
 			name: "v1alpha1 converted extraPodMetadata annotation does not receive v1beta1 CEL validation",
@@ -2390,6 +2433,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					ExtraClientContainers: []string{"metrics"},
 				}
 			}),
+			// The preserved service annotation warns once, from the compatibility recursion.
+			wantWarnings: []string{`spec.services[worker].annotations[nvidia.com/vllm-distributed-executor-backend]: value "ray" is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead`},
 		},
 		{
 			name: "alpha PVC name requirement is preserved structurally",
@@ -3326,10 +3371,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "vLLM backend annotation accepts ray case-insensitively",
+			name: "vLLM backend annotation accepts ray case-insensitively with a deprecation warning",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "RAY"}
 			}),
+			wantWarnings: []string{`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: value "RAY" is deprecated; the operator-generated Ray launch for multinode vLLM is removed in Dynamo 1.8.0 and this value is then rejected; launch Ray from leader and worker role podTemplates instead`},
 		},
 		{
 			name: "vLLM backend annotation rejects unknown value",

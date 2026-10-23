@@ -168,6 +168,71 @@ Dynamo also adds `--master-port=29500` and keeps the worker wait-for-leader wiri
 For TensorRT-LLM, the authored worker command must start `sshd` on port `2222`; Dynamo retains the
 worker readiness probe on that port and mounts the MPI SSH key.
 
+### Ray executor with role Pod templates
+
+The operator-generated Ray launch for multinode vLLM is deprecated and is removed in Dynamo 1.8.0;
+multiprocessing has been the generated default since Dynamo 1.0.0. Admission warns when the
+`nvidia.com/vllm-distributed-executor-backend` annotation selects `ray`. To keep using the Ray
+executor, author it in role Pod templates. The leader starts the Ray head and the engine, and each
+worker joins the head and exposes its GPUs. The operator injects nothing into either command.
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: ray-role-multinode
+spec:
+  backendFramework: vllm
+  components:
+  - name: decode
+    type: decode
+    replicas: 1
+    multinode:
+      nodeCount: 2
+    roles:
+    - name: leader
+      podTemplate:
+        spec:
+          containers:
+          - name: main
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+            command: [/bin/sh, -c]
+            args:
+            - >-
+              ray start --head --port=6379 &&
+              exec python3 -m dynamo.vllm
+              --model Qwen/Qwen3-8B
+              --tensor-parallel-size 2
+              --distributed-executor-backend ray
+            env:
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+          - name: main
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+            command: [/bin/sh, -c]
+            args:
+            - >-
+              until ray start --address=$(DYNAMO_LEADER_ADDRESS):6379 --block; do
+              echo "waiting for the Ray head"; sleep 5; done
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+```
+
+The worker retries its join because the leader's Ray head is not up when the worker Pod starts.
+The engine on the leader waits until the Ray cluster offers enough GPUs for the configured
+world size. Set `VLLM_NIXL_SIDE_CHANNEL_HOST` on Ray leaders that take part in disaggregated
+serving across nodes; the operator injects it only for the multiprocessing launch.
+
 The two template-source modes are exclusive:
 
 ```text

@@ -219,6 +219,9 @@ const (
 	// vLLM distributed executor backend override annotation.
 	// Users can set this on a DGD to explicitly choose "mp" or "ray" for multi-node vLLM deployments.
 	// When present, takes priority over the version-based default.
+	// The "ray" value is deprecated: admission warns on it, and Dynamo 1.8.0
+	// removes the generated Ray launch and rejects the value. "mp" remains
+	// accepted as the default executor.
 	KubeAnnotationVLLMDistributedExecutorBackend = "nvidia.com/vllm-distributed-executor-backend"
 
 	// VLLMMpMasterPort is the default port for vLLM multiprocessing coordination between nodes.

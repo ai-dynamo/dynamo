@@ -41,6 +41,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 			`must be "mp" or "ray"`,
 		))
 	}
+	// Service annotations are preserved source-only fields, so the storage-version
+	// recursion never sees this Ray selection; warn with the source path here.
+	if warning := vllmRayExecutorDeprecationWarning(spec.Annotations, fldPath.Child("annotations")); warning != "" {
+		v.warn(warning)
+	}
 
 	if spec.DynamoNamespace != nil && *spec.DynamoNamespace != "" {
 		v.warnf(

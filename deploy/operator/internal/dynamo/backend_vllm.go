@@ -410,6 +410,10 @@ func getExpandedArgs(container *corev1.Container) []string {
 // Decision logic:
 //  1. Explicit override annotation takes priority (user set "mp" or "ray")
 //  2. Operator origin version compatibility gate: uses compatibility.VLLMMultiprocessing
+//
+// The generated Ray launch is deprecated and is removed in Dynamo 1.8.0. Until
+// then both paths that select it keep rendering unchanged so an operator-only
+// upgrade does not roll existing workloads; they only log the deprecation.
 func shouldUseMpBackend(annotations map[string]string) bool {
 	logger := log.Log.WithName("vllm-backend")
 
@@ -420,7 +424,7 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 			logger.Info("Using mp backend (explicit override)")
 			return true
 		case "ray":
-			logger.Info("Using ray backend (explicit override)")
+			logger.Info("Using ray backend (explicit override); the operator-generated Ray launch is deprecated and is removed in Dynamo 1.8.0, launch Ray from leader and worker role podTemplates instead")
 			return false
 		default:
 			logger.Info("Ignoring invalid vllm-distributed-executor-backend annotation value, falling through to version check",
@@ -429,7 +433,11 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 	}
 
 	// Step 2: Check operator origin version gate
-	return compatibility.VLLMMultiprocessing.Enabled(annotations)
+	useMp := compatibility.VLLMMultiprocessing.Enabled(annotations)
+	if !useMp {
+		logger.Info("Using ray backend (operator origin before 1.0.0); the operator-generated Ray launch is deprecated and is removed in Dynamo 1.8.0, recreate the DGD for multiprocessing or launch Ray from leader and worker role podTemplates")
+	}
+	return useMp
 }
 
 // injectMpDistributedLaunchFlags injects vLLM multiprocessing flags for multi-node TP/PP deployments.
@@ -480,6 +488,10 @@ func injectMpDistributedLaunchFlags(
 	injectFlagsIntoContainerCommand(container, mpFlags, needsShell, "vllm")
 }
 
+// injectRayDistributedLaunchFlags renders the deprecated generated Ray launch for
+// multi-node TP/PP: a Ray head plus the engine on the leader, and a bare Ray
+// agent on each worker. It is removed in Dynamo 1.8.0; role podTemplates own
+// Ray launches from then on.
 func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
 	switch role {
 	case RoleLeader:

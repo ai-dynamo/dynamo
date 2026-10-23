@@ -80,6 +80,34 @@ HTTP 403 when listing Pods, Planner warns and uses existing status/default fallb
 Grant Pod-list access to enable registered native names, models, and capabilities;
 other API errors still propagate.
 
+#### Deprecations
+
+##### Operator-generated Ray launch for multinode vLLM
+
+**Change:** The operator-generated Ray launch for multinode vLLM tensor- and pipeline-parallel
+components is deprecated and is removed in Dynamo 1.8.0. Multiprocessing has been the generated
+default since Dynamo 1.0.0. The `nvidia.com/vllm-distributed-executor-backend: ray` annotation
+value still renders the Ray launch in this release, and admission warns on it. In 1.8.0 the
+value is rejected, and DGDs created before Dynamo 1.0.0 that still receive Ray through their
+operator origin version render multiprocessing instead. The `mp` value remains accepted.
+Elastic expert parallelism keeps its own Ray cluster launch and is not affected.
+
+**Affected:** Multinode vLLM components whose component `podTemplate`, role `podTemplate`, or
+DGD metadata carries the `ray` annotation value, and multinode vLLM DGDs created before
+Dynamo 1.0.0 without the annotation.
+
+**Action:** Before upgrading to 1.8.0, either remove the annotation to use multiprocessing, or
+move the Ray launch into complete leader and worker role `podTemplate`s as shown in the
+[multinode orchestration guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/multinode-orchestration.md#ray-executor-with-role-pod-templates).
+Role templates own the complete engine command, including the Ray head, the worker join loop,
+and `--distributed-executor-backend ray`. For disaggregated serving across nodes, also set
+`VLLM_NIXL_SIDE_CHANNEL_HOST` from `status.podIP` in those templates; the operator injects it
+only for multiprocessing.
+
+**Existing deployments:** No rendering change in this release, so an operator-only upgrade to
+v1.7.0 does not roll Ray-launched workloads. Either migration above changes the pod template
+and rolls the component once when applied.
+
 ### v1.6.0
 
 #### Runtime Compatibility
