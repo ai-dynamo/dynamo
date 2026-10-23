@@ -825,3 +825,73 @@ func TestNativeSidecarSkipsBackendPodSetup(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveDynamoRuntimeImage(t *testing.T) {
+	cases := []struct {
+		name             string
+		mainImage        string
+		roleSidecar      *corev1.Container
+		componentSidecar *corev1.Container
+		wantImage        string
+	}{
+		{
+			name:      "combined runtime uses main",
+			mainImage: "dynamo:1.5.0",
+			wantImage: "dynamo:1.5.0",
+		},
+		{
+			name:             "TP follower uses leader sidecar instead of native engine",
+			mainImage:        "sglang:0.5.22",
+			componentSidecar: &corev1.Container{Name: "runtime", Image: "dynamo:1.5.0"},
+			wantImage:        "dynamo:1.5.0",
+		},
+		{
+			name:             "role sidecar overrides leader sidecar",
+			mainImage:        "sglang:0.5.22",
+			roleSidecar:      &corev1.Container{Name: "runtime", Image: "dynamo:1.6.0"},
+			componentSidecar: &corev1.Container{Name: "runtime", Image: "dynamo:1.5.0"},
+			wantImage:        "dynamo:1.6.0",
+		},
+		{
+			name:             "empty role sidecar image does not fall back to leader",
+			mainImage:        "sglang:0.5.22",
+			roleSidecar:      &corev1.Container{Name: "runtime"},
+			componentSidecar: &corev1.Container{Name: "runtime", Image: "dynamo:1.5.0"},
+		},
+		{name: "no authored runtime image"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Resolve the Dynamo image from the selected role and component fallback")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				PodTemplate: &corev1.PodTemplateSpec{},
+			}
+			if tc.mainImage != "" {
+				component.PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: tc.mainImage}}
+			}
+			if tc.roleSidecar != nil {
+				component.PodTemplate.Spec.InitContainers = []corev1.Container{*tc.roleSidecar.DeepCopy()}
+			}
+			original := component.DeepCopy()
+			image := resolveDynamoRuntimeImage(component, tc.componentSidecar)
+			require.Equal(t, tc.wantImage, image)
+			require.Equal(t, original, component)
+
+			t.Log("Build context from the resolved image and component-wide mode")
+			nativeSidecar := tc.componentSidecar != nil
+			context, err := generateComponentContext(component, "dgd", "ns", 2, DiscoveryContext{}, configv1alpha1.InfrastructureConfiguration{}, image, nativeSidecar)
+			require.NoError(t, err)
+			if nativeSidecar {
+				require.Equal(t, "runtime", context.RuntimeContainerName)
+			} else {
+				require.Equal(t, "main", context.RuntimeContainerName)
+			}
+			if image == "" {
+				require.Nil(t, context.RuntimeVersion)
+			} else {
+				require.NotNil(t, context.RuntimeVersion)
+				require.Equal(t, strings.TrimPrefix(tc.wantImage, "dynamo:"), context.RuntimeVersion.String())
+			}
+		})
+	}
+}
