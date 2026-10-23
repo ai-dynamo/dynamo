@@ -52,6 +52,11 @@ on:
         required: false
         type: boolean
         default: false
+      require_workflow_match:
+        description: 'Fail (instead of warn) when stage-release-rc.yml or release.yml on the dispatch ref differs from the release branch tip. Dispatch runs the dispatch ref''s workflow files, not the release branch''s.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -181,6 +186,56 @@ jobs:
           echo "bump_sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "rc_number=${RC_ROUND}" >> "$GITHUB_OUTPUT"
           echo "Staging ${RELEASE_BRANCH} (CI branch ${CI_BRANCH}) @ ${SHA} as ${RELEASE_VERSION}-rc.${RC_ROUND}"
+
+      # A dispatch runs the workflow files from the dispatch ref (normally main),
+      # not from the release branch being staged. A change that landed on only one
+      # side silently changes what gets staged (rc10 dropped the kvbm wheels because
+      # main removed them from WHEEL_TOKENS while release/1.6.0 still shipped KVBM).
+      # Call out any drift between the two; require_workflow_match makes it fatal.
+      - name: Check workflow files match the release branch
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_REF: ${{ github.ref_name }}
+          TIP_SHA: ${{ steps.target.outputs.bump_sha }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          REQUIRE_MATCH: ${{ inputs.require_workflow_match }}
+        run: |
+          set -euo pipefail
+          fetch() { # <path> <ref> <out>
+            local http
+            http=$(curl -sS -o "$3" -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/${REPO}/contents/$1?ref=$2")
+            case "${http}" in
+              200) ;;
+              404) : > "$3" ;;
+              *) echo "::error::could not read $1 at $2 (HTTP ${http})"; exit 1 ;;
+            esac
+          }
+          drift=0
+          for f in .github/workflows/stage-release-rc.yml .github/workflows/release.yml; do
+            fetch "${f}" "${RUN_SHA}" "${RUNNER_TEMP}/run.yml"
+            fetch "${f}" "${TIP_SHA}" "${RUNNER_TEMP}/tip.yml"
+            if cmp -s "${RUNNER_TEMP}/run.yml" "${RUNNER_TEMP}/tip.yml"; then
+              continue
+            fi
+            drift=1
+            echo "::warning file=${f}::${f} on '${RUN_REF}' (running) differs from ${RELEASE_BRANCH} (${TIP_SHA:0:10}); this run uses the '${RUN_REF}' copy."
+            {
+              echo "### Workflow drift: \`${f}\`"
+              echo "Running copy (\`${RUN_REF}\` @ ${RUN_SHA:0:10}) vs ${RELEASE_BRANCH} (@ ${TIP_SHA:0:10}); first 80 lines of \`diff -u release-branch running\`:"
+              echo '```diff'
+              diff -u "${RUNNER_TEMP}/tip.yml" "${RUNNER_TEMP}/run.yml" | head -n 80 || true
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          done
+          if [ "${drift}" = "1" ] && [ "${REQUIRE_MATCH}" = "true" ]; then
+            echo "::error::workflow files on '${RUN_REF}' differ from ${RELEASE_BRANCH}; re-dispatch with --ref ${RELEASE_BRANCH}, or reconcile the workflows, or drop require_workflow_match if the drift is intended."
+            exit 1
+          fi
 
       # Normalize the per-type fields to canonical subset strings (all|none|csv)
       # for await-post-merge, release.yml, and the GitLab trigger. The container
