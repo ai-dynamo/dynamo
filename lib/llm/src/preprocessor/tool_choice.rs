@@ -186,6 +186,7 @@ impl OpenAIPreprocessor {
                     )?
                 {
                     // TODO: Consider GPT-OSS renderer guidance for required parallel calls.
+                    // Example system prompt: "After reasoning, emit all requested independent calls as one JSON array of {name, parameters} objects."
                     // The envelope uses structural guidance, but its payload is
                     // the required-call JSON array rather than native Harmony calls.
                     return Ok(GuidedToolConstraint::GuidedJsonRequired);
