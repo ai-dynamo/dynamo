@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Any, List, Sequence, Tuple
 
-from gpu_memory_service.common.vmm import VMMDevice
+from gpu_memory_service.common.vmm import VMMDevice, VMMDeviceType, get_vmm_device_type
 
 PINNED_COPY_CHUNK_SIZE = 64 * 1024 * 1024
 
@@ -41,11 +41,18 @@ def _free_aligned_buffer(view: memoryview, ptr: int) -> None:
     _LIBC.free(ctypes.c_void_p(ptr))
 
 
-def _is_unsupported_host_register_error(exc: BaseException) -> bool:
+# Raised by _sycl_vmm/sycl_vmm.cpp host_register(); a unit test keeps them in sync.
+_UNSUPPORTED_HOST_REGISTER_MESSAGES = (
+    "register_host_memory not available",
+    "device does not support host memory registration",
+)
+
+
+def _is_unsupported_host_register_error(exc: RuntimeError) -> bool:
+    # Only _sycl_vmm raises these; any other backend or error must fail.
     message = str(exc).lower()
-    return (
-        "register_host_memory not available" in message
-        or "device does not support host memory registration" in message
+    return get_vmm_device_type() == VMMDeviceType.XPU and any(
+        text in message for text in _UNSUPPORTED_HOST_REGISTER_MESSAGES
     )
 
 
@@ -69,14 +76,13 @@ class PinnedCopySlot:
             self.stream = self._vmm.stream_create_nonblocking()
             try:
                 self._vmm.host_register(self.ptr, size)
-            except Exception as exc:  # noqa: BLE001
-                if _is_unsupported_host_register_error(exc):
-                    _LOGGER.warning(
-                        "GPU backend does not support host memory registration; "
-                        "continuing with unregistered host staging buffer"
-                    )
-                else:
+            except RuntimeError as exc:
+                if not _is_unsupported_host_register_error(exc):
                     raise
+                _LOGGER.warning(
+                    "GPU backend does not support host memory registration; "
+                    "continuing with unregistered host staging buffer"
+                )
             else:
                 self._registered = True
         except Exception:
