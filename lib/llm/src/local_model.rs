@@ -16,7 +16,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
-use crate::model_card::{ModelDeploymentCard, is_weight_file};
+use crate::model_card::{ABSOLUTE_MAX_METADATA_BYTES, ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::reasoning_field::ReasoningField;
@@ -909,8 +909,10 @@ fn system_status_base_url(info: &dynamo_runtime::SystemStatusServerInfo) -> Stri
 }
 
 /// Scan `model_dir` for files to advertise alongside the typed MDC slots.
-/// Skips weights, dotfiles / README (`is_ignored`), already-typed
-/// filenames, and anything that isn't a regular file. Non-recursive.
+/// Skips weights (including download temp names), dotfiles / README
+/// (`is_ignored`), already-typed filenames, files larger than the
+/// frontend's fetch cap, and anything that isn't a regular file.
+/// Non-recursive.
 /// Returns an empty vec when `model_dir` doesn't exist (e.g. name-only
 /// `LocalModel` placeholders).
 fn harvest_extra_files(
@@ -926,10 +928,13 @@ fn harvest_extra_files(
     {
         let entry = entry?;
         let path = entry.path();
-        // `Path::is_file` uses `fs::metadata` which follows symlinks.
+        // `fs::metadata` follows symlinks.
         // `entry.file_type()` / `entry.metadata()` use lstat on Unix —
         // they would skip the HF blob symlinks we need to harvest.
-        if !path.is_file() {
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
             continue;
         }
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -939,6 +944,17 @@ fn harvest_extra_files(
             || is_weight_file(&path)
             || HuggingFaceProvider::is_ignored(name)
         {
+            continue;
+        }
+        // Every advertised file is required, so one the frontend refuses
+        // to fetch would block the whole model from loading.
+        if meta.len() > ABSOLUTE_MAX_METADATA_BYTES {
+            tracing::warn!(
+                file = %path.display(),
+                size = meta.len(),
+                cap = ABSOLUTE_MAX_METADATA_BYTES,
+                "Not advertising file larger than the metadata fetch cap",
+            );
             continue;
         }
         out.push(CheckedFile::from_disk(&path)?);
@@ -1118,6 +1134,47 @@ mod harvest_extra_files_tests {
                 "special_tokens_map.json",
                 "target_for_symlink",
             ]
+        );
+    }
+
+    #[test]
+    fn skips_weight_temp_files_and_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Download temp names for weight shards.
+        std::fs::write(
+            dir.path().join("model-00001-of-00002.safetensors.0dc03bC1"),
+            b"x",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("model.safetensors.partial"), b"x").unwrap();
+        // A name that looks like metadata but is larger than the frontend's
+        // fetch cap. Sparse, so it costs no disk.
+        std::fs::File::create(dir.path().join("big_extra.json"))
+            .unwrap()
+            .set_len(ABSOLUTE_MAX_METADATA_BYTES + 1)
+            .unwrap();
+        // Kept: the shard index is metadata, not a weight.
+        std::fs::write(dir.path().join("model.safetensors.index.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("preprocessor_config.json"), b"{}").unwrap();
+
+        let typed: HashSet<String> = HashSet::new();
+        let mut names: Vec<String> = harvest_extra_files(dir.path(), &typed)
+            .unwrap()
+            .iter()
+            .map(|cf| {
+                cf.path()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["model.safetensors.index.json", "preprocessor_config.json"]
         );
     }
 
