@@ -19,36 +19,32 @@ package aisimulate
 
 import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-// Native input paths, in the snake_case spelling of the upstream AISimulate contract.
-// They are read-only: callers pass them to the unstructured helpers and must not modify them.
+// Native input paths, in the snake_case spelling of the upstream AISimulate contract. They
+// address the same native key when the underlay is built and when derived defaults are read,
+// and are passed to the unstructured helpers, which must not modify them.
 var (
-	SearchSpaceModelName   = []string{"search_space", "model_name"}
-	SearchSpaceBackend     = []string{"search_space", "backend"}
-	SearchSpaceHardwareSKU = []string{"search_space", "hardware_sku"}
-	SearchSpaceGPUBudget   = []string{"search_space", "gpu_budget"}
+	searchSpaceModelName   = []string{"search_space", "model_name"}
+	searchSpaceBackend     = []string{"search_space", "backend"}
+	searchSpaceHardwareSKU = []string{"search_space", "hardware_sku"}
+	searchSpaceGPUBudget   = []string{"search_space", "gpu_budget"}
 
-	Workload                = []string{"workload"}
-	WorkloadISL             = []string{"workload", "isl"}
-	WorkloadOSL             = []string{"workload", "osl"}
-	WorkloadNumRequestRatio = []string{"workload", "num_request_ratio"}
-	WorkloadRequestRate     = []string{"workload", "request_rate"}
-	WorkloadConcurrency     = []string{"workload", "concurrency"}
-	WorkloadKVLoadRatio     = []string{"workload", "kv_load_ratio"}
-	WorkloadRequestCount    = []string{"workload", "request_count"}
-	WorkloadTracePath       = []string{"workload", "trace_path"}
-	WorkloadTracePaths      = []string{"workload", "trace_paths"}
+	workloadPath            = []string{"workload"}
+	workloadISL             = []string{"workload", "isl"}
+	workloadOSL             = []string{"workload", "osl"}
+	workloadNumRequestRatio = []string{"workload", "num_request_ratio"}
+	workloadRequestRate     = []string{"workload", "request_rate"}
+	workloadConcurrency     = []string{"workload", "concurrency"}
+	workloadKVLoadRatio     = []string{"workload", "kv_load_ratio"}
+	workloadRequestCount    = []string{"workload", "request_count"}
 
-	Goal                 = []string{"goal"}
-	GoalTarget           = []string{"goal", "target"}
-	GoalParetoObjectives = []string{"goal", "pareto_objectives"}
-	GoalSLA              = []string{"goal", "sla"}
-	GoalSLATTFTMs        = []string{"goal", "sla", "ttft_ms"}
-	GoalSLAITLMs         = []string{"goal", "sla", "itl_ms"}
-	GoalSLAE2EMs         = []string{"goal", "sla", "e2e_ms"}
-	GoalStrictSLA        = []string{"goal", "strict_sla"}
-	GoalMinGoodputRPS    = []string{"goal", "min_goodput_rps"}
+	goalTarget           = []string{"goal", "target"}
+	goalParetoObjectives = []string{"goal", "pareto_objectives"}
+	goalSLATTFTMs        = []string{"goal", "sla", "ttft_ms"}
+	goalSLAITLMs         = []string{"goal", "sla", "itl_ms"}
+	goalSLAE2EMs         = []string{"goal", "sla", "e2e_ms"}
+	goalStrictSLA        = []string{"goal", "strict_sla"}
 
-	SweepMaxTrials = []string{"sweep", "max_trials"}
+	sweepMaxTrials = []string{"sweep", "max_trials"}
 )
 
 // TargetPareto is the goal.target of a multi-objective search.

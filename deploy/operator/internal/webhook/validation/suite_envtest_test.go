@@ -20,6 +20,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
@@ -106,20 +107,21 @@ func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptio
 // so a plain mutex-guarded value is enough.
 type fakeHardwareDiscoverer struct {
 	mu    sync.Mutex
-	found webhookdefaulting.DiscoveredHardware
+	found gpu.GPUInfo
 	err   error
 }
 
-func (f *fakeHardwareDiscoverer) set(found webhookdefaulting.DiscoveredHardware, err error) {
+func (f *fakeHardwareDiscoverer) set(found gpu.GPUInfo, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.found, f.err = found, err
 }
 
-func (f *fakeHardwareDiscoverer) Discover(context.Context, string) (webhookdefaulting.DiscoveredHardware, error) {
+func (f *fakeHardwareDiscoverer) Discover(context.Context, nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.found, f.err
+	found := f.found
+	return &found, f.err
 }
 
 type mutableFeatureGate struct {

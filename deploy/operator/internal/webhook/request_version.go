@@ -19,7 +19,9 @@ package webhook
 
 import "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-const nativeCarrierVersion = "v1beta2"
+// VersionV1Beta2 is the API version whose Requests reach the webhooks as a converted v1beta1
+// object carrying spec.v1beta2.
+const VersionV1Beta2 = "v1beta2"
 
 // RequestedVersion is the API version the client used. With matchPolicy: Equivalent the API
 // server converts the object to the version the webhook registered for; RequestKind then
@@ -30,19 +32,4 @@ func RequestedVersion(req admission.Request) string {
 		return req.RequestKind.Version
 	}
 	return req.Kind.Version
-}
-
-// RequestUsesV1Beta2 reports whether the client addressed the Request through v1beta2.
-func RequestUsesV1Beta2(req admission.Request) bool {
-	return RequestedVersion(req) == nativeCarrierVersion
-}
-
-// RequestIsNative reports whether the represented spec is native to the API version the
-// client used. hasV1Beta2Carrier is whether the converted v1beta1 object carries spec.v1beta2.
-// After conversion that carrier means the represented object is native v1beta2, so the
-// request is native exactly when both agree. A mismatch is a foreign-version view: the
-// client either wrote a conversion carrier directly or reads or updates an object through
-// the API version that does not own it.
-func RequestIsNative(req admission.Request, hasV1Beta2Carrier bool) bool {
-	return RequestUsesV1Beta2(req) == hasV1Beta2Carrier
 }

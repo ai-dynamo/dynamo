@@ -9594,7 +9594,7 @@ spec:
                     image:
                       description: |-
                         Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-                        persists the operator's configured image.
+                        persists the configured override or a version-matched Dynamo planner image.
                       minLength: 1
                       type: string
                     parameters:
@@ -9623,6 +9623,7 @@ spec:
                     type: string
                   minItems: 1
                   type: array
+                  x-kubernetes-list-type: set
                 hardware:
                   description: |-
                     Hardware bounds the accelerator configurations evaluated by the search.
@@ -9695,7 +9696,6 @@ spec:
                       type: array
                       x-kubernetes-list-type: set
                     mode:
-                      default: Optimize
                       description: Mode selects scalar optimization or a Pareto search.
                       enum:
                         - Optimize
@@ -9737,7 +9737,6 @@ spec:
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
                     maxCandidates:
-                      default: 1
                       description: |-
                         MaxCandidates is the maximum number of DGDCs owned by one run. Scalar
                         candidates are ordered best first; Pareto candidates have no scalar rank.
@@ -9759,7 +9758,7 @@ spec:
                   description: |-
                     Workload defines the synthetic traffic model used for every candidate evaluation.
                     When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;
-                    an explicit empty workload receives the same shape from the schema. An explicit
+                    an explicit empty workload receives the same shape from admission. An explicit
                     workload.static: {} opts out of that shape, leaving the workload to
                     spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the
                     fields it names.
@@ -9767,10 +9766,6 @@ spec:
                     KV-load ratio search.
                   properties:
                     static:
-                      default:
-                        concurrency: 10
-                        isl: 1024
-                        osl: 128
                       description: |-
                         Static defines one of AISimulate's synthetic workload shapes. Its fields are not
                         defaulted individually: the default belongs to spec.workload as a whole, so an
@@ -9797,6 +9792,9 @@ spec:
                           maxItems: 2
                           minItems: 1
                           type: array
+                          x-kubernetes-validations:
+                            - message: a range needs min < max
+                              rule: size(self) != 2 || self[0] < self[1]
                         numRequestRatio:
                           description: NumRequestRatio sets request count relative to the selected load.
                           exclusiveMinimum: true

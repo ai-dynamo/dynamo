@@ -88,72 +88,72 @@ func Underlay(spec *v1beta2.DynamoGraphDeploymentRequestSpec) (map[string]any, e
 	b := builder{root: map[string]any{}}
 
 	if spec.Model != nil {
-		b.set(spec.Model.Name, SearchSpaceModelName)
+		b.set(spec.Model.Name, searchSpaceModelName)
 	}
 	if len(spec.Backends) > 0 {
 		backends := make([]string, len(spec.Backends))
 		for i, backend := range spec.Backends {
 			backends[i] = string(backend)
 		}
-		b.setStrings(backends, SearchSpaceBackend)
+		b.setStrings(backends, searchSpaceBackend)
 	}
 	if spec.Hardware != nil && spec.Hardware.GPU != nil {
 		if sku := spec.Hardware.GPU.SKU; sku != nil && *sku != "" {
-			b.set(*sku, SearchSpaceHardwareSKU)
+			b.set(*sku, searchSpaceHardwareSKU)
 		}
 		if budget := spec.Hardware.GPU.Budget; budget != nil {
-			b.set(int64(*budget), SearchSpaceGPUBudget)
+			b.set(int64(*budget), searchSpaceGPUBudget)
 		}
 	}
 
 	if spec.Workload != nil && spec.Workload.Static != nil {
 		static := spec.Workload.Static
 		if static.ISL != nil {
-			b.set(int64(*static.ISL), WorkloadISL)
+			b.set(int64(*static.ISL), workloadISL)
 		}
 		if static.OSL != nil {
-			b.set(int64(*static.OSL), WorkloadOSL)
+			b.set(int64(*static.OSL), workloadOSL)
 		}
 		if static.NumRequestRatio != nil {
-			b.set(*static.NumRequestRatio, WorkloadNumRequestRatio)
+			b.set(*static.NumRequestRatio, workloadNumRequestRatio)
 		}
 		if static.RequestRate != nil {
-			b.set(*static.RequestRate, WorkloadRequestRate)
+			b.set(*static.RequestRate, workloadRequestRate)
 		}
 		if static.Concurrency != nil {
-			b.set(int64(*static.Concurrency), WorkloadConcurrency)
+			b.set(int64(*static.Concurrency), workloadConcurrency)
 		}
 		switch len(static.KVLoadRatio) {
 		case 0:
 		case 1:
-			b.set(static.KVLoadRatio[0], WorkloadKVLoadRatio)
+			b.set(static.KVLoadRatio[0], workloadKVLoadRatio)
 		default:
 			ratios := make([]any, len(static.KVLoadRatio))
 			for i, ratio := range static.KVLoadRatio {
 				ratios[i] = ratio
 			}
-			b.set(ratios, WorkloadKVLoadRatio)
+			b.set(ratios, workloadKVLoadRatio)
 		}
 	}
 
 	if objective := spec.Objective; objective != nil {
 		if objective.Mode == v1beta2.ObjectiveModePareto {
-			b.set(TargetPareto, GoalTarget)
+			b.set(TargetPareto, goalTarget)
 			if len(objective.Metrics) > 0 {
-				b.setStrings(nativeMetrics(objective.Metrics), GoalParetoObjectives)
+				b.setStrings(nativeMetrics(objective.Metrics), goalParetoObjectives)
 			}
 		} else if objective.Metric != nil {
-			b.set(nativeMetric(*objective.Metric), GoalTarget)
+			b.set(nativeMetric(*objective.Metric), goalTarget)
 		}
 		if sla := objective.SLA; sla != nil {
 			if sla.TTFTMs != nil {
-				b.set(*sla.TTFTMs, GoalSLATTFTMs)
+				b.set(*sla.TTFTMs, goalSLATTFTMs)
 			}
 			if sla.ITLMs != nil {
-				b.set(*sla.ITLMs, GoalSLAITLMs)
+				b.set(*sla.ITLMs, goalSLAITLMs)
 			}
 			if sla.E2EMs != nil {
-				b.set(*sla.E2EMs, GoalSLAE2EMs)
+				b.set(*sla.E2EMs, goalSLAE2EMs)
 			}
 		}
 	}

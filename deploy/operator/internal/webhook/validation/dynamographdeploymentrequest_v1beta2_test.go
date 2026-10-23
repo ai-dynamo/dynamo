@@ -84,50 +84,25 @@ func TestValidateV1beta2AcceptsADefaultedRequest(t *testing.T) {
 	v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestV1beta2(v1beta2DefaultedSpec()))
 }
 
-func TestValidateV1beta2TypedStage(t *testing.T) {
-	t.Run("missing model", func(t *testing.T) {
-		spec := v1beta2DefaultedSpec()
-		spec.Model = nil
-		errs := validateDynamoGraphDeploymentRequestV1beta2(spec)
-		v1beta2RequireError(t, errs, "spec.model: model is required")
-	})
-	t.Run("blank model", func(t *testing.T) {
-		spec := v1beta2DefaultedSpec()
-		spec.Model.Name = "  "
-		errs := validateDynamoGraphDeploymentRequestV1beta2(spec)
-		v1beta2RequireError(t, errs, "spec.model.name: must not be blank")
-	})
-	t.Run("duplicate backend", func(t *testing.T) {
-		spec := v1beta2DefaultedSpec()
-		spec.Backends = []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM, nvidiacomv1beta2.BackendVLLM}
-		v1beta2RequireError(t, validateDynamoGraphDeploymentRequestV1beta2(spec), "spec.backends[1]")
-	})
-	t.Run("kv_load_ratio range order", func(t *testing.T) {
-		spec := v1beta2DefaultedSpec()
-		spec.Workload.Static.KVLoadRatio = nvidiacomv1beta2.KVLoadRatio{0.9, 0.1}
-		v1beta2RequireError(t, validateDynamoGraphDeploymentRequestV1beta2(spec), "spec.workload.static.kvLoadRatio: a range needs min < max")
-	})
-	t.Run("an empty workload has nothing to validate", func(t *testing.T) {
-		spec := v1beta2WithParameters(v1beta2DefaultedSpec(), `{"workload":{"isl":512,"osl":64,"concurrency":8}}`)
-		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{}
-		v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestV1beta2(spec))
-	})
-	t.Run("an invalid typed value is not excused by the parameters", func(t *testing.T) {
-		spec := v1beta2WithParameters(v1beta2DefaultedSpec(), `{"workload":{"kv_load_ratio":0.5}}`)
-		spec.Workload.Static.KVLoadRatio = nvidiacomv1beta2.KVLoadRatio{0.9, 0.1}
-		v1beta2RequireError(t, validateDynamoGraphDeploymentRequestV1beta2(spec), "spec.workload.static.kvLoadRatio")
-	})
-	t.Run("typed and parameter errors aggregate", func(t *testing.T) {
-		spec := v1beta2WithParameters(v1beta2DefaultedSpec(), `[1]`)
-		spec.Model.Name = ""
-		errs := validateDynamoGraphDeploymentRequestV1beta2(spec)
-		v1beta2RequireError(t, errs, "spec.model.name")
-		v1beta2RequireError(t, errs, "spec.aisimulate.parameters")
-	})
-	t.Run("parameter content is not validated here", func(t *testing.T) {
+// The webhook does not repeat what the generated schema and CEL enforce before conversion:
+// native model presence, the model name length, backend uniqueness and the kvLoadRatio range
+// order. The operatorenv table proves those errors end to end.
+func TestValidateV1beta2LeavesSourceSchemaRulesToTheSchema(t *testing.T) {
+	spec := v1beta2DefaultedSpec()
+	spec.Model = nil
+	spec.Backends = []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM, nvidiacomv1beta2.BackendVLLM}
+	spec.Workload.Static.KVLoadRatio = nvidiacomv1beta2.KVLoadRatio{0.9, 0.1}
+	v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestV1beta2(spec))
+}
+
+func TestValidateV1beta2ParametersAreOpaque(t *testing.T) {
+	for _, parameters := range []string{
+		`{"workload":{"isl":0},"goal":{"target":"nope"}}`,
+		`[1]`, // the CRD types parameters as an object; admission does not interpret it
+	} {
 		v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestV1beta2(
-			v1beta2WithParameters(v1beta2DefaultedSpec(), `{"workload":{"isl":0},"goal":{"target":"nope"}}`)))
-	})
+			v1beta2WithParameters(v1beta2DefaultedSpec(), parameters)))
+	}
 }
 
 func TestValidateV1beta2AISimulateImage(t *testing.T) {
@@ -154,11 +129,6 @@ func TestValidateV1beta2AISimulateImage(t *testing.T) {
 	})
 }
 
-func TestValidateV1beta2MalformedParameters(t *testing.T) {
-	errs := validateDynamoGraphDeploymentRequestV1beta2(v1beta2WithParameters(v1beta2DefaultedSpec(), `[1]`))
-	v1beta2RequireError(t, errs, "spec.aisimulate.parameters: spec.aisimulate.parameters: must be a JSON object")
-}
-
 func v1beta2Envelope(raw string) *apiextensionsv1.JSON {
 	return &apiextensionsv1.JSON{Raw: []byte(raw)}
 }
@@ -173,9 +143,9 @@ func TestValidateEnvelopeV1beta2(t *testing.T) {
 	v1beta2RequireNoError(t, validateDynamoGraphDeploymentRequestEnvelopeV1beta2(v1beta2Envelope(string(good)), path))
 
 	bad := v1beta2DefaultedSpec()
-	bad.Model.Name = ""
+	bad.AISimulate = nil
 	raw, _ := json.Marshal(bad)
-	v1beta2RequireError(t, validateDynamoGraphDeploymentRequestEnvelopeV1beta2(v1beta2Envelope(string(raw)), path), "model")
+	v1beta2RequireError(t, validateDynamoGraphDeploymentRequestEnvelopeV1beta2(v1beta2Envelope(string(raw)), path), "aisimulate")
 
 	v1beta2RequireError(t, validateDynamoGraphDeploymentRequestEnvelopeV1beta2(v1beta2Envelope(`{"model": 3}`), path), "spec.v1beta2: must be a valid v1beta2 spec")
 }

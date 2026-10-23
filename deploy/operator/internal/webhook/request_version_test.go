@@ -55,26 +55,3 @@ func TestRequestedVersion(t *testing.T) {
 		})
 	}
 }
-
-func TestRequestIsNative(t *testing.T) {
-	tests := []struct {
-		name    string
-		req     admission.Request
-		carrier bool
-		want    bool
-	}{
-		{"native v1beta2 create", requestWithKinds("v1beta2"), true, true},
-		{"native v1beta1 create", requestWithKinds(""), false, true},
-		{"native v1alpha1 create", requestWithKinds("v1alpha1"), false, true},
-		{"carrier written through v1beta1", requestWithKinds(""), true, false},
-		{"carrier written through v1alpha1", requestWithKinds("v1alpha1"), true, false},
-		{"v1beta1 payload written through v1beta2", requestWithKinds("v1beta2"), false, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := RequestIsNative(tt.req, tt.carrier); got != tt.want {
-				t.Fatalf("RequestIsNative() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}

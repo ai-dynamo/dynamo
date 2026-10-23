@@ -70,6 +70,7 @@ type HardwareSpec struct {
 // +kubebuilder:validation:MaxItems=2
 // +kubebuilder:validation:items:Minimum=0
 // +kubebuilder:validation:items:Maximum=1
+// +kubebuilder:validation:XValidation:rule="size(self) != 2 || self[0] < self[1]",message="a range needs min < max"
 type KVLoadRatio []float64
 
 // StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
@@ -114,7 +115,6 @@ type WorkloadSpec struct {
 	// defaulted individually: the default belongs to spec.workload as a whole, so an
 	// explicit workload object keeps exactly the fields it names.
 	// +optional
-	// +kubebuilder:default={isl: 1024, osl: 128, concurrency: 10}
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
 
@@ -161,7 +161,6 @@ type ObjectiveSLASpec struct {
 type ObjectiveSpec struct {
 	// Mode selects scalar optimization or a Pareto search.
 	// +optional
-	// +kubebuilder:default=Optimize
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
 	// Metric is the scalar target when mode is Optimize.
@@ -212,7 +211,6 @@ type RecommendationSpec struct {
 	// candidates are ordered best first; Pareto candidates have no scalar rank.
 	// This field does not limit internal trials.
 	// +optional
-	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
@@ -228,6 +226,7 @@ type NativeSearchInput struct {
 	// Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
+	// +listType=set
 	Backends []Backend `json:"backends,omitempty"`
 
 	// Hardware bounds the accelerator configurations evaluated by the search.
@@ -237,7 +236,7 @@ type NativeSearchInput struct {
 
 	// Workload defines the synthetic traffic model used for every candidate evaluation.
 	// When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;
-	// an explicit empty workload receives the same shape from the schema. An explicit
+	// an explicit empty workload receives the same shape from admission. An explicit
 	// workload.static: {} opts out of that shape, leaving the workload to
 	// spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the
 	// fields it names.

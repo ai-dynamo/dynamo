@@ -27,14 +27,15 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	admissionv1 "k8s.io/api/admission/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/utils/ptr"
 )
 
 // defaultMetricV1beta2 is the scalar target an Optimize objective receives when it names none.
 const defaultMetricV1beta2 = nvidiacomv1beta2.ObjectiveMetric("Throughput")
 
-// Nested defaults of the parents admission creates. They must equal the +kubebuilder:default
-// markers in api/v1beta2: the API server defaults a mutated object in the webhook's version
-// (v1beta1, whose v1beta2 carrier is opaque), so the v1beta2 schema never fills them in.
+// Defaults of the objects admission creates. Admission is their only owner: the API server
+// defaults a mutated object in the webhook's version (v1beta1, whose v1beta2 carrier is
+// opaque), so the v1beta2 schema carries no default markers for them.
 const (
 	defaultStaticISLV1beta2         int32 = 1024
 	defaultStaticOSLV1beta2         int32 = 128
@@ -42,31 +43,30 @@ const (
 	defaultMaxCandidatesV1beta2     int32 = 1
 )
 
-func defaultPtrV1beta2[T any](v T) *T { return &v }
-
 // This file defaults the v1beta2 shape of a DynamoGraphDeploymentRequest. It is separate
 // from the canonical defaulting because the v1beta1 hub carries a v1beta2 Request as an
 // opaque spec.v1beta2 envelope: conversion cannot apply field-level defaults to it, so the
 // handler decodes the envelope, runs this traversal and encodes the result. Names carry the
 // API version because the canonical names belong to v1beta1.
 //
-// The CRD schema owns the unconditional defaults: backends, objective.mode,
-// recommendation.maxCandidates and workload.static as a whole (workload.static: {} opts
-// out). objective.sla has no default: an omitted SLA stays absent. Admission owns what depends on
-// other fields or on the environment: the scalar metric, the cluster hardware and the
-// AISimulate image. spec.aisimulate.parameters never changes a default. It overrides the
-// defaulted typed values later, when the input is lowered.
+// Admission owns every v1beta2 default, and each default has this one owner: backends,
+// objective.mode, the scalar metric, recommendation.maxCandidates, workload.static, the
+// cluster hardware and the AISimulate image. workload.static: {} opts out of the static
+// workload. objective.sla has no default: an omitted SLA stays absent.
+// spec.aisimulate.parameters never changes a default. It overrides the defaulted typed
+// values later, when the input is lowered.
 
 // defaultDynamoGraphDeploymentRequestV1beta2 defaults the v1beta2 spec that dgdr carries in
-// spec.v1beta2. The environment is read once, before any mutation, and only on CREATE:
-// discovered hardware is persisted with the Request, so a later write never replaces what
-// the Request was created with. The envelope is rewritten
+// spec.v1beta2. The environment is read once, before any mutation, and only for a CREATE or
+// an UPDATE that changes spec.hardware (see resolveHardware). oldSpec is the stored spec on
+// UPDATE and nil otherwise. The envelope is rewritten
 // only when defaulting changed the spec, so a defaulted object stays byte-identical across
 // repeated admissions.
 func defaultDynamoGraphDeploymentRequestV1beta2(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	operation admissionv1.Operation,
+	oldSpec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 	options DGDRV1beta2Options,
 ) error {
 	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
@@ -78,7 +78,7 @@ func defaultDynamoGraphDeploymentRequestV1beta2(
 		return fmt.Errorf("encode spec.v1beta2: %w", err)
 	}
 
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(&spec, options.resolveDefaults(ctx, operation, &spec))
+	defaultDynamoGraphDeploymentRequestSpecV1beta2(&spec, options.resolveDefaults(ctx, operation, oldSpec, &spec))
 
 	after, err := json.Marshal(&spec)
 	if err != nil {
@@ -88,6 +88,30 @@ func defaultDynamoGraphDeploymentRequestV1beta2(
 		dgdr.Spec.V1Beta2 = &apiextensionsv1.JSON{Raw: after}
 	}
 	return nil
+}
+
+// decodeOldSpecV1beta2 returns the stored v1beta2 spec an UPDATE replaces. The API server
+// converts the old object to the same v1beta1 carrier view as the new one, so the spec sits
+// in the same spec.v1beta2 envelope. It returns nil when there is nothing to compare with.
+func decodeOldSpecV1beta2(
+	operation admissionv1.Operation,
+	oldObject []byte,
+) (*nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec, error) {
+	if operation != admissionv1.Update || len(oldObject) == 0 {
+		return nil, nil
+	}
+	var old nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	if err := json.Unmarshal(oldObject, &old); err != nil {
+		return nil, fmt.Errorf("decode old object: %w", err)
+	}
+	if old.Spec.V1Beta2 == nil {
+		return nil, nil
+	}
+	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
+	if err := json.Unmarshal(old.Spec.V1Beta2.Raw, &spec); err != nil {
+		return nil, fmt.Errorf("decode old spec.v1beta2: %w", err)
+	}
+	return &spec, nil
 }
 
 // dynamoGraphDeploymentRequestV1beta2DefaultOptions carries the request-scoped values the
@@ -105,59 +129,68 @@ type hardwareDefaultsV1beta2 struct {
 	budget int32
 }
 
-func (h hardwareDefaultsV1beta2) empty() bool { return h.sku == "" && h.budget == 0 }
-
 // defaultDynamoGraphDeploymentRequestSpecV1beta2 defaults spec in place. It applies on
-// CREATE and UPDATE and is idempotent; opts carries no hardware on UPDATE. spec must not be nil.
+// CREATE and UPDATE and is idempotent; opts carries hardware only when the environment was
+// asked (see resolveHardware). spec must not be nil. Explicit values, including empty
+// objects, are kept. The functions below mirror the Go API tree and visit children in
+// declaration order.
 func defaultDynamoGraphDeploymentRequestSpecV1beta2(
 	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 	opts dynamoGraphDeploymentRequestV1beta2DefaultOptions,
 ) {
-	// Structural defaults live here, not in the CRD schema: a schema default would also be
-	// applied to an object carrying spec.v1beta1 and put native fields next to the carrier,
-	// which conversion rejects. This function only runs for native requests. Explicit values,
-	// including empty objects, are kept. A parent the client sent already received its nested
-	// schema defaults at decode; a parent created here gets them explicitly.
-	if spec.Backends == nil {
-		spec.Backends = []nvidiacomv1beta2.Backend{"vllm", "sglang", "trtllm"}
-	}
-	if spec.Workload == nil {
-		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{
-			ISL:         defaultPtrV1beta2(defaultStaticISLV1beta2),
-			OSL:         defaultPtrV1beta2(defaultStaticOSLV1beta2),
-			Concurrency: defaultPtrV1beta2(defaultStaticConcurrencyV1beta2),
-		}}
-	}
-	if spec.Objective == nil {
-		spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{Mode: nvidiacomv1beta2.ObjectiveModeOptimize}
-	}
-	if spec.Recommendation == nil {
-		spec.Recommendation = &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: defaultMaxCandidatesV1beta2}
+	defaultDynamoGraphDeploymentRequestNativeSpecV1beta2(&spec.DynamoGraphDeploymentRequestNativeSpec, opts)
+}
+
+func defaultDynamoGraphDeploymentRequestNativeSpecV1beta2(
+	native *nvidiacomv1beta2.DynamoGraphDeploymentRequestNativeSpec,
+	opts dynamoGraphDeploymentRequestV1beta2DefaultOptions,
+) {
+	defaultNativeSearchInputV1beta2(&native.NativeSearchInput, opts)
+}
+
+func defaultNativeSearchInputV1beta2(
+	input *nvidiacomv1beta2.NativeSearchInput,
+	opts dynamoGraphDeploymentRequestV1beta2DefaultOptions,
+) {
+	if input.Backends == nil {
+		input.Backends = []nvidiacomv1beta2.Backend{"vllm", "sglang", "trtllm"}
 	}
 
-	if spec.Hardware == nil && !opts.hardware.empty() {
-		spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
+	// Hardware has no static default: it exists only when the cluster supplied some.
+	if input.Hardware == nil && opts.hardware != (hardwareDefaultsV1beta2{}) {
+		input.Hardware = &nvidiacomv1beta2.HardwareSpec{}
 	}
-	if spec.Hardware != nil {
-		defaultHardwareSpecV1beta2(spec.Hardware, opts.hardware)
+	if input.Hardware != nil {
+		defaultHardwareSpecV1beta2(input.Hardware, opts.hardware)
 	}
 
-	if spec.Objective != nil {
-		defaultObjectiveSpecV1beta2(spec.Objective)
+	if input.Workload == nil {
+		input.Workload = &nvidiacomv1beta2.WorkloadSpec{}
 	}
+	defaultWorkloadSpecV1beta2(input.Workload)
+
+	if input.Objective == nil {
+		input.Objective = &nvidiacomv1beta2.ObjectiveSpec{}
+	}
+	defaultObjectiveSpecV1beta2(input.Objective)
 
 	// The operator image is persisted with the Request, so spec.aisimulate is created to
 	// carry it.
-	if spec.AISimulate == nil && opts.aisimulateImage != "" {
-		spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{}
+	if input.AISimulate == nil && opts.aisimulateImage != "" {
+		input.AISimulate = &nvidiacomv1beta2.AISimulateSpec{}
 	}
-	if spec.AISimulate != nil {
-		defaultAISimulateSpecV1beta2(spec.AISimulate, opts.aisimulateImage)
+	if input.AISimulate != nil {
+		defaultAISimulateSpecV1beta2(input.AISimulate, opts.aisimulateImage)
 	}
+
+	if input.Recommendation == nil {
+		input.Recommendation = &nvidiacomv1beta2.RecommendationSpec{}
+	}
+	defaultRecommendationSpecV1beta2(input.Recommendation)
 }
 
 func defaultHardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec, defaults hardwareDefaultsV1beta2) {
-	if hardware.GPU == nil && !defaults.empty() {
+	if hardware.GPU == nil && defaults != (hardwareDefaultsV1beta2{}) {
 		hardware.GPU = &nvidiacomv1beta2.GPUHardwareSpec{}
 	}
 	if hardware.GPU != nil {
@@ -169,28 +202,49 @@ func defaultHardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec, default
 // SKU and let admission size the budget.
 func defaultGPUHardwareSpecV1beta2(gpu *nvidiacomv1beta2.GPUHardwareSpec, defaults hardwareDefaultsV1beta2) {
 	if gpu.SKU == nil && defaults.sku != "" {
-		sku := defaults.sku
-		gpu.SKU = &sku
+		gpu.SKU = ptr.To(defaults.sku)
 	}
 	if gpu.Budget == nil && defaults.budget > 0 {
-		budget := defaults.budget
-		gpu.Budget = &budget
+		gpu.Budget = ptr.To(defaults.budget)
 	}
 }
 
-// defaultObjectiveSpecV1beta2 gives an Optimize objective without a metric the default
-// scalar target. It reads the typed objective alone: a goal.target in
+func defaultWorkloadSpecV1beta2(workload *nvidiacomv1beta2.WorkloadSpec) {
+	// An explicit static: {} is the opt-out, so the static defaults apply only to the object
+	// created here.
+	if workload.Static == nil {
+		workload.Static = &nvidiacomv1beta2.StaticWorkloadSpec{}
+		defaultStaticWorkloadSpecV1beta2(workload.Static)
+	}
+}
+
+func defaultStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpec) {
+	static.ISL = ptr.To(defaultStaticISLV1beta2)
+	static.OSL = ptr.To(defaultStaticOSLV1beta2)
+	static.Concurrency = ptr.To(defaultStaticConcurrencyV1beta2)
+}
+
+// defaultObjectiveSpecV1beta2 defaults the mode and gives an Optimize objective without a
+// metric the default scalar target. It reads the typed objective alone: a goal.target in
 // spec.aisimulate.parameters overrides the completed typed value when the input is lowered,
 // so it never suppresses this default.
 func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
-	if (objective.Mode == "" || objective.Mode == nvidiacomv1beta2.ObjectiveModeOptimize) && objective.Metric == nil {
-		metric := defaultMetricV1beta2
-		objective.Metric = &metric
+	if objective.Mode == "" {
+		objective.Mode = nvidiacomv1beta2.ObjectiveModeOptimize
+	}
+	if objective.Mode == nvidiacomv1beta2.ObjectiveModeOptimize && objective.Metric == nil {
+		objective.Metric = ptr.To(defaultMetricV1beta2)
 	}
 }
 
 func defaultAISimulateSpecV1beta2(aisimulate *nvidiacomv1beta2.AISimulateSpec, image string) {
 	if aisimulate.Image == "" && image != "" {
 		aisimulate.Image = image
+	}
+}
+
+func defaultRecommendationSpecV1beta2(recommendation *nvidiacomv1beta2.RecommendationSpec) {
+	if recommendation.MaxCandidates == 0 {
+		recommendation.MaxCandidates = defaultMaxCandidatesV1beta2
 	}
 }
