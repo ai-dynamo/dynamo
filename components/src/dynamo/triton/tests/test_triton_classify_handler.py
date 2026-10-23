@@ -81,7 +81,7 @@ class _MockModel:
 
 
 class _FakeOwner:
-    """Mimics the memory_buffer.owner access surface Triton exposes."""
+    """Mimics the memory_buffer.owner label-lookup surface Triton exposes."""
 
     def __init__(self, output_labels: dict[int, dict[int, str]]) -> None:
         self._output_labels = output_labels
