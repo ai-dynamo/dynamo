@@ -71,7 +71,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 		return live
 	}
 	accepted := func(live *nvidiacomv1beta2.DynamoGraphDeploymentRequest) *metav1.Condition {
-		return meta.FindStatusCondition(live.Status.Conditions, DGDRAcceptedConditionV1beta2)
+		return meta.FindStatusCondition(live.Status.Conditions, nvidiacomv1beta2.DGDRRequestConditionAccepted)
 	}
 	getRun := func(g Gomega, name string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
 		run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}

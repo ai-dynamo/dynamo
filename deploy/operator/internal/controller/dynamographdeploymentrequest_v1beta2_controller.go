@@ -58,10 +58,6 @@ const (
 	// dgdrV1beta2RetainedRuns is how many terminal Runs a Request keeps. Older ones are deleted.
 	dgdrV1beta2RetainedRuns = 5
 
-	// DGDRAcceptedConditionV1beta2 reports whether the current Request generation has been
-	// materialized as an immutable Run. Execution state belongs to the Run, not to this condition.
-	DGDRAcceptedConditionV1beta2 = "Accepted"
-
 	dgdrReasonRunCreated          = "RunCreated"
 	dgdrReasonInvalidSpec         = "InvalidSpec"
 	dgdrReasonWaitingForActiveRun = "WaitingForActiveRun"
@@ -322,7 +318,7 @@ func dgdrV1beta2Condition(
 	reason, message string,
 ) metav1.Condition {
 	return metav1.Condition{
-		Type:               DGDRAcceptedConditionV1beta2,
+		Type:               nvidiacomv1beta2.DGDRRequestConditionAccepted,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,

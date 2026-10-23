@@ -179,7 +179,7 @@ func dgdrV1beta2Request(withHardware bool) *nvidiacomv1beta2.DynamoGraphDeployme
 
 func dgdrV1beta2AcceptedCondition(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) metav1.Condition {
 	t.Helper()
-	condition := meta.FindStatusCondition(request.Status.Conditions, DGDRAcceptedConditionV1beta2)
+	condition := meta.FindStatusCondition(request.Status.Conditions, nvidiacomv1beta2.DGDRRequestConditionAccepted)
 	if condition == nil {
 		t.Fatal("no Accepted condition")
 	}
