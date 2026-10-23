@@ -209,7 +209,15 @@ impl IngressRequestDecoder<PythonPayload> for PythonIngressPayloadAdapter {
         payload_codec: RequestPlanePayloadCodec,
         bytes: Bytes,
     ) -> Result<PythonPayload, PipelineError> {
-        let mut payload = decode_python_request::<PythonPayload>(payload_codec, bytes).await?;
+        // Without backend admission nothing reads the rank, so decode it as a
+        // bidirectional frame is, without the rank probe.
+        let mut payload = if dynamo_llm::admission_gate::enabled() {
+            decode_python_request::<PythonPayload>(payload_codec, bytes).await?
+        } else {
+            decode_python_request::<BidirectionalFrame>(payload_codec, bytes)
+                .await?
+                .0
+        };
         // Unconditionally: a request's responses go back in the codec it arrived
         // in, whether its body names a usable rank or none.
         payload.payload_codec = payload_codec;

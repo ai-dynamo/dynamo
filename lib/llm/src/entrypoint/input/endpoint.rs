@@ -147,11 +147,14 @@ pub async fn run(
             // network path admits each request through this worker's gate
             // first: the config's own, shared with every endpoint serving a
             // clone of it.
-            let admission_gate = admission_gate.get_or_create(&component);
-            let ingress = Ingress::for_engine(AdmissionEngine::new(
-                Arc::clone(&admission_gate),
-                inner_engine,
-            ))?;
+            let admission_gate =
+                crate::admission_gate::enabled().then(|| admission_gate.get_or_create(&component));
+            let ingress = match &admission_gate {
+                Some(gate) => {
+                    Ingress::for_engine(AdmissionEngine::new(Arc::clone(gate), inner_engine))?
+                }
+                None => Ingress::for_engine(inner_engine)?,
+            };
 
             // The disaggregation role is carried by `worker_type`, not
             // `model_type`. Prefill workers register with an empty
@@ -172,7 +175,9 @@ pub async fn run(
                     needs,
                 )
                 .await?;
-            admission_gate.record_model_card(model.card());
+            if let Some(admission_gate) = &admission_gate {
+                admission_gate.record_model_card(model.card());
+            }
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
             Box::pin(fut)

@@ -461,8 +461,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "admission gate per DP rank, each held from admission until the "
             "request finishes. Takes precedence over both environment variables.\n"
             f"env var: {_ENGINE_REQUEST_LIMIT_ENV} (legacy alias: "
-            "DYN_ENGINE_REQUEST_LIMIT) | default: the engine's reported "
-            "max_num_seqs, or 10000 until it is reported",
+            "DYN_ENGINE_REQUEST_LIMIT) | default: unset (backend admission "
+            "disabled unless another admission limit is set)",
         )
 
         add_argument(

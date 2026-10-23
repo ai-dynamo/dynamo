@@ -298,7 +298,8 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<EncodedPythonResponse>, Error>
         let payload_codec = request.payload_codec();
         let context = request.context();
         let dp_rank = request.dp_rank();
-        let uses_admission = self.backend_role.uses_admission();
+        let uses_admission =
+            dynamo_llm::admission_gate::enabled() && self.backend_role.uses_admission();
         let generate = generate_python_stream(
             &self.engine,
             request,

@@ -830,9 +830,11 @@ fn register_model<'p>(
     // is built and published, is what makes this endpoint a model backend,
     // whose requests that gate admits from now on, even if it is already
     // serving.
-    let admission_gate = endpoint
-        .admission_gate
-        .get_or_create(endpoint.inner.component());
+    let admission_gate = dynamo_llm::admission_gate::enabled().then(|| {
+        endpoint
+            .admission_gate
+            .get_or_create(endpoint.inner.component())
+    });
     endpoint
         .inner
         .set_lifecycle_operation_role(lifecycle_role)
@@ -891,7 +893,9 @@ fn register_model<'p>(
             register_model_card(&endpoint.inner, &card)
                 .await
                 .map_err(|e| PyException::new_err(format!("{}", e)))?;
-            admission_gate.record_model_card(&card);
+            if let Some(admission_gate) = &admission_gate {
+                admission_gate.record_model_card(&card);
+            }
 
             return Ok(());
         }
@@ -960,7 +964,9 @@ fn register_model<'p>(
             )
             .await
             .map_err(to_pyerr)?;
-        admission_gate.record_model_card(local_model.card());
+        if let Some(admission_gate) = &admission_gate {
+            admission_gate.record_model_card(local_model.card());
+        }
 
         if let Some(lora_name) = lora_identifier {
             tracing::info!("Registered LoRA '{}' MDC", lora_name);

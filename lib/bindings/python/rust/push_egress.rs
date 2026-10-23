@@ -705,7 +705,7 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PushFrame>, Error> for PythonP
         &self,
         request: SingleIn<PythonPayload>,
     ) -> Result<ManyOut<PushFrame>, Error> {
-        if self.backend_role.uses_admission() {
+        if dynamo_llm::admission_gate::enabled() && self.backend_role.uses_admission() {
             let context = request.context();
             let dp_rank = request.dp_rank();
             self.admission

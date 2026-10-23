@@ -7,7 +7,8 @@ subtitle: Configure the backend admission gate in a Kubernetes deployment.
 
 Backend admission control limits requests inside each engine and queues excess work outside it.
 Configure the gate on the worker containers in your DynamoGraphDeployment (DGD). It supports both
-Dynamo Python and Dynamo Sidecar backends.
+Dynamo Python and Dynamo Sidecar backends. It is disabled by default; setting any of the variables
+below enables it.
 
 For behavior and tuning guidance, see
 [Admission Control Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md).

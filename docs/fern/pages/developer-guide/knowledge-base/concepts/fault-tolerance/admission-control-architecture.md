@@ -40,7 +40,8 @@ are planned at the router.
 
 ## Backend
 
-Backend admission control supports both Dynamo Python and Dynamo Sidecar backends. Each worker has
+Backend admission control is disabled by default; setting any of the limits under
+[Configuration](#configuration) enables it. It supports both Dynamo Python and Dynamo Sidecar backends. Each worker has
 its own gate, including separate prefill and decode workers in a disaggregated deployment. All
 endpoints of a worker share its gate.
 

@@ -108,6 +108,9 @@
 //!
 //! # Configuration
 //!
+//! Backend admission is disabled unless at least one setting below has an
+//! explicit value (see [`enabled`]).
+//!
 //! Each setting is a per-rank limit, read once when a worker's gate is created,
 //! from the first of its environment names that holds a valid value:
 //!
@@ -141,7 +144,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::Poll;
 
 use dynamo_runtime::component::Component;
@@ -281,6 +284,15 @@ struct ExplicitLimits {
     engine_request_limit: Option<Explicit>,
     engine_request_waiting_limit: Option<Explicit>,
     request_queue_limit: Option<Explicit>,
+}
+
+/// This process's explicit settings, read from the environment once.
+static EXPLICIT_LIMITS: LazyLock<ExplicitLimits> = LazyLock::new(ExplicitLimits::from_environment);
+
+/// Whether backend admission is enabled: only when at least one setting has an
+/// explicit, valid value. Disabled, backends never create or consult a gate.
+pub fn enabled() -> bool {
+    *EXPLICIT_LIMITS != ExplicitLimits::default()
 }
 
 impl ExplicitLimits {
@@ -1572,7 +1584,7 @@ impl BackendAdmissionGate {
                 .map(|worker_id| format!("{worker_id:x}"))
                 .unwrap_or_default(),
         };
-        let gate = Self::with_metrics(owner, ExplicitLimits::from_environment(), metrics);
+        let gate = Self::with_metrics(owner, *EXPLICIT_LIMITS, metrics);
         // Logged once per worker, as the effective configuration: the limits
         // are not exported as metrics.
         gate.state
