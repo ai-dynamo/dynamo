@@ -31,6 +31,9 @@ spec:
           # In Dynamo runtime mode the EPP reads the model and the KV block
           # size from the workers' model cards, as the Frontend does.
           env:
+          # The same KV event socket grouping as arm A's Frontend; a-frontend.yaml explains.
+          - name: DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB
+            value: "16"
           - name: HF_HOME
             value: /opt/models
           - name: HF_HUB_OFFLINE

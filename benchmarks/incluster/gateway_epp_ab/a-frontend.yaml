@@ -27,6 +27,12 @@ spec:
           env:
           - name: DYN_ROUTER_MODE
             value: kv
+          # By default the router opens one ZMQ socket per worker for each KV
+          # event stream, and libzmq allows 1,023 sockets, so past a few hundred
+          # workers it stops receiving most workers' KV events. 16 workers per
+          # socket keeps 2048 workers at 128 sockets per stream.
+          - name: DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB
+            value: "16"
           # Model files come from the shared cache, so no pod calls Hugging Face.
           - name: HF_HOME
             value: /opt/models
