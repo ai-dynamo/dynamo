@@ -733,6 +733,64 @@ mod tests {
     }
 
     #[test]
+    fn plugin_priority_header_reaches_engine_in_every_phase() {
+        use dynamo_llm::generate_format::{ClientRequest, GenerateFormat, Worker};
+        for (header, expected) in [
+            (None, 7),
+            (Some("5"), 5),
+            (Some("0"), 0),
+            (Some(" -5 "), -5),
+            (Some("-2147483648"), i32::MIN),
+            (Some("2147483647"), i32::MAX),
+            (Some("2147483648"), 7),
+            (Some("invalid"), 7),
+            (Some(""), 7),
+        ] {
+            let headers = std::iter::once(("content-type", "application/json"))
+                .chain(header.map(|value| ("x-dynamo-request-priority", value)))
+                .map(|(name, value)| (name.parse().unwrap(), value.parse().unwrap()))
+                .collect();
+            let opened = dynamo_sglang_generate::SglangFormat::native()
+                .open(ClientRequest {
+                    body: br#"{"input_ids":[1],"priority":7}"#,
+                    headers: &headers,
+                    default_request_id: "priority",
+                })
+                .unwrap();
+            opened.validation.unwrap();
+            let bound = (opened.bind)(&Worker {
+                model: "model",
+                engine_info: &serde_json::Value::Null,
+                kv_cache_block_size: 16,
+                lora_name: None,
+                tower_connector_lora_enabled: false,
+            })
+            .unwrap();
+            let mut canonical: PreprocessedRequest =
+                serde_json::from_value(serde_json::to_value(bound.request).unwrap()).unwrap();
+            let routing = canonical.routing.as_ref().unwrap();
+            assert_eq!(routing.priority, Some(expected));
+            assert_eq!(routing.priority_jump, Some(expected.max(0) as f64));
+            canonical.bootstrap_info = Some(dynamo_backend_common::BootstrapInfo {
+                bootstrap_host: "127.0.0.1".into(),
+                bootstrap_port: 5000,
+                bootstrap_room: 1,
+                handoff_id: None,
+            });
+            for mode in [
+                DisaggregationMode::Aggregated,
+                DisaggregationMode::Prefill,
+                DisaggregationMode::Decode,
+            ] {
+                let native = request(&canonical, "priority", mode, None, None)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(native.body["priority"], expected, "{header:?} {mode:?}");
+            }
+        }
+    }
+
+    #[test]
     fn native_request_preserves_engine_fields_and_overrides_routing_fields() {
         let mut canonical = canonical_request();
         let payload = json!({
