@@ -391,26 +391,24 @@ impl WorkerPicker for UncachedPoolSplitPicker {
                                 .position(|tier| Some(&tier.taint) == taint.as_ref())
                         })
                         .next()
-                    {
-                        let pools = self.parameters.pools.clone().unwrap_or_default();
-                        for tier in pools.iter().skip(index + 1) {
-                            let upgraded_rows: Vec<usize> = candidates
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, candidate)| {
-                                    candidate
-                                        .taints()
-                                        .is_some_and(|set| set.contains(&tier.taint))
-                                })
-                                .map(|(row, _)| row)
-                                .collect();
-                            if let Some(row) =
-                                select_affine(load, &cached, upgraded_rows.into_iter())
-                            {
-                                return Ok(row);
-                            }
+                {
+                    let pools = self.parameters.pools.clone().unwrap_or_default();
+                    for tier in pools.iter().skip(index + 1) {
+                        let upgraded_rows: Vec<usize> = candidates
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, candidate)| {
+                                candidate
+                                    .taints()
+                                    .is_some_and(|set| set.contains(&tier.taint))
+                            })
+                            .map(|(row, _)| row)
+                            .collect();
+                        if let Some(row) = select_affine(load, &cached, upgraded_rows.into_iter()) {
+                            return Ok(row);
                         }
                     }
+                }
                 Err(WorkerSelectionPolicyError::failed("no eligible worker"))
             }
         }
