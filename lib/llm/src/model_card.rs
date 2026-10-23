@@ -672,15 +672,24 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
 /// 1 GiB cap on metadata fetch — realistic files are <20 MiB. Bounds
 /// disk usage if a worker advertises a bogus `CheckedFile.size`, and is
 /// the fallback when `size` is absent on a `CheckedFile`.
-const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// File extensions that identify model weights. Callers: the frontend
-/// hf:// sibling harvest below and `local_model::harvest_extra_files`.
+/// Identify weights and their suffixed download artifacts by filename, including
+/// snapshot symlinks whose targets have hash-only names. Weight-index JSON files
+/// remain metadata. Used by both frontend and worker sibling harvesting.
 pub(crate) fn is_weight_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("safetensors" | "bin" | "gguf" | "onnx" | "tflite" | "h5" | "pt" | "pth" | "msgpack")
-    )
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if filename.ends_with(".safetensors.index.json") || filename.ends_with(".bin.index.json") {
+        return false;
+    }
+    filename.split('.').skip(1).any(|extension| {
+        matches!(
+            extension,
+            "safetensors" | "bin" | "gguf" | "onnx" | "tflite" | "h5" | "pt" | "pth" | "msgpack"
+        )
+    })
 }
 
 /// Parent directory of a `file://` URI when it resolves to a real local
@@ -3285,10 +3294,12 @@ mod tests {
         std::fs::write(snap.path().join("tokenizer.model"), b"sp")?;
         // `.safetensors.index.json` is `.json`, not a weight — must be kept.
         std::fs::write(snap.path().join("model.safetensors.index.json"), b"idx")?;
+        std::fs::write(snap.path().join("pytorch_model.bin.index.json"), b"idx")?;
         super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
         assert!(slug.path().join("preprocessor_config.json").exists());
         assert!(slug.path().join("tokenizer.model").exists());
         assert!(slug.path().join("model.safetensors.index.json").exists());
+        assert!(slug.path().join("pytorch_model.bin.index.json").exists());
         Ok(())
     }
 
@@ -3297,12 +3308,22 @@ mod tests {
     fn harvest_skips_weight_blobs() -> anyhow::Result<()> {
         let snap = tempfile::tempdir()?;
         let slug = tempfile::tempdir()?;
-        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+        let weights = [
+            "model.safetensors",
+            "pytorch_model.bin",
+            "model.gguf",
+            "model-00064-of-000096.safetensors.0dc03bC1",
+            "model.safetensors.incomplete",
+            "pytorch_model.bin.tmp",
+            "model.safetensors.tmp.json",
+            "model.safetensors.index.json.tmp",
+        ];
+        for weight in weights {
             std::fs::write(snap.path().join(weight), b"WEIGHTS")?;
         }
         super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
-        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
-            assert!(!slug.path().join(weight).exists());
+        for weight in weights {
+            assert!(!slug.path().join(weight).exists(), "harvested {weight}");
         }
         Ok(())
     }

@@ -16,7 +16,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
-use crate::model_card::{ModelDeploymentCard, is_weight_file};
+use crate::model_card::{ABSOLUTE_MAX_METADATA_BYTES, ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::reasoning_field::ReasoningField;
@@ -912,7 +912,7 @@ fn system_status_base_url(info: &dynamo_runtime::SystemStatusServerInfo) -> Stri
 /// Skips weights, dotfiles / README (`is_ignored`), already-typed
 /// filenames, and anything that isn't a regular file. Non-recursive.
 /// Returns an empty vec when `model_dir` doesn't exist (e.g. name-only
-/// `LocalModel` placeholders).
+/// `LocalModel` placeholders). Rejects oversized metadata before hashing it.
 fn harvest_extra_files(
     model_dir: &Path,
     typed_filenames: &HashSet<String>,
@@ -941,6 +941,16 @@ fn harvest_extra_files(
         {
             continue;
         }
+        let size = fs::metadata(&path)
+            .with_context(|| format!("reading metadata for {}", path.display()))?
+            .len();
+        anyhow::ensure!(
+            size <= ABSOLUTE_MAX_METADATA_BYTES,
+            "metadata file {} is {} bytes, exceeds cap {}",
+            path.display(),
+            size,
+            ABSOLUTE_MAX_METADATA_BYTES
+        );
         out.push(CheckedFile::from_disk(&path)?);
     }
     Ok(out)
@@ -1081,12 +1091,20 @@ mod harvest_extra_files_tests {
         // ecosystem-wide case (.pt) which mx alone wouldn't catch.
         touch("model.safetensors");
         touch("pytorch_lora_weights.pt");
+        touch("model-00064-of-000096.safetensors.0dc03bC1");
+        touch("model.safetensors.incomplete");
+        touch("pytorch_model.bin.tmp");
+        touch("model.safetensors.tmp.json");
+        touch("model.safetensors.index.json.tmp");
         // dotfile / README (excluded by is_ignored)
         touch(".gitattributes");
         touch("README.md");
         // genuine extras (kept)
         touch("preprocessor_config.json");
         touch("special_tokens_map.json");
+        touch("model.safetensors.index.json");
+        touch("pytorch_model.bin.index.json");
+        touch("tokenizer.model");
         // subdir (skipped — not a file)
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         // symlink to a real file (must be followed — HF snapshot dirs
@@ -1114,11 +1132,153 @@ mod harvest_extra_files_tests {
             names,
             vec![
                 "added_tokens.json",
+                "model.safetensors.index.json",
                 "preprocessor_config.json",
+                "pytorch_model.bin.index.json",
                 "special_tokens_map.json",
                 "target_for_symlink",
+                "tokenizer.model",
             ]
         );
+    }
+
+    #[test]
+    fn rejects_oversized_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preprocessor_config.json");
+        let size = ABSOLUTE_MAX_METADATA_BYTES + 1;
+        // Sparse file: exercise the size check without writing or hashing 1 GiB.
+        fs::File::create(&path).unwrap().set_len(size).unwrap();
+
+        let error = harvest_extra_files(dir.path(), &HashSet::new()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "metadata file {} is {} bytes, exceeds cap {}",
+                path.display(),
+                size,
+                ABSOLUTE_MAX_METADATA_BYTES
+            )
+        );
+    }
+
+    #[test]
+    fn filters_weight_symlinks_before_checking_size() {
+        let snapshot = tempfile::tempdir().unwrap();
+        let blobs = tempfile::tempdir().unwrap();
+        let blob = blobs.path().join("weight-blob");
+        fs::File::create(&blob)
+            .unwrap()
+            .set_len(4_261_412_864)
+            .unwrap();
+        std::os::unix::fs::symlink(
+            &blob,
+            snapshot
+                .path()
+                .join("model-00064-of-000096.safetensors.0dc03bC1"),
+        )
+        .unwrap();
+        let metadata_blob = blobs.path().join("metadata-blob");
+        fs::write(&metadata_blob, b"{}").unwrap();
+        std::os::unix::fs::symlink(
+            &metadata_blob,
+            snapshot.path().join("model.safetensors.index.json"),
+        )
+        .unwrap();
+
+        let files = harvest_extra_files(snapshot.path(), &HashSet::new()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].basename(), Some("model.safetensors.index.json"));
+        assert_eq!(files[0].size(), Some(2));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn serves_harvested_metadata_without_suffixed_weights() -> anyhow::Result<()> {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let model_dir = tempfile::tempdir()?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            fs::copy(entry.path(), model_dir.path().join(entry.file_name()))?;
+        }
+        let stray = "model-00064-of-000096.safetensors.0dc03bC1";
+        fs::write(model_dir.path().join(stray), b"not metadata")?;
+        fs::write(model_dir.path().join("model.safetensors.index.json"), b"{}")?;
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+            ],
+            async {
+                let runtime = dynamo_runtime::Runtime::from_current()?;
+                let _shutdown = runtime.primary_token().drop_guard();
+                let drt = dynamo_runtime::DistributedRuntime::new(
+                    runtime,
+                    dynamo_runtime::distributed::DistributedConfig::process_local(),
+                )
+                .await?;
+                let endpoint = drt
+                    .namespace("metadata-filter")?
+                    .component("worker")?
+                    .endpoint("generate");
+                let mut model = LocalModelBuilder::default()
+                    .model_path(model_dir.path().to_path_buf())
+                    .model_name(Some("local-model".to_string()))
+                    .self_host_metadata(true)
+                    .build()
+                    .await?;
+                model
+                    .attach(
+                        &endpoint,
+                        ModelType::Chat,
+                        ModelInput::Tokens,
+                        None,
+                        Some(crate::worker_type::WorkerType::Aggregated),
+                        Vec::new(),
+                    )
+                    .await?;
+                let instances = drt
+                    .discovery()
+                    .list(dynamo_runtime::discovery::DiscoveryQuery::AllModels)
+                    .await?;
+                assert_eq!(instances.len(), 1);
+                let card: ModelDeploymentCard = instances[0].deserialize_model()?;
+                assert!(
+                    card.extra_files
+                        .iter()
+                        .any(|file| file.basename() == Some("model.safetensors.index.json"))
+                );
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()?;
+                for (file, _) in card.iter_metadata_files() {
+                    assert_ne!(file.basename(), Some(stray));
+                    let url = file.url().expect("worker must advertise HTTP metadata");
+                    assert_eq!(url.scheme(), "http");
+                    let bytes = client
+                        .get(url.clone())
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .bytes()
+                        .await?;
+                    assert_eq!(
+                        blake3::hash(&bytes).to_hex().as_str(),
+                        file.checksum().hash()
+                    );
+                }
+                let missing_url = card.iter_metadata_files()[0].0.url().unwrap().join(stray)?;
+                assert_eq!(
+                    client.get(missing_url).send().await?.status(),
+                    reqwest::StatusCode::NOT_FOUND
+                );
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await
     }
 
     #[test]
