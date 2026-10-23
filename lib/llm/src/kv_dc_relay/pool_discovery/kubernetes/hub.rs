@@ -424,6 +424,9 @@ impl PoolIndex {
             runtime_namespace: None,
             frontend_endpoint: None,
             model: None,
+            capabilities: Vec::new(),
+            frontends: Vec::new(),
+            capacity: Vec::new(),
             relay_identity: bound.map(address_identity),
             revision: Revision::default(),
         };
