@@ -91,7 +91,6 @@ def test_vllm_token_budget_matches_rejection_policy():
 
 
 def test_build_sampling_params_caps_oversized_max_tokens():
-    # Not marked xpu_1, so this runs only on the vLLM 0.32 CUDA image.
     from dynamo.vllm.handlers import build_sampling_params
 
     request = {
