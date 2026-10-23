@@ -200,16 +200,8 @@ def _cluster(backend, manifest, renames, runtime_component, path):
 @pytest.mark.parametrize("runtime_component", [None, "custom"])
 @pytest.mark.parametrize("shape", list(_SHAPES))
 async def test_startup_binds_metrics_to_registered_workers(
-    shape, runtime_component, path, monkeypatch, request
+    shape, runtime_component, path, monkeypatch
 ):
-    if runtime_component and not _PATHS[path][1] and _PATHS[path][4]:
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                reason="fallback WorkerInfo ignores the projected runtime component "
-                "and the FPM subscriber is never rebound",
-            )
-        )
     monkeypatch.setattr(
         environment_base, "STARTUP_PENDING_RECHECK_SECONDS", 0.01, raising=False
     )

@@ -778,6 +778,8 @@ class KubernetesConnector(PlannerConnector):
         info = build_worker_info_from_defaults(backend, sub_component_type)
         if dgd_service_name is not None:
             info.k8s_name = dgd_service_name
+        if expected_component:
+            info.component_name = expected_component
         arg_model = _dgd_model_name()
         if arg_model:
             info.model_name = arg_model
