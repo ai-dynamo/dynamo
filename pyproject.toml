@@ -323,7 +323,7 @@ filterwarnings = [
     # pandas 2.3 emits this from the bundled compatibility report path on fillna.
     "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aisimulate.legacy_cli.report_and_save",
     # pandas 3.1 deprecates DataFrame.drop(inplace=...) with Pandas4Warning, a DeprecationWarning
-    # subclass; AISimulate's picking and result processing still pass it.
+    # subclass; AISimulate still passes it in aisimulate.sdk.pareto_analysis, which picking calls.
     "ignore:The inplace keyword in DataFrame.drop is deprecated.*:DeprecationWarning:aisimulate",
 ]
 
