@@ -611,8 +611,17 @@ mod tests {
                 validate_strict_function(&function, false).is_err(),
                 strict == Some(true)
             );
-            validate_strict_function(&function, true).unwrap();
         }
+        validate_strict_function(
+            &FunctionObject {
+                name: "search".into(),
+                description: None,
+                parameters: Some(json!({})),
+                strict: Some(true),
+            },
+            true,
+        )
+        .unwrap();
     }
 
     #[test]
