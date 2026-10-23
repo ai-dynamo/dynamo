@@ -313,6 +313,7 @@ func TestLeaseManager_Guard_DoesNotRunWorkWhenLeaseCannotStart(t *testing.T) {
 	}
 }
 
+// TestLeaseManager_Guard_ReleasesLeaseBeforeRepanicking checks cleanup before the caller sees a worker panic.
 func TestLeaseManager_Guard_ReleasesLeaseBeforeRepanicking(t *testing.T) {
 	t.Log("Given a worker that panics while holding the lease")
 	client := fake.NewSimpleClientset()
@@ -342,6 +343,7 @@ func TestLeaseManager_Guard_ReleasesLeaseBeforeRepanicking(t *testing.T) {
 	t.Error("Guard returned instead of propagating the worker panic")
 }
 
+// TestLeaseManager_Guard_CleansUpAmbiguousAcquisition checks ownership-safe cleanup after a lost acquisition response.
 func TestLeaseManager_Guard_CleansUpAmbiguousAcquisition(t *testing.T) {
 	for _, verb := range []string{"create", "update"} {
 		for _, otherOwner := range []bool{false, true} {
@@ -435,6 +437,7 @@ type blockedRenewalClient struct {
 	coordination typedcoordinationv1.CoordinationV1Interface
 }
 
+// CoordinationV1 returns the coordination client that intercepts renewal requests.
 func (c *blockedRenewalClient) CoordinationV1() typedcoordinationv1.CoordinationV1Interface {
 	return c.coordination
 }
@@ -444,6 +447,7 @@ type blockedRenewalCoordination struct {
 	lease *blockedRenewalLease
 }
 
+// Leases returns the lease client whose renewal requests can be blocked.
 func (c *blockedRenewalCoordination) Leases(string) typedcoordinationv1.LeaseInterface {
 	return c.lease
 }
@@ -456,6 +460,7 @@ type blockedRenewalLease struct {
 	ignoreCancel bool
 }
 
+// Update blocks until cancellation and, when configured, until the test releases the request.
 func (l *blockedRenewalLease) Update(ctx context.Context, _ *coordinationv1.Lease, _ metav1.UpdateOptions) (*coordinationv1.Lease, error) {
 	// Later attempts after cancellation must not close the notification channels again.
 	if err := ctx.Err(); err != nil {
@@ -470,6 +475,7 @@ func (l *blockedRenewalLease) Update(ctx context.Context, _ *coordinationv1.Leas
 	return nil, ctx.Err()
 }
 
+// TestLeaseManager_Guard_BoundsBlockedRenewal checks cancellation and expiry while a renewal request is blocked.
 func TestLeaseManager_Guard_BoundsBlockedRenewal(t *testing.T) {
 	for _, watchdog := range []bool{false, true} {
 		for _, ignoreCancel := range []bool{false, true} {

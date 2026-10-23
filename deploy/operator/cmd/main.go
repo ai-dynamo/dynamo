@@ -88,6 +88,12 @@ var (
 	crdScheme    = k8sruntime.NewScheme()
 	setupLog     = ctrl.Log.WithName("setup")
 	configScheme = k8sruntime.NewScheme()
+
+	// Startup uses these constructors so its lease boundary can be exercised with fake clients.
+	loadKubernetesConfig  = ctrl.GetConfigOrDie
+	createOperatorManager = ctrl.NewManager
+	createCertManager     = internalcert.NewCertManager
+	setupOperatorSignals  = ctrl.SetupSignalHandler
 )
 
 // leaseCleanupTimeout bounds stopping renewal and deleting the namespace scope marker
@@ -221,7 +227,7 @@ func run() error {
 	// Initialize runtime config (will be populated after detection)
 	runtimeConfig := &commonController.RuntimeConfig{}
 
-	mainCtx := ctrl.SetupSignalHandler()
+	mainCtx := setupOperatorSignals()
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -286,7 +292,7 @@ func run() error {
 	if err := podcache.Configure(&mgrOpts.Cache); err != nil {
 		return fmt.Errorf("unable to configure Pod cache: %w", err)
 	}
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
+	mgr, err := createOperatorManager(loadKubernetesConfig(), mgrOpts)
 	if err != nil {
 		return fmt.Errorf("unable to start manager: %w", err)
 	}
@@ -301,7 +307,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("unable to create direct client for cert management: %w", err)
 	}
-	certMgr, err := internalcert.NewCertManager(directClient, &operatorCfg.Server.Webhook)
+	certMgr, err := createCertManager(directClient, &operatorCfg.Server.Webhook)
 	if err != nil {
 		return fmt.Errorf("unable to create cert manager: %w", err)
 	}
