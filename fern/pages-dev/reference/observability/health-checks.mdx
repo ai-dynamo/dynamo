@@ -14,7 +14,7 @@ optional canary requests that actively exercise idle worker endpoints. For a loc
 | Process | Default port | Path | Behavior |
 | --- | --- | --- | --- |
 | Frontend | `DYN_HTTP_PORT`, default `8000` | `/live` | Reports whether the HTTP service is running or shutting down |
-| Frontend | `DYN_HTTP_PORT`, default `8000` | `/health` | Reports frontend health plus discovered endpoints and instances |
+| Frontend | `DYN_HTTP_PORT`, default `8000` | `/health` | Reports frontend readiness; `?instances=true` adds discovered endpoints and instances |
 | Frontend | `DYN_HTTP_PORT`, default `8000` | `/v1/models/<model>/ready` | Reports whether the selected model has ready topology, a usable serving engine, and enabled HTTP routes |
 | Worker or standalone router | `DYN_SYSTEM_PORT`, disabled by default | `/live` | Reports system status |
 | Worker or standalone router | `DYN_SYSTEM_PORT`, disabled by default | `/health` | Reports system status |
@@ -37,12 +37,23 @@ During graceful shutdown, `/live` remains `200 OK` while the Frontend is drainin
 After the drain finishes or times out and the service enters the stopping state, `/live` returns
 `503 Service Unavailable` with status `shutting_down`.
 
-The frontend `/health` endpoint returns `200 OK` while ready and lists the endpoints and instances currently
-visible through discovery:
+The frontend `/health` endpoint returns `200 OK` while ready:
 
 ```json
 {
   "status": "healthy",
+  "stage": "ready"
+}
+```
+
+With the `instances=true` query parameter, the response also lists the endpoints and instances
+currently visible through discovery. Building the list serializes every discovered instance, so keep
+readiness probes on the default form:
+
+```json
+{
+  "status": "healthy",
+  "stage": "ready",
   "endpoints": [
     "dyn://dynamo.backend.generate"
   ],
