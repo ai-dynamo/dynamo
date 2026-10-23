@@ -189,7 +189,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 # Python distribution, so requirements.sglang.txt cannot refresh it. Replace it
 # with the release carrying the current fix line where the base ships one.
 # Nothing on the runtime path runs uv.
-RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:0.13.4,source=/,target=/tmp/uv-image \
+RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:0.13.5,source=/,target=/tmp/uv-image \
     if [ -e /usr/local/bin/uv ]; then \
         install -m 0755 /tmp/uv-image/uv /tmp/uv-image/uvx /usr/local/bin/; \
     fi && \

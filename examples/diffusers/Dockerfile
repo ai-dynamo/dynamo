@@ -10,7 +10,7 @@ RUN apt-get update \
  && update-ca-certificates \
  && apt-get clean
 
-COPY --from=ghcr.io/astral-sh/uv:0.13.4 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
 ENV UV_LINK_MODE=copy
 
 RUN uv venv /opt/dynamo/venv --python 3.12 \
