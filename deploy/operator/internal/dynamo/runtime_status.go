@@ -14,7 +14,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 // ComponentRuntimeStatus is the provider-neutral runtime identity projected
@@ -64,7 +63,7 @@ func ResolveComponentRuntimeStatus(
 
 	if raw := annotations[commonconsts.KubeAnnotationGPUPowerLimit]; raw != "" {
 		if watts, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && watts > 0 {
-			status.GPUPowerLimitWatts = ptr.To(watts)
+			status.GPUPowerLimitWatts = new(watts)
 		}
 	}
 	return status

@@ -109,6 +109,7 @@ These recipes are under active development and may require additional setup step
 | **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/sglang/agg/)** | SGLang | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available (shared with [DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/sglang/agg/)). |
 | **[Solar-Open2-250B-NVFP4](solar-open2-250b/vllm/agg-b200-chat/)** | vLLM | Aggregated | 4x B200 | ✅ | Text only — NVFP4 checkpoint, 2 replicas × TP2, reasoning + tool calling. Prebuilt image available. |
 | **[Solar-Open2-250B-NVFP4](solar-open2-250b/vllm/disagg-b200-chat/)** | vLLM | Disaggregated | 8x B200 | ✅ | Text only — NVFP4 checkpoint, 1× prefill TP4 + EP and 2× decode TP2, NIXL/RDMA KV transfer, reasoning + tool calling. Prebuilt image available. |
+| **[MiniMax-M3.1-Flash](minimax-m3.1/)** | vLLM, SGLang, TensorRT-LLM | Aggregated | 4x B200 or 4x GB300 | ✅ | Day-0 profile for the MiniMax-M3.1-Flash checkpoint — TP4 + EP on one node, 1M context, up to 256 concurrent requests with prefix caching (plus FP8 KV cache and KV-aware routing on vLLM and SGLang), reasoning + tool calling; text + image input. |
 
 ## Recipe Structure
 
