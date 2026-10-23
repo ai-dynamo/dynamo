@@ -20,6 +20,7 @@ import unittest
 
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestServer
+from demo_tools import TOOLS
 from worker import MODEL, VoiceChatWorker
 
 
@@ -89,6 +90,23 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
                                 "sglang": {"unit_id": "unit0"},
                             }
                         )
+                        await ws.send_json(
+                            {
+                                "type": "sglang.tool.call",
+                                "response_id": "response",
+                                "call_id": "call1",
+                                "name": "generate_random_number",
+                                "arguments": '{"min":1,"max":50}',
+                            }
+                        )
+                        await ws.send_json(
+                            {
+                                "type": "sglang.tool.result",
+                                "event_id": "result",
+                                "call_id": "call1",
+                                "output": '{"error":"tool unavailable"}',
+                            }
+                        )
                     elif event["type"] == "sglang.input_audio.end":
                         await ws.send_json(
                             {
@@ -118,6 +136,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             events = worker.generate(stream(queue), context)
             configured = await asyncio.wait_for(anext(events), 2)
             self.assertEqual(configured["session"]["id"], "native-session")
+            self.assertEqual(configured["session"]["tools"], TOOLS)
             self.assertIsInstance(received[0]["event_id"], str)
             busy = worker.generate(stream(asyncio.Queue()), Context())
             self.assertEqual((await anext(busy))["error"]["code"], "server_busy")
@@ -135,10 +154,30 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("sglang", audio)
             self.assertEqual(received[-1]["sglang"], {"seq": 0, "t_start_ms": 0})
             self.assertEqual(received[-1]["event_id"], "frame")
+            tool_events = [await asyncio.wait_for(anext(events), 2) for _ in range(5)]
+            self.assertEqual(
+                [e["type"] for e in tool_events],
+                [
+                    "response.output_item.added",
+                    "response.function_call_arguments.delta",
+                    "response.function_call_arguments.done",
+                    "response.output_item.done",
+                    "conversation.item.added",
+                ],
+            )
+            call = tool_events[2]
+            self.assertEqual(call["call_id"], "call1")
+            self.assertEqual(call["arguments"], '{"min":1,"max":50}')
+            self.assertEqual(tool_events[-1]["item"]["call_id"], "call1")
+            self.assertEqual(
+                tool_events[-1]["item"]["output"], '{"error":"tool unavailable"}'
+            )
             await queue.put({"type": "input_audio_buffer.commit"})
             done = await asyncio.wait_for(anext(events), 2)
             self.assertEqual(done["response"]["metadata"]["input_acks"], "1")
             self.assertIsNone(done["response"]["status_details"])
+            self.assertEqual(done["response"]["output"][0]["call_id"], "call1")
+            self.assertEqual(done["response"]["metadata"]["tool_results"], "1")
             self.assertEqual(
                 done["response"]["metadata"]["native_finish_reason"], "stop"
             )
@@ -155,6 +194,34 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await asyncio.wait_for(waiting, 2))
             await asyncio.wait_for(closed.wait(), 2)
             self.assertFalse(worker.active)
+
+    async def test_unsupported_tool_configuration_is_rejected(self):
+        app = web.Application()
+
+        async def native(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.send_json({"type": "session.created", "session": {"id": "native"}})
+            async for _ in ws:
+                self.fail("Invalid catalog should not configure native execution")
+            return ws
+
+        app.router.add_get("/v1/realtime", native)
+        async with TestServer(app) as server, ClientSession() as session:
+            for configuration in ({"tools": []}, {"tool_choice": "none"}):
+                with self.subTest(configuration=configuration):
+                    worker = VoiceChatWorker(
+                        session, str(server.make_url("")).rstrip("/"), 42
+                    )
+                    queue = asyncio.Queue()
+                    request = update()
+                    request["session"].update(configuration)
+                    await queue.put(request)
+                    events = worker.generate(stream(queue), Context())
+                    response = await asyncio.wait_for(anext(events), 2)
+                    self.assertEqual(response["error"]["code"], "invalid_request")
+                    await events.aclose()
+                    self.assertFalse(worker.active)
 
     async def test_failed_native_connection_releases_worker(self):
         app = web.Application()

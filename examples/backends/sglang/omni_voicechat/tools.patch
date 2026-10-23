@@ -1,0 +1,164 @@
+--- a/sglang_omni/pipeline/session_graph.py
++++ b/sglang_omni/pipeline/session_graph.py
+@@ -43,6 +43,7 @@
+     SESSION_CONTROL,
+     SPEECH_STARTED,
+     SPEECH_STOPPED,
++    TOOL_RESPONSE,
+     TURN_DONE,
+     TURN_EMPTY,
+     TURN_INTERRUPTED,
+@@ -514,7 +515,8 @@
+             for target, edge in control_targets:
+                 await self.control_edge(graph, target, edge, chunk)
+             if control_targets and not (
+-                is_published and control_type(chunk) in REPORT_CONTROLS
++                is_published
++                and (control_type(chunk) in REPORT_CONTROLS or chunk.format == TOOL_RESPONSE)
+             ):
+                 continue
+             else:
+--- a/sglang_omni/serve/realtime/adapters.py
++++ b/sglang_omni/serve/realtime/adapters.py
+@@ -67,6 +67,7 @@
+         self.unit_completion: asyncio.Future[int] | None = None
+         self.unit_output_events: list[OutputEvent] = []
+         self.unit_output_bytes = 0
++        self.background_outputs: list[OutputEvent] = []
+         self.output_sink: OutputSink | None = None
+         self.reader_error: Exception | None = None
+         self.is_closing = False
+@@ -100,10 +101,31 @@
+         self.unit_output_events.clear()
+         self.unit_output_bytes = 0
+ 
++    async def flush_background_outputs(self) -> None:
++        assert self.output_sink is not None
++        for event in self.background_outputs:
++            await self.output_sink(event)
++        self.background_outputs.clear()
++
+     async def read_session_outputs(self) -> None:
+         assert self.session_identity is not None and self.output_sink is not None
+         try:
+             async for output in self.client.session_outputs(self.session_identity):
++                # Tools complete asynchronously and retain the input sequence that called them.
++                if output.format in ("tool_call", "tool_response"):
++                    self.background_outputs.extend(self.output_converter(output))
++                    if (
++                        len(self.background_outputs) > self.limits.max_output_chunks
++                        or sum(
++                            len(repr(event).encode())
++                            for event in self.background_outputs
++                        )
++                        > self.limits.max_output_bytes
++                    ):
++                        raise RuntimeError("background tool output budget exhausted")
++                    if self.active_unit is None:
++                        await self.flush_background_outputs()
++                    continue
+                 if (
+                     self.active_unit is None
+                     or output.input_seq != self.active_unit.index
+@@ -113,6 +135,7 @@
+                     for event in self.unit_output_events:
+                         await self.output_sink(event, self.active_unit)
+                     self.reset_unit_outputs()
++                    await self.flush_background_outputs()
+                     if (
+                         self.unit_completion is not None
+                         and not self.unit_completion.done()
+--- a/sglang_omni/serve/realtime/output.py
++++ b/sglang_omni/serve/realtime/output.py
+@@ -59,6 +59,19 @@
+ 
+ 
+ @dataclass(frozen=True)
++class ToolCallEvent(ResponseEvent):
++    call_id: str
++    name: str
++    arguments: str
++
++
++@dataclass(frozen=True)
++class ToolResultEvent:
++    call_id: str
++    output: str
++
++
++@dataclass(frozen=True)
+ class TurnFailure:
+     error_type: str
+     code: str
+@@ -97,6 +110,8 @@
+     | AudioFinished
+     | ResponseFinished
+     | TurnFailure
++    | ToolCallEvent
++    | ToolResultEvent
+     | SpeechStarted
+     | SpeechStopped
+     | InputTranscription
+--- a/sglang_omni/serve/realtime/output_buffer.py
++++ b/sglang_omni/serve/realtime/output_buffer.py
+@@ -19,6 +19,8 @@
+     ResponseStatus,
+     TextDelta,
+     TextFinished,
++    ToolCallEvent,
++    ToolResultEvent,
+ )
+ from sglang_omni.serve.realtime.types import (
+     PCM16_BYTES_PER_SAMPLE,
+@@ -36,6 +38,10 @@
+     event = envelope.event
+     if isinstance(event, AudioDelta):
+         return math.ceil(len(event.pcm) / 3) * 4 + ENVELOPE_BYTES
++    elif isinstance(event, ToolCallEvent):
++        return len(event.arguments.encode()) + len(event.name.encode()) + ENVELOPE_BYTES
++    elif isinstance(event, ToolResultEvent):
++        return len(event.output.encode()) + ENVELOPE_BYTES
+     elif isinstance(
+         event, (TextDelta, TextFinished, ResponseFinished, InputTranscription)
+     ):
+--- a/sglang_omni/serve/realtime/projection.py
++++ b/sglang_omni/serve/realtime/projection.py
+@@ -32,6 +32,8 @@
+     TextDelta,
+     TextFinished,
+     TurnFailure,
++    ToolCallEvent,
++    ToolResultEvent,
+ )
+ from sglang_omni.serve.realtime.schema import (
+     AudioConfig,
+@@ -114,6 +116,10 @@
+     output_index: int
+     content_index: int
+     delta: str
++    call_id: str
++    name: str
++    arguments: str
++    output: str
+     transcript: str
+     text: str
+     audio_start_ms: float
+@@ -206,6 +212,18 @@
+         else:
+             pass
+         return server_event
++    elif isinstance(event, ToolCallEvent):
++        return dict(
++            type="sglang.tool.call",
++            response_id=event.response_id,
++            call_id=event.call_id,
++            name=event.name,
++            arguments=event.arguments,
++        )
++    elif isinstance(event, ToolResultEvent):
++        return dict(
++            type="sglang.tool.result", call_id=event.call_id, output=event.output
++        )
+     elif isinstance(event, ResponseProgress):
+         return dict(
+             type="sglang.response.progress",

@@ -15,6 +15,9 @@ Its existing Rust `/v1/realtime` handler selects that worker and carries **all
 input and output audio over Dynamo's bidirectional TCP RPC**. A Python worker
 adapter connects to the native SGLang-Omni WebSocket. The browser holds one
 frontend connection for the conversation; no native backend URL reaches it.
+The native function channel selects tools, and a CPU tool stage executes them and
+feeds results back to the model while microphone audio continues. Tool calls,
+arguments, and results also cross the frontend's typed realtime bridge.
 A separate HTTP server serves playground assets only and has no WebSocket route.
 
 ```mermaid
@@ -25,6 +28,7 @@ flowchart LR
     Frontend <-->|Bidirectional Dynamo TCP RPC| Worker
     Worker <-->|Native WebSocket| Omni[SGLang-Omni]
     Omni <--> GPU[Perception / thinker / talker / codec]
+    Omni <-->|Calls and function-channel results| Tools[CPU tool stage]
     Web[Static playground HTTP :18897] -->|HTML / JavaScript only| Browser
 ```
 
@@ -78,6 +82,11 @@ allow microphone access. The page connects directly to the frontend at
 microphone frames, including silence, while the model replies. **End** closes the
 session and releases its retained model state. The browser limits a conversation
 to four minutes; start another conversation to continue.
+
+Try **"Pick a random number between one and fifty."** The **Live tool calls**
+panel shows the model-generated arguments and actual tool result. The model
+receives that result and speaks the answer; microphone capture continues while
+the tool runs.
 
 For a specific GPU node, pass `--node <node-name>` to `deploy.py`. Use `--dry-run`
 to inspect all resources before applying them. Cold startup includes the model
@@ -137,6 +146,64 @@ CPU worker tests can run without loading a model:
 python -m unittest discover \
   -s examples/backends/sglang/omni_voicechat -p test_worker.py -v
 ```
+
+## Native Tool Calling
+
+The deployed catalog contains `generate_random_number(min, max)`, implemented in
+`demo_tools.py`. It returns an actual random integer, inclusive of the supplied
+bounds. Arguments must be integers within -1000000 through 1000000, with
+`min <= max`. Tool errors return structured error results to the model. Tool
+selection and retries remain model-controlled: in validation, the checkpoint
+retried with different bounds after a range error. Use the emitted arguments and
+results to inspect what actually executed.
+
+Tools execute **on the server**, inside SGLang-Omni's native tool graph. The model's
+separate function channel generates calls; the tool stage returns results over a
+control edge, and the thinker consumes them on subsequent audio frames. The
+browser displays events and never executes model-generated code.
+
+`session.updated.tools` and `GET /api/tools` advertise the deployed catalog. A
+client may omit `session.update.tools` or provide that exact catalog. Other
+catalogs (including an explicit empty list) and `tool_choice` values other than
+`auto` are rejected. This deployment does not accept client-supplied tool outputs
+or arbitrary per-session tool implementations. To add a server tool, add its
+schema and Python implementation to `demo_tools.py`, then redeploy.
+
+Calls cross Dynamo using `response.output_item.added`,
+`response.function_call_arguments.delta`, `response.function_call_arguments.done`,
+and `response.output_item.done`. Completed tool outputs arrive as
+`conversation.item.added` with `item.type: function_call_output` and the matching
+`call_id`. Final response output and metadata retain tool calls and counters.
+
+A pinned-source patch publishes asynchronous graph tool events through the native
+realtime adapter. It preserves results arriving between audio units or after the
+originating input sequence has advanced, and accounts for tool payload bytes in
+the output buffer limit. It also publishes tool results that the graph routes over
+a control edge back to the model.
+
+Replay the vendor's spoken tool fixture and verify a returned number appears in
+subsequent speech and audio:
+
+```bash
+curl -L --fail \
+  https://raw.githubusercontent.com/NVIDIA-NeMo/Speech/nemotron-labs-voicechat/examples/speechlm2/sample_audio/sample_fc.wav \
+  -o /tmp/voicechat-tools.wav
+
+python examples/backends/sglang/omni_voicechat/smoke.py \
+  --url http://localhost:18898 --audio /tmp/voicechat-tools.wav \
+  --tail 20 --require-tool --output /tmp/voicechat-tool-replay
+
+python examples/backends/sglang/omni_voicechat/browser_smoke.py \
+  --url http://localhost:18897 --audio /tmp/voicechat-tools.wav \
+  --seconds 32 --require-tool --output /tmp/voicechat-tool-browser
+
+kubectl --context "$DEMO_CONTEXT" --namespace "$DEMO_NAMESPACE" \
+  exec deployment/voicechat-backend -c omni -- bash -lc \
+  'cd /demo && python3 -m unittest -v test_native_tools.py'
+```
+
+The native bridge tests run on CPU inside the SGLang-Omni image and load no model
+weights. Worker protocol tests above run in the client environment.
 
 ## Protocol Adapter
 

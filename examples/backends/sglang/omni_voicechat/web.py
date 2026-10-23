@@ -15,9 +15,12 @@
 
 """Serve playground assets only; browsers connect directly to dynamo.frontend."""
 
+import json
 import os
+from pathlib import Path
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
+from demo_tools import TOOLS
 
 MODEL = "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B"
 
@@ -33,6 +36,7 @@ def adapt_asset(path, body):
             f"""
 window.DEMO_WS_URL = `${{location.protocol === "https:" ? "wss" : "ws"}}://${{location.hostname}}:{port}/v1/realtime`;
 window.DEMO_CAPABILITIES_URL = "/v1/realtime/capabilities";
+window.DEMO_TOOLS = {json.dumps(TOOLS)};
 """
         ).encode()
     if path.endswith("/session.js"):
@@ -40,7 +44,7 @@ window.DEMO_CAPABILITIES_URL = "/v1/realtime/capabilities";
         replacements = {
             "const session = { output_modalities: this.outputModalities };": 'const session = { type: "realtime", model: "'
             + MODEL
-            + '", output_modalities: ["audio"] };',
+            + '", output_modalities: ["audio"], tools: window.DEMO_TOOLS, tool_choice: "auto" };',
             "this.granted = event.session.sglang.granted;": 'this.granted = { interaction: "native", native_full_duplex: true, native_unit_ms: 80, input_modalities: ["audio"], output_modalities: ["audio"], input_audio_format: {type: "audio/pcm", rate: 16000}, output_audio_format: {type: "audio/pcm", rate: 22050} };',
             'this.send("sglang.input_audio.end");': 'this.send("input_audio_buffer.commit");',
             'case "sglang.input_audio.drained":': 'case "input_audio_buffer.committed":',
@@ -50,6 +54,14 @@ window.DEMO_CAPABILITIES_URL = "/v1/realtime/capabilities";
                 raise ValueError(f"Pinned playground source changed: {old}")
             body = body.replace(old.encode(), new.encode())
     if path.endswith("/app.js"):
+        body = b'import { observeToolEvent } from "./tools.js";\n' + body
+        old_handler = b"await activeSession.handle(JSON.parse(message.data));"
+        if body.count(old_handler) != 1:
+            raise ValueError("Pinned playground event handler changed")
+        body = body.replace(
+            old_handler,
+            b"const event = JSON.parse(message.data); observeToolEvent(event); await activeSession.handle(event);",
+        )
         old = b"transport: (event) => activeSocket.send(JSON.stringify(event)),"
         if body.count(old) != 1:
             raise ValueError("Pinned playground transport changed")
@@ -96,9 +108,21 @@ async def application():
                 },
             )
 
+    async def tools_script(request):
+        return web.Response(
+            body=Path(__file__).with_name("tools.js").read_bytes(),
+            content_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def tools_catalog(request):
+        return web.json_response({"tools": TOOLS, "execution": "server"})
+
     app.cleanup_ctx.append(clients)
     app.router.add_get("/health", status)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/tools", tools_catalog)
+    app.router.add_get("/static/orb/tools.js", tools_script)
     for path in ("/", "/api/presets", "/v1/realtime/capabilities", "/static/{path:.*}"):
         app.router.add_get(path, asset)
     return app

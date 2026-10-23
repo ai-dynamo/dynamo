@@ -22,9 +22,14 @@ import os
 import uuid
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType
+from demo_tools import TOOLS
 
 MODEL = "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B"
 LOG = logging.getLogger("voicechat.worker")
+
+
+class UnsupportedSession(ValueError):
+    pass
 
 
 def error(code, message):
@@ -48,7 +53,14 @@ class VoiceChatWorker:
             )
             return
         self.active = True
-        stats = {"input_frames": 0, "input_acks": 0, "audio_chunks": 0}
+        stats = {
+            "input_frames": 0,
+            "input_acks": 0,
+            "audio_chunks": 0,
+            "tool_calls": 0,
+            "tool_results": 0,
+        }
+        calls = {}
         tasks = []
         try:
             async with self.session.ws_connect(
@@ -68,15 +80,24 @@ class VoiceChatWorker:
                         if kind == "session.update":
                             config = event["session"]
                             if config.get("output_modalities") not in (None, ["audio"]):
-                                raise ValueError(
+                                raise UnsupportedSession(
                                     "This demo supports output_modalities=['audio']"
                                 )
                             if any(
-                                config.get(key)
-                                for key in ("instructions", "tools", "audio")
+                                config.get(key) for key in ("instructions", "audio")
                             ):
-                                raise ValueError(
+                                raise UnsupportedSession(
                                     "This demo uses the checkpoint's fixed voice, prompt and PCM formats"
+                                )
+                            if config.get("tools") is not None and json.dumps(
+                                config["tools"], sort_keys=True
+                            ) != json.dumps(TOOLS, sort_keys=True):
+                                raise UnsupportedSession(
+                                    "Tools are configured at deployment; omit tools or supply the advertised catalog exactly"
+                                )
+                            if config.get("tool_choice") not in (None, "auto"):
+                                raise UnsupportedSession(
+                                    "VoiceChat currently supports tool_choice='auto' only"
                                 )
                             await ws.send_json(
                                 {
@@ -160,6 +181,8 @@ class VoiceChatWorker:
                                 "id": session_id,
                                 "model": MODEL,
                                 "output_modalities": ["audio"],
+                                "tools": TOOLS,
+                                "tool_choice": "auto",
                             },
                         }
                     elif kind == "sglang.input_audio.accepted":
@@ -170,12 +193,81 @@ class VoiceChatWorker:
                             "event_id": event["event_id"],
                             "item_id": session_id + "-input",
                         }
+                    elif kind == "sglang.tool.call":
+                        call_id = event["call_id"]
+                        if call_id in calls:
+                            raise ValueError("Duplicate native tool call ID")
+                        item = {
+                            "id": "item_" + call_id,
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": event["name"],
+                            "arguments": event["arguments"],
+                            "status": "completed",
+                        }
+                        calls[call_id] = item
+                        stats["tool_calls"] += 1
+                        fields = {
+                            "response_id": event["response_id"],
+                            "item_id": item["id"],
+                            "output_index": len(calls),
+                            "call_id": call_id,
+                        }
+                        for wire in (
+                            {
+                                "type": "response.output_item.added",
+                                "response_id": event["response_id"],
+                                "output_index": len(calls),
+                                "item": {
+                                    **item,
+                                    "arguments": "",
+                                    "status": "in_progress",
+                                },
+                            },
+                            {
+                                "type": "response.function_call_arguments.delta",
+                                **fields,
+                                "delta": event["arguments"],
+                            },
+                            {
+                                "type": "response.function_call_arguments.done",
+                                **fields,
+                                "name": event["name"],
+                                "arguments": event["arguments"],
+                            },
+                            {
+                                "type": "response.output_item.done",
+                                "response_id": event["response_id"],
+                                "output_index": len(calls),
+                                "item": item,
+                            },
+                        ):
+                            yield {"event_id": f"event_{uuid.uuid4().hex}", **wire}
+                    elif kind == "sglang.tool.result":
+                        call_id = event["call_id"]
+                        if call_id not in calls:
+                            raise ValueError("Native tool result has no matching call")
+                        stats["tool_results"] += 1
+                        yield {
+                            "type": "conversation.item.added",
+                            "event_id": event["event_id"],
+                            "previous_item_id": calls[call_id]["id"],
+                            "item": {
+                                "id": "output_" + call_id,
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": event["output"],
+                                "status": "completed",
+                            },
+                        }
                     elif kind.startswith("response.") or kind == "error":
                         event.pop("sglang", None)
                         if kind in ("response.created", "response.done"):
                             response = event["response"]
                             details = response.get("status_details") or {}
                             reason = details.get("reason")
+                            if kind == "response.done":
+                                response.setdefault("output", []).extend(calls.values())
                             # Native reasons differ from the typed OpenAI reason enum.
                             if details:
                                 response["status_details"] = (
@@ -197,6 +289,8 @@ class VoiceChatWorker:
                         if kind == "response.output_audio.delta":
                             stats["audio_chunks"] += 1
                         yield event
+        except UnsupportedSession as problem:
+            yield error("invalid_request", str(problem))
         except Exception:
             LOG.exception("session_failed worker=%s", self.instance_id)
             yield error("backend_error", "VoiceChat session failed; see worker logs")

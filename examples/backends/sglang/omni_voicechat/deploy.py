@@ -37,8 +37,9 @@ set -euo pipefail
 git clone --filter=blob:none https://github.com/sgl-project/sglang-omni.git /workspace/omni
 git -C /workspace/omni checkout {OMNI_REVISION}
 git -C /workspace/omni apply /demo/playback.patch
+git -C /workspace/omni apply /demo/tools.patch
 python3 -m pip install --no-deps --no-build-isolation -e /workspace/omni
-export PYTHONPATH=/workspace/omni
+export PYTHONPATH=/demo:/workspace/omni
 exec python3 /demo/backend.py
 """
 
@@ -103,6 +104,8 @@ def manifests(args):
         "data": {
             **{p.name: p.read_text() for p in ROOT.glob("*.py")},
             "playback.patch": (ROOT / "playback.patch").read_text(),
+            "tools.patch": (ROOT / "tools.patch").read_text(),
+            "tools.js": (ROOT / "tools.js").read_text(),
             "bootstrap.sh": BOOTSTRAP,
         },
     }
@@ -225,8 +228,19 @@ def manifests(args):
         spec=backend_spec,
     )
     for resource, files in (
-        (frontend, ("web.py",)),
-        (backend, ("worker.py", "backend.py", "bootstrap.sh", "playback.patch")),
+        (frontend, ("web.py", "tools.js", "demo_tools.py")),
+        (
+            backend,
+            (
+                "worker.py",
+                "backend.py",
+                "demo_tools.py",
+                "native_tools.py",
+                "bootstrap.sh",
+                "playback.patch",
+                "tools.patch",
+            ),
+        ),
     ):
         checksum = hashlib.sha256(
             json.dumps(

@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 from playwright.async_api import async_playwright
+from smoke import tool_summary
 
 
 async def main(args):
@@ -37,11 +38,16 @@ async def main(args):
         subtype="PCM_16",
     )
     errors, messages, packets, text = [], [], [], []
-    sockets, sent = [], []
+    sockets, sent, events = [], [], []
 
     def frame(payload):
         event = json.loads(payload)
         messages.append(event["type"])
+        events.append(
+            event
+            if event["type"] != "response.output_audio.delta"
+            else {"type": event["type"]}
+        )
         if event["type"] == "response.output_audio.delta":
             packets.append(base64.b64decode(event["delta"]))
         if event["type"] in (
@@ -107,10 +113,14 @@ async def main(args):
         await page.screenshot(
             path=str(args.output / "conversation.png"), full_page=True
         )
+        completed_rows = await page.locator("#toolPanel [data-complete=true]").count()
         meters = await page.evaluate("window.audioMeters")
         await page.locator("#endBtn").click()
         await page.wait_for_timeout(3000)
         await browser.close()
+    (args.output / "events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n"
+    )
     summary = {
         "websocket_urls": sockets,
         "sent_counts": {kind: sent.count(kind) for kind in sorted(set(sent))},
@@ -119,9 +129,13 @@ async def main(args):
         "event_counts": {kind: messages.count(kind) for kind in sorted(set(messages))},
         "errors": errors,
         "audio_meters": meters,
+        "tools": tool_summary(events, args.require_tool),
+        "completed_tool_rows": completed_rows,
     }
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
+    if args.require_tool:
+        assert completed_rows > 0, "No tool result displayed in the page"
     assert not errors, errors
     assert packets, "Browser received no audio"
     assert "".join(text).strip(), "Browser received no spoken text"
@@ -141,4 +155,5 @@ if __name__ == "__main__":
     parser.add_argument("--audio", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=float, default=46)
+    parser.add_argument("--require-tool", action="store_true")
     asyncio.run(main(parser.parse_args()))

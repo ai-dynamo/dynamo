@@ -20,6 +20,7 @@ import asyncio
 import base64
 import json
 import math
+import re
 import time
 from pathlib import Path
 
@@ -27,6 +28,93 @@ import aiohttp
 import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly
+
+
+def number_words(value):
+    small = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split()
+    tens = "zero ten twenty thirty forty fifty sixty seventy eighty ninety".split()
+    if value < 0:
+        return "minus " + number_words(-value)
+    if value < 20:
+        return small[value]
+    if value < 100:
+        return tens[value // 10] + (" " + small[value % 10] if value % 10 else "")
+    for scale, name in ((1000000, "million"), (1000, "thousand"), (100, "hundred")):
+        if value >= scale:
+            return (
+                number_words(value // scale)
+                + " "
+                + name
+                + (" " + number_words(value % scale) if value % scale else "")
+            )
+
+
+def tool_summary(events, require=False):
+    calls, reports = {}, []
+    for index, event in enumerate(events):
+        if event["type"] == "response.function_call_arguments.done":
+            call_id = event["call_id"]
+            assert call_id not in calls, "Duplicate tool call ID"
+            calls[call_id] = event
+        elif (
+            event["type"] == "conversation.item.added"
+            and event["item"]["type"] == "function_call_output"
+        ):
+            item = event["item"]
+            call = calls[item["call_id"]]
+            args, output = json.loads(call["arguments"]), json.loads(item["output"])
+            assert call["name"] == "generate_random_number", call
+            if "error" not in output:
+                assert (
+                    type(output["result"]) is int
+                    and args["min"] <= output["result"] <= args["max"]
+                ), (args, output)
+            following = events[index + 1 :]
+            # Attribute speech before the next call to this result.
+            next_call = next(
+                (
+                    i
+                    for i, e in enumerate(following)
+                    if e["type"] == "response.function_call_arguments.done"
+                ),
+                len(following),
+            )
+            following = following[:next_call]
+            reply = "".join(
+                e["delta"]
+                for e in following
+                if e["type"]
+                in (
+                    "response.output_audio_transcript.delta",
+                    "response.output_text.delta",
+                )
+            )
+            words = re.sub(r"\band\b", " ", reply.lower().replace("negative", "minus"))
+            words = " ".join(re.findall(r"[a-z]+|-?\d+", words))
+            value = output.get("result")
+            grounded = type(value) is int and any(
+                re.search(r"(?<!\w)" + re.escape(form) + r"(?!\w)", words)
+                for form in (str(value), number_words(value))
+            )
+            reports.append(
+                {
+                    "call_id": item["call_id"],
+                    "name": call["name"],
+                    "arguments": args,
+                    "output": output,
+                    "reply_after_result": reply,
+                    "spoken_result_matches": grounded,
+                    "audio_after_result": any(
+                        e["type"] == "response.output_audio.delta" for e in following
+                    ),
+                }
+            )
+    if require:
+        assert reports, "No completed native tool call traversed the frontend"
+        assert any(
+            r["spoken_result_matches"] and r["audio_after_result"] for r in reports
+        ), reports
+    return reports
 
 
 async def replay(args):
@@ -192,6 +280,7 @@ async def replay(args):
         else 0,
         "audio_rms": rms,
         "text": "".join(text),
+        "tools": tool_summary(events, args.require_tool),
         "elapsed_s": time.perf_counter() - started,
     }
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -205,4 +294,5 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=float, default=0)
     parser.add_argument("--tail", type=float, default=4)
+    parser.add_argument("--require-tool", action="store_true")
     asyncio.run(replay(parser.parse_args()))

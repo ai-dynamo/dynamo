@@ -19,12 +19,14 @@ import asyncio
 import os
 
 import uvicorn
+from demo_tools import registry
 from huggingface_hub import snapshot_download
+from native_tools import deployment
 from sglang_omni.client.client import Client
 from sglang_omni.models.nemotron_voicechat.duplex_config import (
-    NemotronVoiceChatDuplexPipelineConfig,
+    NemotronVoiceChatToolPipelineConfig,
 )
-from sglang_omni.models.nemotron_voicechat.realtime import deployment
+from sglang_omni.models.nemotron_voicechat.payload_types import VOICECHAT_FORMAT
 from sglang_omni.pipeline.mp_runner import MultiProcessPipelineRunner
 from sglang_omni.proto.session import SessionLimits
 from sglang_omni.serve.openai_api import create_app
@@ -52,7 +54,13 @@ async def main():
             "special_tokens_map.json",
         ],
     )
-    config = NemotronVoiceChatDuplexPipelineConfig(model_path=model_path)
+    config = NemotronVoiceChatToolPipelineConfig(
+        model_path=model_path, tools=registry()
+    )
+    config.session_publish = {
+        "voicechat": [VOICECHAT_FORMAT, "tool_call"],
+        "tool": ["tool_response"],
+    }
     runner = MultiProcessPipelineRunner(config)
     try:
         await runner.start(timeout=900)
