@@ -111,3 +111,6 @@
 # examples/gpu-sharing is added in the same PR as the GPU sharing docs
 # that link to it on main. Remove this rule once that PR merges.
 ^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/gpu-sharing
+
+# Preserve historical attribution while this contributor profile is unavailable.
+^https://github\.com/Spycsh$

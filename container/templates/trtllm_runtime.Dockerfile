@@ -256,6 +256,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        ca-certificates \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -268,6 +269,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         keyboxd \
         libssl3t64 \
         openssl
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
@@ -694,15 +699,14 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # one, in range, so a surviving old copy beside the new one fails the build.
 # Version-compared rather than glob-matched: a glob range silently stops matching
 # at the end of the series it was written for.
-RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.4,<4.0" && \
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade pip==26.2.2 "aiohttp>=3.14.4,<4.0" && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 4) <= tv(vs[0]) < (4, 0, 0) else 1)'
 
 # Refresh the base image's certifi CA bundle in system site, for the same
 # inventory reason as aiohttp above. certifi has no dependencies, so this moves
 # exactly one distribution. Mirrored by the pre_runtime whiteout below: the
-# upgrade renames the version-stamped dist-info directory. Same guard shape as
-# aiohttp: exactly one dist-info, at or above the floor.
-RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "certifi>=2026.10.19" && \
+# upgrade renames the version-stamped dist-info directory.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade certifi==2026.10.19 && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 19) else 1)'
 
 # Pin the upstream developer stack in system site, where the image inventory
@@ -749,6 +753,9 @@ CMD ["/bin/bash"]
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+# The filesystem overlay does not carry runtime_full's image environment.
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
 # Remove the upstream runtime's Git LFS package without pruning shared dependencies.
 RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 
@@ -818,7 +825,12 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+# Remove old trust-store files and Python metadata before restoring the updated overlay.
 RUN rm -rf /workspace /home/ubuntu \
+    /etc/ssl/certs \
+    /usr/share/ca-certificates \
+    /usr/local/lib/python3.12/dist-packages/pip \
+    /usr/local/lib/python3.12/dist-packages/pip-*.dist-info \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
     /usr/local/bin/etcdutl \
