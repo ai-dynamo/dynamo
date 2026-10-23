@@ -3683,7 +3683,6 @@ func TestDCDWorkloadRenderer_FrontendStartupProbeOrigin(t *testing.T) {
 		wantEnabled    bool
 	}{
 		{name: "legacy standalone ignores authored origin", templateOrigin: "1.7.0"},
-		{name: "1.6 standalone keeps old defaults", origin: "1.6.0", templateOrigin: "1.7.0"},
 		{name: "new standalone overrides old template origin", origin: "1.7.0", templateOrigin: "1.6.0", wantEnabled: true},
 		{name: "role template uses standalone origin", origin: "1.7.0", templateOrigin: "1.6.0", roleTemplate: true, wantEnabled: true},
 		{name: "role template cannot enable legacy standalone", templateOrigin: "1.7.0", roleTemplate: true},

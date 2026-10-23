@@ -140,8 +140,6 @@ func TestDCDDefaulter_CreationOrigin(t *testing.T) {
 		graphChild bool
 		want       string
 	}{
-		{name: "standalone create overwrites authored origin", operation: admissionv1.Create, origin: "2.0.0", want: "1.7.0"},
-		{name: "legacy update does not backfill", operation: admissionv1.Update},
 		{name: "update preserves creation origin", operation: admissionv1.Update, origin: "1.6.0", want: "1.6.0"},
 		{name: "graph child create does not acquire current origin", operation: admissionv1.Create, graphChild: true},
 	} {

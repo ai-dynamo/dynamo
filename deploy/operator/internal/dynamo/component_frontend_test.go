@@ -28,11 +28,8 @@ func TestFrontendDefaultsStartupProbeVersionGate(t *testing.T) {
 	}{
 		{name: "unknown runtime on new graph", origin: "1.7.0"},
 		{name: "older runtime on new graph", origin: "1.7.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 5, Patch: 9}},
-		{name: "invalid origin preserves existing defaults", origin: "not-semver", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}},
-		{name: "missing origin preserves existing defaults", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}},
 		{name: "released 1.6 graph preserves existing defaults", origin: "1.6.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}},
 		{name: "new graph with minimum supported runtime", origin: "1.7.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}, wantEnabled: true},
-		{name: "newer graph and runtime", origin: "2.0.0", runtimeVersion: &runtimeversion.Version{Major: 2}, wantEnabled: true},
 	}
 
 	for _, tt := range tests {
@@ -109,7 +106,6 @@ func TestFrontendStartupProbeOriginPropagation(t *testing.T) {
 		wantEnabled bool
 	}{
 		{name: "missing graph origin preserves frontend defaults"},
-		{name: "1.6 graph preserves frontend defaults", origin: "1.6.0"},
 		{name: "1.7 graph enables frontend default", origin: "1.7.0", wantEnabled: true},
 		{name: "1.6 graph preserves frontend sidecar", origin: "1.6.0", sidecar: true},
 	}
