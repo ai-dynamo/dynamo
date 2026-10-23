@@ -40,6 +40,9 @@ pub enum DiscoveryClientError {
     },
 }
 
+/// Cloning is cheap: clones share one connection pool, so give each task its
+/// own clone instead of wrapping the client in an `Arc`.
+#[derive(Clone, Debug)]
 pub struct GlobalDiscoveryClient {
     http: reqwest::Client,
     routers_url: Url,
