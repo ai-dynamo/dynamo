@@ -438,19 +438,7 @@ def _unrecognized_launch_shape(detail: str) -> RuntimeError:
 
 
 def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
-    """Normalize what ``launch_core_engines`` yields across vLLM releases.
-
-    vLLM 0.28 and later yield a ``CoreEngineLaunch`` object defining no
-    ``__iter__``; earlier releases yield a plain 4-tuple. Duck-typing the
-    yielded object avoids importing ``CoreEngineLaunch``, a name that does not
-    exist before 0.28.
-    """
-    if isinstance(launch, tuple):
-        if len(launch) != 4:
-            raise _unrecognized_launch_shape(
-                f"a {len(launch)}-tuple rather than the expected 4-tuple"
-            )
-        return launch
+    """Read the fields of vLLM's ``CoreEngineLaunch``, which is not iterable."""
     try:
         return (
             launch.engine_manager,

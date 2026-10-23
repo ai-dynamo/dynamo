@@ -50,10 +50,6 @@ def _core_engine_launch_object(engine_manager, addresses):
     )
 
 
-def _core_engine_launch_tuple(engine_manager, addresses):
-    return (engine_manager, None, addresses, None)
-
-
 def test_child_environment_offsets_system_port_by_index(monkeypatch):
     monkeypatch.setenv("DYN_SYSTEM_PORT", "19401")
     env = processes._child_environment(
@@ -229,23 +225,7 @@ def test_unpack_core_engine_launch_names_a_renamed_field():
     assert isinstance(raised.value.__cause__, AttributeError)
 
 
-@pytest.mark.parametrize("size", [3, 5], ids=["short-tuple", "long-tuple"])
-def test_unpack_core_engine_launch_rejects_a_resized_tuple(size):
-    """A tuple of the wrong arity must not reach the caller's four-name unpack."""
-    with pytest.raises(RuntimeError) as raised:
-        processes._unpack_core_engine_launch(tuple(range(size)))
-
-    message = str(raised.value)
-    assert f"{size}-tuple" in message
-    _assert_names_verified_versions(message)
-
-
-@pytest.mark.parametrize(
-    "make_launch",
-    [_core_engine_launch_object, _core_engine_launch_tuple],
-    ids=["core-engine-launch-object", "legacy-tuple"],
-)
-def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_launch):
+def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     process_count = 4
     addresses = SimpleNamespace(
         inputs=[f"in{i}" for i in range(process_count)],
@@ -266,7 +246,7 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_l
     # call with the wrong arity fails here instead of at startup.
     @contextmanager
     def launch_context(vllm_config, executor_class, log_stats, addresses):
-        yield make_launch(engine_manager, addresses)
+        yield _core_engine_launch_object(engine_manager, addresses)
 
     parent_client = Mock()
     parent_config = _vllm_config()
