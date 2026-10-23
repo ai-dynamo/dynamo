@@ -335,11 +335,44 @@ def test_connector_to_kv_transfer_json_multi():
     result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
     assert result["kv_connector"] == "PdConnector"
     assert result["kv_role"] == "kv_both"
+    assert result["kv_connector_module_path"] == "dynamo.vllm.pd_connector"
     nested = result["kv_connector_extra_config"]["connectors"]
     assert {c["kv_connector"]: c["kv_role"] for c in nested} == {
         "DynamoConnector": "kv_both",
         "NixlConnector": "kv_consumer",
     }
+
+
+def test_pd_connector_importable_from_module_path():
+    """Test PdConnector resolves from the module path vLLM loads it by."""
+    module = importlib.import_module("dynamo.vllm.pd_connector")
+    assert module.PdConnector.__name__ == "PdConnector"
+
+
+@pytest.mark.parametrize("offload", ["_LMCacheConnectorV1", "_FlexKVConnectorV1"])
+def test_pd_connector_checks_connector_order(monkeypatch, offload):
+    """Test PdConnector takes LMCache or FlexKV first and NIXL second, without KVBM."""
+    pd = importlib.import_module("dynamo.vllm.pd_connector")
+    offload_cls = getattr(pd, offload)
+    if offload_cls is None:
+        pytest.skip(f"{offload} is not available in this vLLM build")
+
+    def children(*classes):
+        def init(self, vllm_config, role, kv_cache_config):
+            self._connectors = [Mock(spec=cls) for cls in classes]
+
+        return init
+
+    monkeypatch.setattr(
+        pd.MultiConnector, "__init__", children(offload_cls, pd.NixlConnector)
+    )
+    pd.PdConnector(vllm_config=None, role=None, kv_cache_config=None)
+
+    monkeypatch.setattr(
+        pd.MultiConnector, "__init__", children(pd.NixlConnector, offload_cls)
+    )
+    with pytest.raises(TypeError, match="first connector"):
+        pd.PdConnector(vllm_config=None, role=None, kv_cache_config=None)
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests

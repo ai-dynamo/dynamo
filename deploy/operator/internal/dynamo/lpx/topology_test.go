@@ -68,11 +68,13 @@ func TestRenderHybridTopologyRoles(t *testing.T) {
 	t.Log("Every Agent container receives the deployment identity; main and runtime replace authored topology values")
 	deployment := corev1.EnvVar{Name: "LPX_DEPLOYMENT", Value: "dgd-uid"}
 	modelPath := corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: "/models/model-build"}
+	noLocalPartitions := corev1.EnvVar{Name: "LPX_LOCAL_PARTITION_IDS", Value: ""}
 	podIndex := &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.labels['grove.io/podclique-pod-index']"}}
 	require.Equal(t, []corev1.EnvVar{
+		noLocalPartitions,
+		modelPath,
 		deployment,
 		{Name: "LPX_TOPOLOGY_SOCKET", Value: "/run/lpx-topology/agent.sock"},
-		modelPath,
 		{Name: "RDMA_PORT", Value: "19877"},
 	}, agent.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, []corev1.EnvVar{deployment, modelPath}, agent.Spec.PodSpec.InitContainers[0].Env)
@@ -87,11 +89,12 @@ func TestRenderHybridTopologyRoles(t *testing.T) {
 
 	t.Log("Cyborg main reads the local topology API that its runtime sidecar serves")
 	require.Equal(t, []corev1.EnvVar{
+		{Name: "LPX_ALLOCATION", Value: testAgentTemplateName},
+		noLocalPartitions,
+		modelPath,
 		deployment,
 		{Name: "CYBORG_LPU_TOPOLOGY_SOCKET", Value: "/run/lpx-topology/topology.sock"},
 		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
-		modelPath,
-		{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
 	}, cyborg.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, []corev1.EnvVar{
 		deployment,
@@ -133,12 +136,14 @@ func TestRenderHybridWithoutTopologyLeavesRolesUnchanged(t *testing.T) {
 
 	t.Log("Authored environment stays as written behind the model bindings")
 	modelPath := corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: "/models/model-build"}
-	require.Equal(t, []corev1.EnvVar{modelPath, {Name: "LPX_DEPLOYMENT", Value: "stale"}, {Name: "RDMA_PORT", Value: "19877"}}, agent.Spec.PodSpec.Containers[0].Env)
+	noLocalPartitions := corev1.EnvVar{Name: "LPX_LOCAL_PARTITION_IDS", Value: ""}
+	require.Equal(t, []corev1.EnvVar{noLocalPartitions, modelPath, {Name: "LPX_DEPLOYMENT", Value: "stale"}, {Name: "RDMA_PORT", Value: "19877"}}, agent.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, []corev1.EnvVar{modelPath, {Name: "DYN_LPX_TOPOLOGY_ROLE", Value: "consumer"}, {Name: "DYN_SYSTEM_PORT", Value: "18090"}}, agent.Spec.PodSpec.InitContainers[1].Env)
 	require.Equal(t, []corev1.EnvVar{
-		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
+		{Name: "LPX_ALLOCATION", Value: testAgentTemplateName},
+		noLocalPartitions,
 		modelPath,
-		{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
+		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
 		{Name: "CYBORG_LPU_TOPOLOGY_SOCKET", Value: "/authored.sock"},
 	}, cyborg.Spec.PodSpec.Containers[0].Env)
 }

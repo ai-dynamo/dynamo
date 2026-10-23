@@ -126,8 +126,8 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].SubPath = "cyborg"
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].ReadOnly = true
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].SubPath = "cyborg"
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].ReadOnly = true
 	input := RenderInput{
 		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 	}
@@ -137,8 +137,10 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 
 	t.Log("Keep runtime environment opaque while supplying its manifest before authored references")
 	modelEnv := []corev1.EnvVar{
-		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
+		{Name: allocationEnvVar, Value: "agt"},
+		{Name: localPartitionIDsEnv, Value: ""},
 		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
 	}
 	require.Equal(t, append(modelEnv, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
@@ -184,7 +186,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			cyborg.Spec.Replicas = test.replicas
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
-			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
+			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = test.mountPath
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})

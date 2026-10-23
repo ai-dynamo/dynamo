@@ -103,8 +103,8 @@ func (r *graphReconciler) resolveWorkloads(
 }
 
 // renderPodCliqueSet composes resolved workloads into one Grove envelope with
-// runtime ConfigMaps and, for Kubernetes discovery, serving Services plus a
-// topology Service for each workload whose Agents publish topology.
+// serving Services for Kubernetes discovery, plus a topology Service for each
+// workload whose Agents publish topology.
 // Inputs must be non-nil except existingPCS, which is nil during creation.
 // Workloads must contain every component group.
 // Plans must have finalized names and use the same keys as workloads.
@@ -159,7 +159,6 @@ func (r *graphReconciler) renderPodCliqueSet(
 		// Keep workload templates in canonical component order.
 		pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, rendered.Cliques...)
 		pcs.Spec.Template.PodCliqueScalingGroupConfigs = append(pcs.Spec.Template.PodCliqueScalingGroupConfigs, rendered.ScalingGroup)
-		resources = append(resources, rendered.Resources...)
 
 		// Kubernetes discovery exposes only this workload's serving role within its PCS.
 		if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dgd.Annotations) {

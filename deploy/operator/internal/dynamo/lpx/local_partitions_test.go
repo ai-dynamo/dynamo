@@ -7,6 +7,8 @@ package lpx
 
 import (
 	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -115,8 +117,8 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			require.Len(t, spec.PropSyncConnectors, test.wantConnectors)
 			require.Equal(t, test.wantAgents, projection.AgentReplicas())
 
-			t.Log("Publish only remote runtime partitions to Agents and Cyborg")
-			require.Equal(t, test.wantRuntimeIDs, resolvedPartitionData([]*ModelProjection{projection})["partition_ids"])
+			t.Log("Derive remote runtime roots from the projected build")
+			require.Equal(t, test.wantRuntimeIDs, projectedRuntimeIDs(projection))
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
 			t.Log("Change the workload digest when partitions move to the GPU")
@@ -138,7 +140,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		{
 			name:    "no local partitions removes authored values",
 			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
-			wantEnv: []corev1.EnvVar{{Name: "OTHER", Value: "kept"}},
+			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}, {Name: "OTHER", Value: "kept"}},
 		},
 		{
 			name:    "no local partitions shadows envFrom sources",
@@ -401,8 +403,8 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			require.JSONEq(t, test.wantPartitionMap, string(metadata.PartitionInfo))
 			require.JSONEq(t, test.wantPropSyncInfo, string(metadata.PropSyncInfo))
 
-			t.Log("Publish only remote runtime partitions to Agents and Cyborg")
-			require.Equal(t, test.wantRuntimeIDs, resolvedPartitionData([]*ModelProjection{projection})["partition_ids"])
+			t.Log("Derive remote runtime roots from the projected build")
+			require.Equal(t, test.wantRuntimeIDs, projectedRuntimeIDs(projection))
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
 			t.Log("Change the workload digest when partitions move to the GPU")
@@ -473,4 +475,12 @@ func TestProjectModelV3LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 		LocalPartitions: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 	})
 	require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")
+}
+
+func projectedRuntimeIDs(projection *ModelProjection) string {
+	ids := make([]string, len(projection.configuredBuild.partitions))
+	for i, partition := range projection.configuredBuild.partitions {
+		ids[i] = strconv.Itoa(partition.sourcePartitionID)
+	}
+	return strings.Join(ids, "\n")
 }

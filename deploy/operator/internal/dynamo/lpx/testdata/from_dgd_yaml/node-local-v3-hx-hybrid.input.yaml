@@ -124,8 +124,6 @@ spec:
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
-              - name: config
-                mountPath: /configs
               - name: hugepages
                 mountPath: /dev/hugepages
               - name: host-sys
