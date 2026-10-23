@@ -56,6 +56,13 @@ inputs:
     description: 'Dockerfile path relative to the repository root'
     required: false
     default: './container/rendered.Dockerfile'
+  image_compression_level:
+    description: >-
+      Gzip compression level (0-9) for newly created image layers. Requires
+      push_image=true. Existing layer blobs are reused as-is. Empty keeps the
+      BuildKit default.
+    required: false
+    default: ''
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -76,6 +83,7 @@ runs:
         GITHUB_REF_NAME: ${{ github.ref_name }}
         CUDA_VERSION: ${{ inputs.cuda_version }}
         DOCKERFILE: ${{ inputs.dockerfile }}
+        IMAGE_COMPRESSION_LEVEL: ${{ inputs.image_compression_level }}
       run: |
         set -x
 
@@ -115,6 +123,21 @@ runs:
           EXTRA_ARGS+=" --push"
         elif [ "${{ inputs.no_load }}" == "false" ]; then
           EXTRA_ARGS+=" --load"
+        fi
+
+        # buildx merges --push into an existing type=image output, so this adds
+        # no second export. With --load it would, hence the push requirement.
+        # force-compression stays unset so cached blobs are not recompressed.
+        if [ -n "${IMAGE_COMPRESSION_LEVEL}" ]; then
+          if [[ ! "${IMAGE_COMPRESSION_LEVEL}" =~ ^[0-9]$ ]]; then
+            echo "::error::image_compression_level must be a single digit 0-9, got '${IMAGE_COMPRESSION_LEVEL}'"
+            exit 1
+          fi
+          if [ "${{ inputs.push_image }}" != "true" ]; then
+            echo "::error::image_compression_level requires push_image=true"
+            exit 1
+          fi
+          EXTRA_ARGS+=" --output type=image,compression=gzip,compression-level=${IMAGE_COMPRESSION_LEVEL}"
         fi
 
         # Add extra tags (each as a separate --tag argument)

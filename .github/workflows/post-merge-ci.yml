@@ -303,6 +303,8 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
       build_timeout_minutes: 60
+      # Fast gzip for new dev-image layers (DYN-5102); remove to revert.
+      image_compression_level: '1'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-dev' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-dev-{0}', github.sha) || '' }}

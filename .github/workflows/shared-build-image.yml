@@ -62,6 +62,11 @@ on:
         required: false
         type: boolean
         default: true
+      image_compression_level:
+        description: 'Gzip level (0-9) for newly created layers of the pushed image; empty keeps the BuildKit default'
+        required: false
+        type: string
+        default: ''
       show_summary:
         description: 'Show summary'
         required: false
@@ -496,6 +501,7 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
+          image_compression_level: ${{ inputs.image_compression_level }}
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
