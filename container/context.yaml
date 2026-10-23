@@ -65,8 +65,8 @@ dynamo:
 
   nats_version: v2.14.8
   nats_commit: 3e47c8fa715b0e3b2feaeedc378c25fff88a966e
-  etcd_version: v3.5.34
-  etcd_commit: 38e57443c51fc9a3cc6a943fa8ed10381f66ce5c
+  etcd_version: v3.5.35
+  etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 
   nixl_ref: v1.3.2
   nixl_ucx_ref: v1.22.0
