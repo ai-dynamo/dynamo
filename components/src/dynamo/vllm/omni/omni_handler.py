@@ -20,6 +20,7 @@ from typing import (
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
+from pydantic import ValidationError
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
@@ -57,6 +58,7 @@ from dynamo.vllm.omni.base_handler import BaseOmniHandler
 # Re-exported: EngineInputs moved to its own module so the per-modality
 # builders can annotate it without importing this handler.
 from dynamo.vllm.omni.engine_inputs import EngineInputs
+from dynamo.vllm.omni.image_edit import ImageEditLimits, load_image_edit_references
 from dynamo.vllm.omni.output_formatter import (
     AudioAggregateState,
     AudioStreamState,
@@ -215,6 +217,7 @@ class OmniHandler(BaseOmniHandler):
             media_output_fs: Filesystem for storing generated images/videos.
             media_output_http_url: Base URL for rewriting media paths in responses.
         """
+        self._image_edit_limits = ImageEditLimits.from_env()
         super().__init__(
             runtime=runtime,
             config=config,
@@ -224,6 +227,7 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+        self._image_edit_loader = ImageLoader(max_pixels=self._image_edit_limits.pixels)
         self.generate_endpoint = generate_endpoint
 
         # Keep parity with BaseWorkerHandler LoRA resolver contract.
@@ -330,9 +334,27 @@ class OmniHandler(BaseOmniHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        parsed_request_raw, request_type = parse_request_type(
-            request, self.config.output_modalities
-        )
+        try:
+            parsed_request_raw, request_type = parse_request_type(
+                request, self.config.output_modalities
+            )
+        except ValidationError as error:
+            if not any(
+                modality.lower() == "image"
+                for modality in (self.config.output_modalities or [])
+            ):
+                raise
+            # Pydantic's rendered exception includes the offending input value.
+            # Only expose a field label, never an inline image or signed URL.
+            reference_error = any(
+                item["loc"][:1] == ("input_reference",)
+                for item in error.errors(include_input=False, include_url=False)
+            )
+            raise InvalidArgument(
+                "Failed to load input_reference"
+                if reference_error
+                else "Invalid image request fields"
+            ) from error
         parsed_request = cast(
             Union[NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]],
             parsed_request_raw,
@@ -613,24 +635,26 @@ class OmniHandler(BaseOmniHandler):
             inputs = self._engine_inputs_from_image(
                 parsed_request, dimensions=dimensions
             )
+            model_class_name = get_model_class_name(self.engine_client)
+            images = [image] if image is not None else []
             if parsed_request.input_reference is not None:
-                try:
-                    image = await self._image_loader.load_image(
-                        parsed_request.input_reference
-                    )
-                except (ValueError, PIL.Image.DecompressionBombError) as e:
-                    # Keep URLs and inline image data out of the client error.
-                    raise ValueError("Failed to load input_reference") from e
-            if image is not None:
-                inputs.input_images = 1
+                images = await load_image_edit_references(
+                    parsed_request.input_reference,
+                    image_loader=self._image_edit_loader,
+                    model_class_name=model_class_name,
+                    operator_limit=self._image_edit_limits.images,
+                    max_total_pixels=self._image_edit_limits.total_pixels,
+                )
+            if images:
+                inputs.input_images = len(images)
                 inputs.prompt.update(
                     build_image_to_image_prompt(
-                        model_class_name=get_model_class_name(self.engine_client),
+                        model_class_name=model_class_name,
                         prompt=parsed_request.prompt,
                         negative_prompt=(
                             parsed_request.nvext or ImageNvExt()
                         ).negative_prompt,
-                        input_image=[image],
+                        input_image=images,
                         height=dimensions[1],
                         width=dimensions[0],
                     )

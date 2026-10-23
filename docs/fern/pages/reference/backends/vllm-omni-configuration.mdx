@@ -54,6 +54,51 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
   be positive; FastH3 VSA starts with 64.
 </ParamField>
 
+## Image Edit Capabilities
+
+**Experimental.** Direct uploads and multiple ordered references are supported
+through an aggregated Omni worker when its loaded pipeline advertises a
+finite image limit in the installed Omni registry. The adapter resolves the
+actual pipeline class, including upstream aliases, independently of the
+client's model name.
+
+Dynamo stage-router deployments advertise a zero image-edit limit and reject
+edit references because their stage workers do not load `input_reference` into
+the image prompt. Use an aggregated Omni worker for image edits. Stage-router
+deployments continue to support text-to-image generation.
+
+| Resolved pipeline | Source-derived maximum | Metadata source |
+|---|---:|---|
+| `Flux2KleinPipeline` | 4 | vLLM-Omni 0.31.0rc1 |
+| `QwenImageEditPlusPipeline` | 4 | vLLM-Omni 0.31.0rc1 |
+| `HunyuanImage3Pipeline` | 3 | vLLM-Omni 0.31.0rc1 |
+| `BooguImagePipeline` | 1 | vLLM-Omni 0.31.0rc1 |
+
+This table describes registry metadata, not GPU qualification of every model.
+FLUX.2 Klein 4B was GPU-qualified on one GH200 with vLLM 0.31.0,
+vLLM-Omni 0.31.0rc1, and model revision
+`e7b7dc27f91deacad38e78976d1f2b499d76a294`: one through four inputs,
+a rejected fifth input, and a changed output when only input two changed.
+Multipart and JSON produced identical pixels for the same inputs, prompt, and
+seed at 512 by 512 pixels and four denoising steps. This checks conditioning
+and transport behavior; it is not an output-quality or throughput benchmark.
+
+Missing, invalid, or unknown metadata permits at most one reference; it does
+not establish that a pipeline implements editing. Omni 0.31.0rc1 does not
+expose a universal single-image-edit support flag. In particular,
+`supports_multimodal_inputs=False` does not prove that editing is unsupported.
+Dynamo therefore preserves the existing single-image path for those pipelines.
+
+Set `DYN_IMAGE_EDIT_MAX_IMAGES`, `DYN_IMAGE_EDIT_MAX_PIXELS`, and
+`DYN_IMAGE_EDIT_MAX_TOTAL_PIXELS` on the worker to lower its input budgets.
+The worker advertises the smaller of the model and configured count limits,
+then rechecks every request before loading inputs. A failed second or later
+reference never becomes a successful partial edit. These settings do not
+change `n`, output dimensions, or output encoding.
+
+See [Image API Compatibility](../components/frontend-configuration.mdx#image-api-compatibility)
+for the request contract, all resource defaults, and rolling-upgrade behavior.
+
 ## Memory & Performance
 
 <ParamField path="--image-png-compression-level" type="int" default="6">
