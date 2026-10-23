@@ -27,11 +27,32 @@ pub enum PoolDiscoveryMode {
         lease: LeasePolicy,
     },
     /// SIG Multicluster: pools are MCS `ServiceExport`s. Liveness is endpoint
-    /// readiness, so there is no lease.
-    Kubernetes,
+    /// readiness, so there is no lease. Assumes a trusted network with pod
+    /// addresses that are reachable between clusters.
+    Kubernetes {
+        mcs: McsImplementation,
+        /// The operator names each PoolRelay Service `<DGD name><suffix>`.
+        /// A name rule works with every MCS implementation; `exportedLabels`
+        /// does not.
+        pool_service_suffix: String,
+        /// The Global Router's Service, exported to every workload cluster.
+        router_service: String,
+    },
     File {
         path: PathBuf,
     },
+}
+
+/// How the MCS implementation names imported EndpointSlices. Not
+/// `non_exhaustive`: the implementations in dynamo-llm must handle every
+/// variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McsImplementation {
+    /// The `multicluster.kubernetes.io` labels (Submariner, Cilium, GKE).
+    Standard,
+    /// Karmada's own names: a `derived-<service>` Service, and slices named
+    /// `imported-<source cluster>-<source slice>`.
+    Karmada,
 }
 
 /// Everything the router needs from the selected mode. The router code is

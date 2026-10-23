@@ -40,7 +40,7 @@ pub use connection::{StateBroadcaster, StateConnection, StateDialer, StateReceiv
 pub use identity::{
     PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity, verify,
 };
-pub use mode::{BuildPoolDiscovery, PoolDiscovery, PoolDiscoveryMode};
+pub use mode::{BuildPoolDiscovery, McsImplementation, PoolDiscovery, PoolDiscoveryMode};
 pub use record::{Capacity, PoolDirectory, PoolEvent, PoolRecord, PoolRecordBuilder, Revision};
 pub use registrar::{LeasePolicy, PoolRegistrar, Registration};
 pub use replicas::{ReplicaDirectory, ReplicaEndpoint, ReplicaEvent, ReplicaId};
