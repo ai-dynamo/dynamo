@@ -52,6 +52,7 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 #[cfg(test)]
 use super::tools::custom_input;
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
+use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
 /// Request body for `POST /v1/responses`.
@@ -947,6 +948,7 @@ fn convert_tools_and_choice(
     tools: Option<&[Tool]>,
     tool_choice: Option<&RequestToolChoiceParam>,
     names: &ToolNameMap,
+    skip_strict_schema_validation: bool,
 ) -> anyhow::Result<(
     Option<Vec<ChatCompletionTool>>,
     Option<ChatCompletionToolChoiceOption>,
@@ -956,11 +958,20 @@ fn convert_tools_and_choice(
         .transpose()?
         .unwrap_or_default();
     for tool in &converted_tools {
-        super::strict_schema::validate_strict_function(&tool.function)
-            .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
+        super::strict_schema::validate_strict_function(
+            &tool.function,
+            skip_strict_schema_validation,
+        )
+        .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
     }
 
     let converted_choice = match tool_choice {
+        // vLLM rejects explicit auto without tools; use the backend default.
+        Some(RequestToolChoiceParam::Option(ToolChoiceOptions::Auto))
+            if converted_tools.is_empty() =>
+        {
+            None
+        }
         Some(RequestToolChoiceParam::AllowedTools(choice)) => {
             let allowed = allowed_function_names(choice, names)?;
             let available: HashSet<&str> = converted_tools
@@ -1161,6 +1172,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             (!inner_tools.is_empty()).then_some(inner_tools.as_slice()),
             resp.inner.tool_choice.as_ref(),
             &names,
+            *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
         )?;
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
@@ -3311,6 +3323,83 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_choice_without_function_tools() {
+        for tools in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([{
+                "type": "namespace", "name": "empty", "description": "Empty", "tools": []
+            }]),
+        ] {
+            for choice in [
+                serde_json::Value::Null,
+                serde_json::json!("auto"),
+                serde_json::json!("none"),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model", "input": "Say hello", "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
+                let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+                assert!(chat.inner.tools.is_none());
+                if choice == "none" {
+                    assert_eq!(
+                        chat.inner.tool_choice,
+                        Some(ChatCompletionToolChoiceOption::None)
+                    );
+                } else {
+                    assert_eq!(
+                        chat.inner.tool_choice, None,
+                        "tools={tools}, choice={choice}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_forced_tool_choice_without_function_tools_is_invalid() {
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            for choice in [
+                serde_json::json!("required"),
+                serde_json::json!({"type": "function", "name": "missing"}),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model", "input": "Say hello", "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
+                let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+                let error = crate::engines::ValidateRequest::validate(&chat).unwrap_err();
+                assert!(error.to_string().contains("tool_choice"));
+                assert!(error.to_string().contains("tools"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_choice_with_function_tools_is_preserved() {
+        for choice in ["auto", "none", "required"] {
+            let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
+                "model": "test-model", "input": "Say hello", "tool_choice": choice,
+                "tools": [{"type": "function", "name": "hello"}]
+            }))
+            .unwrap();
+            let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+            assert_eq!(chat.inner.tools.as_ref().unwrap()[0].function.name, "hello");
+            assert_eq!(
+                serde_json::to_value(chat.inner.tool_choice).unwrap(),
+                choice
+            );
+        }
+    }
+
+    #[test]
     fn test_top_level_and_namespace_function_tools_conversion() {
         let mut req = make_response_with_input("hello");
         req.inner.tools = Some(
@@ -3409,7 +3498,8 @@ mod tests {
         }))
         .unwrap();
         let names = ToolNameMap::new(&tools, None);
-        let error = convert_tools_and_choice(Some(&tools), Some(&choice), &names).unwrap_err();
+        let error =
+            convert_tools_and_choice(Some(&tools), Some(&choice), &names, false).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<ResponsesConversionError>(),
             Some(ResponsesConversionError::InvalidArgument(_))
@@ -3445,7 +3535,7 @@ mod tests {
             }
             let names = ToolNameMap::new(&tools, None);
             let (converted, _) =
-                convert_tools_and_choice(Some(&tools), Some(&choice), &names).unwrap();
+                convert_tools_and_choice(Some(&tools), Some(&choice), &names, false).unwrap();
             let converted = converted.unwrap();
             assert_eq!(converted.len(), 1);
             assert_eq!(converted[0].function.name, "retained");

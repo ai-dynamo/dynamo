@@ -1342,9 +1342,8 @@ async fn completions_single(
             err_response
         })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.request_metrics().attach_to(&mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1603,7 +1602,7 @@ async fn completions_batch(
     batch_size: usize,
     n: u8,
 ) -> Result<Response, ErrorResponse> {
-    use crate::protocols::openai::completions::extract_single_prompt;
+    use dynamo_protocols::types::Prompt;
     use futures::stream::{self, StreamExt};
 
     let request_id = request.id().to_string();
@@ -1636,9 +1635,7 @@ async fn completions_batch(
             err_response
         })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight_guard.response_collector();
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -1649,13 +1646,18 @@ async fn completions_batch(
     // id, but every one is linked to the request context: `kill` cascades to
     // linked children, so a client disconnect or a failed preflight stops all
     // of them rather than only the prompt that happened to be first.
-    let mut all_streams = Vec::new();
+    let mut all_streams = Vec::with_capacity(batch_size);
     let parent_ctx = request.context();
+    let prompts: Vec<Prompt> =
+        match std::mem::replace(&mut request.inner.prompt, Prompt::String(String::new())) {
+            Prompt::StringArray(prompts) => prompts.into_iter().map(Prompt::String).collect(),
+            Prompt::ArrayOfIntegerArray(prompts) => {
+                prompts.into_iter().map(Prompt::IntegerArray).collect()
+            }
+            single => vec![single],
+        };
 
-    for prompt_idx in 0..batch_size {
-        // Extract single prompt at this index
-        let single_prompt = extract_single_prompt(&request.inner.prompt, prompt_idx);
-
+    for (prompt_idx, single_prompt) in prompts.into_iter().enumerate() {
         // Create a new request with this single prompt
         let mut single_request = request.content().clone();
         single_request.inner.prompt = single_prompt;
@@ -1668,6 +1670,10 @@ async fn completions_batch(
             request.metadata().clone(),
         );
         copy_context_metadata(&request, &mut single_request_context);
+        // The preprocessor adds each prompt's tokens to the one tracked request.
+        inflight_guard
+            .request_metrics()
+            .attach_to(&mut single_request_context);
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
@@ -1858,7 +1864,7 @@ async fn embeddings(
         request.inner.model = canonical;
     }
     let request_id = get_or_create_request_id(&headers);
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // The worker always emits base64-encoded vectors over NATS so we
@@ -1908,10 +1914,10 @@ async fn embeddings(
         err_response
     })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
+
+    inflight.request_metrics().attach_to(&mut request);
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
@@ -2052,9 +2058,7 @@ async fn classify(
         err_response
     })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -2142,9 +2146,7 @@ async fn rerank(
         inflight.mark_error(extract_error_type_from_response(&response));
         response
     })?;
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
     let stream = engine.generate(request).await.map_err(|error| {
         if super::metrics::request_was_rejected(error.as_ref()) {
@@ -2422,9 +2424,7 @@ async fn pooling(
         err_response
     })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
 
     // issue the generate call on the engine
@@ -3638,9 +3638,8 @@ async fn chat_completions(
     let stream_can_defer_all_output =
         request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.request_metrics().attach_to(&mut request);
 
     let annotations = request.annotations();
 
@@ -4386,9 +4385,8 @@ async fn responses(
     let stream_can_defer_all_output =
         request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.request_metrics().attach_to(&mut request);
 
     tracing::trace!("Issuing generate call for responses");
 
@@ -5243,13 +5241,13 @@ async fn images_with_request(
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Images,
         streaming,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight.response_collector();
 
     // Issue the generate call on the engine
     // Note: This uses ServerStreamingEngine for internal routing/distribution,
@@ -5259,7 +5257,7 @@ async fn images_with_request(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Images);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5371,20 +5369,20 @@ async fn videos(
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Videos,
         streaming,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight.response_collector();
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5497,18 +5495,20 @@ async fn video_stream(
         .get_videos_engine(&model)
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
-    let mut inflight =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Videos,
+        true,
+        request.id(),
+    );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight.response_collector();
 
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5795,9 +5795,7 @@ async fn audio_speech(
         &request_id,
     );
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
 
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
@@ -7114,6 +7112,53 @@ mod tests {
                 "client response must not include the underlying engine message"
             );
         }
+
+        // A worker's refusal as the request plane delivers it — decoded from
+        // its prologue, then the cause of a pre-stream `CannotConnect` — is the
+        // same rejected overload whether it is the whole worker's or one DP
+        // rank's.
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let delivered_refusal = |error_type: ErrorType| -> anyhow::Error {
+            let refusal = DynamoError::builder()
+                .error_type(error_type)
+                .message("Server overloaded")
+                .build();
+            let delivered: DynamoError =
+                serde_json::from_value(serde_json::to_value(refusal).unwrap()).unwrap();
+            pre_stream_failure_error(StreamPrologueError::new("Server overloaded", delivered))
+                .into()
+        };
+        for error_type in [
+            ErrorType::WorkerOverloaded,
+            ErrorType::WorkerRankOverloaded(4),
+        ] {
+            let err = delivered_refusal(error_type);
+            assert!(
+                crate::http::service::metrics::request_was_rejected(err.as_ref()),
+                "{error_type:?}"
+            );
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+            assert_eq!(response.0.as_u16(), 529, "{error_type:?}");
+            assert_eq!(response.1.error_type, "Overloaded");
+        }
+
+        // A rank's refusal as the last failure recorded, as the routing host
+        // records it, for a request migration has no untried worker left for:
+        // the exhaustion error is an overload too.
+        let migration = crate::protocols::common::preprocessor::MigrationState::default();
+        migration.record_failure(
+            7,
+            delivered_refusal(ErrorType::WorkerRankOverloaded(4))
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned()),
+        );
+        let exhausted = migration.exhausted_error().expect("a failure was recorded");
+        assert_eq!(exhausted.error_type(), ErrorType::ResourceExhausted);
+        let response = ErrorMessage::from_anyhow(anyhow::anyhow!(exhausted), BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.error_type, "Overloaded");
     }
 
     #[test]
@@ -9236,6 +9281,10 @@ mod tests {
             ),
             (DynamoErrorType::ResourceExhausted, ErrorType::Overload),
             (DynamoErrorType::WorkerOverloaded, ErrorType::Overload),
+            (
+                DynamoErrorType::WorkerRankOverloaded(4),
+                ErrorType::Overload,
+            ),
             (DynamoErrorType::Unavailable, ErrorType::Unavailable),
             (DynamoErrorType::WorkerUnavailable, ErrorType::Unavailable),
             (DynamoErrorType::InvalidArgument, ErrorType::Validation),

@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
@@ -98,8 +97,8 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 				}},
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"},
-				Spec:       v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+				Name: "test", Namespace: "test",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
 			}
 			original := dgd.DeepCopy()
 
@@ -122,8 +121,8 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 
 			t.Log("Render an independent standalone DCD so graph inference cannot mask controller detection")
 			dcd := &v1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "test"},
-				Spec:       v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
+				Name: "worker", Namespace: "test",
+				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
 			}
 			originalDCD := dcd.DeepCopy()
 			pod, err := GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, RoleMain, commonconsts.MultinodeDeploymentTypeGrove, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
@@ -174,7 +173,7 @@ func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 				{Name: "NATS_SERVER", Value: "nats://frontend:4222"},
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"},
+				Name: "test", Namespace: "test",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					BackendFramework: string(BackendFrameworkVLLM), Env: graphEnv,
 					Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{
@@ -186,10 +185,10 @@ func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 				dgd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
 			}
 			component := v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, FrontendSidecar: ptr.To("frontend"),
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, FrontendSidecar: new("frontend"),
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: currentOrigin}},
+					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: currentOrigin},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{Name: commonconsts.MainContainerName, Image: "engine:latest", Env: engineEnv},
@@ -256,19 +255,19 @@ func TestNativeSidecarRendering(t *testing.T) {
 				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
 				Env:       []corev1.EnvVar{{Name: "GLOBAL", Value: "engine"}},
 			}
-			dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"}, Spec: v1beta1.DynamoGraphDeploymentSpec{
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "test", Namespace: "test", Spec: v1beta1.DynamoGraphDeploymentSpec{
 				Env:          []corev1.EnvVar{{Name: "GLOBAL", Value: "default"}, {Name: "SHARED", Value: "value"}},
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{LabelKey: "topology.example/zone", Domain: "zone", Enforcement: "required"}},
 			}}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "worker", ComponentType: componentType, FrontendSidecar: ptr.To("frontend"),
+				ComponentName: "worker", ComponentType: componentType, FrontendSidecar: new("frontend"),
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
-				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"}}, Spec: corev1.PodSpec{
+				PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"}, Spec: corev1.PodSpec{
 					Containers: []corev1.Container{engine, {Name: "frontend", Image: "frontend:1.5.0", Env: []corev1.EnvVar{{Name: "ETCD_ENDPOINTS", Value: "frontend-etcd:2379"}}}},
 					InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, {
 						Name: "runtime", Image: "runtime:1.5.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 						Env:          []corev1.EnvVar{{Name: "GLOBAL", Value: "runtime"}, {Name: "NATS_TLS_CA_CERT_PATH", Value: "/runtime/ca.crt"}, {Name: commonconsts.EnvKvTransferEnforcement, Value: "preferred"}},
-						StartupProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}},
+						StartupProbe: &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"true"}}},
 					}},
 				}},
 			}
@@ -469,7 +468,7 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}},
+					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name: commonconsts.MainContainerName, Image: "runtime:1.6.0",
 						Env: []corev1.EnvVar{
