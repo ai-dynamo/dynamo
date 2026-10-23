@@ -102,6 +102,20 @@ def test_build_sampling_params_caps_oversized_max_tokens():
     assert build_sampling_params(request, {}, 100).max_tokens == 97
 
 
+def test_build_sampling_params_rejects_max_tokens_above_model_length():
+    from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 101},
+        "output_options": {},
+    }
+    with pytest.raises(InvalidArgument, match="cannot be greater than"):
+        build_sampling_params(request, {}, 100)
+
+
 @pytest.mark.parametrize(
     (
         "model_input",

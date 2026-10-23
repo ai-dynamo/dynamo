@@ -953,6 +953,12 @@ def build_sampling_params(
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
     if model_max_len is not None:
+        # vLLM caps prompt + output but rejects output alone above the model length.
+        if provided_max_tokens is not None and provided_max_tokens > model_max_len:
+            raise InvalidArgument(
+                f"max_tokens={provided_max_tokens} cannot be greater than "
+                f"max_model_len={model_max_len}. Please request fewer output tokens."
+            )
         sampling_params.max_tokens = get_max_tokens(
             max_model_len=model_max_len,
             max_tokens=provided_max_tokens,
