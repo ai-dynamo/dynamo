@@ -54,7 +54,7 @@ runs:
       run: |
         # Share one installation deadline and leave room inside the callers'
         # 20-minute timeout for failure diagnostics and process termination.
-        timeout --verbose --kill-after=10s 17m bash -euo pipefail <<'SNAPSHOT_SETUP'
+        timeout --verbose --kill-after=10s 17m bash -euo pipefail /dev/fd/3 3<<'SNAPSHOT_SETUP'
         # Defer shell termination while a foreground command handles TERM, so
         # timeout can still kill the process group if that command does not exit.
         trap 'exit 124' TERM
@@ -151,7 +151,7 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
-        timeout --verbose --kill-after=5s 2m bash <<'SNAPSHOT_DIAGNOSTICS' || echo "::warning::Snapshot-agent diagnostics failed or timed out"
+        timeout --verbose --kill-after=5s 2m bash /dev/fd/3 3<<'SNAPSHOT_DIAGNOSTICS' || echo "::warning::Snapshot-agent diagnostics failed or timed out"
         trap 'exit 124' TERM
         set +e
         echo "::group::Snapshot-agent status"
