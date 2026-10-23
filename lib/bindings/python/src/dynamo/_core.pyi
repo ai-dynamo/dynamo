@@ -119,6 +119,24 @@ class DistributedRuntime:
         """
         ...
 
+    def register_engine_http_handler(
+        self,
+        name: str,
+        callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    ) -> None:
+        """Register `/engine/{name}/...` on an enabled system server.
+
+        The async callback receives `method`, the relative `path`, and JSON
+        `body` (None for an empty body), and returns `status` and JSON `body`.
+        Registration fails if the name is already registered. No authentication
+        is added; callers must restrict access to the system listener.
+        """
+        ...
+
+    def unregister_engine_http_handler(self, name: str) -> None:
+        """Remove a handler; already dispatched requests may still finish."""
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
@@ -1373,6 +1391,17 @@ class FpmDirectPublisher:
         ...
 
 
+class FpmHealthSnapshot:
+    @property
+    def snapshot(self) -> dict[tuple[str, int], bytes]: ...
+    @property
+    def unjoined_worker_ids(self) -> list[str]: ...
+    @property
+    def stale_rank_count(self) -> int: ...
+    @property
+    def missing_rank_count(self) -> int: ...
+
+
 class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
@@ -1412,9 +1441,12 @@ class FpmEventSubscriber:
         """
         ...
 
-    def start_tracking(self) -> None:
+    def start_tracking(self, max_age_seconds: float = 15.0) -> None:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
+
+        ``max_age_seconds`` fixes the freshness and cleanup window for this
+        subscription. It must be finite and positive.
 
         Spawns two background tasks:
 
@@ -1444,11 +1476,20 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_recent_stats_with_health(self) -> FpmHealthSnapshot:
+        """Return fresh samples, unjoined IDs, stale count, and missing rank count.
+
+        Age is measured from local receive time, including idle heartbeats.
+        The age limit is set once by ``start_tracking()``.
+        Missing ranks include discovered workers that have not published a sample.
+        """
+        ...
+
     def get_model_cards(self) -> dict[str, str]:
         """
         Snapshot of model deployment cards keyed by worker id.
 
-        The snapshot is filtered against the known-workers set so entries
+        The snapshot is filtered against the active worker lifecycle so entries
         for already-removed workers are not returned.  Values are the raw
         ``ModelDeploymentCard`` serialized as a JSON string; callers parse
         whichever fields they need (e.g. ``runtime_config``,
@@ -2728,7 +2769,9 @@ class KvDcRelay:
         ...
 
 class KvStateAgentHost:
-    def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
+    def __init__(
+        self, endpoint: Endpoint, max_slots: int = 8, slots_per_socket: int = 1
+    ) -> None:
         ...
 
     async def start(self) -> None:
@@ -2850,6 +2893,7 @@ class KvRouter:
         self,
         request: JsonLike,
         response_buffer_size: int = 100,
+        context: Context | None = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate from a preprocessed request dict (PreprocessedRequest format).
@@ -2857,6 +2901,8 @@ class KvRouter:
         Accepts a full request dict with token_ids, model, stop_conditions, etc.
         Set response_buffer_size to 0 for demand-driven direct Python consumption;
         negative values are rejected.
+        Pass context to preserve request metadata, cancellation, and distributed
+        tracing across the Python/Rust boundary.
         Returns an async iterator yielding generation responses.
         """
         ...
@@ -3210,6 +3256,15 @@ class StreamIncomplete(DynamoException):
 
 class WorkerOverloaded(DynamoException):
     """The worker temporarily cannot admit another request."""
+
+    ...
+
+class WorkerUnavailable(DynamoException):
+    """No worker on the request's route can serve it yet (HTTP 503).
+
+    Raised by `RoutedEngine.generate`, for example while prefill routing is
+    still activating. Re-raise it unchanged to keep the 503.
+    """
 
     ...
 

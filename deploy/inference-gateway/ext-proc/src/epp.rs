@@ -1628,6 +1628,7 @@ impl EndpointPicker for Router {
             cache_namespace,
             // The Dynamo runtime encodes salt itself so leave the forwarded body's salt alone.
             cache_salt_forwarding: CacheSaltForwarding::Preserve,
+            strip_nvext: false,
             reservation_id: Some(reservation_id),
         })
     }

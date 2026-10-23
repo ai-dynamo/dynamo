@@ -16,7 +16,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG PYTHON_VERSION
-ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
@@ -223,17 +222,13 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
 
-# Install Dynamo runtime wheels and optional KVBM/GMS wheels.
-# Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
+# Install Dynamo runtime wheels and the optional GMS wheel.
+# Use --no-deps to prevent dependency conflicts with the upstream solve.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
-    if [ "${ENABLE_KVBM}" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$KVBM_WHEEL"; fi; \
-    fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
@@ -262,6 +257,7 @@ RUN set -eux; \
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
+    --mount=type=bind,source=./container/deps/vllm/protected_overrides.txt,target=/tmp/vllm_omni_protected_overrides.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
@@ -490,6 +486,17 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # PyNvVideoCodec` dlopens libnvcuvid.so.1, which no driverless XPU or CPU
 # builder has, so an import-based check would raise whether or not the wheel is
 # installed and could never fail the build.
+#
+# mooncake goes the same way, for two reasons. The floor names the CUDA 13
+# distribution, and the XPU and CPU bases carry no mooncake at all, so under
+# --no-deps it would arrive here without msgpack, which vLLM does not pull in.
+# lmcache is filtered too: its floor refreshes the CUDA base's bundled copy,
+# and installing it --no-deps on a base without it would ship it unresolved.
+# The check asserts the distribution is absent rather than the `mooncake` module,
+# so it tests the filter without assuming what a future base may ship. It is
+# written as a positive test with no `!` and no stderr redirect: a broken
+# interpreter then fails the build instead of passing it vacuously.
+#
 # Whole-RUN branches, rather than a conditional inside one RUN: a `{% raw %}{% if %}{% endraw %}` in the
 # middle of a `\`-continued command emits a blank line that ends the command
 # early, and a `#` comment there is joined onto the previous line, commenting
@@ -497,7 +504,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    grep -v -e '^PyNvVideoCodec' \
+    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' -e '^lmcache' \
         /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.nonvidia.txt && \

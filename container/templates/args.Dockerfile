@@ -44,7 +44,6 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 {% endif %}
 
 # Build configuration
-ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
