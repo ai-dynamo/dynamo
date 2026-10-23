@@ -253,6 +253,15 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <div className="dynamo-model-tags"><span>vLLM + TRT-LLM</span><span>1-4x GPU</span><span>Agentic · 1M context</span></div>
   <a className="dynamo-card-link" href="nemotron-3-5-lightning.mdx" aria-label="Open the Nemotron 3.5 Lightning recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="h200" data-technique="aggregated prompt-caching session-affinity" data-workload="video-understanding" data-targets="agg-h200-round-robin agg-h200-session-affinity">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
+      <div><h3>Cosmos3 Nano Reasoner</h3><p>NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">Experimental FP8 video-reasoning recipe comparing four-worker round robin with per-video session affinity.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>4x H200</span><span>Video understanding</span></div>
+    <a className="dynamo-card-link" href="cosmos3-nano-reasoner.mdx" aria-label="Open the Cosmos3 Nano Reasoner recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="h200 b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="agg-b200-256k agg-b200-1m agg-gb200-256k agg-gb200-1m agg-h200-256k agg-h200-1m disagg-b200-256k disagg-b200-1m disagg-gb200-256k disagg-gb200-1m disagg-h200-256k disagg-h200-1m">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />

@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id: cosmos3-nano-reasoner
+title: Cosmos3 Nano Reasoner
+page: pages/recipes/model-recipes/cosmos3-nano-reasoner.mdx
+provider: nvidia
+model:
+  name: Cosmos3 Nano Reasoner
+  precision: FP8
+status: experimental
+targets:
+- id: agg-h200-round-robin
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020
+  topology: aggregated
+  techniques:
+  - fp8
+  - round-robin
+  - prompt-caching
+  workload:
+    type: video-understanding
+    traffic: 200 30-second videos at 2 FPS, five questions per video, 128 output tokens, concurrency 1/2/4/8/16
+  deploy:
+    asset: recipes/cosmos3-nano-reasoner/vllm/agg-h200-round-robin/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/cosmos3-nano-reasoner/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 12.69 requests/s and 1,625 output tokens/s at concurrency 16; TTFT p50 794 ms
+- id: agg-h200-session-affinity
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 4
+  runtime:
+    framework: vllm
+    image: nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020
+  topology: aggregated
+  techniques:
+  - fp8
+  - round-robin
+  - session-affinity
+  - prompt-caching
+  workload:
+    type: video-understanding
+    traffic: 200 30-second videos at 2 FPS with five questions and a stable session ID per video, 128 output tokens, concurrency 1/2/4/8/16
+  deploy:
+    asset: recipes/cosmos3-nano-reasoner/vllm/agg-h200-session-affinity/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/cosmos3-nano-reasoner/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 20.64 requests/s and 2,642 output tokens/s at concurrency 16; 63% more throughput than round robin
+related_benchmarks: []
+maintainer: null
+gaps:
+- The benchmark dataset is private.

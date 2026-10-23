@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# End-to-end smoke test using one real video from the private benchmark dataset.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cosmos3-nano-reasoner-smoke-video
+  labels:
+    app.kubernetes.io/name: cosmos3-nano-reasoner
+    app.kubernetes.io/component: smoke-test
+spec:
+  selector:
+    app.kubernetes.io/name: cosmos3-nano-reasoner
+    app.kubernetes.io/component: smoke-test
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cosmos3-nano-reasoner-smoke
+  labels:
+    app.kubernetes.io/name: cosmos3-nano-reasoner
+    app.kubernetes.io/component: smoke-test
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cosmos3-nano-reasoner
+        app.kubernetes.io/component: smoke-test
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: python:3.12-slim@sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              pip install --no-cache-dir "huggingface_hub==1.33.0"
+
+              python3 - <<'PY'
+              import os
+              from huggingface_hub import hf_hub_download
+
+              path = hf_hub_download(
+                  repo_id=os.environ["HF_DATASET_REPO"],
+                  repo_type="dataset",
+                  filename=os.environ["VIDEO_PATH"],
+                  revision=os.environ["HF_DATASET_REVISION"],
+                  token=os.environ["HF_TOKEN"],
+                  local_dir="/video",
+              )
+              print(f"Downloaded smoke-test video to {path}")
+              PY
+
+              python3 -m http.server 8080 --bind 0.0.0.0 --directory /video &
+              video_server_pid=$!
+              cleanup() { kill "$video_server_pid" 2>/dev/null || true; }
+              trap cleanup EXIT
+
+              python3 - <<'PY'
+              import json
+              import os
+              import time
+              import urllib.request
+              from pathlib import Path
+
+              endpoint = f"http://{os.environ['ENDPOINT']}"
+              video_url = (
+                  f"http://{os.environ['VIDEO_SERVICE']}:8080/"
+                  f"{os.environ['VIDEO_PATH']}"
+              )
+
+              for _ in range(120):
+                  try:
+                      head = urllib.request.Request(video_url, method="HEAD")
+                      with urllib.request.urlopen(head, timeout=5):
+                          break
+                  except Exception:
+                      time.sleep(1)
+              else:
+                  raise SystemExit("In-cluster video Service did not become ready")
+
+              for _ in range(180):
+                  try:
+                      with urllib.request.urlopen(f"{endpoint}/v1/models", timeout=5):
+                          break
+                  except Exception:
+                      time.sleep(5)
+              else:
+                  raise SystemExit("Frontend did not become ready")
+
+              payload = {
+                  "model": os.environ["TARGET_MODEL"],
+                  "messages": [{
+                      "role": "user",
+                      "content": [
+                          {
+                              "type": "text",
+                              "text": "Describe the main actions and events in this video.",
+                          },
+                          {
+                              "type": "video_url",
+                              "video_url": {"url": video_url},
+                          },
+                      ],
+                  }],
+                  "stream": False,
+                  "max_tokens": 32,
+                  "temperature": 0,
+              }
+              headers = {"Content-Type": "application/json"}
+              if os.environ["SESSION_AFFINITY"] == "1":
+                  headers["X-Dynamo-Session-ID"] = (
+                      f"{os.environ['DATASET_SUBDIR']}:"
+                      f"{Path(os.environ['VIDEO_PATH']).name}"
+                  )
+              request = urllib.request.Request(
+                  f"{endpoint}/v1/chat/completions",
+                  data=json.dumps(payload).encode(),
+                  headers=headers,
+                  method="POST",
+              )
+              with urllib.request.urlopen(request, timeout=600) as response:
+                  result = json.load(response)
+
+              choices = result.get("choices", [])
+              content = choices[0].get("message", {}).get("content") if choices else None
+              if not content:
+                  raise SystemExit(f"Completion was empty: {json.dumps(result)}")
+              print(
+                  f"Smoke test passed ({os.environ['BENCHMARK_VARIANT']}). "
+                  f"Completion: {content}"
+              )
+              PY
+          envFrom:
+            - configMapRef:
+                name: cosmos3-nano-reasoner-perf-profile
+          env:
+            - name: TARGET_MODEL
+              value: nvidia/cosmos3-nano-reasoner
+            - name: VIDEO_SERVICE
+              value: cosmos3-nano-reasoner-smoke-video
+            - name: HF_DATASET_REPO
+              value: jkiczka/cosmos3-benchmark-videos
+            - name: HF_DATASET_REVISION
+              value: ce4b687c7736e29a13e00385cc8b6a6d28f355fd
+            - name: DATASET_SUBDIR
+              value: 2fps-30s
+            - name: VIDEO_PATH
+              value: 2fps-30s/vid-0000.mp4
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi

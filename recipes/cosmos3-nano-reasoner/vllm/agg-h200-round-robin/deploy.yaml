@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Experimental Cosmos3 Nano Reasoner deployment for four H200 GPUs.
+# Requests are distributed by pure round robin; session affinity is disabled.
+# Cluster-specific scheduling, credentials, and registry configuration are
+# intentionally omitted from this portable base.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: cosmos3-nano-reasoner-agg-h200-round-robin
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      runtimeVersionOverride: "1.5.0"
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020
+              imagePullPolicy: IfNotPresent
+              workingDir: /opt/nim
+              command: ["/opt/nim/.venv/bin/python"]
+              args:
+                - -m
+                - dynamo.frontend
+                - --http-host
+                - 0.0.0.0
+                - --http-port
+                - "8000"
+                - --dyn-chat-processor
+                - dynamo
+                - --router-mode
+                - round-robin
+              env:
+                - name: DYN_REQUEST_PLANE
+                  value: tcp
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              ports:
+                - name: http
+                  containerPort: 8000
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 8Gi
+                limits:
+                  cpu: "8"
+                  memory: 16Gi
+
+    - name: Worker
+      type: worker
+      runtimeVersionOverride: "1.5.0"
+      replicas: 4
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          containers:
+            - name: main
+              image: nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020
+              imagePullPolicy: IfNotPresent
+              workingDir: /opt/nim
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -euo pipefail
+                  exec /opt/nim/start_server.sh
+              env:
+                - name: NIM_MODEL_TYPE
+                  value: reasoner
+                - name: NIM_DYNAMO_WORKER
+                  value: "true"
+                - name: NIM_MODEL_SIZE
+                  value: nano
+                - name: NIM_PRECISION
+                  value: fp8
+                - name: NIM_CACHE_PATH
+                  value: /shared-model-cache
+                - name: NIM_DISCOVERY_BACKEND
+                  value: '{"discovery_backend":"kubernetes","async_scheduling":true,"enable_multimodal":true}'
+                - name: DYN_REQUEST_PLANE
+                  value: tcp
+                - name: DYN_SELF_HOST_METADATA
+                  value: "true"
+                - name: TQDM_DISABLE
+                  value: "1"
+                - name: NIM_ENABLE_WARMUP
+                  value: "0"
+                - name: NIM_ENABLE_TEXT_GUARDRAILS
+                  value: "0"
+                - name: NIM_ENABLE_VIDEO_GUARDRAILS
+                  value: "0"
+                - name: NIM_ENABLE_SIGLIP_GUARDRAILS
+                  value: "0"
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "32"
+                  memory: 96Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "32"
+                  memory: 128Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache

@@ -1,0 +1,207 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Cosmos3 Nano Reasoner
+subtitle: Compare round-robin routing with per-video session affinity on four H200 GPUs.
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Deploy NVIDIA Cosmos3 Nano Reasoner as four FP8 aggregate workers. Two
+matched targets isolate routing behavior: pure round robin and round robin
+with a 300-second per-video session-affinity TTL.
+
+<div className="dynamo-target-picker">
+
+<p className="dynamo-target-picker-title">Choose a routing profile</p>
+
+<div className="dynamo-target-picker-row">
+
+<span className="dynamo-target-picker-dim">Routing</span>
+
+<input type="radio" id="recipe-variant-round-robin" name="recipe-variant" value="round-robin" defaultChecked />
+
+<label htmlFor="recipe-variant-round-robin">Round robin</label>
+
+<input type="radio" id="recipe-variant-session-affinity" name="recipe-variant" value="session-affinity" />
+
+<label htmlFor="recipe-variant-session-affinity">Session affinity</label>
+
+</div>
+
+<div className="dynamo-target-picker-summary" data-variant="round-robin">
+
+<span><b>Hardware</b> 4x H200, one GPU per worker</span>
+<span><b>Runtime</b> vLLM through Cosmos3 NIM 2.1.0</span>
+<span><b>Precision</b> FP8</span>
+<span><b>Topology</b> Aggregated</span>
+<span><b>Routing</b> Round robin, no session-affinity flag</span>
+
+</div>
+
+<div className="dynamo-target-picker-summary" data-variant="session-affinity">
+
+<span><b>Hardware</b> 4x H200, one GPU per worker</span>
+<span><b>Runtime</b> vLLM through Cosmos3 NIM 2.1.0</span>
+<span><b>Precision</b> FP8</span>
+<span><b>Topology</b> Aggregated</span>
+<span><b>Routing</b> Round robin with a 300-second per-video affinity TTL</span>
+
+</div>
+
+</div>
+
+<Note>
+
+In a matched four-H200 benchmark, per-video session affinity improved
+throughput and median latency at every tested concurrency. See
+[Measured performance](#measured-performance).
+
+</Note>
+
+## Prerequisites
+
+- A Kubernetes cluster with the [Dynamo platform](../../kubernetes/getting-started/quickstart.mdx) installed.
+- Four available H200 GPUs and a ReadWriteMany model-cache volume.
+- An NGC API key with access to `nvcr.io/nim/nvidia/cosmos3:2.1.0`.
+- A read-only Hugging Face token with access to the private
+  `jkiczka/cosmos3-benchmark-videos` dataset for the smoke test and benchmark.
+
+Run commands from the repository root:
+
+```bash
+export CONTEXT="<your-kubernetes-context>"
+export NAMESPACE="<your-namespace>"
+
+kubectl --context "$CONTEXT" create namespace "$NAMESPACE"
+kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret generic ngc-api-secret \
+  --from-literal=NGC_API_KEY="$NGC_API_KEY"
+kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN"
+```
+
+If your cluster requires registry authentication or cluster-specific H200
+scheduling, inject those settings through a private Kustomize overlay rather
+than editing the portable manifest.
+
+## Populate the model cache
+
+The model-download Job and serving workers use the same pinned image and
+shared cache. If `shared-model-cache` already exists, keep it; PVC storage
+class and access mode fields are immutable.
+
+For a new cache, first replace the placeholder `storageClassName` in
+[model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/model-cache/model-cache.yaml)
+with a ReadWriteMany-capable storage class. Then run:
+
+```bash
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
+  -f recipes/cosmos3-nano-reasoner/model-cache/model-cache.yaml
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
+  -f recipes/cosmos3-nano-reasoner/model-cache/model-download.yaml
+kubectl --context "$CONTEXT" -n "$NAMESPACE" wait \
+  --for=condition=Complete job/cosmos3-nano-reasoner-model-download \
+  --timeout=3600s
+```
+
+## Deploy
+
+Choose one profile and deploy it:
+
+```bash
+export PROFILE=round-robin # or: session-affinity
+export DGD="cosmos3-nano-reasoner-agg-h200-${PROFILE}"
+
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
+  -f "recipes/cosmos3-nano-reasoner/vllm/agg-h200-${PROFILE}/deploy.yaml"
+kubectl --context "$CONTEXT" -n "$NAMESPACE" wait \
+  --for=condition=Ready "dynamographdeployment/${DGD}" \
+  --timeout=1200s
+```
+
+The round-robin manifest does not set a session-affinity flag. The
+session-affinity manifest sets a 300-second TTL, and its benchmark profile
+sends a stable `X-Dynamo-Session-ID` derived from each video filename.
+
+## Smoke test
+
+The smoke test downloads one real 30-second video, exposes it to the workers
+through an in-cluster Service, and validates a non-empty multimodal completion:
+
+```bash
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
+  -f "recipes/cosmos3-nano-reasoner/perf/profiles/${PROFILE}.yaml"
+kubectl --context "$CONTEXT" -n "$NAMESPACE" delete job \
+  cosmos3-nano-reasoner-smoke --ignore-not-found
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
+  -f recipes/cosmos3-nano-reasoner/perf/smoke.yaml
+kubectl --context "$CONTEXT" -n "$NAMESPACE" logs -f \
+  job/cosmos3-nano-reasoner-smoke
+```
+
+The final log line starts with `Smoke test passed` and includes the model's
+description of the video.
+
+## Benchmark
+
+The [AIPerf workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/perf/README.md)
+downloads the pinned dataset snapshot outside measured request latency. It
+then sends five questions for each of 200 30-second, 2 FPS videos at every
+concurrency level: 1,000 requests with exactly 128 output tokens each. For
+session affinity, AIPerf sends
+`X-Dynamo-Session-ID: 2fps-30s:<video-filename>` on all five questions; pure
+round robin sends no session-affinity header.
+
+```bash
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
+  -f "recipes/cosmos3-nano-reasoner/perf/profiles/${PROFILE}.yaml"
+kubectl --context "$CONTEXT" -n "$NAMESPACE" delete job \
+  cosmos3-nano-reasoner-perf --ignore-not-found
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
+  -f recipes/cosmos3-nano-reasoner/perf/perf.yaml
+kubectl --context "$CONTEXT" -n "$NAMESPACE" logs -f \
+  job/cosmos3-nano-reasoner-perf
+```
+
+## Measured performance
+
+These are single-run AIPerf measurements from matched four-H200 deployments.
+Each row represents 1,000 successful requests with no errors. Both profiles
+used the same 200 videos, five questions per video, and 128 output tokens.
+
+| Concurrency | Round-robin req/s | Affinity req/s | Throughput gain | Round-robin TTFT p50 | Affinity TTFT p50 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1.51 | 2.03 | +34% | 456 ms | 140 ms |
+| 2 | 3.48 | 4.21 | +21% | 413 ms | 142 ms |
+| 4 | 6.56 | 8.29 | +26% | 432 ms | 142 ms |
+| 8 | 10.20 | 14.62 | +43% | 525 ms | 210 ms |
+| 16 | 12.69 | 20.64 | +63% | 794 ms | 359 ms |
+
+At concurrency 16, session affinity produced 2,642 output tokens/s versus
+1,625 for round robin. Request-latency p50 fell from 1,183 ms to 735 ms, and
+TTFT p95 fell from 1,409 ms to 614 ms. The result is consistent with keeping
+all five questions for a video on one worker, allowing per-video locality to
+be reused instead of distributing repeat work across the four workers.
+
+The complete TTFT, request-latency, ITL, prompt-cache, and throughput sweep is
+available in the
+[benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/perf/README.md).
+
+<Note>
+
+Each video has five self-contained questions. Pure round robin may distribute
+those questions across workers, while session affinity pins all five to the
+same worker. Deploy and benchmark one profile at a time to compare equal
+four-worker setups.
+
+</Note>
+
+## Source
+
+- [Recipe overview](https://github.com/ai-dynamo/dynamo/tree/main/recipes/cosmos3-nano-reasoner)
+- [Round-robin deployment](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/vllm/agg-h200-round-robin/deploy.yaml)
+- [Session-affinity deployment](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/vllm/agg-h200-session-affinity/deploy.yaml)
+- [AIPerf benchmark](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/perf/perf.yaml)
+- [Video smoke test](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/perf/smoke.yaml)
