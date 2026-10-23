@@ -41,19 +41,10 @@ const (
 	defaultHardwareDiscoveryTimeout = 5 * time.Second
 )
 
-// DiscoveredHardware is what the cluster has, as far as it can be determined.
-type DiscoveredHardware struct {
-	// SKU is the AISimulate hardware catalog name, or empty when the GPU model is not one
-	// the catalog knows.
-	SKU string
-	// GPUs is the total number of GPUs of that SKU in the cluster.
-	GPUs int
-}
-
 // HardwareDiscoverer finds the cluster's GPUs. filterSKU, when set, restricts the result to
 // GPUs of that SKU.
 type HardwareDiscoverer interface {
-	Discover(ctx context.Context, filterSKU string) (DiscoveredHardware, error)
+	Discover(ctx context.Context, filterSKU nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error)
 }
 
 // DGDRV1beta2Options configures the defaults of v1beta2 Requests.
@@ -123,43 +114,28 @@ func (o DGDRV1beta2Options) resolveHardware(
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	found, err := o.Hardware.Discover(ctx, sku)
+	found, err := o.Hardware.Discover(ctx, nvidiacomv1beta1.GPUSKUType(sku))
 	if err != nil {
 		log.FromContext(ctx).Info("hardware discovery failed; leaving hardware unresolved", "error", err.Error())
 		return hardwareDefaultsV1beta2{}
 	}
 
+	// The cluster facts are mapped into the v1beta2 API here: the AISimulate catalog name of
+	// the GPU model (empty when the catalog does not know it) and the total GPU count.
+	var gpus int
+	if found != nil {
+		gpus = found.GPUsPerNode * found.NodesWithGPUs
+	}
 	var defaults hardwareDefaultsV1beta2
 	if sku == "" {
-		defaults.sku = found.SKU
+		defaults.sku = string(gpu.KnownSKU(found))
 	}
-	if !hasBudget && found.GPUs > 0 {
+	if !hasBudget && gpus > 0 {
 		maxBudget := o.MaxHardwareBudget
 		if maxBudget <= 0 {
 			maxBudget = defaultMaxHardwareBudget
 		}
-		defaults.budget = int32(min(found.GPUs, int(maxBudget)))
+		defaults.budget = int32(min(gpus, int(maxBudget)))
 	}
 	return defaults
-}
-
-// gpuHardwareDiscoverer backs HardwareDiscoverer with the operator's GPU discovery.
-type gpuHardwareDiscoverer struct {
-	discoverer *gpu.Discoverer
-}
-
-// NewGPUHardwareDiscoverer adapts the operator's GPU discovery for hardware defaulting.
-func NewGPUHardwareDiscoverer(discoverer *gpu.Discoverer) HardwareDiscoverer {
-	return gpuHardwareDiscoverer{discoverer: discoverer}
-}
-
-func (g gpuHardwareDiscoverer) Discover(ctx context.Context, filterSKU string) (DiscoveredHardware, error) {
-	info, err := g.discoverer.Discover(ctx, nvidiacomv1beta1.GPUSKUType(filterSKU))
-	if err != nil {
-		return DiscoveredHardware{}, err
-	}
-	return DiscoveredHardware{
-		SKU:  string(gpu.KnownSKU(info)),
-		GPUs: info.GPUsPerNode * info.NodesWithGPUs,
-	}, nil
 }

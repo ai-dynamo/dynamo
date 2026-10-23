@@ -234,7 +234,7 @@ type NativeSearchInput struct {
 
 	// Workload defines the synthetic traffic model used for every candidate evaluation.
 	// When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;
-	// an explicit empty workload receives the same shape from the schema. An explicit
+	// an explicit empty workload receives the same shape from admission. An explicit
 	// workload.static: {} opts out of that shape, leaving the workload to
 	// spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the
 	// fields it names.

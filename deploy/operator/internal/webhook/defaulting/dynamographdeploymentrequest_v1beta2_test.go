@@ -27,6 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	admissionv1 "k8s.io/api/admission/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -254,20 +255,21 @@ func TestNativeTargetOverridesTheDefaultedMetric(t *testing.T) {
 }
 
 type fakeDiscoverer struct {
-	found   DiscoveredHardware
+	found   gpu.GPUInfo
 	err     error
 	calls   int
 	filter  string
 	timeout time.Duration
 }
 
-func (f *fakeDiscoverer) Discover(ctx context.Context, filterSKU string) (DiscoveredHardware, error) {
+func (f *fakeDiscoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
 	f.calls++
-	f.filter = filterSKU
+	f.filter = string(filterSKU)
 	if deadline, ok := ctx.Deadline(); ok {
 		f.timeout = time.Until(deadline)
 	}
-	return f.found, f.err
+	found := f.found
+	return &found, f.err
 }
 
 func TestResolveHardwareV1beta2(t *testing.T) {
@@ -285,14 +287,14 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		}
 	})
 	t.Run("complete hardware never asks the cluster", func(t *testing.T) {
-		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h100_sxm", GPUs: 4}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 4, NodesWithGPUs: 1}}
 		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))))
 		if d.calls != 0 || !(got == hardwareDefaultsV1beta2{}) {
 			t.Fatalf("calls=%d got=%+v", d.calls, got)
 		}
 	})
 	t.Run("everything missing", func(t *testing.T) {
-		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 16}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 16, NodesWithGPUs: 1}}
 		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil))
 		if got.sku != "h200_sxm" || got.budget != 16 || d.filter != "" {
 			t.Fatalf("got %+v, filter %q", got, d.filter)
@@ -302,21 +304,21 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		}
 	})
 	t.Run("a pinned SKU filters discovery and keeps its value", func(t *testing.T) {
-		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "b200_sxm", GPUs: 4}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "b200_sxm", GPUsPerNode: 4, NodesWithGPUs: 1}}
 		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), nil))
 		if d.filter != "b200_sxm" || got.sku != "" || got.budget != 4 {
 			t.Fatalf("got %+v, filter %q", got, d.filter)
 		}
 	})
 	t.Run("a pinned budget keeps its value", func(t *testing.T) {
-		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 64}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 64, NodesWithGPUs: 1}}
 		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, v1beta2Ptr(int32(3))))
 		if got.sku != "h200_sxm" || got.budget != 0 {
 			t.Fatalf("got %+v", got)
 		}
 	})
 	t.Run("the budget is capped", func(t *testing.T) {
-		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 1024}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 1024, NodesWithGPUs: 1}}
 		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil)); got.budget != 32 {
 			t.Fatalf("default cap: %+v", got)
 		}
@@ -325,7 +327,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		}
 	})
 	t.Run("an unknown GPU model yields no SKU", func(t *testing.T) {
-		d := &fakeDiscoverer{found: DiscoveredHardware{GPUs: 8}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{GPUsPerNode: 8, NodesWithGPUs: 1}}
 		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil)); got.sku != "" || got.budget != 8 {
 			t.Fatalf("got %+v", got)
 		}
@@ -337,7 +339,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		}
 	})
 	t.Run("the timeout is configurable", func(t *testing.T) {
-		d := &fakeDiscoverer{found: DiscoveredHardware{GPUs: 1}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{GPUsPerNode: 1, NodesWithGPUs: 1}}
 		DGDRV1beta2Options{Hardware: d, HardwareDiscoveryTimeout: time.Hour}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil))
 		if d.timeout < time.Minute {
 			t.Fatalf("timeout = %v", d.timeout)
@@ -346,7 +348,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 }
 
 func TestResolveDefaultsV1beta2(t *testing.T) {
-	d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}
+	d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}
 	got := DGDRV1beta2Options{Hardware: d, AISimulateImage: "registry.example.com/aisimulate:1.2.0"}.
 		resolveDefaults(context.Background(), admissionv1.Create, nil, v1beta2SchemaDefaulted())
 	if got.aisimulateImage != "registry.example.com/aisimulate:1.2.0" || got.hardware.sku != "h200_sxm" || got.hardware.budget != 8 {
@@ -368,7 +370,7 @@ func v1beta2Envelope(t *testing.T, spec *nvidiacomv1beta2.DynamoGraphDeploymentR
 func TestDefaultEnvelopeV1beta2(t *testing.T) {
 	options := DGDRV1beta2Options{
 		AISimulateImage: "registry.example.com/aisimulate:1.2.0",
-		Hardware:        &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}},
+		Hardware:        &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}},
 	}
 	dgdr := v1beta2Envelope(t, v1beta2SchemaDefaulted())
 
@@ -436,7 +438,7 @@ func hardwareSpecV1beta2(sku *string, budget *int32) *nvidiacomv1beta2.DynamoGra
 func TestHardwareIsNeverDiscoveredOnOtherOperations(t *testing.T) {
 	for _, op := range []admissionv1.Operation{admissionv1.Delete, admissionv1.Connect, ""} {
 		t.Run("operation "+string(op), func(t *testing.T) {
-			d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}
+			d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}
 			old := hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), v1beta2Ptr(int32(4)))
 			got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), op, old, hardwareSpecV1beta2(nil, nil))
 			if got != (hardwareDefaultsV1beta2{}) || d.calls != 0 {
@@ -482,7 +484,7 @@ func TestResolveHardwareByOperationV1beta2(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}
+			d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}
 			got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), tt.op, tt.old, tt.spec)
 			if got != tt.want || d.calls != tt.wantCalls || (tt.wantCalls > 0 && d.filter != tt.wantFilter) {
 				t.Fatalf("got %+v, calls %d, filter %q; want %+v, calls %d, filter %q",
@@ -495,7 +497,7 @@ func TestResolveHardwareByOperationV1beta2(t *testing.T) {
 // A Request created while discovery had nothing to offer keeps its spec through a later
 // metadata-only update, even after the cluster recovers.
 func TestUpdateKeepsUnchangedHardwareUnresolved(t *testing.T) {
-	options := DGDRV1beta2Options{Hardware: &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}}
+	options := DGDRV1beta2Options{Hardware: &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}}
 	// The objective metric is still defaulted on update, so the spec already carries it.
 	spec := v1beta2SchemaDefaulted()
 	metric := defaultMetricV1beta2
@@ -512,7 +514,7 @@ func TestUpdateKeepsUnchangedHardwareUnresolved(t *testing.T) {
 }
 
 func TestUpdateRediscoversRemovedHardware(t *testing.T) {
-	options := DGDRV1beta2Options{Hardware: &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}}
+	options := DGDRV1beta2Options{Hardware: &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}}
 	dgdr := v1beta2Envelope(t, v1beta2SchemaDefaulted())
 	old := hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), v1beta2Ptr(int32(4)))
 	if err := defaultDynamoGraphDeploymentRequestV1beta2(context.Background(), dgdr, admissionv1.Update, old, options); err != nil {

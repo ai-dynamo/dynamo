@@ -13,6 +13,8 @@ import (
 	"os"
 	"testing"
 
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
@@ -32,8 +34,8 @@ const controllerAISimulateImage = "registry.example/aisimulate:1.2.0"
 
 type fixedHardwareDiscoverer struct{}
 
-func (fixedHardwareDiscoverer) Discover(context.Context, string) (webhookdefaulting.DiscoveredHardware, error) {
-	return webhookdefaulting.DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}, nil
+func (fixedHardwareDiscoverer) Discover(context.Context, nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
+	return &gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}, nil
 }
 
 var (
