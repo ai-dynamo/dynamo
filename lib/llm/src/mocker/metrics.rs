@@ -24,6 +24,7 @@ const SGLANG_SCHEDULER_LABELS: &[&str] = &[
     "moe_ep_rank",
 ];
 const SGLANG_REQUEST_LABELS: &[&str] = &["model_name", "engine_type"];
+const TRTLLM_LABELS: &[&str] = &["model_name", "engine_type"];
 
 pub(crate) struct NativeMockerMetrics {
     dp_size: u32,
@@ -42,13 +43,12 @@ struct NativeMockerMetricsState {
 }
 
 enum NativeCollectors {
-    Vllm(VllmFamilyCollectors),
-    Trtllm(VllmFamilyCollectors),
+    Vllm(VllmCollectors),
+    Trtllm(TrtllmCollectors),
     Sglang(SglangCollectors),
 }
 
-/// Collectors shared by engines backed by the vLLM scheduler metric model.
-struct VllmFamilyCollectors {
+struct VllmCollectors {
     num_requests_running: IntGaugeVec,
     num_requests_waiting: IntGaugeVec,
     kv_cache_usage_perc: GaugeVec,
@@ -56,6 +56,17 @@ struct VllmFamilyCollectors {
     num_preemptions_total: IntCounterVec,
     time_to_first_token_seconds: HistogramVec,
     inter_token_latency_seconds: HistogramVec,
+    request_time_per_output_token_seconds: HistogramVec,
+    e2e_request_latency_seconds: HistogramVec,
+}
+
+/// Mirrors the TensorRT-LLM `MetricsCollector` families that `dynamo.trtllm` re-exports.
+struct TrtllmCollectors {
+    num_requests_running: IntGaugeVec,
+    num_requests_waiting: IntGaugeVec,
+    kv_cache_utilization: GaugeVec,
+    time_to_first_token_seconds: HistogramVec,
+    time_per_output_token_seconds: HistogramVec,
     e2e_request_latency_seconds: HistogramVec,
 }
 
@@ -66,11 +77,13 @@ struct SglangCollectors {
     num_requests_total: IntCounterVec,
     time_to_first_token_seconds: HistogramVec,
     inter_token_latency_seconds: HistogramVec,
+    request_time_per_output_token_seconds: HistogramVec,
     e2e_request_latency_seconds: HistogramVec,
 }
 
 enum NativeMetricHandles {
     Vllm(HashMap<u32, VllmDpHandles>),
+    Trtllm(TrtllmHandles),
     Sglang(SglangHandles),
 }
 
@@ -83,6 +96,14 @@ struct VllmDpHandles {
     request_metrics: NativeRequestMetricHandles,
 }
 
+/// One series per worker: `dynamo.trtllm` registers a single collector even with attention DP.
+struct TrtllmHandles {
+    num_requests_running: IntGauge,
+    num_requests_waiting: IntGauge,
+    kv_cache_utilization: Gauge,
+    request_metrics: NativeRequestMetricHandles,
+}
+
 struct SglangHandles {
     num_running_reqs: IntGauge,
     num_queue_reqs: IntGauge,
@@ -91,24 +112,24 @@ struct SglangHandles {
 }
 
 #[derive(Clone)]
-enum NativeRequestMetricHandles {
-    Vllm {
-        time_to_first_token_seconds: Histogram,
-        inter_token_latency_seconds: Histogram,
-        e2e_request_latency_seconds: Histogram,
-    },
-    Sglang {
-        num_requests_total: IntCounter,
-        time_to_first_token_seconds: Histogram,
-        inter_token_latency_seconds: Histogram,
-        e2e_request_latency_seconds: Histogram,
-    },
+struct NativeRequestMetricHandles {
+    time_to_first_token_seconds: Histogram,
+    /// TensorRT-LLM has no inter-token latency histogram.
+    inter_token_latency_seconds: Option<Histogram>,
+    time_per_output_token_seconds: Histogram,
+    /// vLLM records a TPOT of 0 for single-token requests; SGLang and TensorRT-LLM skip them.
+    record_zero_tpot: bool,
+    e2e_request_latency_seconds: Histogram,
+    /// Only SGLang counts completed requests.
+    num_requests_total: Option<IntCounter>,
 }
 
 pub(crate) struct NativeRequestTiming {
     handles: Option<NativeRequestMetricHandles>,
     start: Instant,
+    first_token_at: Option<Instant>,
     last_token_at: Option<Instant>,
+    output_tokens: usize,
 }
 
 impl NativeMockerMetrics {
@@ -175,6 +196,7 @@ impl NativeMockerMetrics {
                 Some(NativeMetricHandles::Vllm(handles)) => handles
                     .get(&dp_rank)
                     .map(|handles| handles.request_metrics.clone()),
+                Some(NativeMetricHandles::Trtllm(handles)) => Some(handles.request_metrics.clone()),
                 Some(NativeMetricHandles::Sglang(handles)) => Some(handles.request_metrics.clone()),
                 None => None,
             }
@@ -220,7 +242,7 @@ impl NativeMockerMetrics {
         }
 
         state.handles = match &self.collectors {
-            NativeCollectors::Vllm(collectors) | NativeCollectors::Trtllm(collectors) => {
+            NativeCollectors::Vllm(collectors) => {
                 let mut handles = HashMap::with_capacity(self.dp_size as usize);
                 for dp_rank in 0..self.dp_size {
                     let engine = dp_rank.to_string();
@@ -243,21 +265,56 @@ impl NativeMockerMetrics {
                             num_preemptions_total: collectors
                                 .num_preemptions_total
                                 .with_label_values(&label_values),
-                            request_metrics: NativeRequestMetricHandles::Vllm {
+                            request_metrics: NativeRequestMetricHandles {
                                 time_to_first_token_seconds: collectors
                                     .time_to_first_token_seconds
                                     .with_label_values(&label_values),
-                                inter_token_latency_seconds: collectors
-                                    .inter_token_latency_seconds
+                                inter_token_latency_seconds: Some(
+                                    collectors
+                                        .inter_token_latency_seconds
+                                        .with_label_values(&label_values),
+                                ),
+                                time_per_output_token_seconds: collectors
+                                    .request_time_per_output_token_seconds
                                     .with_label_values(&label_values),
+                                record_zero_tpot: true,
                                 e2e_request_latency_seconds: collectors
                                     .e2e_request_latency_seconds
                                     .with_label_values(&label_values),
+                                num_requests_total: None,
                             },
                         },
                     );
                 }
                 Some(NativeMetricHandles::Vllm(handles))
+            }
+            NativeCollectors::Trtllm(collectors) => {
+                let label_values = [model_name, "trtllm"];
+                Some(NativeMetricHandles::Trtllm(TrtllmHandles {
+                    num_requests_running: collectors
+                        .num_requests_running
+                        .with_label_values(&label_values),
+                    num_requests_waiting: collectors
+                        .num_requests_waiting
+                        .with_label_values(&label_values),
+                    kv_cache_utilization: collectors
+                        .kv_cache_utilization
+                        .with_label_values(&label_values),
+                    request_metrics: NativeRequestMetricHandles {
+                        time_to_first_token_seconds: collectors
+                            .time_to_first_token_seconds
+                            .with_label_values(&label_values),
+                        inter_token_latency_seconds: None,
+                        time_per_output_token_seconds: collectors
+                            .time_per_output_token_seconds
+                            .with_label_values(&label_values),
+                        record_zero_tpot: false,
+                        e2e_request_latency_seconds: collectors
+                            .e2e_request_latency_seconds
+                            .with_label_values(&label_values),
+                        num_requests_total: None,
+                    },
+                }))
             }
             NativeCollectors::Sglang(collectors) => {
                 let scheduler_label_values = [model_name, "sglang", "0", "0", "0"];
@@ -272,19 +329,27 @@ impl NativeMockerMetrics {
                     cache_hit_rate: collectors
                         .cache_hit_rate
                         .with_label_values(&scheduler_label_values),
-                    request_metrics: NativeRequestMetricHandles::Sglang {
-                        num_requests_total: collectors
-                            .num_requests_total
-                            .with_label_values(&request_label_values),
+                    request_metrics: NativeRequestMetricHandles {
                         time_to_first_token_seconds: collectors
                             .time_to_first_token_seconds
                             .with_label_values(&request_label_values),
-                        inter_token_latency_seconds: collectors
-                            .inter_token_latency_seconds
+                        inter_token_latency_seconds: Some(
+                            collectors
+                                .inter_token_latency_seconds
+                                .with_label_values(&request_label_values),
+                        ),
+                        time_per_output_token_seconds: collectors
+                            .request_time_per_output_token_seconds
                             .with_label_values(&request_label_values),
+                        record_zero_tpot: false,
                         e2e_request_latency_seconds: collectors
                             .e2e_request_latency_seconds
                             .with_label_values(&request_label_values),
+                        num_requests_total: Some(
+                            collectors
+                                .num_requests_total
+                                .with_label_values(&request_label_values),
+                        ),
                     },
                 }))
             }
@@ -326,6 +391,37 @@ impl NativeMockerMetrics {
                     *last_seen = metrics.vllm_preemptions_total;
                 }
             }
+            Some(NativeMetricHandles::Trtllm(handles)) => {
+                let running = state
+                    .latest_snapshots
+                    .values()
+                    .map(|snapshot| snapshot.running_requests)
+                    .sum::<u64>();
+                let waiting = state
+                    .latest_snapshots
+                    .values()
+                    .map(|snapshot| snapshot.waiting_requests)
+                    .sum::<u64>();
+                let used_blocks = state
+                    .latest_snapshots
+                    .values()
+                    .map(|snapshot| snapshot.active_decode_blocks)
+                    .sum::<u64>();
+                let total_blocks = state
+                    .latest_snapshots
+                    .values()
+                    .map(|snapshot| snapshot.total_blocks)
+                    .sum::<u64>();
+
+                handles.num_requests_running.set(clamp_u64_to_i64(running));
+                handles.num_requests_waiting.set(clamp_u64_to_i64(waiting));
+                // TensorRT-LLM reports usedNumBlocks / maxNumBlocks and skips an empty pool.
+                if total_blocks > 0 {
+                    handles
+                        .kv_cache_utilization
+                        .set(used_blocks as f64 / total_blocks as f64);
+                }
+            }
             Some(NativeMetricHandles::Sglang(handles)) => {
                 let running = state
                     .latest_snapshots
@@ -365,64 +461,62 @@ impl NativeMockerMetrics {
 impl NativeCollectors {
     fn new(engine_type: EngineType) -> Result<Self> {
         match engine_type {
-            EngineType::Vllm => Ok(Self::Vllm(VllmFamilyCollectors::new(
-                "vllm",
-                "Cumulative number of request preemptions.",
-            )?)),
-            EngineType::Trtllm => Ok(Self::Trtllm(VllmFamilyCollectors::new(
-                "trtllm",
-                "Cumulative number of request preemptions (always 0 under GUARANTEED_NO_EVICT).",
-            )?)),
+            EngineType::Vllm => Ok(Self::Vllm(VllmCollectors::new()?)),
+            EngineType::Trtllm => Ok(Self::Trtllm(TrtllmCollectors::new()?)),
             EngineType::Sglang => Ok(Self::Sglang(SglangCollectors::new()?)),
         }
     }
 
     fn register(&self, registry: &MetricsRegistry) -> Result<()> {
         match self {
-            Self::Vllm(collectors) | Self::Trtllm(collectors) => collectors.register(registry),
+            Self::Vllm(collectors) => collectors.register(registry),
+            Self::Trtllm(collectors) => collectors.register(registry),
             Self::Sglang(collectors) => collectors.register(registry),
         }
     }
 }
 
-impl VllmFamilyCollectors {
-    fn new(prefix: &str, preemptions_help: &str) -> Result<Self> {
+impl VllmCollectors {
+    fn new() -> Result<Self> {
         Ok(Self {
             num_requests_running: IntGaugeVec::new(
                 Opts::new(
-                    format!("{prefix}:num_requests_running"),
+                    "vllm:num_requests_running",
                     "Number of requests currently running on GPU.",
                 ),
                 VLLM_LABELS,
             )?,
             num_requests_waiting: IntGaugeVec::new(
                 Opts::new(
-                    format!("{prefix}:num_requests_waiting"),
+                    "vllm:num_requests_waiting",
                     "Number of requests waiting to be processed.",
                 ),
                 VLLM_LABELS,
             )?,
             kv_cache_usage_perc: GaugeVec::new(
                 Opts::new(
-                    format!("{prefix}:kv_cache_usage_perc"),
+                    "vllm:kv_cache_usage_perc",
                     "KV-cache usage as a fraction of available cache blocks.",
                 ),
                 VLLM_LABELS,
             )?,
             gpu_cache_usage_perc: GaugeVec::new(
                 Opts::new(
-                    format!("{prefix}:gpu_cache_usage_perc"),
+                    "vllm:gpu_cache_usage_perc",
                     "Compatibility alias for KV-cache usage as a fraction of available cache blocks.",
                 ),
                 VLLM_LABELS,
             )?,
             num_preemptions_total: IntCounterVec::new(
-                Opts::new(format!("{prefix}:num_preemptions_total"), preemptions_help),
+                Opts::new(
+                    "vllm:num_preemptions_total",
+                    "Cumulative number of request preemptions.",
+                ),
                 VLLM_LABELS,
             )?,
             time_to_first_token_seconds: HistogramVec::new(
                 HistogramOpts::new(
-                    format!("{prefix}:time_to_first_token_seconds"),
+                    "vllm:time_to_first_token_seconds",
                     "Histogram of time to first token in seconds.",
                 )
                 .buckets(vllm_ttft_buckets()),
@@ -430,15 +524,23 @@ impl VllmFamilyCollectors {
             )?,
             inter_token_latency_seconds: HistogramVec::new(
                 HistogramOpts::new(
-                    format!("{prefix}:inter_token_latency_seconds"),
+                    "vllm:inter_token_latency_seconds",
                     "Histogram of inter-token latency in seconds.",
+                )
+                .buckets(vllm_itl_buckets()),
+                VLLM_LABELS,
+            )?,
+            request_time_per_output_token_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    "vllm:request_time_per_output_token_seconds",
+                    "Histogram of time_per_output_token_seconds per request.",
                 )
                 .buckets(vllm_itl_buckets()),
                 VLLM_LABELS,
             )?,
             e2e_request_latency_seconds: HistogramVec::new(
                 HistogramOpts::new(
-                    format!("{prefix}:e2e_request_latency_seconds"),
+                    "vllm:e2e_request_latency_seconds",
                     "Histogram of e2e request latency in seconds.",
                 )
                 .buckets(vllm_e2e_buckets()),
@@ -455,6 +557,61 @@ impl VllmFamilyCollectors {
         registry.add_metric(Box::new(self.num_preemptions_total.clone()))?;
         registry.add_metric(Box::new(self.time_to_first_token_seconds.clone()))?;
         registry.add_metric(Box::new(self.inter_token_latency_seconds.clone()))?;
+        registry.add_metric(Box::new(self.request_time_per_output_token_seconds.clone()))?;
+        registry.add_metric(Box::new(self.e2e_request_latency_seconds.clone()))?;
+        Ok(())
+    }
+}
+
+impl TrtllmCollectors {
+    // TensorRT-LLM's default buckets are the same lists as vLLM's TTFT, ITL and e2e buckets.
+    fn new() -> Result<Self> {
+        Ok(Self {
+            num_requests_running: IntGaugeVec::new(
+                Opts::new("trtllm_num_requests_running", "Number of active requests"),
+                TRTLLM_LABELS,
+            )?,
+            num_requests_waiting: IntGaugeVec::new(
+                Opts::new("trtllm_num_requests_waiting", "Number of queued requests"),
+                TRTLLM_LABELS,
+            )?,
+            kv_cache_utilization: GaugeVec::new(
+                Opts::new("trtllm_kv_cache_utilization", "KV cache utilization"),
+                TRTLLM_LABELS,
+            )?,
+            time_to_first_token_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    "trtllm_time_to_first_token_seconds",
+                    "Histogram of time to first token in seconds.",
+                )
+                .buckets(vllm_ttft_buckets()),
+                TRTLLM_LABELS,
+            )?,
+            time_per_output_token_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    "trtllm_time_per_output_token_seconds",
+                    "Histogram of time per output token in seconds.",
+                )
+                .buckets(vllm_itl_buckets()),
+                TRTLLM_LABELS,
+            )?,
+            e2e_request_latency_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    "trtllm_e2e_request_latency_seconds",
+                    "Histogram of end to end request latency in seconds.",
+                )
+                .buckets(vllm_e2e_buckets()),
+                TRTLLM_LABELS,
+            )?,
+        })
+    }
+
+    fn register(&self, registry: &MetricsRegistry) -> Result<()> {
+        registry.add_metric(Box::new(self.num_requests_running.clone()))?;
+        registry.add_metric(Box::new(self.num_requests_waiting.clone()))?;
+        registry.add_metric(Box::new(self.kv_cache_utilization.clone()))?;
+        registry.add_metric(Box::new(self.time_to_first_token_seconds.clone()))?;
+        registry.add_metric(Box::new(self.time_per_output_token_seconds.clone()))?;
         registry.add_metric(Box::new(self.e2e_request_latency_seconds.clone()))?;
         Ok(())
     }
@@ -495,6 +652,14 @@ impl SglangCollectors {
                 .buckets(sglang_itl_buckets()),
                 SGLANG_REQUEST_LABELS,
             )?,
+            request_time_per_output_token_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    "sglang:request_time_per_output_token_seconds",
+                    "Per-request TPOT in seconds: (finished_time - first_token_time) / (completion_tokens - 1).",
+                )
+                .buckets(sglang_itl_buckets()),
+                SGLANG_REQUEST_LABELS,
+            )?,
             e2e_request_latency_seconds: HistogramVec::new(
                 HistogramOpts::new(
                     "sglang:e2e_request_latency_seconds",
@@ -513,6 +678,7 @@ impl SglangCollectors {
         registry.add_metric(Box::new(self.num_requests_total.clone()))?;
         registry.add_metric(Box::new(self.time_to_first_token_seconds.clone()))?;
         registry.add_metric(Box::new(self.inter_token_latency_seconds.clone()))?;
+        registry.add_metric(Box::new(self.request_time_per_output_token_seconds.clone()))?;
         registry.add_metric(Box::new(self.e2e_request_latency_seconds.clone()))?;
         Ok(())
     }
@@ -523,7 +689,9 @@ impl NativeRequestTiming {
         Self {
             handles,
             start,
+            first_token_at: None,
             last_token_at: None,
+            output_tokens: 0,
         }
     }
 
@@ -540,15 +708,22 @@ impl NativeRequestTiming {
         };
 
         let now = Instant::now();
+        self.output_tokens += token_count;
         let Some(last_token_at) = self.last_token_at.replace(now) else {
-            handles.observe_ttft(now.duration_since(self.start).as_secs_f64());
+            self.first_token_at = Some(now);
+            handles
+                .time_to_first_token_seconds
+                .observe(now.duration_since(self.start).as_secs_f64());
             return;
         };
 
+        let Some(inter_token_latency_seconds) = &handles.inter_token_latency_seconds else {
+            return;
+        };
         let per_token_interval =
             now.duration_since(last_token_at).as_secs_f64() / token_count as f64;
         for _ in 0..token_count {
-            handles.observe_itl(per_token_interval);
+            inter_token_latency_seconds.observe(per_token_interval);
         }
     }
 
@@ -557,56 +732,21 @@ impl NativeRequestTiming {
             return;
         };
 
-        handles.observe_e2e(self.start.elapsed().as_secs_f64());
-        handles.inc_completed_requests();
-    }
-}
-
-impl NativeRequestMetricHandles {
-    fn observe_ttft(&self, value: f64) {
-        match self {
-            Self::Vllm {
-                time_to_first_token_seconds,
-                ..
+        // The first output token belongs to prefill, so TPOT spans the remaining tokens.
+        let tpot = match (self.first_token_at, self.last_token_at) {
+            (Some(first), Some(last)) if self.output_tokens > 1 => {
+                last.duration_since(first).as_secs_f64() / (self.output_tokens - 1) as f64
             }
-            | Self::Sglang {
-                time_to_first_token_seconds,
-                ..
-            } => time_to_first_token_seconds.observe(value),
+            _ => 0.0,
+        };
+        if tpot > 0.0 || handles.record_zero_tpot {
+            handles.time_per_output_token_seconds.observe(tpot);
         }
-    }
 
-    fn observe_itl(&self, value: f64) {
-        match self {
-            Self::Vllm {
-                inter_token_latency_seconds,
-                ..
-            }
-            | Self::Sglang {
-                inter_token_latency_seconds,
-                ..
-            } => inter_token_latency_seconds.observe(value),
-        }
-    }
-
-    fn observe_e2e(&self, value: f64) {
-        match self {
-            Self::Vllm {
-                e2e_request_latency_seconds,
-                ..
-            }
-            | Self::Sglang {
-                e2e_request_latency_seconds,
-                ..
-            } => e2e_request_latency_seconds.observe(value),
-        }
-    }
-
-    fn inc_completed_requests(&self) {
-        if let Self::Sglang {
-            num_requests_total, ..
-        } = self
-        {
+        handles
+            .e2e_request_latency_seconds
+            .observe(self.start.elapsed().as_secs_f64());
+        if let Some(num_requests_total) = &handles.num_requests_total {
             num_requests_total.inc();
         }
     }
@@ -908,8 +1048,13 @@ mod tests {
             histogram_count(&registry, "sglang:e2e_request_latency_seconds"),
             0
         );
+        assert_eq!(
+            histogram_count(&registry, "sglang:request_time_per_output_token_seconds"),
+            0
+        );
         assert_eq!(counter_value(&registry, "sglang:num_requests_total"), 0.0);
 
+        std::thread::sleep(Duration::from_millis(1));
         timing.record_tokens(1);
         timing.record_normal_completion();
         assert_eq!(
@@ -918,6 +1063,10 @@ mod tests {
         );
         assert_eq!(
             histogram_count(&registry, "sglang:e2e_request_latency_seconds"),
+            1
+        );
+        assert_eq!(
+            histogram_count(&registry, "sglang:request_time_per_output_token_seconds"),
             1
         );
         assert_eq!(counter_value(&registry, "sglang:num_requests_total"), 1.0);
@@ -931,6 +1080,88 @@ mod tests {
             histogram_count(&registry, "sglang:e2e_request_latency_seconds"),
             1
         );
+        assert_eq!(
+            histogram_count(&registry, "sglang:request_time_per_output_token_seconds"),
+            1
+        );
         assert_eq!(counter_value(&registry, "sglang:num_requests_total"), 1.0);
+    }
+
+    #[tokio::test]
+    async fn vllm_records_zero_tpot_for_single_token_requests() {
+        let registry = MetricsRegistry::new();
+        let metrics = NativeMockerMetrics::new(EngineType::Vllm, 1).unwrap();
+        metrics.register(&registry).unwrap();
+
+        let mut timing = metrics
+            .request_timing("llama", 0, false, Instant::now())
+            .await;
+        timing.record_tokens(1);
+        timing.record_normal_completion();
+
+        let family = gather_family(&registry, "vllm:request_time_per_output_token_seconds");
+        let histogram = family.get_metric()[0].histogram.as_ref().unwrap();
+        assert_eq!(histogram.sample_count(), 1);
+        assert_eq!(histogram.sample_sum(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn trtllm_scrape_contract_uses_native_names_and_aggregates_dp_ranks() {
+        let registry = MetricsRegistry::new();
+        let metrics = NativeMockerMetrics::new(EngineType::Trtllm, 2).unwrap();
+        metrics.register(&registry).unwrap();
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 3, 10, 2, 4, 0, 0, 0));
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 4, 10, 7, 8, 0, 0, 0));
+
+        let mut timing = metrics
+            .request_timing("llama", 1, false, Instant::now())
+            .await;
+        timing.record_tokens(1);
+        std::thread::sleep(Duration::from_millis(1));
+        timing.record_tokens(1);
+        timing.record_normal_completion();
+
+        let mut single_token = metrics
+            .request_timing("llama", 0, false, Instant::now())
+            .await;
+        single_token.record_tokens(1);
+        single_token.record_normal_completion();
+
+        let running = gather_family(&registry, "trtllm_num_requests_running");
+        assert_eq!(running.get_field_type(), MetricType::GAUGE);
+        assert_eq!(running.get_metric().len(), 1);
+        let running_metric = running.get_metric().first().unwrap();
+        assert_eq!(
+            metric_labels(running_metric),
+            HashSet::from(["model_name".to_string(), "engine_type".to_string()])
+        );
+        assert_eq!(running_metric.gauge.as_ref().unwrap().value(), 9.0);
+        let waiting = gather_family(&registry, "trtllm_num_requests_waiting");
+        assert_eq!(
+            waiting.get_metric()[0].gauge.as_ref().unwrap().value(),
+            12.0
+        );
+        let utilization = gather_family(&registry, "trtllm_kv_cache_utilization");
+        assert_eq!(
+            utilization.get_metric()[0].gauge.as_ref().unwrap().value(),
+            0.35
+        );
+
+        assert_eq!(
+            histogram_count(&registry, "trtllm_time_to_first_token_seconds"),
+            2
+        );
+        assert_eq!(
+            histogram_count(&registry, "trtllm_time_per_output_token_seconds"),
+            1
+        );
+        assert_eq!(
+            histogram_count(&registry, "trtllm_e2e_request_latency_seconds"),
+            2
+        );
+
+        let text = registry.prometheus_expfmt_combined().unwrap();
+        assert!(!text.contains("trtllm:"));
+        assert!(!text.contains("inter_token_latency"));
     }
 }
