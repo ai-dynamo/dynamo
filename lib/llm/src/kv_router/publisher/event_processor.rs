@@ -115,6 +115,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
                                     dp_rank: event.dp_rank,
                                 },
                                 None,
+                                None,
                                 &mut output,
                             )
                             .await;
