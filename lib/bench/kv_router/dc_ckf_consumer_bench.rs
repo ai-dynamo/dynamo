@@ -22,7 +22,7 @@ use anyhow::{Context, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::dc_ckf_metadata::DcCkfCorpusMetadata;
 use dynamo_kv_router::identity::{
-    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
 use dynamo_kv_router::indexer::cuckoo::{
     CkfConfig, ConsumerDrainMarker, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublisher,
@@ -390,7 +390,7 @@ fn generate_corpus(
     }
     let format = generated[0].snapshot.identity().format();
     let pools: [Option<PoolId>; MAX_LANES] = std::array::from_fn(|lane| {
-        (lane < args.lanes).then(|| PoolId::new(domain, DcId::new(lane as u64 + 1)))
+        (lane < args.lanes).then(|| PoolId::new(domain, ClusterId::new(lane as u64 + 1)))
     });
     let manifest = GlobalCkfManifest::new(consumer, domain, format, pools)?;
     let mut lanes = Vec::with_capacity(args.lanes);
@@ -496,7 +496,7 @@ fn generate_lane_state(
         );
     }
     let identity = ProducerIdentity::new(
-        PoolId::new(domain, DcId::new(lane as u64 + 1)),
+        PoolId::new(domain, ClusterId::new(lane as u64 + 1)),
         1,
         1,
         state.format(),
