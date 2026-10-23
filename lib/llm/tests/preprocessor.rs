@@ -265,6 +265,7 @@ impl Request {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -954,6 +955,7 @@ mod context_length_validation {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             thinking_token_budget: None,
+            preserve_thinking: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -1335,6 +1337,7 @@ mod embedding_without_chat_template {
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
             thinking_token_budget: None,
+            preserve_thinking: None,
         }
     }
 

@@ -89,7 +89,14 @@ def build_realtime_text_factories(
     consumed without starting speculative generation.
     """
     from vllm.engine.protocol import StreamingInput
-    from vllm.entrypoints.chat_utils import load_chat_template
+
+    try:
+        from vllm.entrypoints.chat_utils import load_chat_template
+    except ImportError:
+        # Newer vLLM moved chat_utils under vllm.renderers (renderers refactor,
+        # upstream main after 2026-10). Remove this fallback once every
+        # supported vLLM pin ships vllm.renderers.chat_utils.
+        from vllm.renderers.chat_utils.chat_template import load_chat_template
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.serve.engine.protocol import ErrorResponse

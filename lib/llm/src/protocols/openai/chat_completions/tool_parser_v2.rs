@@ -117,7 +117,19 @@ fn validate_parser_version_for_mode(
     reasoning_parser: Option<&str>,
 ) -> anyhow::Result<()> {
     match version {
-        ParserVersion::Auto => Ok(()),
+        ParserVersion::Auto => {
+            // Beam is a unified-only family that `auto` routes when BOTH slots name it;
+            // one slot alone would install the Beam turn grammar without the Beam
+            // route's rendering, stop-token and reasoning handling.
+            let beam = crate::preprocessor::structural_tag::is_beam_parser;
+            if beam(tool_call_parser) != beam(reasoning_parser) {
+                anyhow::bail!(
+                    "{}=auto routes Beam only when both --dyn-tool-call-parser and --dyn-reasoning-parser are \"beam\" (got {tool_call_parser:?} / {reasoning_parser:?})",
+                    env_llm::DYN_PARSER_VERSION
+                );
+            }
+            Ok(())
+        }
         ParserVersion::V1 => {
             let tools = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
             let reasoning = dynamo_parsers::reasoning::get_available_reasoning_parsers();
@@ -291,7 +303,9 @@ pub(crate) fn parse_complete_guided_json(
                 })
                 .collect()
         }
-        GuidedToolConstraint::None | GuidedToolConstraint::StructuralTag => {
+        GuidedToolConstraint::None
+        | GuidedToolConstraint::StructuralTag
+        | GuidedToolConstraint::BeamTurnGrammar { .. } => {
             anyhow::bail!("request did not install guided JSON")
         }
     }
@@ -1549,6 +1563,16 @@ mod tests {
         );
         assert!(
             validate_parser_version_for_mode(ParserVersion::Auto, Some("muse_glimmer"), None)
+                .is_ok()
+        );
+        // Beam in one slot only is a configuration error under `auto`.
+        assert!(validate_parser_version_for_mode(ParserVersion::Auto, Some("beam"), None).is_err());
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::Auto, Some("hermes"), Some("beam"))
+                .is_err()
+        );
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::Auto, Some("beam"), Some("beam"))
                 .is_ok()
         );
         assert!(

@@ -40,9 +40,9 @@ use std::sync::LazyLock;
 use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers_v2::{
-    InvalidGuidedPayloadPolicy, Tool, UnifiedEvent, UnifiedParser, UnifiedParserEvent,
-    UnifiedParserInit, UnifiedParserOutput, UnifiedParserStartingState, UnifiedToolOutputMode,
-    create_unified_parser_for_family,
+    ArgumentFraming, InvalidGuidedPayloadPolicy, Tool, ToolCallPolicy, UnifiedEvent, UnifiedParser,
+    UnifiedParserEvent, UnifiedParserInit, UnifiedParserOutput, UnifiedParserStartingState,
+    UnifiedToolOutputMode, create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
@@ -73,6 +73,10 @@ pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
 pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
+/// The `dynamo-parsers-v2` unified family that serves Beam. Dynamo has no v1 Beam
+/// parser, so the `beam` + `beam` pair routes to the unified parser without
+/// `DYN_PARSER_VERSION=2`, like DeepSeek V4.1.
+pub(crate) const BEAM_UNIFIED_FAMILY: &str = "beam";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
@@ -86,6 +90,14 @@ const DYNAMO_FAMILY_ALIASES: &[(&str, &str)] = &[
     ("kimi_k25", KIMI_K2_UNIFIED_FAMILY),
 ];
 
+/// Unified families the parsers crate registers (0.7.27+) but this frontend does not
+/// serve yet: each one's route (prompt rendering, stop-token and reasoning handling,
+/// its tests) lands with its own PR — GPT-OSS in #16731, Nemotron 3 in #16981. Until
+/// then a configured `harmony` / `gpt_oss` / `nemotron_v3` name stays on the V1 path
+/// it has today, instead of `auto` switching it to a parser the frontend has not
+/// integrated. Remove an entry when its route lands.
+const PENDING_UNIFIED_FAMILIES: &[&str] = &["gpt_oss", "nemotron_v3"];
+
 /// Canonical family names and aliases share one route for registration, stream, and batch.
 pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
     let parser = DYNAMO_FAMILY_ALIASES
@@ -93,10 +105,17 @@ pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
         .find_map(|(alias, family)| (*alias == parser).then_some(*family))
         .unwrap_or(parser);
     dynamo_parsers_v2::canonical_unified_family(parser)
+        .filter(|family| !PENDING_UNIFIED_FAMILIES.contains(family))
 }
 
 pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    let mut names = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.to_vec();
+    // Registered names include aliases of a pending family (`harmony` → `gpt_oss`), so
+    // filter through the same canonical resolution the routing uses.
+    let mut names: Vec<&'static str> = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES
+        .iter()
+        .copied()
+        .filter(|name| canonical_family(name).is_some())
+        .collect();
     names.extend(DYNAMO_FAMILY_ALIASES.iter().map(|(alias, _)| *alias));
     names.sort_unstable();
     names.dedup();
@@ -202,6 +221,16 @@ pub(crate) struct UnifiedRequestPolicy {
 }
 
 impl UnifiedRequestPolicy {
+    /// The policy as the installed grammar leaves it: a `response_format` the grammar
+    /// holds inside the model's answer channel is native channel output, not the bare
+    /// JSON document the structured-response probes expect.
+    fn under(self, constraint: &GuidedToolConstraint) -> Self {
+        Self {
+            structured_response: self.structured_response && !constraint.frames_structured_answer(),
+            ..self
+        }
+    }
+
     fn starting_state(
         self,
         family: &str,
@@ -577,6 +606,10 @@ fn reasoning_marker_prefill(
                 contains_unquoted_marker(content, "<|start|>")
                     || contains_unquoted_marker(content, "<|eom|>")
             }
+            BEAM_UNIFIED_FAMILY => BEAM_OPENERS
+                .iter()
+                .chain(BEAM_CLOSERS.iter())
+                .any(|marker| content.contains(marker)),
             _ => false,
         }
     };
@@ -622,6 +655,9 @@ pub(crate) fn stream_prefill(
         // so the model emits `<think>` itself when it thinks.
         QWEN3_UNIFIED_FAMILY => UnifiedParserStartingState::None,
         DEEPSEEK_V41_UNIFIED_FAMILY => UnifiedParserStartingState::None,
+        // Beam's prompt ends at the `<|start|>assistant` header slot; the model opens
+        // its own channel and the grammar owns that open slot.
+        BEAM_UNIFIED_FAMILY => UnifiedParserStartingState::None,
         _ => UnifiedParserStartingState::None,
     }
 }
@@ -713,7 +749,39 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
             },
         ),
         "muse_glimmer" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
+        BEAM_UNIFIED_FAMILY => Ok(beam_prefill(content)),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
+    }
+}
+
+/// Beam's channel markers are special tokens the engine emits as such, so a literal
+/// never hides inside quotes: plain substring positions are the right reading.
+const BEAM_OPENERS: [&str; 2] = ["<|channel|>", "<|start|>"];
+const BEAM_CLOSERS: [&str; 3] = ["<|end|>", "<|return|>", "<|call|>"];
+
+/// Beam's channel state read back off complete output.
+///
+/// The prompt ends at the `<|start|>assistant` header slot, so output normally opens
+/// its own channel (`<|channel|>…`, or a framed `<|start|>…` message): `None`. A closer
+/// before any opener means the prompt had opened a channel: `<|end|>` closes the
+/// analysis channel it opened (`Reasoning`), `<|return|>` the final one (`Response`).
+/// Output with no control marker at all is a final answer the prompt opened
+/// (`Response`), which is also what already-decoded text looks like when the
+/// aggregator re-reads it.
+fn beam_prefill(content: &str) -> UnifiedParserStartingState {
+    let opener = BEAM_OPENERS
+        .iter()
+        .filter_map(|marker| content.find(marker))
+        .min();
+    let closer = BEAM_CLOSERS
+        .iter()
+        .filter_map(|marker| content.find(marker).map(|at| (at, *marker)))
+        .min_by_key(|(at, _)| *at);
+    match (opener, closer) {
+        (Some(open), Some((close, _))) if open < close => UnifiedParserStartingState::None,
+        (Some(_), None) => UnifiedParserStartingState::None,
+        (_, Some((_, "<|end|>"))) => UnifiedParserStartingState::Reasoning,
+        (_, Some(_)) | (None, None) => UnifiedParserStartingState::Response,
     }
 }
 
@@ -989,10 +1057,38 @@ fn tool_output_mode(constraint: &GuidedToolConstraint) -> UnifiedToolOutputMode 
         GuidedToolConstraint::GuidedJsonRequired => {
             UnifiedToolOutputMode::GuidedJson { named_tool: None }
         }
-        GuidedToolConstraint::None | GuidedToolConstraint::StructuralTag => {
-            UnifiedToolOutputMode::Native
-        }
+        GuidedToolConstraint::None
+        | GuidedToolConstraint::StructuralTag
+        | GuidedToolConstraint::BeamTurnGrammar { .. } => UnifiedToolOutputMode::Native,
     }
+}
+
+/// How the native parser frames argument values for this request: the Beam turn
+/// grammar writes every held tool's non-string parameters as JSON, so those slots own
+/// their strings and a closing tag inside one is data (see
+/// `dynamo_parsers_v2::ArgumentFraming::SchemaConstrained`); without a grammar a value
+/// runs to the first closing tag.
+fn argument_framing(constraint: &GuidedToolConstraint) -> ArgumentFraming {
+    match constraint {
+        GuidedToolConstraint::BeamTurnGrammar { .. } => ArgumentFraming::SchemaConstrained,
+        GuidedToolConstraint::None
+        | GuidedToolConstraint::StructuralTag
+        | GuidedToolConstraint::GuidedJsonNamed { .. }
+        | GuidedToolConstraint::GuidedJsonRequired => ArgumentFraming::Lenient,
+    }
+}
+
+fn apply_argument_framing(
+    parser: &mut dyn UnifiedParser,
+    argument_framing: ArgumentFraming,
+) -> anyhow::Result<()> {
+    if argument_framing != ArgumentFraming::default() {
+        parser.set_tool_call_policy(ToolCallPolicy {
+            malformed: Default::default(),
+            argument_framing,
+        })?;
+    }
+    Ok(())
 }
 
 /// The malformed-guided-payload contract for one request, selected by the
@@ -1110,6 +1206,21 @@ fn unified_parser_control_markers(family: &str) -> Vec<String> {
                 .map(str::to_string),
         );
     }
+    if family == BEAM_UNIFIED_FAMILY {
+        markers.extend(
+            [
+                "<|start|>",
+                "<|channel|>",
+                "<|message|>",
+                "<|constrain|>",
+                "<|end|>",
+                "<|return|>",
+                "<|call|>",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
     if let Some(marker) = native_family_marker(family) {
         markers.push(marker.to_string());
     }
@@ -1130,6 +1241,7 @@ fn native_family_marker(family: &str) -> Option<&'static str> {
         "kimi_k2" => Some("<|tool_call_begin|>"),
         "kimi_k3" => Some("<|open|>call"),
         "muse_glimmer" => Some("<atem:invoke"),
+        "beam" => Some("<|start|>assistant to="),
         _ => None,
     }
 }
@@ -1577,6 +1689,7 @@ impl ChoiceState {
         prefill: impl Into<StreamPrefill>,
         tool_output_mode: UnifiedToolOutputMode,
         guided_streaming: bool,
+        argument_framing: ArgumentFraming,
     ) -> anyhow::Result<Self> {
         let prefill = prefill.into();
         let mut parser = create_unified_parser_for_family(family, tools)?;
@@ -1602,6 +1715,7 @@ impl ChoiceState {
             tool_output_mode: tool_output_mode.clone(),
             invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
         })?;
+        apply_argument_framing(parser.as_mut(), argument_framing)?;
         if let Some(prefix) = prefill.prefix {
             // Replay only consumed structural bytes; the grammar retains ownership
             // of an optional channel label that generation has not completed yet.
@@ -2215,6 +2329,7 @@ fn text_delta(text: String) -> Vec<UnifiedParserEvent> {
 }
 
 /// The aggregated result of parsing one complete (non-streaming) output.
+#[derive(Debug)]
 pub(crate) struct CompleteOutput {
     pub incomplete_native_call: bool,
     pub text: String,
@@ -2254,6 +2369,7 @@ pub(crate) fn parse_complete_with_policy(
     tool_definitions: &[ToolDefinition],
     policy: UnifiedRequestPolicy,
 ) -> anyhow::Result<CompleteOutput> {
+    let policy = policy.under(guided_tool_constraint);
     // A remote frontend may reconstruct guided JSON even when the backend returned
     // native reasoning/content without a tool call. Keep that recovery under the
     // same grammar owner as ordinary native batch output.
@@ -2330,6 +2446,7 @@ fn parse_complete_in_mode(
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
     })?;
+    apply_argument_framing(parser.as_mut(), argument_framing(guided_tool_constraint))?;
 
     let mut text = String::new();
     let mut reasoning = String::new();
@@ -2900,7 +3017,9 @@ where
         starting_state: prefill,
         prefix: prefill_prefix,
     } = prefill.into();
+    let policy = policy.under(&guided_tool_constraint);
     let prefill = policy.starting_state(family, prefill);
+    let argument_framing = argument_framing(&guided_tool_constraint);
     let tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
         let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
@@ -3395,7 +3514,7 @@ where
                             starting_state: choice_prefill,
                             prefix: (choice_prefill == UnifiedParserStartingState::Reasoning).then_some(prefill_prefix).flatten(),
                         };
-                        match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming) {
+                        match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming, argument_framing) {
                             Ok(mut state) => {
                                 // A raw run resuming after an already-parsed detour
                                 // gets a brand-new parser instance; seed it with any
@@ -3985,6 +4104,12 @@ pub(crate) mod tests {
         for native in [
             GuidedToolConstraint::None,
             GuidedToolConstraint::StructuralTag,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false,
+            },
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: true,
+            },
         ] {
             assert_eq!(
                 tool_output_mode(&native),
@@ -3992,6 +4117,54 @@ pub(crate) mod tests {
                 "{native:?} must stay on native markup"
             );
         }
+    }
+
+    #[test]
+    fn the_beam_turn_grammar_frames_arguments_and_owns_a_structured_answer() {
+        // Only the grammar that typed the arguments frames them.
+        for (constraint, framing) in [
+            (GuidedToolConstraint::None, ArgumentFraming::Lenient),
+            (
+                GuidedToolConstraint::StructuralTag,
+                ArgumentFraming::Lenient,
+            ),
+            (
+                GuidedToolConstraint::GuidedJsonRequired,
+                ArgumentFraming::Lenient,
+            ),
+            (
+                GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: false,
+                },
+                ArgumentFraming::SchemaConstrained,
+            ),
+        ] {
+            assert_eq!(argument_framing(&constraint), framing, "{constraint:?}");
+        }
+        // A `response_format` the grammar holds in the final channel is native output.
+        let structured = UnifiedRequestPolicy {
+            reasoning_disabled: false,
+            structured_response: true,
+        };
+        assert!(
+            structured
+                .under(&GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: false,
+                })
+                .structured_response
+        );
+        assert!(
+            !structured
+                .under(&GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: true,
+                })
+                .structured_response
+        );
+        assert!(
+            structured
+                .under(&GuidedToolConstraint::None)
+                .structured_response
+        );
     }
 
     #[test]
@@ -4199,6 +4372,7 @@ pub(crate) mod tests {
             UnifiedParserStartingState::None,
             UnifiedToolOutputMode::Native,
             true,
+            ArgumentFraming::default(),
         )
         .expect("qwen3 unified parser")
     }
@@ -8565,6 +8739,7 @@ pub(crate) mod tests {
                 UnifiedParserStartingState::Response,
                 mode.clone(),
                 true,
+                ArgumentFraming::default(),
             )
             .unwrap();
             let mut events = state.push(prefix);
@@ -8625,6 +8800,7 @@ pub(crate) mod tests {
                     UnifiedParserStartingState::Response,
                     mode.clone(),
                     true,
+                    ArgumentFraming::default(),
                 )
                 .unwrap();
                 let mut split_events = split_state.push(&short_raw[..split]);
@@ -9914,6 +10090,7 @@ pub(crate) mod tests {
                         UnifiedParserStartingState::None,
                         mode,
                         true,
+                        ArgumentFraming::default(),
                     )
                     .unwrap();
                     let mut library = Vec::new();
@@ -10103,6 +10280,7 @@ pub(crate) mod tests {
                 UnifiedParserStartingState::None,
                 UnifiedToolOutputMode::Native,
                 true,
+                ArgumentFraming::default(),
             )
             .unwrap();
             let events = state.push(&input[..stop]);
@@ -12064,6 +12242,7 @@ pub(crate) mod tests {
             UnifiedParserStartingState::None,
             UnifiedToolOutputMode::Native,
             true,
+            ArgumentFraming::default(),
         )
         .unwrap();
         let started = std::time::Instant::now();
@@ -12109,6 +12288,7 @@ pub(crate) mod tests {
                     UnifiedParserStartingState::None,
                     UnifiedToolOutputMode::Native,
                     true,
+                    ArgumentFraming::default(),
                 )
                 .unwrap();
                 state.push(&input[..split]);
@@ -12122,6 +12302,236 @@ pub(crate) mod tests {
             format!("{complete} The literal \"<tool_call>\" stays visible."),
         ] {
             assert_eq!(glm_unfinished_call(&input).unwrap(), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod beam_routing_tests {
+    use super::*;
+    use dynamo_runtime::config::ParserVersion;
+
+    /// The turn grammar writes a held tool's non-string parameters as JSON, so a closing
+    /// tag inside one of their strings is data; and it holds a `response_format` answer
+    /// in the final channel behind the analysis, so that output is a native turn.
+    #[test]
+    fn beam_turn_grammar_frames_held_json_arguments_and_the_structured_answer() {
+        let tools = vec![ToolDefinition {
+            name: "render".into(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "doc": {"type": "object", "properties": {"html": {"type": "string"}}},
+                    "title": {"type": "string"}
+                },
+                "required": ["doc", "title"]
+            })),
+            strict: None,
+        }];
+        let content = concat!(
+            "<|channel|>analysis<|message|>Rendering.<|end|>",
+            "<|start|>assistant to=render<|channel|>analysis <|constrain|>xml<|message|>",
+            "<rfl:parameter name=\"doc\">{\"html\":\"<b>x</b></rfl:parameter> inside\"}</rfl:parameter>",
+            "<rfl:parameter name=\"title\">t</rfl:parameter><|call|>"
+        );
+        let expected = serde_json::json!({
+            "doc": {"html": "<b>x</b></rfl:parameter> inside"},
+            "title": "t"
+        });
+        let held = GuidedToolConstraint::BeamTurnGrammar {
+            frames_answer: false,
+        };
+        let batch = parse_complete_with_policy(
+            BEAM_UNIFIED_FAMILY,
+            content,
+            &held,
+            &tools,
+            UnifiedRequestPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(batch.reasoning, "Rendering.");
+        assert_eq!(batch.tool_calls.len(), 1, "{batch:?}");
+        assert_eq!(batch.tool_calls[0].function.name, "render");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                .unwrap(),
+            expected
+        );
+        // Without the grammar a value runs to the first closing tag.
+        let lenient = parse_complete_with_policy(
+            BEAM_UNIFIED_FAMILY,
+            content,
+            &GuidedToolConstraint::None,
+            &tools,
+            UnifiedRequestPolicy::default(),
+        )
+        .unwrap();
+        assert!(
+            lenient.tool_calls.first().is_none_or(|call| {
+                serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok()
+                    != Some(expected.clone())
+            }),
+            "{lenient:?}"
+        );
+
+        // Streaming frames the same way at every split.
+        let v2_tools = to_v2_tools(Some(&tools));
+        for split in content
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain(std::iter::once(content.len()))
+        {
+            let mut state = ChoiceState::new(
+                BEAM_UNIFIED_FAMILY,
+                &v2_tools,
+                UnifiedParserStartingState::None,
+                UnifiedToolOutputMode::Native,
+                true,
+                argument_framing(&held),
+            )
+            .unwrap();
+            let mut wire = Vec::new();
+            for events in [
+                state.push(&content[..split]),
+                state.push(&content[split..]),
+                state.finish(),
+            ] {
+                wire.extend(state.choices_for(&empty_choice(0), events, true, None));
+            }
+            let calls: Vec<_> = wire
+                .iter()
+                .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                .collect();
+            let arguments: String = calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                expected,
+                "split {split}"
+            );
+            let reasoning: String = wire
+                .iter()
+                .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                .collect();
+            assert_eq!(reasoning, "Rendering.", "split {split}");
+        }
+
+        // A `response_format` answer the grammar framed keeps the reasoning and the
+        // channel structure, and is not probed as a bare JSON document.
+        let answer = concat!(
+            "<|channel|>analysis<|message|>Thinking.<|end|>",
+            "<|start|>assistant<|channel|>final<|message|>{\"ok\":true}<|return|>"
+        );
+        let structured = UnifiedRequestPolicy {
+            reasoning_disabled: false,
+            structured_response: true,
+        };
+        let framed = parse_complete_with_policy(
+            BEAM_UNIFIED_FAMILY,
+            answer,
+            &GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: true,
+            },
+            &[],
+            structured,
+        )
+        .unwrap();
+        assert_eq!(framed.reasoning, "Thinking.");
+        assert_eq!(framed.text, "{\"ok\":true}");
+        assert!(framed.tool_calls.is_empty());
+    }
+
+    /// A family the parsers crate registers but the frontend has not integrated keeps
+    /// its configured names on the V1 path, so bumping the crate cannot switch a route.
+    #[test]
+    fn pending_unified_families_stay_on_the_legacy_route() {
+        for family in PENDING_UNIFIED_FAMILIES {
+            assert!(
+                dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.contains(family),
+                "{family}"
+            );
+            assert_eq!(canonical_family(family), None, "{family}");
+            assert!(!FAMILY_NAMES.contains(family), "{family}");
+        }
+        assert_eq!(canonical_family("harmony"), None);
+        for name in FAMILY_NAMES.iter() {
+            assert!(canonical_family(name).is_some(), "{name}");
+        }
+        assert_eq!(canonical_family("beam"), Some(BEAM_UNIFIED_FAMILY));
+        assert_eq!(canonical_family("qwen3_coder"), Some(QWEN3_UNIFIED_FAMILY));
+    }
+
+    #[test]
+    fn beam_pair_routes_to_the_unified_parser_without_an_explicit_generation() {
+        assert_eq!(
+            configured_family(Some("beam"), Some("beam")),
+            Some(BEAM_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::Auto),
+            Some(BEAM_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::V2),
+            Some(BEAM_UNIFIED_FAMILY)
+        );
+        // There is no v1 Beam parser to fall back to: an explicit `1` selects nothing
+        // here (and `validate_parser_version` rejects it), and half a pair under `auto`
+        // is rejected by the same validation before this choice is made.
+        assert_eq!(
+            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::V1),
+            None
+        );
+        assert!(FAMILY_NAMES.contains(&BEAM_UNIFIED_FAMILY));
+    }
+
+    #[test]
+    fn beam_prefill_reads_the_channel_the_prompt_opened() {
+        assert_eq!(
+            beam_prefill(
+                "<|channel|>analysis<|message|>t<|end|><|start|>assistant<|channel|>final<|message|>a<|return|>"
+            ),
+            UnifiedParserStartingState::None
+        );
+        assert_eq!(
+            beam_prefill(
+                "<|start|>assistant to=get_weather<|channel|>analysis <|constrain|>xml<|message|><|call|>"
+            ),
+            UnifiedParserStartingState::None
+        );
+        assert_eq!(
+            beam_prefill("thought<|end|><|start|>assistant<|channel|>final<|message|>a<|return|>"),
+            UnifiedParserStartingState::Reasoning
+        );
+        assert_eq!(
+            beam_prefill("answer<|return|>"),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            beam_prefill("plain decoded answer"),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            detect_prefill("beam", "plain").unwrap(),
+            UnifiedParserStartingState::Response
+        );
+    }
+
+    #[test]
+    fn beam_control_markers_cover_the_whole_grammar() {
+        let markers = unified_parser_control_markers("beam");
+        for marker in [
+            "<|start|>",
+            "<|channel|>",
+            "<|message|>",
+            "<|constrain|>",
+            "<|end|>",
+            "<|return|>",
+            "<|call|>",
+        ] {
+            assert!(markers.iter().any(|m| m == marker), "{marker}");
         }
     }
 }
