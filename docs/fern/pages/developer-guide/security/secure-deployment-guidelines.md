@@ -198,10 +198,13 @@ reachable.
   target individual
   workers. This drops `request.nvext` at handler entry and ignores the
   routing-override headers.
-- **Admin API.** The frontend's HTTP admin API (for example,
-  `GET`/`POST /busy_threshold`) is enabled by default. If the deployer does not need to
-  change runtime tunables through it, set `DYN_DISABLE_FRONTEND_ADMIN_API=1`.
-  Inference, metrics, models, health, and liveness routes are unaffected.
+- **Admin API.** The frontend's HTTP admin routes (`/busy_threshold`, `/router_policy`,
+  and `/router_policy/busy_threshold`) are off by default. Set
+  `DYN_ENABLE_FRONTEND_ADMIN_API=1` only if you need runtime changes.
+  `DYN_DISABLE_FRONTEND_ADMIN_API=1` always turns them off. When enabled, they share
+  the inference port and have no separate admin authentication. Block these paths
+  for inference clients at the gateway. Inference, metrics, models, health, and
+  liveness routes are unaffected.
 - **Metrics endpoint.** The `/metrics` endpoint is intended for scraping by
   trusted monitoring systems; scope it to your observability stack rather than
   exposing it to untrusted networks.

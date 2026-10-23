@@ -695,10 +695,11 @@ reset. Updating thresholds and selection parameters is not one atomic transactio
 
 ### Scope and Access
 
-The frontend admin API remains enabled by default on the HTTP port, with no separate admin
-authentication. `DYN_DISABLE_FRONTEND_ADMIN_API=1` disables `/router_policy`, its busy-threshold
-subresource, and the legacy `/busy_threshold` routes. Restrict access to these management
-routes at the deployment's gateway or network boundary.
+The frontend admin API is off by default. `DYN_ENABLE_FRONTEND_ADMIN_API=1` enables
+`/router_policy`, its busy-threshold subresource, and the legacy `/busy_threshold`
+routes. `DYN_DISABLE_FRONTEND_ADMIN_API=1` always disables them. When enabled, they
+share the inference HTTP port and have no separate admin authentication. Block
+these paths for inference clients at the gateway or network boundary.
 
 Updates are process-local and not persisted. A rebuilt router receives a new ID and starts
 from its configured startup values. A controller must address each frontend replica directly,

@@ -861,8 +861,8 @@ accepted fields, limits, errors, and rolling upgrades.
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/openapi.json` | OpenAPI specification |
 | `GET` | `/docs` | Swagger UI |
-| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
-| `GET` | `/busy_threshold` | Get stored busy thresholds (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
+| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model (admin API, off by default) |
+| `GET` | `/busy_threshold` | Get stored busy thresholds (admin API, off by default) |
 
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
@@ -908,9 +908,16 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
 </ParamField>
 
+<ParamField path="DYN_ENABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
+  When truthy, registers the `GET` and write routes for `/router_policy`,
+  `/router_policy/busy_threshold`, and `/busy_threshold` on the frontend HTTP port.
+  These routes have no separate admin authentication. Restrict access at the gateway.
+</ParamField>
+
 <ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
-  When truthy, `GET /busy_threshold` and `POST /busy_threshold` are not registered and return 404.
-  Inference, metrics, models, health, and liveness routes are unaffected.
+  When truthy, prevents registration of all frontend admin routes even if
+  `DYN_ENABLE_FRONTEND_ADMIN_API=1` or the Rust builder enables them. Inference,
+  metrics, models, health, and liveness routes are unaffected.
 </ParamField>
 
 ### Endpoint path customization
