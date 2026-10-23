@@ -5485,11 +5485,15 @@ impl OpenAIPreprocessor {
                     tool_definitions,
                     guided_tool_constraint,
                     unified_parser::StreamPrefill {
-                        starting_state: if prompt_prefill.response
-                            && *family == unified_parser::BEAM_UNIFIED_FAMILY
+                        starting_state: if *family == unified_parser::BEAM_UNIFIED_FAMILY
+                            && (prompt_prefill.response
+                                || self.beam_output_is_bare_guidance(request))
                         {
-                            // Assistant prefill inside Beam's final channel: the reply
-                            // continues visible text and ends on `<|return|>`.
+                            // Assistant prefill inside Beam's final channel, or bare text
+                            // an explicit `guided_*` constraint owns (no turn grammar, so
+                            // no channel framing): the reply is visible text from its
+                            // first byte and ends on `<|return|>` or at the end of the
+                            // stream.
                             dynamo_parsers_v2::UnifiedParserStartingState::Response
                         } else {
                             unified_parser::stream_prefill(family, prompt_injected_reasoning)
@@ -17871,6 +17875,130 @@ mod beam_route_tests {
             .build()
             .unwrap();
         assert_eq!(output.output_options.retain_model_stop_token_text, None);
+    }
+
+    /// An explicit `guided_*` constraint without `response_format` makes Beam's output
+    /// bare text the engine's grammar owns (no turn grammar, no channel framing). The
+    /// stream must be read as the final answer: under `None` the bytes were dropped as
+    /// debris between messages. Whole and one-byte delivery, then the aggregated reply.
+    #[tokio::test]
+    async fn beam_bare_explicit_guidance_streams_as_visible_text() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        let preprocessor = OpenAIPreprocessor::new(mock_card(Some("beam"))).unwrap();
+        let base = || -> NvCreateChatCompletionRequest {
+            serde_json::from_value(serde_json::json!({
+                "model": "test",
+                "messages": [{"role": "user", "content": "yes or no?"}],
+            }))
+            .unwrap()
+        };
+        let mut guided: Vec<(&str, NvCreateChatCompletionRequest, &str)> = Vec::new();
+        let mut request = base();
+        request.common.guided_regex = Some("yes|no".to_string());
+        guided.push(("guided_regex", request, "yes"));
+        let mut request = base();
+        request.common.guided_choice = Some(vec!["yes".to_string(), "no".to_string()]);
+        guided.push(("guided_choice", request, "yes"));
+        let mut request = base();
+        request.common.guided_json = Some(serde_json::json!({
+            "type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]
+        }));
+        guided.push(("guided_json", request, "{\"ok\":true}"));
+        let mut request = base();
+        request.common.guided_grammar = Some("root ::= \"yes\" | \"no\"".to_string());
+        guided.push(("guided_grammar", request, "yes"));
+
+        let chunk =
+            |choices: serde_json::Value| -> Annotated<NvCreateChatCompletionStreamResponse> {
+                Annotated::from_data(
+                    serde_json::from_value(serde_json::json!({"id": "test",
+                    "object": "chat.completion.chunk", "created": 0, "model": "test",
+                    "choices": choices}))
+                    .unwrap(),
+                )
+            };
+        for (field, request, answer) in guided {
+            assert!(
+                preprocessor.beam_output_is_bare_guidance(&request),
+                "{field}"
+            );
+            let deliveries: Vec<Vec<String>> = vec![
+                vec![answer.to_string()],
+                answer.chars().map(String::from).collect(),
+            ];
+            for pieces in deliveries {
+                let mut backend: Vec<_> = pieces
+                    .iter()
+                    .enumerate()
+                    .map(|(i, text)| {
+                        let delta = if i == 0 {
+                            serde_json::json!({"role": "assistant", "content": text})
+                        } else {
+                            serde_json::json!({"content": text})
+                        };
+                        chunk(serde_json::json!([{"index": 0, "delta": delta, "finish_reason": null}]))
+                    })
+                    .collect();
+                backend.push(chunk(serde_json::json!(
+                    [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                )));
+                let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                    Some("beam"),
+                    Some("beam"),
+                    None,
+                );
+                let output: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+                    .postprocessor_parsing_stream(stream::iter(backend), &request, prefill, false)
+                    .unwrap()
+                    .collect()
+                    .await;
+                let streamed: String = output
+                    .iter()
+                    .filter_map(|annotated| annotated.data.as_ref())
+                    .flat_map(|response| response.inner.choices.iter())
+                    .filter_map(|choice| match choice.delta.content.as_ref() {
+                        Some(ChatCompletionMessageContent::Text(text)) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    streamed,
+                    answer,
+                    "{field}: streamed ({} chunk(s))",
+                    pieces.len()
+                );
+                let response =
+                    crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                        stream::iter(output),
+                        crate::protocols::openai::ParsingOptions::new(
+                            Some("beam".to_string()),
+                            Some("beam".to_string()),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                let message = &response.inner.choices[0].message;
+                let aggregated = match message.content.as_ref() {
+                    Some(ChatCompletionMessageContent::Text(text)) => text.clone(),
+                    other => panic!("{field}: unexpected content {other:?}"),
+                };
+                assert_eq!(aggregated, answer, "{field}: aggregated");
+                assert!(message.tool_calls.is_none(), "{field}");
+            }
+        }
+        // `response_format` and a forced tool choice are not bare guidance: the first is
+        // the structured-response document path, the second generates native calls.
+        let mut structured = base();
+        structured.common.guided_json = Some(serde_json::json!({"type": "object"}));
+        structured.inner.response_format =
+            Some(serde_json::from_value(serde_json::json!({"type": "json_object"})).unwrap());
+        assert!(!preprocessor.beam_output_is_bare_guidance(&structured));
+        let mut forced = weather_request();
+        forced.common.guided_regex = Some("yes".to_string());
+        forced.inner.tool_choice =
+            Some(serde_json::from_value(serde_json::json!("required")).unwrap());
+        assert!(!preprocessor.beam_output_is_bare_guidance(&forced));
+        assert!(!preprocessor.beam_output_is_bare_guidance(&base()));
     }
 
     #[test]
