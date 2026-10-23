@@ -108,8 +108,9 @@
 //!
 //! # Configuration
 //!
-//! Backend admission is disabled unless at least one setting below has an
-//! explicit value (see [`enabled`]).
+//! Backend admission is disabled unless `DYN_BACKEND_ADMISSION_ENABLED` is
+//! truthy or, while that is unset, at least one setting below has an explicit
+//! value (see [`enabled`]).
 //!
 //! Each setting is a per-rank limit, read once when a worker's gate is created,
 //! from the first of its environment names that holds a valid value:
@@ -165,6 +166,10 @@ use crate::model_card::ModelDeploymentCard;
 mod metrics;
 
 use metrics::{AdmissionSource, BackendAdmissionMetrics, DP_RANK_UNSPECIFIED, RankSeries};
+
+/// Turns backend admission on or off. Unset, any explicit limit turns it on.
+/// `--enable-backend-admission` reaches the gate through this name.
+const DYN_BACKEND_ADMISSION_ENABLED: &str = "DYN_BACKEND_ADMISSION_ENABLED";
 
 /// Maximum admitted requests that have not finished, per DP rank.
 /// `--engine-request-limit` reaches the gate through this name.
@@ -286,13 +291,29 @@ struct ExplicitLimits {
     request_queue_limit: Option<Explicit>,
 }
 
-/// This process's explicit settings, read from the environment once.
 static EXPLICIT_LIMITS: LazyLock<ExplicitLimits> = LazyLock::new(ExplicitLimits::from_environment);
 
-/// Whether backend admission is enabled: only when at least one setting has an
-/// explicit, valid value. Disabled, backends never create or consult a gate.
+static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+    let enabled = std::env::var(DYN_BACKEND_ADMISSION_ENABLED)
+        .ok()
+        .and_then(|value| dynamo_runtime::config::parse_bool_opt(&value))
+        .unwrap_or(*EXPLICIT_LIMITS != ExplicitLimits::default());
+    if enabled {
+        tracing::info!("Backend admission enabled");
+    } else {
+        tracing::info!(
+            "Backend admission disabled; set {DYN_BACKEND_ADMISSION_ENABLED}=1 or an admission \
+             limit to enable it"
+        );
+    }
+    enabled
+});
+
+/// Whether backend admission is enabled: as `DYN_BACKEND_ADMISSION_ENABLED`
+/// says, or, while it is unset, when any limit has an explicit, valid value.
+/// Disabled, backends never create or consult a gate.
 pub fn enabled() -> bool {
-    *EXPLICIT_LIMITS != ExplicitLimits::default()
+    *ENABLED
 }
 
 impl ExplicitLimits {

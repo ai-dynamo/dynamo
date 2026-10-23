@@ -40,8 +40,8 @@ are planned at the router.
 
 ## Backend
 
-Backend admission control is disabled by default; setting any of the limits under
-[Configuration](#configuration) enables it. It supports both Dynamo Python and Dynamo Sidecar backends. Each worker has
+Backend admission control is disabled by default; enable it as described under
+[Configuration](#configuration). It supports both Dynamo Python and Dynamo Sidecar backends. Each worker has
 its own gate, including separate prefill and decode workers in a disaggregated deployment. All
 endpoints of a worker share its gate.
 
@@ -103,10 +103,12 @@ apply to the whole worker.
 > the limits with representative request sizes, concurrency, and bursts, watching goodput and latency.
 > Dynamic adaptation to changing traffic is planned as separate router work.
 
+Enable backend admission with `DYN_BACKEND_ADMISSION_ENABLED=1` (`--enable-backend-admission` on
+Python workers) or by setting any limit below; `DYN_BACKEND_ADMISSION_ENABLED=0` keeps it off.
 Set these on the backend worker. All values apply **per DP rank**; the worker's total capacity is the
 combined capacity of its ranks. Restart the worker to change an explicit setting.
 
-| Setting | Environment variable | Also configured by | Default |
+| Setting | Environment variable | Also configured by | Default once enabled |
 |---|---|---|---|
 | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | `--engine-request-limit`; alias `DYN_ENGINE_REQUEST_LIMIT` | Engine-reported `max_num_seqs`; `10000` until reported. |
 | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Alias `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | Engine-reported `max_num_seqs`; `10000` until reported. |
@@ -125,7 +127,7 @@ independent: overriding an engine limit does not change the queue default.
 
 ### Best Practices
 
-**Start with the engine-based defaults.** Both engine limits default to `max_num_seqs` per rank,
+**Start with the engine-based defaults.** Once admission is enabled, both engine limits default to `max_num_seqs` per rank,
 keeping excess work outside the engine once that many requests are admitted. Raising the limits does
 not increase the engine's batch capacity.
 
