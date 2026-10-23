@@ -93,18 +93,22 @@ dynamo:
 vllm:
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
+    # Layer the Dynamo runtime on the public MiniMax M3.1 Flash vLLM image
+    # (amd64 + arm64, CUDA 13.4.1) instead of a stable vllm/vllm-openai release:
+    # no release serves the model yet. The tag is mutable, so pin the index digest.
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.31.0-ubuntu2404
+    runtime_image_tag: minimax-m31-flash@sha256:86f582dae25ea92802353727164ae4eb03b37b18baf9119b805ffaec2a7ef07c
     vllm_omni_ref: "v0.31.0rc1"
-    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
-    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
-    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
-    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
-    # rather than hiding it. Per-arch stem; the licenses stage appends
-    # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
-    # the runtime image — see the codec-purge follow-up.)
-    baseline_sbom: cuda@2ab6381d
+    # No vLLM-Omni: it backs only the separate dynamo.vllm.omni entry point. Its
+    # dependencies cannot resolve against this base's torch nightly, and its
+    # Transformers <5.15 pin is below this vLLM's own floor (>=5.16.1), so the
+    # runtime keeps the base's Transformers and tokenizers.
+    enable_omni: "false"
+    # No baseline_sbom: the captured cuda@2ab6381d baseline is the CUDA 13.0
+    # floor of stable vllm-openai, not this CUDA 13.4 base, so subtracting it
+    # could drop shipped components. Leaving it unset attributes the whole image
+    # in /legal.
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
@@ -121,7 +125,10 @@ vllm:
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"
-  nixl_ref: v1.3.2
+  # Installed only when the vLLM base ships no NIXL; the MiniMax M3.1 NIXL KV
+  # connector requires NIXL >= 1.5.0, and with 1.3.2 every P/D worker fails
+  # engine-core init.
+  nixl_ref: v1.5.0
   max_jobs: "10"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
@@ -134,20 +141,21 @@ vllm:
 sglang:
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
+    # Layer the Dynamo runtime on the public MiniMax M3.1 Flash SGLang image
+    # (amd64 + arm64, CUDA 13.4.1) instead of a stable lmsysorg/sglang release:
+    # no release serves the model yet, and no -runtime variant of it is
+    # published. The tag is mutable, so pin the index digest.
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.21-cu130-runtime
-    # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
-    # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
-    # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
-    # lmsysorg/sglang is built FROM this nvidia/cuda cudnn-devel base, so this
-    # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
-    # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
-    # the licenses stage appends -${TARGETARCH}.cdx.json. SGLang's codec-bearing
-    # Python wheels are purged in sglang_runtime.Dockerfile; only the in-tree VP9
-    # ffmpeg is copied in. The CUDA Dynamo Rust wheel links against that same
-    # codec-limited build for frontend video decoding; XPU remains codec-free.
-    baseline_sbom: cuda@0230b7f2
+    runtime_image_tag: dev-minimax-m31-flash@sha256:7470e685c9e488f4c99431e22ca2e9a9a6de61a182a582aa2659a0b22f51ac76
+    # No baseline_sbom: the captured cuda@0230b7f2 baseline is the CUDA 13.0
+    # floor of stable lmsysorg/sglang, not this CUDA 13.4 base, so subtracting it
+    # could drop shipped components. Leaving it unset attributes the whole image
+    # in /legal.
+    # SGLang's codec-bearing Python wheels are purged in sglang_runtime.Dockerfile;
+    # only the in-tree VP9 ffmpeg is copied in. The CUDA Dynamo Rust wheel links
+    # against that same codec-limited build for frontend video decoding; XPU
+    # remains codec-free.
   xpu:
     base_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04

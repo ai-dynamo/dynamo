@@ -264,6 +264,7 @@ overrides:
   # Same NVIDIA EULA as the 12.9 variants above; the cuda-dl-base 25.11
   # image bundles cuda-gdb so DEP-5 parser misclassifies these as GPL-3.
   - { ecosystem: dpkg, name: cuda-cccl-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-compiler-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
   - { ecosystem: dpkg, name: cuda-crt-13-0,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-cudart-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-cudart-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
@@ -272,8 +273,13 @@ overrides:
   - { ecosystem: dpkg, name: cuda-cuobjdump-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-cupti-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-cupti-dev-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cuxxfilt-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component" }
   - { ecosystem: dpkg, name: cuda-driver-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-gdb-13-0,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA — cuda-gdb proper, not GDB upstream" }
+  - { ecosystem: dpkg, name: cuda-libraries-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-libraries-dev-13-0,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-minimal-build-13-0,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-nsight-compute-13-0,         license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
   - { ecosystem: dpkg, name: cuda-nvcc-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-nvdisasm-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-nvml-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
@@ -281,7 +287,9 @@ overrides:
   - { ecosystem: dpkg, name: cuda-nvrtc-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-nvrtc-dev-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-nvtx-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-opencl-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component" }
   - { ecosystem: dpkg, name: cuda-profiler-api-13-0,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-sandbox-dev-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component" }
   - { ecosystem: dpkg, name: cuda-sanitizer-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-toolkit-13-0-config-common,  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-toolkit-13-config-common,    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
@@ -302,12 +310,79 @@ overrides:
   - { ecosystem: dpkg, name: libnpp-13-0,                      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnpp-dev-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvfatbin-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvfatbin-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component" }
   - { ecosystem: dpkg, name: libnvjitlink-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvjitlink-dev-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvjpeg-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvjpeg-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvptxcompiler-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvvm-13-0,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+
+  # --- CUDA 13.4 toolkit dpkgs (CUDA 13.4.1 vLLM and SGLang bases) ---
+  # The 13.0 entries above under their 13-4 names, plus the packages new in 13.4. Same NVIDIA
+  # CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component.
+  - { ecosystem: dpkg, name: cuda-cccl-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-command-line-tools-13-4,     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-compat-orin-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (arm64 only; same copyright file as libcublas-13-4)" }
+  - { ecosystem: dpkg, name: cuda-compiler-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-crt-13-4,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-ctadvisor-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-13-4,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-culibos-13-4,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-culibos-dev-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cuobjdump-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cupti-13-4,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cupti-dev-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cuxxfilt-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component" }
+  - { ecosystem: dpkg, name: cuda-driver-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-gdb-13-4,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA — cuda-gdb proper, not GDB upstream" }
+  - { ecosystem: dpkg, name: cuda-libraries-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-libraries-dev-13-4,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-minimal-build-13-4,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-nsight-compute-13-4,         license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (metapackage)" }
+  - { ecosystem: dpkg, name: cuda-nvcc-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvdisasm-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvml-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvprune-13-4,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-13-4,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-dev-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvtx-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-opencl-13-4,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component" }
+  - { ecosystem: dpkg, name: cuda-opencl-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-profiler-api-13-4,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-sandbox-dev-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component" }
+  - { ecosystem: dpkg, name: cuda-sanitizer-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-tileiras-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-13-4-config-common,  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcudla-13-4,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (arm64 only; same copyright file as libcublas-13-4)" }
+  - { ecosystem: dpkg, name: libcudla-dev-13-4,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA (arm64 only; same copyright file as libcublas-13-4)" }
+  - { ecosystem: dpkg, name: libcufft-13-4,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufft-dev-13-4,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufile-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufile-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcuobjclient-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcuobjclient-dev-13-4,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusolver-13-4,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusolver-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparse-13-4,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparse-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnpp-13-4,                      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnpp-dev-13-4,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvfatbin-13-4,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvfatbin-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA; its only GPL v3 grant (Attachment B) covers the CUDA-GDB component" }
+  - { ecosystem: dpkg, name: libnvjitlink-13-4,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjitlink-dev-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjpeg-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjpeg-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvptxcompiler-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvvm-13-4,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: nsight-compute-2026.3.0,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
+  - { ecosystem: python, name: cupti-python,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Software License Agreement — https://docs.nvidia.com/cupti-python/nvidia-cupti-python-license.html" }
   - { ecosystem: dpkg, name: mlnx-dpdk,                        license: "BSD-3-Clause", source: "Mellanox build of upstream DPDK — https://www.dpdk.org/about/legal/" }
   # TRT-LLM 1.3.0rc27's base removes this package and keeps its ld.so.conf.d conffile.
   # The .deb (DOCA 3.5.0 repo) ships no copyright file; its only SPDX tags are BSD-3-Clause.
@@ -338,6 +413,7 @@ overrides:
   - { ecosystem: dpkg, name: libgc1,            license: "BSD-3-Clause",     source: "Boehm-GC upstream — http://www.hboehm.info/gc/license.txt (MIT-like, mapped to closest SPDX)" }
   - { ecosystem: dpkg, name: numactl,           license: "GPL-2.0-or-later", source: "Linux NUMA tools, GPL-2+" }
   - { ecosystem: dpkg, name: ubuntu-keyring,    license: "GPL-2.0-or-later", source: "Ubuntu keyring; copyright file references common-licenses/GPL-2" }
+  - { ecosystem: dpkg, name: cuda-keyring,      license: "MIT",              source: "NVIDIA upstream — https://github.com/NVIDIA/apt-packaging-cuda-keyring/blob/1f6469f225a49c22ba791028cd0588a6eeb5895b/LICENSE; the 1.1-1 .deb ships no copyright file" }
 
   # --- Sglang cuda12.9 — dpkg additions on top of cuda:12.9.1-cudnn-devel ---
   # X11 / libdrm / common system libs whose syft DEP-5 parse came back UNKNOWN.
@@ -1049,3 +1125,9 @@ overrides:
   - { ecosystem: python, name: instanttensor, license: "Apache-2.0", source: "https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE" }
   - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
   - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }
+
+  # --- MiniMax M3.1 Flash public SGLang base (lmsysorg/sglang:dev-minimax-m31-flash): Python
+  #     packages whose METADATA has no License field, so the generator reports UNKNOWN ---
+  - { ecosystem: python, name: fastokens,       license: "Apache-2.0", source: "Crusoe fastokens — https://github.com/crusoecloud/fastokens/blob/main/LICENSE (Apache-2.0); PyPI metadata has no license" }
+  - { ecosystem: python, name: minimax-msa,     license: "MIT",        source: "MiniMax Sparse Attention: MIT License (Copyright (c) 2026 MiniMax) shipped as the package's License-File, minimax_msa-0.1.0.dist-info/licenses/LICENSE, in lmsysorg/sglang:dev-minimax-m31-flash@sha256:7470e685; METADATA has no License field" }
+  - { ecosystem: python, name: sglang-msa-mono, license: "MIT",        source: "SGLang plugin built from the minimax-msa repository (integrations/sglang), whose README states 'This repository uses the MIT license'; METADATA has no License field" }

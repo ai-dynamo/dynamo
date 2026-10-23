@@ -1142,6 +1142,12 @@ class HandlerBase(BaseGenerativeHandler):
         sampling_params = self._override_sampling_params(
             self.default_sampling_params, request
         )
+        # A rendered prompt already carries its special tokens; TRT-LLM's own
+        # detokenize path clears this flag for the same reason.
+        if isinstance(processed_input, dict) and processed_input.get(
+            "chat_template_applied"
+        ):
+            sampling_params.add_special_tokens = False
 
         # Additional sampling params in output options
         output_options = request.get("output_options", {})

@@ -247,9 +247,18 @@ RUN set -eux; \
     # dependency closure. Remove the packages (and their dpkg metadata) before
     # copying Dynamo's separately built VP9-only ffmpeg below. File deletion
     # alone is insufficient because the compliance generator inventories dpkg.
-    apt-get purge -y --auto-remove \
-        ffmpeg \
-        libwayland-server0; \
+    # Purge only the named packages that are installed: apt cannot resolve an
+    # absent package once the base has deleted its package lists, and some
+    # bases ship ffmpeg without libwayland-server0.
+    purge=""; \
+    for pkg in ffmpeg libwayland-server0; do \
+        if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then \
+            purge="$purge $pkg"; \
+        fi; \
+    done; \
+    if [ -n "$purge" ]; then \
+        apt-get purge -y --auto-remove $purge; \
+    fi; \
     rm -rf /var/lib/apt/lists/*; \
     python3 -m pip uninstall --yes \
         av \

@@ -65,7 +65,11 @@ ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
 COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
-RUN install_nixl_from_wheel \
+RUN if [ ! -d "${SITE_PACKAGES}/.nixl_cu${CUDA_MAJOR}.mesonpy.libs" ]; then \
+        python3 -m pip install --no-deps \
+            "nixl==${NIXL_REF#v}" "nixl-cu${CUDA_MAJOR}==${NIXL_REF#v}"; \
+    fi && \
+    install_nixl_from_wheel \
     --cuda-major "${CUDA_MAJOR}" \
     --site-packages "${SITE_PACKAGES}" \
     --prefix "${NIXL_PREFIX}" \
@@ -177,6 +181,8 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
+{# enable_omni: "false" skips vLLM-Omni and the Transformers/tokenizers versions it requires. #}
+{% set enable_omni = context.vllm[device_key].get("enable_omni", "true") == "true" %}
 {% if device != "cuda" %}
 {% set vllm_rs_link = "${VIRTUAL_ENV}/bin/vllm-rs" %}
 {# vLLM <0.31 rejects the extra output fields added by Omni. #}
@@ -184,11 +190,13 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 {% endif %}
 
+{% if enable_omni %}
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
         "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"
+{% endif %}
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -257,6 +265,7 @@ RUN set -eux; \
     ldconfig -p | grep -q 'libturbojpeg.so.0'; \
     rm -rf /var/lib/apt/lists/*
 
+{% if enable_omni %}
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
@@ -266,6 +275,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -587,6 +597,7 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
 
+{% if enable_omni %}
 # Check that later package layers preserve the Omni-compatible versions.
 RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
 import importlib.metadata as md
@@ -597,10 +608,13 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
     if actual != expected:
         raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
+{% endif %}
 
 {% if device == "cuda" %}
+{% if enable_omni %}
 # Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
 RUN python3 -m pip uninstall --yes soxr
+{% endif %}
 
 RUN vllm-rs --help >/dev/null
 {% else %}
