@@ -619,6 +619,47 @@ def test_runtime_configuration_errors_skip_unknown_power():
     assert runtime_configuration_errors(100, 100, -1, -1, 1, capabilities) == []
 
 
+def test_candidate_config_keeps_the_fields_excluded_from_the_dump(monkeypatch):
+    # The Redis URL comes from the config file, not the environment; the dump
+    # excludes it, and non-advisory batch scheduling requires it.
+    monkeypatch.delenv("DYN_PLANNER_BATCH_REDIS_URL", raising=False)
+    config = PlannerConfig(
+        namespace="test-ns",
+        environment="kubernetes",
+        mode="agg",
+        metric_pulling_prometheus_endpoint="http://prometheus.test:9090",
+        batch_scheduling={
+            "enabled": True,
+            "gateway": {"base_url": "http://gateway:8000", "tenant": "tenant"},
+            "metrics": {
+                "frontend_metrics_url": "http://frontend:8000/metrics",
+                "dispatcher_metrics_url": "http://dispatcher:9090/metrics",
+                "online_match_labels": {"model": "test-model"},
+            },
+            "redis": {"url": "redis://valkey:6379/0", "control_key": "drain-limit"},
+            "pool": {
+                "pool_id": "pool",
+                "work_class": "work",
+                "safe_rps_per_ready_replica": 1.0,
+                "max_replicas": 4,
+                "drain_lease_duration_seconds": 600.0,
+            },
+        },
+    )
+    dumped = config.model_dump()
+    assert "url" not in dumped["batch_scheduling"]["redis"]
+    assert "metric_pulling_prometheus_endpoint" not in dumped
+
+    candidate = candidate_config(config, {"min_endpoint": 2})
+
+    assert candidate.min_endpoint == 2
+    redis = candidate.batch_scheduling.redis
+    assert redis is not None and redis.url is not None
+    assert redis.url.get_secret_value() == "redis://valkey:6379/0"
+    assert candidate.metric_pulling_prometheus_endpoint == "http://prometheus.test:9090"
+    assert candidate.namespace == "test-ns"
+
+
 async def test_runtime_candidate_errors_match_runtime_validation():
     planner = _planner(
         "disagg", prefill_gpu_cost=2, decode_gpu_cost=1, total_gpu_power_limit=2000

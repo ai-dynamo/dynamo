@@ -113,7 +113,7 @@ def candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> PlannerC
         )
     try:
         candidate = PlannerConfig.model_validate(
-            config.model_dump() | updates, strict=True
+            _dump_with_excluded(config) | updates, strict=True
         )
     except ValidationError as error:
         # Full PlannerConfig also contains credentials; never echo that input
@@ -125,6 +125,34 @@ def candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> PlannerC
 
 # Backward-compatible private name.
 _candidate_config = candidate_config
+
+
+def _dump_with_excluded(model: BaseModel) -> dict[str, Any]:
+    """``model.model_dump()`` with every ``exclude=True`` field kept.
+
+    Field-level ``exclude`` keeps secrets and environment-derived settings
+    out of serialized configs. A revalidated plain dump would lose them: a
+    ``batch_scheduling.redis.url`` written in the config file would fail the
+    non-advisory batch scheduling checks, and the other excluded fields would
+    be read from the environment again.
+    """
+
+    dumped = model.model_dump()
+    _restore_excluded(model, dumped)
+    return dumped
+
+
+def _restore_excluded(model: BaseModel, dumped: dict[str, Any]) -> None:
+    for name, info in type(model).model_fields.items():
+        value = getattr(model, name)
+        if info.exclude is True:
+            dumped[name] = value
+        elif isinstance(value, BaseModel):
+            _restore_excluded(value, dumped[name])
+        elif isinstance(value, list):
+            for item, item_dump in zip(value, dumped[name]):
+                if isinstance(item, BaseModel):
+                    _restore_excluded(item, item_dump)
 
 
 def runtime_configuration_errors(
