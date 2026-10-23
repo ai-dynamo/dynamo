@@ -3215,6 +3215,20 @@ impl OpenAIPreprocessor {
     ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
+        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) == Some("gpt_oss")
+            && request
+                .chat_template_args()
+                .and_then(|args| args.get("reasoning_effort"))
+                .and_then(serde_json::Value::as_str)
+                == Some("none")
+        {
+            return Err(invalid_argument_error(
+                "GPT-OSS does not support reasoning_effort=none; use low, medium, or high",
+            ));
+        }
 
         let mut stop_conditions = request.extract_stop_conditions()?;
         let eos_token_ids = self.model_info.eos_token_ids();
@@ -7783,6 +7797,7 @@ impl
             thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
+        self.apply_gpt_oss_json_tool_prompt(&mut request);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());

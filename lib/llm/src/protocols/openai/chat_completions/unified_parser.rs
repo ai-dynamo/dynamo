@@ -712,6 +712,7 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 _ => UnifiedParserStartingState::None,
             },
         ),
+        "gpt_oss" => Ok(UnifiedParserStartingState::None),
         "muse_glimmer" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
@@ -1580,9 +1581,8 @@ impl ChoiceState {
     ) -> anyhow::Result<Self> {
         let prefill = prefill.into();
         let mut parser = create_unified_parser_for_family(family, tools)?;
-        // `prompt_token_ids` stays empty: this path establishes the starting state from
-        // the rendered prompt text (see `stream_prefill` / `detect_prefill`), not from
-        // token IDs, which the preprocessor has already consumed by this point.
+        // Harmony needs the consumed assistant header to recognize a generated
+        // `to=` recipient. Other families infer their state from the rendered text.
         //
         // Streaming guided calls commit per call once the name and argument object opener
         // are unambiguous. A committed fragment cannot later be rejected or recovered as
@@ -1593,7 +1593,14 @@ impl ChoiceState {
         // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
         // guided state at all.
         parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids: Vec::new(),
+            prompt_token_ids: if family == "gpt_oss"
+                && matches!(&tool_output_mode, UnifiedToolOutputMode::Native)
+                && prefill.starting_state == UnifiedParserStartingState::None
+            {
+                dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+            } else {
+                Vec::new()
+            },
             starting_state: if prefill.prefix.is_some() {
                 UnifiedParserStartingState::None
             } else {
@@ -2326,6 +2333,14 @@ fn parse_complete_in_mode(
     .flatten();
     let content = &content[..incomplete_start.unwrap_or(content.len())];
     parser.initialize_request(UnifiedParserInit {
+        prompt_token_ids: if family == "gpt_oss"
+            && matches!(&effective_mode, UnifiedToolOutputMode::Native)
+            && content.trim_start().starts_with("to=")
+        {
+            dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+        } else {
+            Vec::new()
+        },
         starting_state: policy.batch_starting_state(family, content)?,
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
@@ -3967,6 +3982,106 @@ pub(crate) mod tests {
     }
 
     // --- tool_choice -> UnifiedToolOutputMode ------------------------------------
+
+    #[test]
+    fn gpt_oss_aliases_select_the_unified_route_only_in_v2() {
+        use dynamo_runtime::config::ParserVersion;
+
+        for (tool, reasoning) in [
+            (Some("harmony"), Some("gpt_oss")),
+            (Some("harmony"), None),
+            (None, Some("gpt_oss")),
+        ] {
+            let family = configured_family(tool, reasoning);
+            assert_eq!(family, Some("gpt_oss"));
+            for (version, expected) in [
+                (ParserVersion::Auto, None),
+                (ParserVersion::V1, None),
+                (ParserVersion::V2, Some("gpt_oss")),
+            ] {
+                assert_eq!(
+                    selected_family_for_selection(family, version, tool, reasoning),
+                    expected
+                );
+                assert_eq!(
+                    selected_batch_family_for_selection(family, version, tool, reasoning),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_consumed_headers_and_guided_calls_match_batch_at_every_split() {
+        for (input, constraint, reasoning) in [
+            (
+                " to=functions.get_weather<|channel|>analysis<|message|>{\"city\":\"Tokyo\"}<|call|>",
+                GuidedToolConstraint::None,
+                "",
+            ),
+            (
+                "<|channel|>analysis<|message|>plan<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{\"city\":\"Tokyo\"}<|call|>",
+                GuidedToolConstraint::StructuralTag,
+                "plan",
+            ),
+            (
+                r#"[{"name":"get_weather","parameters":{"city":"Tokyo"}}]"#,
+                GuidedToolConstraint::GuidedJsonRequired,
+                "",
+            ),
+            (
+                r#"{"city":"Tokyo"}"#,
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".to_string(),
+                },
+                "",
+            ),
+        ] {
+            let batch = parse_complete("gpt_oss", input, &constraint, &weather_tools()).unwrap();
+            assert!(batch.text.is_empty(), "{:?}", batch.text);
+            assert_eq!(batch.reasoning, reasoning);
+            assert_eq!(batch.tool_calls.len(), 1);
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city":"Tokyo"})
+            );
+            for split in 0..=input.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([chunk(&input[..split], false), chunk(&input[split..], true)]),
+                    Some(weather_tools()),
+                    constraint.clone(),
+                    UnifiedParserStartingState::None,
+                    "gpt_oss",
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(output.iter().all(|response| !response.is_error()));
+                let events = logical_events(&output);
+                assert_stream_calls_match_batch(&events, &batch, &format!("split={split}"));
+                let streamed_reasoning: String = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LogicalEvent::Reasoning(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(streamed_reasoning, reasoning, "split={split}");
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, LogicalEvent::Text(text) if !text.is_empty())),
+                    "split={split}: {events:?}"
+                );
+                assert_eq!(
+                    collect_choices(&output).last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
 
     #[test]
     fn maps_tool_choice_onto_the_output_mode() {
