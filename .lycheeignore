@@ -110,3 +110,8 @@
 # examples/gpu-sharing is added in the same PR as the GPU sharing docs
 # that link to it on main. Remove this rule once that PR merges.
 ^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/gpu-sharing
+
+# The Qwen3-ASR DGD manifests and the renamed realtime launcher are introduced by
+# the same PR as the docs that link to them, so the blob/main URLs return 404 until
+# merge. Remove this entry after merge.
+^https://github\.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/(deploy/agg_asr(_realtime)?\.yaml|launch/agg_asr_realtime\.sh)$
