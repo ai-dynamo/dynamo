@@ -17,7 +17,7 @@ use axum::{
     Router as AxumRouter, http::StatusCode, http::header::CONTENT_TYPE, response::IntoResponse,
     routing::get,
 };
-use dynamo_llm::http::service::metrics::generate_log_buckets;
+use dynamo_http_server::metrics::generate_log_buckets;
 use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says

@@ -3,17 +3,20 @@
 
 use anyhow::Error;
 use async_stream::stream;
+use dynamo_http_server::metrics::Endpoint;
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
-    http::service::{metrics::Endpoint, service_v2::HttpService},
+    http::service::service_v2::HttpService,
     model_card::ModelDeploymentCard,
     preprocessor::LLMMetricAnnotation,
     protocols::{
         Annotated,
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+        openai::{
+            chat_completions::{
+                NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+            },
+            completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
-        openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::metrics::prometheus_names::frontend_service::METRICS_PREFIX_ENV;
@@ -939,8 +942,7 @@ mod integration_tests {
         discovery::ModelWatcher, engines::make_echo_engine, entrypoint::EngineConfig,
         local_model::LocalModelBuilder, namespace::NamespaceFilter,
     };
-    use dynamo_runtime::DistributedRuntime;
-    use dynamo_runtime::discovery::DiscoveryQuery;
+    use dynamo_runtime::{DistributedRuntime, discovery::DiscoveryQuery};
     use std::sync::Arc;
 
     #[tokio::test]

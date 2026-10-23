@@ -24,15 +24,13 @@ use futures::StreamExt;
 use serde::Serialize;
 use tracing::Instrument;
 
-use super::disconnect::{
-    ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
-};
+use super::disconnect::monitor_for_disconnects_with_error;
 use super::error::SanitizedError;
-use super::metrics::{CancellationLabels, ErrorType};
-use super::openai::{
-    check_model_serving_ready, check_ready, find_invalid_argument_in_chain, get_body_limit,
-    get_or_create_request_id, preprocessed_context_from_headers,
-};
+use super::openai::check_model_serving_ready;
+use super::openai::check_ready;
+use super::openai::find_invalid_argument_in_chain;
+use super::openai::get_or_create_request_id;
+use super::openai::preprocessed_context_from_headers;
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
@@ -41,9 +39,14 @@ use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::response_merge::{
     PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
 };
-use crate::protocols::sglang::generate::SglangGenerateRequest;
-use crate::protocols::sglang::merge::merger;
-use crate::protocols::sglang::stream::SglangGenerateStream;
+use crate::protocols::sglang::{
+    generate::SglangGenerateRequest, merge::merger, stream::SglangGenerateStream,
+};
+use dynamo_http_server::disconnect::ConnectionHandle;
+use dynamo_http_server::disconnect::create_connection_monitor;
+use dynamo_http_server::metrics::CancellationLabels;
+use dynamo_http_server::metrics::ErrorType;
+use dynamo_http_server::request::get_body_limit;
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -111,21 +114,21 @@ fn error_response(code: StatusCode, message: String) -> Response {
 fn stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
     // Deadline is checked before overload so a chain carrying both markers keeps
     // the deadline outcome, matching the OpenAI surface.
-    let (error_type, message) = if super::metrics::request_deadline_exceeded(error) {
+    let (error_type, message) = if dynamo_http_server::metrics::request_deadline_exceeded(error) {
         (
             ErrorType::Cancelled,
-            super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+            dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
         )
-    } else if super::metrics::request_was_rejected(error) {
+    } else if dynamo_http_server::metrics::request_was_rejected(error) {
         (ErrorType::Overload, SanitizedError::Overloaded.to_string())
-    } else if super::metrics::request_was_unavailable(error) {
+    } else if dynamo_http_server::metrics::request_was_unavailable(error) {
         (
             ErrorType::Unavailable,
             SanitizedError::Unavailable.to_string(),
         )
     } else if let Some(error) = find_invalid_argument_in_chain(error) {
         (ErrorType::Validation, error.message().to_string())
-    } else if super::metrics::request_was_cancelled(error) {
+    } else if dynamo_http_server::metrics::request_was_cancelled(error) {
         (ErrorType::Cancelled, SanitizedError::Cancelled.to_string())
     } else {
         (ErrorType::Internal, SanitizedError::Internal.to_string())
@@ -192,7 +195,7 @@ fn internal_error_response() -> Response {
 fn deadline_exceeded_response() -> Response {
     error_response(
         StatusCode::TOO_MANY_REQUESTS,
-        super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+        dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
     )
 }
 
@@ -347,7 +350,7 @@ async fn handler(
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
-        endpoint: super::metrics::Endpoint::Generate.to_string(),
+        endpoint: dynamo_http_server::metrics::Endpoint::Generate.to_string(),
         request_type: if streaming { "streaming" } else { "unary" }.to_string(),
     };
     let (mut connection_handle, stream_handle) = create_connection_monitor(
@@ -398,7 +401,7 @@ async fn dispatch(
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
-        super::metrics::Endpoint::Generate,
+        dynamo_http_server::metrics::Endpoint::Generate,
         streaming,
         &request_id,
     );
@@ -420,11 +423,13 @@ async fn dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
-            let deadline_exceeded = super::metrics::request_deadline_exceeded(error.as_ref());
+            let deadline_exceeded =
+                dynamo_http_server::metrics::request_deadline_exceeded(error.as_ref());
             let was_cancelled = request_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref());
-            let was_rejected = super::metrics::request_was_rejected(error.as_ref());
-            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
+                || dynamo_http_server::metrics::request_was_cancelled(error.as_ref());
+            let was_rejected = dynamo_http_server::metrics::request_was_rejected(error.as_ref());
+            let was_unavailable =
+                dynamo_http_server::metrics::request_was_unavailable(error.as_ref());
             let invalid_argument = find_invalid_argument_in_chain(error.as_ref());
             inflight_guard.mark_error(if deadline_exceeded || was_cancelled {
                 ErrorType::Cancelled
@@ -445,7 +450,7 @@ async fn dispatch(
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected SGLang generate request");
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Generate);
+                    .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Generate);
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "engine rejected the request".to_string(),
@@ -539,8 +544,10 @@ mod tests {
     use super::*;
 
     use crate::http::service::generate::tests::{WorkerUnavailableEngine, dispatch_test_context};
-    use crate::http::service::metrics::{Endpoint, RequestType, Status};
     use crate::protocols::common::llm_backend::LLMEngineOutput;
+    use dynamo_http_server::metrics::Endpoint;
+    use dynamo_http_server::metrics::RequestType;
+    use dynamo_http_server::metrics::Status;
     use dynamo_runtime::protocols::maybe_error::MaybeError;
 
     #[test]
@@ -735,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn pre_stream_deadline_maps_to_http_429_with_cancelled_metric() {
-        use crate::http::service::metrics::{Endpoint, RequestType, Status};
+        use dynamo_http_server::metrics::{Endpoint, RequestType, Status};
 
         let engine: crate::types::openai::generate::GenerateStreamingEngine =
             Arc::new(DeadlineEngine);

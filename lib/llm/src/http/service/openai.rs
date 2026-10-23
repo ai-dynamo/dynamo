@@ -40,15 +40,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
-        monitor_for_disconnects_with_activity_and_error_signal,
+        StreamErrorSignal, monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
-        process_chat_response_and_observe_metrics,
+        EventConverter, process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
@@ -95,6 +93,10 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use dynamo_http_server::{
+    disconnect::{ConnectionHandle, create_connection_monitor},
+    metrics::{CancellationLabels, Endpoint, ErrorType},
+};
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
@@ -104,6 +106,10 @@ use dynamo_protocols::types::responses::{
 };
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
+
+use dynamo_http_server::request::{get_body_limit, is_json_content_type};
+
+use crate::controller::chat::{ChatController, ChatError, ChatOutput, DynamoChatController};
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -131,17 +137,6 @@ pub(super) fn rl_router(
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
     let state = dynamo_rl::RlDiscoveryState::new_from_env(config);
     Ok(dynamo_rl::rl_router(state))
-}
-
-// Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
-/// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
-pub(super) fn get_body_limit() -> usize {
-    std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(45 * 1024 * 1024)
 }
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
@@ -355,7 +350,7 @@ pub(super) fn record_local_failure(class: ErrorClass) {
     if class == ErrorClass::Cancelled {
         return;
     }
-    super::metrics::record_failure(&DynamoError::builder().class(class).build());
+    dynamo_http_server::metrics::record_failure(&DynamoError::builder().class(class).build());
 }
 
 fn sanitized_error_class(error: SanitizedError) -> ErrorClass {
@@ -424,7 +419,7 @@ fn responses_error_code(status_code: StatusCode) -> ResponseErrorCode {
 }
 
 fn stream_error_type(error: &dynamo_runtime::error::DynamoError) -> ErrorType {
-    use super::metrics::{
+    use dynamo_http_server::metrics::{
         request_was_cancelled, request_was_rejected, request_was_timed_out, request_was_unavailable,
     };
 
@@ -775,7 +770,7 @@ impl ErrorMessage {
         };
 
         if record_failure {
-            super::metrics::record_failure(error);
+            dynamo_http_server::metrics::record_failure(error);
         }
 
         if matches!(
@@ -839,13 +834,14 @@ impl ErrorMessage {
             );
         }
 
-        if let Some(error) = super::metrics::queue_deadline_error(err.as_ref()) {
-            super::metrics::record_failure(error);
+        if let Some(error) = dynamo_http_server::metrics::queue_deadline_error(err.as_ref()) {
+            dynamo_http_server::metrics::record_failure(error);
             let code = StatusCode::TOO_MANY_REQUESTS;
             return (
                 code,
                 Json(ErrorMessage {
-                    message: super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+                    message: dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE
+                        .to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
@@ -854,7 +850,7 @@ impl ErrorMessage {
             );
         }
 
-        if super::metrics::request_was_cancelled(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_cancelled(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Cancelled,
                 format!("{err:#}"),
@@ -870,7 +866,7 @@ impl ErrorMessage {
         }
 
         // Check for ResourceExhausted anywhere in the error chain → HTTP 529
-        if super::metrics::request_was_rejected(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
                 format!("{err:#}"),
@@ -878,7 +874,7 @@ impl ErrorMessage {
         }
 
         // No backend workers are currently routable → HTTP 503.
-        if super::metrics::request_was_unavailable(err.as_ref()) {
+        if dynamo_http_server::metrics::request_was_unavailable(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Unavailable,
                 format!("{err:#}"),
@@ -1350,10 +1346,10 @@ async fn completions_single(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1677,10 +1673,10 @@ async fn completions_batch(
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
-            if super::metrics::request_was_rejected(e.as_ref()) {
+            if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                    .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1921,10 +1917,11 @@ async fn embeddings(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model_name,
+                dynamo_http_server::metrics::Endpoint::Embeddings,
+            );
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2063,10 +2060,10 @@ async fn classify(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Classify);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Classify);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate classification");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2149,7 +2146,7 @@ async fn rerank(
     let mut response_collector = inflight.response_collector();
     let model_name = model.to_string();
     let stream = engine.generate(request).await.map_err(|error| {
-        if super::metrics::request_was_rejected(error.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(error.as_ref()) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, Endpoint::Rerank);
@@ -2429,10 +2426,10 @@ async fn pooling(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Pooling);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Pooling);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate pooling output");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -2484,7 +2481,7 @@ async fn pooling(
 }
 
 async fn handler_chat_completions(
-    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, template, controller)): State<ChatHttpState>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ErrorResponse> {
@@ -2527,8 +2524,9 @@ async fn handler_chat_completions(
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     if !resolved_model.is_empty()
-        && let Err(error) = check_model_serving_ready(&state, resolved_model)
+        && let Err(error) = controller.check_model_ready(resolved_model)
     {
+        let error = chat_controller_error_response(error);
         lifecycle_request.record_session(&request_id, None);
         terminal.finish(terminal_outcome_for_error_response(&error));
         return Err(error);
@@ -2551,12 +2549,9 @@ async fn handler_chat_completions(
     let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     // Canonicalize alias → primary for the metric label.
-    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
+    let model = controller.resolve_model(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state
-            .manager()
-            .metric_model_for(&canonical_model)
-            .to_string(),
+        model: model.metric_name,
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -2607,8 +2602,7 @@ async fn handler_chat_completions(
     let response = match tokio::spawn(
         classify_lifecycle_response(
             chat_completions(
-                state,
-                template,
+                (state, template, controller),
                 request,
                 stream_handle,
                 lifecycle,
@@ -2768,20 +2762,6 @@ async fn read_json_request_body(headers: &HeaderMap, body: Body) -> Result<Bytes
         })
 }
 
-fn is_json_content_type(content_type: &str) -> bool {
-    let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    let Some((media_type, subtype)) = media_type.split_once('/') else {
-        return false;
-    };
-
-    media_type.eq_ignore_ascii_case("application")
-        && (subtype.eq_ignore_ascii_case("json")
-            || subtype
-                .to_ascii_lowercase()
-                .rsplit_once('+')
-                .is_some_and(|(_, suffix)| suffix == "json"))
-}
-
 fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(body.len());
     let mut in_string = false;
@@ -2933,11 +2913,11 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let overloaded = event
             .error
             .as_ref()
-            .is_some_and(|error| super::metrics::request_was_rejected(error));
+            .is_some_and(|error| dynamo_http_server::metrics::request_was_rejected(error));
         let metric_error_type = event
             .error
             .as_ref()
-            .filter(|error| super::metrics::request_was_timed_out(*error))
+            .filter(|error| dynamo_http_server::metrics::request_was_timed_out(*error))
             .map(|_| ErrorType::ResponseTimeout);
 
         // Parse the status-bearing node's own message. The diagnostic string
@@ -3233,7 +3213,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             && let Some(error) = &semantic
             && error.class().normalized() == sanitized_error_class(variant)
         {
-            super::metrics::record_failure(error);
+            dynamo_http_server::metrics::record_failure(error);
             render_record_failure = false;
         }
         return ErrorMessage::sanitized_with_details_recording(
@@ -3490,17 +3470,25 @@ fn apply_chat_completions_request_template(
     }
 }
 
-/// OpenAI Chat Completions Request Handler
-///
-/// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
-/// for an [`super::OpenAIChatCompletionsStreamingEngine`] and will return a stream of responses which will be
-/// forward to the client.
-///
-/// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
-/// non-streaming requests, we will fold the stream into a single response as part of this handler.
+/// Map controller failures into the existing HTTP status, body and metric policy.
+fn chat_controller_error_response(error: ChatError) -> ErrorResponse {
+    match error {
+        ChatError::ModelNotFound => ErrorMessage::model_not_found(),
+        ChatError::ModelUnavailable(model) => {
+            ErrorMessage::service_unavailable_with_body(model_not_ready_message(&model))
+        }
+        ChatError::InvalidRequest(error) => {
+            ErrorMessage::from_anyhow(error.into(), "Invalid tool_choice")
+        }
+        ChatError::Generation(error) => {
+            ErrorMessage::from_anyhow(error, "Failed to generate completions")
+        }
+    }
+}
+
+/// Validate the API request and deliver typed controller output as JSON or SSE.
 async fn chat_completions(
-    state: Arc<service_v2::State>,
-    template: Option<RequestTemplate>,
+    (state, template, controller): ChatHttpState,
     mut request: Context<NvCreateChatCompletionRequest>,
     stream_handle: ConnectionHandle,
     lifecycle: LifecycleTrace,
@@ -3526,12 +3514,12 @@ async fn chat_completions(
     // engine routing, metrics, and the OpenAI response.model all use the
     // canonical primary (matching vLLM/SGLang). Non-aliases pass through so
     // metric_model_for still applies its unknown-model cardinality guard.
-    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
-    if canonical != request.inner.model {
-        request.inner.model = canonical;
+    let resolved = controller.resolve_model(&request.inner.model);
+    if resolved.name != request.inner.model {
+        request.inner.model = resolved.name;
     }
     let model = request.inner.model.clone();
-    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let metric_model = resolved.metric_name;
 
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
@@ -3578,65 +3566,29 @@ async fn chat_completions(
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    // Let backend adapters apply their own generation default (e.g. --override-generation-config).
-    if request.inner.max_completion_tokens.is_none() {
-        request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
-    }
-
-    tracing::trace!("Getting chat completions engine for model: {}", model);
-
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
-
-    // Request policy controls whether parser-produced tool calls may be exposed.
-    // Assistant response/guided constraints are handled separately during
-    // preprocessing and do not revoke an auto request's tool-call permission.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
-
     // When parallel_tool_calls is false, limit the response to a single tool call.
-    let parsing_options =
-        parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
     let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
-
-    // Any force_nonempty_content=true request: surface reasoning as content when
-    // the turn produced none. See `wants_reasoning_as_content_when_empty`.
-    let move_reasoning_to_content_when_empty =
-        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
-            request.chat_template_args.as_ref(),
-        );
-    let parsing_options = parsing_options
-        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
-    request.insert(REQUEST_PARSING_OPTIONS_CONTEXT_KEY, parsing_options.clone());
-
-    // Computed before `request` moves into `generate`. Only a stream that can
-    // withhold every data frame needs forced keep-alive frames.
-    let stream_can_defer_all_output =
-        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = inflight_guard.response_collector();
     inflight_guard.request_metrics().attach_to(&mut request);
 
     let annotations = request.annotations();
 
-    // issue the generate call on the engine
-    let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
+    // The controller returns typed output; HTTP retains delivery and metrics.
+    let ChatOutput {
+        stream,
+        parsing_options,
+        can_defer_all_output: stream_can_defer_all_output,
+    } = controller.generate(request).await.map_err(|error| {
+        if let ChatError::Generation(error) = &error
+            && dynamo_http_server::metrics::request_was_rejected(error.as_ref())
+        {
+            state.metrics_clone().inc_rejection(
+                &model,
+                dynamo_http_server::metrics::Endpoint::ChatCompletions,
+            );
         }
-        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        let err_response = chat_controller_error_response(error);
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
@@ -4353,10 +4305,10 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Responses);
+                .inc_rejection(&model, dynamo_http_server::metrics::Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -4827,6 +4779,23 @@ pub fn chat_completions_router(
     template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
+    let controller = Arc::new(DynamoChatController::new(state.manager_clone()));
+    chat_completions_router_with_controller(state, template, path, controller)
+}
+
+type ChatHttpState = (
+    Arc<service_v2::State>,
+    Option<RequestTemplate>,
+    Arc<dyn ChatController>,
+);
+
+/// Reuse the same routes, schemas and HTTP behavior with a different controller.
+pub(super) fn chat_completions_router_with_controller(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    path: Option<String>,
+    controller: Arc<dyn ChatController>,
+) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/chat/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path)
         .with_openapi_kind(super::OpenApiRouteKind::ChatCompletions);
@@ -4834,7 +4803,7 @@ pub fn chat_completions_router(
         .route(&path, post(handler_chat_completions))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
-        .with_state((state, template));
+        .with_state((state, template, controller));
     (vec![doc], router)
 }
 
@@ -5215,10 +5184,10 @@ async fn images_with_request(
     // NOT for client-facing SSE streaming. The stream is immediately folded into
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Images);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5340,10 +5309,10 @@ async fn videos(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5466,10 +5435,10 @@ async fn video_stream(
     let mut response_collector = inflight.response_collector();
 
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5761,10 +5730,10 @@ async fn audio_speech(
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
+                .inc_rejection(&metric_model, dynamo_http_server::metrics::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -6192,17 +6161,6 @@ mod tests {
         request.temperature = None;
         apply_chat_completions_request_template(&mut request, Some(&template));
         assert_eq!(request.temperature, Some(0.7));
-    }
-
-    #[test]
-    fn test_is_json_content_type() {
-        assert!(is_json_content_type("application/json"));
-        assert!(is_json_content_type("application/json; charset=utf-8"));
-        assert!(is_json_content_type("Application/JSON"));
-        assert!(is_json_content_type("application/vnd.dynamo+json"));
-        assert!(!is_json_content_type("text/plain"));
-        assert!(!is_json_content_type("application/json-patch"));
-        assert!(!is_json_content_type("application"));
     }
 
     #[test]
@@ -7078,8 +7036,9 @@ mod tests {
         // its prologue, then the cause of a pre-stream `CannotConnect` — is the
         // same rejected overload whether it is the whole worker's or one DP
         // rank's.
-        use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::{
+            StreamPrologueError, egress::addressed_router::testing::pre_stream_failure_error,
+        };
 
         let delivered_refusal = |error_type: ErrorType| -> anyhow::Error {
             let refusal = DynamoError::builder()
@@ -7097,7 +7056,7 @@ mod tests {
         ] {
             let err = delivered_refusal(error_type);
             assert!(
-                crate::http::service::metrics::request_was_rejected(err.as_ref()),
+                dynamo_http_server::metrics::request_was_rejected(err.as_ref()),
                 "{error_type:?}"
             );
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
@@ -7275,7 +7234,7 @@ mod tests {
 
         // The legacy shape has no capacity signal, so the overload override does
         // not engage.
-        assert!(!super::super::metrics::request_was_rejected(
+        assert!(!dynamo_http_server::metrics::request_was_rejected(
             event.error.as_ref().expect("error is set")
         ));
 
@@ -7719,7 +7678,9 @@ mod tests {
             .message("internal deadline detail")
             .build()
             .into();
-        assert!(!super::super::metrics::request_was_rejected(error.as_ref()));
+        assert!(!dynamo_http_server::metrics::request_was_rejected(
+            error.as_ref()
+        ));
 
         let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);

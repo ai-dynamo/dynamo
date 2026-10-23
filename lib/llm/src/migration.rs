@@ -1,16 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
-use std::error::Error as StdError;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{collections::BTreeMap, error::Error as StdError, sync::Arc, time::Instant};
 
 use anyhow::{Error, Result};
 use futures::{stream, stream::StreamExt};
 
 use crate::{
-    http::service::metrics::Metrics,
     model_card::ModelDeploymentCard,
     protocols::{
         TokenIdType,
@@ -23,6 +19,7 @@ use crate::{
     },
     session_affinity::explicit_target,
 };
+use dynamo_http_server::metrics::Metrics;
 
 use dynamo_kv_router::scheduling::AbortCause;
 use dynamo_protocols::types::CompletionUsage;
@@ -875,11 +872,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::service::metrics::Metrics;
     use crate::protocols::common::{
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
         preprocessor::RoutingHints, timing::RequestTracker,
     };
+    use dynamo_http_server::metrics::Metrics;
     use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
@@ -923,8 +920,9 @@ mod tests {
     // pre_stream_failure_error must withhold those reasons before attaching a cause.
     #[test]
     fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
-        use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::{
+            StreamPrologueError, egress::addressed_router::testing::pre_stream_failure_error,
+        };
 
         for &(error_type, reason) in &[
             (ErrorType::Cancelled, "request.cancelled"),
@@ -993,8 +991,9 @@ mod tests {
 
     #[test]
     fn pre_stream_validation_refusal_is_not_a_transport_failure() {
-        use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::{
+            StreamPrologueError, egress::addressed_router::testing::pre_stream_failure_error,
+        };
 
         for error_type in [
             ErrorType::InvalidArgument,

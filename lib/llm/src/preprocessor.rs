@@ -15,6 +15,8 @@ pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
 pub mod prompt;
+mod request_options;
+pub(crate) use request_options::apply_request_tool_call_parsing_options;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
 pub(crate) mod tool_choice;
@@ -54,7 +56,6 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
-use crate::http::service::metrics::RequestMetrics;
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -73,8 +74,8 @@ use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
-use crate::protocols::common::timing::RequestTracker;
-use crate::tokenizers::Encoding;
+use crate::{protocols::common::timing::RequestTracker, tokenizers::Encoding};
+use dynamo_http_server::metrics::RequestMetrics;
 
 use dynamo_parsers::{
     ReasoningParser, ReasoningParserType, reasoning::ParserResult,
@@ -8575,8 +8576,7 @@ mod strip_tests {
 #[cfg(test)]
 mod extra_args_media_copy_tests {
     use super::*;
-    use crate::model_card::ModelDeploymentCard;
-    use crate::protocols::common::preprocessor::MultimodalData;
+    use crate::{model_card::ModelDeploymentCard, protocols::common::preprocessor::MultimodalData};
 
     fn test_preprocessor() -> OpenAIPreprocessor {
         let mdc = ModelDeploymentCard::load_from_disk(
@@ -8602,8 +8602,7 @@ mod extra_args_media_copy_tests {
 
     #[tokio::test]
     async fn deepseek_v41_display_name_fallback_orders_tool_media() {
-        use crate::common::checked_file::CheckedFile;
-        use crate::model_card::ModelInfoType;
+        use crate::{common::checked_file::CheckedFile, model_card::ModelInfoType};
 
         let mut mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
@@ -10308,8 +10307,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_unified_reasoning_keeps_interleaved_text_order_in_stream_and_batch() {
-        use crate::protocols::openai::GuidedToolConstraint;
-        use crate::protocols::openai::chat_completions::unified_parser;
+        use crate::protocols::openai::{GuidedToolConstraint, chat_completions::unified_parser};
         for (family, input) in [
             (
                 "kimi_k3",
@@ -13790,10 +13788,10 @@ mod tests {
             "model": "test-model", "input": [[1, 2, 3], [4, 5]],
         }))
         .unwrap();
-        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
         let inflight = metrics.clone().create_inflight_guard(
             "test-model",
-            crate::http::service::metrics::Endpoint::Embeddings,
+            dynamo_http_server::metrics::Endpoint::Embeddings,
             false,
             "",
         );
@@ -13811,8 +13809,8 @@ mod tests {
         assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
     }
 
-    fn awaiting_first_token_input_tokens(metrics: &crate::http::service::metrics::Metrics) -> u64 {
-        let view = crate::discovery::CommittedModelView {
+    fn awaiting_first_token_input_tokens(metrics: &dynamo_http_server::metrics::Metrics) -> u64 {
+        let view = dynamo_http_server::load::ModelLoadView {
             name: "test-model".to_string(),
             is_ready: true,
             aliases: Vec::new(),
@@ -13839,10 +13837,10 @@ mod tests {
             "messages": [{"role": "user", "content": "What is the weather?"}],
         }))
         .unwrap();
-        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
         let inflight = metrics.clone().create_inflight_guard(
             "test-model",
-            crate::http::service::metrics::Endpoint::ChatCompletions,
+            dynamo_http_server::metrics::Endpoint::ChatCompletions,
             false,
             "",
         );

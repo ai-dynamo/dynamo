@@ -40,7 +40,14 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::http::service::error::{ClientErrorAction, SanitizedError, http_action_for_error};
-use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
+use dynamo_http_server::disconnect::ConnectionHandle;
+#[cfg(test)]
+use dynamo_http_server::disconnect::{
+    ConnectionStatus, connection_monitor, create_connection_monitor,
+};
+#[cfg(test)]
+use dynamo_http_server::metrics::{CancellationLabels, Metrics};
+use dynamo_http_server::metrics::{ErrorType, InflightGuard};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -58,18 +65,6 @@ pub fn backend_stream_timeout() -> Option<Duration> {
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
         .map(|secs| Duration::from_secs(secs.saturating_mul(2)))
-}
-
-#[derive(Clone, Copy)]
-pub enum ConnectionStatus {
-    Disabled,
-    ClosedUnexpectedly,
-    ClosedGracefully,
-}
-
-pub struct ConnectionHandle {
-    sender: Option<tokio::sync::oneshot::Sender<ConnectionStatus>>,
-    on_drop: ConnectionStatus,
 }
 
 /// One-shot application error reported by an SSE producer.
@@ -139,7 +134,7 @@ impl StreamErrorSignal {
         };
         if let Some(error) = &failure.semantic_error {
             if error.class() != ErrorClass::Cancelled {
-                crate::http::service::metrics::record_failure(error);
+                dynamo_http_server::metrics::record_failure(error);
             }
             return;
         }
@@ -154,7 +149,7 @@ impl StreamErrorSignal {
             ErrorType::NotImplemented => ErrorClass::NotImplemented,
             ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
         };
-        crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
+        dynamo_http_server::metrics::record_failure(&DynamoError::builder().class(class).build());
     }
 }
 
@@ -237,123 +232,6 @@ impl Drop for SignaledConnectionHandle {
         {
             self.handle.disarm();
         }
-    }
-}
-
-impl ConnectionHandle {
-    /// Handle which by default will issue a [`ConnectionStatus::ClosedGracefully`] signal when dropped.
-    pub fn create_disarmed(sender: tokio::sync::oneshot::Sender<ConnectionStatus>) -> Self {
-        Self {
-            sender: Some(sender),
-            on_drop: ConnectionStatus::ClosedGracefully,
-        }
-    }
-
-    /// Handle which will issue a [`ConnectionStatus::ClosedUnexpectedly`] signal when dropped.
-    pub fn create_armed(sender: tokio::sync::oneshot::Sender<ConnectionStatus>) -> Self {
-        Self {
-            sender: Some(sender),
-            on_drop: ConnectionStatus::ClosedUnexpectedly,
-        }
-    }
-
-    /// Handle which will not issue a signal when dropped.
-    pub fn create_disabled(sender: tokio::sync::oneshot::Sender<ConnectionStatus>) -> Self {
-        Self {
-            sender: Some(sender),
-            on_drop: ConnectionStatus::Disabled,
-        }
-    }
-
-    /// Handle which will issue a [`ConnectionStatus::ClosedGracefully`] signal when dropped.
-    pub fn disarm(&mut self) {
-        self.on_drop = ConnectionStatus::ClosedGracefully;
-    }
-
-    /// Handle which will issue a [`ConnectionStatus::ClosedUnexpectedly`] signal when dropped.
-    pub fn arm(&mut self) {
-        self.on_drop = ConnectionStatus::ClosedUnexpectedly;
-    }
-}
-
-impl Drop for ConnectionHandle {
-    fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(self.on_drop);
-        }
-    }
-}
-
-/// Creates a pair of handles which will monitor for disconnects from the client.
-///
-/// The first handle is armed and will issue a [`ConnectionStatus::ClosedUnexpectedly`] signal when dropped.
-/// The second handle is disarmed and will issue a [`ConnectionStatus::ClosedGracefully`] signal when dropped.
-///
-/// The handles are returned in the order of the first being armed and the second being disarmed.
-pub async fn create_connection_monitor(
-    engine_context: Arc<dyn AsyncEngineContext>,
-    metrics: Option<Arc<Metrics>>,
-    cancellation_labels: CancellationLabels,
-) -> (ConnectionHandle, ConnectionHandle) {
-    // these oneshot channels monitor possible disconnects from the client in two different scopes:
-    // - the local task (connection_handle)
-    // - an optionally streaming response (stream_handle)
-    let (connection_tx, connection_rx) = tokio::sync::oneshot::channel();
-    let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
-
-    // detached task that will naturally close when both handles are dropped
-    tokio::spawn(connection_monitor(
-        engine_context.clone(),
-        connection_rx,
-        stream_rx,
-        metrics,
-        cancellation_labels,
-    ));
-
-    // Two handles, the first is armed, the second is disarmed
-    (
-        ConnectionHandle::create_armed(connection_tx),
-        ConnectionHandle::create_disabled(stream_tx),
-    )
-}
-
-#[tracing::instrument(level = "trace", skip_all, fields(request_id = %engine_context.id()))]
-async fn connection_monitor(
-    engine_context: Arc<dyn AsyncEngineContext>,
-    connection_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
-    stream_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
-    metrics: Option<Arc<Metrics>>,
-    cancellation_labels: CancellationLabels,
-) {
-    match connection_rx.await {
-        Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            // the client has disconnected, no need to gracefully cancel, just kill the context
-            tracing::warn!("Connection closed unexpectedly; issuing cancellation");
-            if let Some(metrics) = &metrics {
-                metrics.inc_client_disconnect();
-                metrics.inc_cancellation(&cancellation_labels);
-            }
-            engine_context.kill();
-        }
-        Ok(ConnectionStatus::ClosedGracefully) => {
-            tracing::trace!("Connection closed gracefully");
-        }
-        Ok(ConnectionStatus::Disabled) => {}
-    }
-
-    match stream_rx.await {
-        Err(_) | Ok(ConnectionStatus::ClosedUnexpectedly) => {
-            tracing::warn!("Stream closed unexpectedly; issuing cancellation");
-            if let Some(metrics) = &metrics {
-                metrics.inc_client_disconnect();
-                metrics.inc_cancellation(&cancellation_labels);
-            }
-            engine_context.kill();
-        }
-        Ok(ConnectionStatus::ClosedGracefully) => {
-            tracing::trace!("Stream closed gracefully");
-        }
-        Ok(ConnectionStatus::Disabled) => {}
     }
 }
 
@@ -777,7 +655,10 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+    use dynamo_http_server::metrics::Endpoint;
+    use dynamo_http_server::metrics::ErrorType;
+    use dynamo_http_server::metrics::RequestType;
+    use dynamo_http_server::metrics::Status;
     use dynamo_runtime::pipeline::context::Controller;
     use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1190,7 +1071,7 @@ mod tests {
         connection_handle.disarm();
         drop(connection_handle);
         let error_signal = StreamErrorSignal::default();
-        let semantic_counter = crate::http::service::metrics::DYNAM_FAILURES_TOTAL
+        let semantic_counter = dynamo_http_server::metrics::DYNAM_FAILURES_TOTAL
             .with_label_values(&["Internal", "runtime.internal"]);
         let semantic_before = semantic_counter.get();
         let producer_error_signal = error_signal.clone();

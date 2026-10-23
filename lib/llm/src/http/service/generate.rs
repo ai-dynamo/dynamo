@@ -26,15 +26,12 @@ use futures::StreamExt;
 use serde::Serialize;
 use tracing::Instrument;
 
-use super::disconnect::create_connection_monitor;
 use super::error::{SanitizedError, find_canonical_error_in_chain};
-use super::metrics::{
-    CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
-};
-use super::openai::{
-    check_model_serving_ready, check_ready, get_body_limit, get_or_create_request_id,
-    preprocessed_context_from_headers, smart_json_error_middleware,
-};
+use super::openai::check_model_serving_ready;
+use super::openai::check_ready;
+use super::openai::get_or_create_request_id;
+use super::openai::preprocessed_context_from_headers;
+use super::openai::smart_json_error_middleware;
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessed_mm_identifier;
@@ -44,6 +41,13 @@ use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
 use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+use dynamo_http_server::disconnect::create_connection_monitor;
+use dynamo_http_server::metrics::CancellationLabels;
+use dynamo_http_server::metrics::ErrorType;
+use dynamo_http_server::metrics::HttpQueueGuard;
+use dynamo_http_server::metrics::InflightGuard;
+use dynamo_http_server::metrics::ResponseMetricCollector;
+use dynamo_http_server::request::get_body_limit;
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -197,7 +201,7 @@ fn generate_deadline_exceeded_response() -> Response {
     generate_error_response(
         StatusCode::TOO_MANY_REQUESTS,
         "deadline_exceeded",
-        super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+        dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
     )
 }
 
@@ -747,7 +751,7 @@ impl GenerateMetricLifecycle {
         let metrics = state.metrics_clone();
         let inflight = metrics.clone().create_inflight_guard(
             &metric_model,
-            super::metrics::Endpoint::Generate,
+            dynamo_http_server::metrics::Endpoint::Generate,
             false,
             request_id,
         );
@@ -1008,7 +1012,7 @@ async fn handler_generate(
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: metric_lifecycle.metric_model.clone(),
-        endpoint: super::metrics::Endpoint::Generate.to_string(),
+        endpoint: dynamo_http_server::metrics::Endpoint::Generate.to_string(),
         request_type: "unary".to_string(),
     };
     let (mut connection_handle, _stream_handle) = create_connection_monitor(
@@ -1076,11 +1080,13 @@ async fn generate_dispatch(
         Err(error) => {
             // Deadline is checked before overload so a chain carrying both
             // markers keeps the deadline outcome, matching the OpenAI surface.
-            let deadline_exceeded = super::metrics::request_deadline_exceeded(error.as_ref());
+            let deadline_exceeded =
+                dynamo_http_server::metrics::request_deadline_exceeded(error.as_ref());
             let was_cancelled = request_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref());
-            let was_rejected = super::metrics::request_was_rejected(error.as_ref());
-            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
+                || dynamo_http_server::metrics::request_was_cancelled(error.as_ref());
+            let was_rejected = dynamo_http_server::metrics::request_was_rejected(error.as_ref());
+            let was_unavailable =
+                dynamo_http_server::metrics::request_was_unavailable(error.as_ref());
             let invalid_request = generate_invalid_request_response(error.as_ref());
             inflight_guard.mark_error(if deadline_exceeded || was_cancelled {
                 ErrorType::Cancelled
@@ -1099,9 +1105,10 @@ async fn generate_dispatch(
             }
             if was_rejected {
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
-                state
-                    .metrics_clone()
-                    .inc_rejection(&metric_model, super::metrics::Endpoint::Generate);
+                state.metrics_clone().inc_rejection(
+                    &metric_model,
+                    dynamo_http_server::metrics::Endpoint::Generate,
+                );
                 return generate_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
@@ -1163,12 +1170,12 @@ async fn generate_dispatch(
         Err(error) => {
             if request_context.is_killed()
                 || engine_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref())
+                || dynamo_http_server::metrics::request_was_cancelled(error.as_ref())
             {
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
             }
-            if super::metrics::request_was_unavailable(error.as_ref()) {
+            if dynamo_http_server::metrics::request_was_unavailable(error.as_ref()) {
                 inflight_guard.mark_error(ErrorType::Unavailable);
                 tracing::warn!(%request_id, %error, "generate stream failed: no worker available");
                 return generate_unavailable_response();
@@ -1200,8 +1207,10 @@ pub(crate) mod tests {
 
     use super::service_v2::{HttpService, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV};
     use super::*;
-    use crate::http::service::metrics::{Endpoint, RequestType, Status};
     use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+    use dynamo_http_server::metrics::Endpoint;
+    use dynamo_http_server::metrics::RequestType;
+    use dynamo_http_server::metrics::Status;
     use dynamo_runtime::{
         engine::{AsyncEngine, ResponseStream},
         pipeline::{Error, ManyOut, Operator, ServerStreamingEngine, SingleIn},
@@ -3143,19 +3152,19 @@ pub(crate) mod tests {
 
         let worker_labels = [WORKER_ID, DP_RANK, crate::discovery::WORKER_TYPE_DECODE];
         assert_eq!(
-            crate::http::service::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            dynamo_http_server::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
                 .with_label_values(&worker_labels)
                 .get(),
             3
         );
         assert!(
-            crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            dynamo_http_server::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
                 .with_label_values(&worker_labels)
                 .get()
                 > 0.0
         );
         assert!(
-            crate::http::service::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            dynamo_http_server::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
                 .with_label_values(&worker_labels)
                 .get()
                 > 0.0
@@ -3216,20 +3225,20 @@ pub(crate) mod tests {
             crate::discovery::WORKER_TYPE_PREFILL,
         ];
         assert_eq!(
-            crate::http::service::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+            dynamo_http_server::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
                 .with_label_values(&prefill_labels)
                 .get(),
             3
         );
         assert!(
-            crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+            dynamo_http_server::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
                 .with_label_values(&prefill_labels)
                 .get()
                 > 0.0
         );
         let decode_labels = [DECODE_WORKER_ID, "5", crate::discovery::WORKER_TYPE_DECODE];
         assert!(
-            crate::http::service::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+            dynamo_http_server::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
                 .with_label_values(&decode_labels)
                 .get()
                 > 0.0

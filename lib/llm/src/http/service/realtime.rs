@@ -30,8 +30,7 @@
 //! - The handler drains the engine's response stream onto the WebSocket.
 //! - WebSocket stream close procedure is encapsulated in the `ScopedWsWriter` wrapper.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use parking_lot::Mutex;
 
@@ -105,7 +104,7 @@ async fn handle_socket(
     state: Arc<service_v2::State>,
     // Held for the full WebSocket task lifetime so realtime sessions are
     // visible to graceful shutdown after the 101 upgrade response completes.
-    _permit: service_v2::InflightPermit,
+    _permit: dynamo_http_server::lifecycle::InflightPermit,
 ) {
     // Inbound writes a non-NORMAL close message to `close_reason` on protocol errors
     // before cancelling the engine; the ScopedWsWriter takes it on Drop.

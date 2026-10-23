@@ -163,7 +163,7 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
 /// the same value. Both the real
 /// preprocessing path
 /// (`apply_tool_choice_structural_tag`) and the HTTP-layer reconstruction
-/// (`http::service::apply_request_tool_call_parsing_options`) must consult this
+/// (`preprocessor::apply_request_tool_call_parsing_options`) must consult this
 /// function; neither may re-derive eligibility, mode, scope, or registry
 /// availability independently.
 pub(crate) enum StructuralTagDecision {
@@ -184,7 +184,7 @@ impl StructuralTagDecision {
 /// that is not valid against the request's `tools` — e.g. `required` with no
 /// tools, or a named tool absent from `tools`. Both the real preprocessing path
 /// (`apply_tool_choice_structural_tag`) and the HTTP-layer reconstruction
-/// (`http::service::apply_request_tool_call_parsing_options`) must propagate
+/// (`preprocessor::apply_request_tool_call_parsing_options`) must propagate
 /// this error rather than falling back to `NotApplicable`, or an invalid forced
 /// choice would silently install a structural tag anyway.
 pub(crate) fn structural_tag_decision(

@@ -4,6 +4,16 @@
 use anyhow::Error;
 use async_stream::stream;
 use base64::Engine as _;
+use dynamo_http_server::metrics::Endpoint;
+use dynamo_http_server::metrics::ErrorType;
+use dynamo_http_server::metrics::Metrics;
+use dynamo_http_server::metrics::RequestType;
+use dynamo_http_server::metrics::Status;
+use dynamo_llm::endpoint_type::EndpointType;
+use dynamo_llm::http::service::error::HttpError;
+use dynamo_llm::http::service::service_v2::BackendErrorCheck;
+use dynamo_llm::http::service::service_v2::HttpService;
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -17,16 +27,6 @@ use dynamo_llm::protocols::{
 };
 use dynamo_llm::types::openai::audios::OpenAIAudiosStreamingEngine;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use dynamo_llm::{
-    endpoint_type::EndpointType,
-    http::service::{
-        Metrics,
-        error::HttpError,
-        metrics::{Endpoint, ErrorType, RequestType, Status},
-        service_v2::{BackendErrorCheck, HttpService},
-    },
-    model_card::ModelDeploymentCard,
-};
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -1656,8 +1656,7 @@ async fn test_model_ready_endpoint() {
 /// *any* registered model, displayable or not.
 #[tokio::test]
 async fn test_model_ready_endpoint_non_displayable_shadow() {
-    use dynamo_llm::discovery::WorkerSet;
-    use dynamo_llm::worker_type::WorkerType;
+    use dynamo_llm::{discovery::WorkerSet, worker_type::WorkerType};
 
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
@@ -2455,7 +2454,7 @@ async fn assert_pre_commit_disconnect_is_recorded_once(on_kill: OnKill) {
         1,
         "one disconnect must be recorded once"
     );
-    let cancellation_labels = dynamo_llm::http::service::metrics::CancellationLabels {
+    let cancellation_labels = dynamo_http_server::metrics::CancellationLabels {
         model: MODEL.to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: RequestType::Stream.as_str().to_string(),

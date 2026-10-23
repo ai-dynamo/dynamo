@@ -9,22 +9,24 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
-use crate::grpc::service::dispatch_error_status;
-use crate::http::service::metadata::extract_metadata_from_grpc;
-use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
 use crate::types::Annotated;
+use crate::{
+    grpc::service::dispatch_error_status, http::service::metadata::extract_metadata_from_grpc,
+    protocols::openai::ParsingOptions,
+};
 
-use super::kserve;
-use super::kserve::inference;
+use super::kserve::{self, inference};
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
-};
+use crate::http::service::metrics::process_response_and_observe_metrics;
+use dynamo_http_server::disconnect::ConnectionHandle;
+use dynamo_http_server::disconnect::create_connection_monitor;
+use dynamo_http_server::metrics::CancellationLabels;
+use dynamo_http_server::metrics::Endpoint;
+use dynamo_http_server::metrics::InflightGuard;
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::{Status, metadata::MetadataMap};
@@ -118,15 +120,15 @@ pub async fn completion_response_stream(
         // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
         // surfaces' 429: the deadline elapsed waiting for capacity, so it is
         // backpressure rather than a gateway timeout. No rejection accounting.
-        if crate::http::service::metrics::request_deadline_exceeded(e.as_ref()) {
+        if dynamo_http_server::metrics::request_deadline_exceeded(e.as_ref()) {
             return Status::resource_exhausted(
-                crate::http::service::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state.metrics_clone().inc_rejection(
                 &model_name,
-                crate::http::service::metrics::Endpoint::Completions,
+                dynamo_http_server::metrics::Endpoint::Completions,
             );
             return Status::resource_exhausted(e.to_string());
         }

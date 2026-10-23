@@ -2070,6 +2070,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-http-server"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dynamo-runtime",
+ "futures",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [
@@ -2153,6 +2173,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-custom-policy-builtin",
+ "dynamo-http-server",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2172,7 +2193,6 @@ dependencies = [
  "half",
  "hf-hub",
  "http-body-util",
- "hyper-util",
  "image",
  "ipnet",
  "json-five",
@@ -2211,7 +2231,6 @@ dependencies = [
  "tokenizers",
  "tokio",
  "tokio-rayon",
- "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",

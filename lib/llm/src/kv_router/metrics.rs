@@ -48,11 +48,10 @@
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
-use dynamo_runtime::component::Component;
-use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
     frontend_service, kv_publisher, labels, name_prefix, router, router_request, routing_overhead,
 };
+use dynamo_runtime::{component::Component, metrics::MetricsHierarchy};
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
 fn router_metric(suffix: &str) -> String {
@@ -63,13 +62,12 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
-use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
+use dynamo_http_server::metrics::generate_log_buckets;
 
 mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
-use dynamo_kv_router::indexer::ApproximateLruStats;
-use dynamo_kv_router::sequences::LocalWorkerLoad;
+use dynamo_kv_router::{indexer::ApproximateLruStats, sequences::LocalWorkerLoad};
 use worker_registered::RouterWorkerRegistered;
 pub(crate) use worker_registered::{RegistrationAvailabilityProvider, RouterWorkerRegistration};
 

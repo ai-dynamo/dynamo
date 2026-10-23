@@ -8,7 +8,7 @@ pub mod tensor;
 use tonic::Status;
 
 use crate::http::service::error::SanitizedError;
-use crate::http::service::metrics::request_was_unavailable;
+use dynamo_http_server::metrics::request_was_unavailable;
 
 /// Map a dispatch error that is not a client-visible rejection onto its gRPC status.
 ///
