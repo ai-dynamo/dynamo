@@ -33,6 +33,9 @@ const (
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
 	roleLaunchOwnership       roleLaunchOwnership
+	// nativeSidecar selects Dynamo sidecar mode, where complete role templates
+	// own the whole native engine launch, including executor and coordination flags.
+	nativeSidecar bool
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
@@ -56,6 +59,19 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	annotations := GetPodTemplateAnnotations(component)
 
 	if isMultinode {
+		// Sidecar role templates own the native launch, so no flag or env injection
+		// applies. A worker that declares runtime serves its local data-parallel
+		// ranks and keeps its authored engine probes; a compute-only worker has no
+		// engine endpoint to probe.
+		if b.nativeSidecar {
+			if role == RoleWorker && GetDynamoSidecar(component) == nil {
+				container.LivenessProbe = nil
+				container.ReadinessProbe = nil
+				container.StartupProbe = nil
+			}
+			return nil
+		}
+
 		preserveRoleLaunch := b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate
 		launchArgs := parseVLLMLaunchArgs(getExpandedCommandLine(container))
 		roleTemplateMP := preserveRoleLaunch && launchArgs.IsMpDistributedExecutorBackend
