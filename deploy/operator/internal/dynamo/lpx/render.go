@@ -129,7 +129,7 @@ func RenderNodeLocal(
 				RoleName:     conductorTemplateName,
 				PodSpec:      conductorTemplate.Spec,
 				Replicas:     1,
-				MinAvailable: ptr.To(int32(1)),
+				MinAvailable: new(int32(1)),
 				StartsAfter:  agentTemplateNames,
 			},
 		}
@@ -197,7 +197,7 @@ func RenderNodeLocal(
 				RoleName:     agent.TemplateName,
 				PodSpec:      podSpec,
 				Replicas:     replicas,
-				MinAvailable: ptr.To(replicas),
+				MinAvailable: new(replicas),
 			},
 		})
 	}
@@ -225,7 +225,7 @@ func RenderNodeLocal(
 			return nil, err
 		}
 
-		cyborg.Spec.MinAvailable = ptr.To(int32(1))
+		cyborg.Spec.MinAvailable = new(int32(1))
 	}
 
 	// Each workload contributes its own scaling group to the shared PCS.
@@ -237,8 +237,8 @@ func RenderNodeLocal(
 		Name:         plan.ScalingGroupTemplate,
 		CliqueNames:  members,
 		Annotations:  map[string]string{WorkloadDigestAnnotation: workloadDigest},
-		Replicas:     ptr.To(ptr.Deref(input.MinAvailable, 1)),
-		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
+		Replicas:     new(ptr.Deref(input.MinAvailable, 1)),
+		MinAvailable: new(ptr.Deref(input.MinAvailable, 1)),
 	}
 
 	// Keep every LPX role in one backend gang, including the KAI fallback roles.

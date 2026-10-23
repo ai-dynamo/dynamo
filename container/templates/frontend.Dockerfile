@@ -36,6 +36,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             libc6-dev \
             python${PYTHON_VERSION}-dev \
             python${PYTHON_VERSION}-venv \
+        && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
         && apt-get clean \
         && rm -rf /var/lib/apt/lists/*; \
     fi
@@ -49,6 +50,7 @@ FROM ${FRONTEND_IMAGE} AS pre_frontend
 
 ARG PYTHON_VERSION
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends \
@@ -70,8 +72,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
