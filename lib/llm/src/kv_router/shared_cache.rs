@@ -305,7 +305,6 @@ impl HicacheSharedKvCache {
             }
             // N-2: legacy workers without hicache_object_layout may coexist; use the
             // explicit layout, never a guess.
-            // TODO(vX.Y): Remove when workers without hicache_object_layout leave the N-2 window.
             if first.hicache_object_layout.is_some() && config.hicache_object_layout.is_none() {
                 return config.backend != first.backend
                     || config.page_size != first.page_size
