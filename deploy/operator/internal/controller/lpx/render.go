@@ -103,7 +103,7 @@ func (r *graphReconciler) resolveWorkloads(
 }
 
 // renderPodCliqueSet composes resolved workloads into one Grove envelope with
-// runtime ConfigMaps and, for Kubernetes discovery, serving Services.
+// serving Services for Kubernetes discovery. Topology is read directly from DWM.
 // Inputs must be non-nil except existingPCS, which is nil during creation.
 // Workloads must contain every component group.
 // Plans must have finalized names and use the same keys as workloads.
@@ -158,7 +158,6 @@ func (r *graphReconciler) renderPodCliqueSet(
 		// Keep workload templates in canonical component order.
 		pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, rendered.Cliques...)
 		pcs.Spec.Template.PodCliqueScalingGroupConfigs = append(pcs.Spec.Template.PodCliqueScalingGroupConfigs, rendered.ScalingGroup)
-		resources = append(resources, rendered.Resources...)
 
 		// Kubernetes discovery exposes only this workload's serving role within its PCS.
 		if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dgd.Annotations) {
@@ -176,6 +175,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 			service.Spec.Selector[dynamo.LPXServingLabel] = consts.KubeLabelValueTrue
 			service.Spec.Selector[grovecommon.LabelPartOfKey] = pcs.Name
 			resources = append(resources, service)
+
 		}
 
 	}

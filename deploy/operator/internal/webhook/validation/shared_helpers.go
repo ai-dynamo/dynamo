@@ -46,6 +46,10 @@ const (
 	vllmDistributedExecutorBackendRay = "ray"
 
 	runtimeVersionOverrideRequiredMessage = "is required when the specified Dynamo runtime container image has no parseable semantic-version tag"
+
+	// lpxTopologyKubeDiscoveryModeMessage rejects container mode for LPX topology roles: their readers join the
+	// Agent leader's registration through a Service's EndpointSlices, which only pod mode watches.
+	lpxTopologyKubeDiscoveryModeMessage = `must be "pod" when an LPX component's agent and conductor roles declare the "runtime" sidecar for topology discovery`
 )
 
 // runtimeVersionValidationSource identifies the API representation whose field

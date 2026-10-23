@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,8 +24,10 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
@@ -82,6 +85,8 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 		"from_dgd_yaml/single_v2",
 		"from_dgd_yaml/lpu-cyborg-specdec",
 		"from_dgd_yaml/lpu-gpu-specdecode",
+		"from_dgd_yaml/node-local-v2-hybrid-topology",
+		"from_dgd_yaml/node-local-v3-hx-hybrid-topology",
 	}
 
 	for _, name := range tests {
@@ -113,8 +118,15 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 				require.NotNil(t, component)
 				require.True(t, component.IsLPX())
 				require.Equal(t, servingHash, clique.Labels[consts.KubeLabelDynamoWorkerHash])
+				namespace := dynamoDeployment.GetDynamoNamespaceForComponent(component)
+				// A native sidecar owns the runtime namespace and keeps the serving suffix separate.
+				if runtime := common.FindContainerByName(clique.Spec.PodSpec.InitContainers, consts.RuntimeContainerName); runtime != nil {
+					require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: servingHash})
+					require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: namespace})
+					continue
+				}
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar})
-				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: dynamoDeployment.GetDynamoNamespaceForComponent(component) + "-" + servingHash})
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: namespace + "-" + servingHash})
 			}
 
 			t.Log("Render ordinary components independently from their explicit selection")
@@ -146,6 +158,10 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 						continue
 					}
 					delete(clique.Labels, consts.KubeLabelDynamoWorkerHash)
+					if runtime := common.FindContainerByName(clique.Spec.PodSpec.InitContainers, consts.RuntimeContainerName); runtime != nil {
+						runtime.Env = slices.DeleteFunc(runtime.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceWorkerSuffixEnvVar })
+						continue
+					}
 					container := &clique.Spec.PodSpec.Containers[0]
 					container.Env = slices.DeleteFunc(container.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceWorkerSuffixEnvVar })
 					index := slices.IndexFunc(container.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceEnvVar })
@@ -367,7 +383,7 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 			require.NoError(t, err)
 			before := dgd.DeepCopy()
 
-			t.Log("Render ConfigMaps and optional Services without writing resources or mutating the DGD")
+			t.Log("Render optional Services without writing resources or mutating the DGD")
 			pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 			require.NoError(t, err)
 			require.Equal(t, before, dgd)
@@ -380,7 +396,16 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 					configMapCount++
 				}
 			}
-			require.Positive(t, configMapCount)
+			require.Zero(t, configMapCount)
+
+			t.Log("Kubernetes discovery runs every LPX Pod, Agents included, under the DGD's discovery ServiceAccount")
+			for _, clique := range pcs.Spec.Template.Cliques {
+				if tc.wantServices {
+					require.Equal(t, discovery.GetK8sDiscoveryServiceAccountName(dgd.Name), clique.Spec.PodSpec.ServiceAccountName, clique.Name)
+				} else {
+					require.Empty(t, clique.Spec.PodSpec.ServiceAccountName, clique.Name)
+				}
+			}
 			if !tc.wantServices {
 				require.Zero(t, serviceCount)
 				return
@@ -431,6 +456,100 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 					grovecommon.LabelPartOfKey:          pcs.Name,
 				}, service.Spec.Selector)
 			}
+		})
+	}
+}
+
+func TestLPXTopologyDiscoveryRendering(t *testing.T) {
+	const discoveryErr = `component "lpu" declares the LPX topology roles, which require Kubernetes discovery in pod mode`
+	for _, tc := range []struct {
+		name         string
+		annotations  map[string]string
+		roleMode     string
+		allLocal     bool
+		wantTopology bool
+		wantErr      string
+	}{
+		{name: "Kubernetes pod discovery publishes from Agent Pod 0", annotations: map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}, wantTopology: true},
+		{name: "every partition local leaves no publisher", annotations: map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}, allLocal: true},
+		{name: "graph container discovery mode is rejected", annotations: map[string]string{
+			consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes", consts.KubeAnnotationDynamoKubeDiscoveryMode: "container",
+		}, wantErr: discoveryErr},
+		{name: "role container discovery mode is rejected", annotations: map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes"}, roleMode: "container", wantErr: discoveryErr},
+		{name: "etcd discovery is rejected", annotations: map[string]string{consts.KubeAnnotationDynamoDiscoveryBackend: "etcd"}, wantErr: discoveryErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Load a hybrid graph whose agent and conductor both declare the runtime sidecar")
+			dgd := loadLPXInput(t, "node-local-v2-hybrid-topology")
+			dgd.Annotations = tc.annotations
+			component := dgd.GetComponentByName("lpu")
+			if tc.roleMode != "" {
+				component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: tc.roleMode}
+			}
+			if tc.allLocal {
+				component.LPX.Experimental = &v1beta1.LPXExperimentalSpec{LocalPartitions: &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll}}
+			}
+			r := &graphReconciler{
+				Client: newLPXGPUClient(t), config: &configv1alpha1.OperatorConfiguration{}, runtimeConfig: &commoncontroller.RuntimeConfig{},
+				modelRegistry: newTestDataModelRegistry(t, t.TempDir()),
+			}
+			child := newLPXRenderDeployment(t, dgd)
+			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
+			require.NoError(t, err)
+
+			t.Log("The publisher adds no engine: the conductor's component is the only workload")
+			require.Equal(t, map[string][]string{"lpu": {"lpu"}}, lpx.ComponentGroups(dgd))
+			plan := plans["lpu"]
+			require.Equal(t, "cond", plan.CyborgTemplate)
+
+			t.Log("Render the PCS and its Services")
+			pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			services := map[string]*corev1.Service{}
+			for _, resource := range resources {
+				if service, ok := resource.(*corev1.Service); ok {
+					services[service.Name] = service
+				}
+			}
+			cliques := map[string]*grovev1alpha1.PodCliqueTemplateSpec{}
+			for _, clique := range pcs.Spec.Template.Cliques {
+				cliques[clique.Name] = clique
+			}
+			cyborg := cliques["cond"]
+			require.Equal(t, consts.KubeLabelValueTrue, cyborg.Labels[dynamo.LPXServingLabel])
+			if !tc.wantTopology {
+				t.Log("Without Agents, Cyborg needs no topology and only the serving Service exists")
+				require.NotContains(t, cliques, "agt")
+				require.Equal(t, []string{plan.ResourcePrefix + "-serve"}, slices.Collect(maps.Keys(services)))
+				for _, container := range append(cyborg.Spec.PodSpec.Containers, cyborg.Spec.PodSpec.InitContainers...) {
+					require.False(t, slices.ContainsFunc(container.Env, func(env corev1.EnvVar) bool {
+						return env.Name == "LPX_DEPLOYMENT" || env.Name == "DYN_LPX_TOPOLOGY_ROLE" || env.Name == "CYBORG_LPU_TOPOLOGY_SOCKET"
+					}), container.Name)
+				}
+				require.False(t, slices.ContainsFunc(cyborg.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == "lpx-topology" }))
+				return
+			}
+
+			t.Log("Both topology roles run under the discovery ServiceAccount; the Agent stays non-serving and undiscoverable itself")
+			agent := cliques["agt"]
+			for _, clique := range []*grovev1alpha1.PodCliqueTemplateSpec{agent, cyborg} {
+				require.Equal(t, discovery.GetK8sDiscoveryServiceAccountName(dgd.Name), clique.Spec.PodSpec.ServiceAccountName, clique.Name)
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: "LPX_DEPLOYMENT", Value: string(dgd.UID)})
+			}
+			require.NotContains(t, agent.Labels, dynamo.LPXServingLabel)
+			require.NotContains(t, agent.Labels, consts.KubeLabelDynamoDiscoveryEnabled)
+
+			t.Log("Only the ordinary readiness-gated inference Service is rendered")
+			require.Len(t, services, 1)
+			serve := services[plan.ResourcePrefix+"-serve"]
+			require.NotNil(t, serve)
+			require.False(t, serve.Spec.PublishNotReadyAddresses)
+			require.False(t, labels.SelectorFromSet(serve.Spec.Selector).Matches(labels.Set(agent.Labels)))
+
 		})
 	}
 }
@@ -765,9 +884,6 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 			require.Equal(t, "independent-conductor-runtime", container.Image)
 			require.Equal(t, []string{"/bin/nova"}, container.Command)
 			require.NotContains(t, container.Args, "--datacenter-config-filepath")
-			require.Contains(t, container.Env, corev1.EnvVar{
-				Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}",
-			})
 			require.Equal(t, "explicit-conductor", clique.Labels["owner"])
 			require.Equal(t, template.Spec.NodeSelector, clique.Spec.PodSpec.NodeSelector)
 			require.Equal(t, template.Spec.Affinity, clique.Spec.PodSpec.Affinity)
@@ -785,7 +901,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 	require.Equal(t, before, dgd)
 }
 
-func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
+func TestRuntimeTemplateChangesPreservePartitionSelection(t *testing.T) {
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
 		Orchestrators: configv1alpha1.OrchestratorConfiguration{
 			Grove: configv1alpha1.GroveConfiguration{TerminationDelay: metav1.Duration{Duration: 15 * time.Minute}},
@@ -798,7 +914,6 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Render runtime overrides supplied directly by the conductor template")
-	var partitionData map[string]string
 	for _, env := range []corev1.EnvVar{
 		{Name: "NOVA_BATCH_SIZE", Value: "1"},
 		{Name: "NOVA_SEQUENCE_LENGTH", Value: "65536"},
@@ -821,24 +936,17 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 		pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, &deployment, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
 		require.NoError(t, err)
 
-		t.Log("Keep authored environment values without changing shared partition files")
-		var hash string
+		t.Log("Keep authored environment values without changing selected partitions")
 		for _, clique := range pcs.Spec.Template.Cliques {
 			if clique.Name == plan.ConductorTemplate {
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: filepath.Join("/nfs", buildID)})
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, env)
-				hash = clique.Annotations[v1alpha1.AnnotationExtraResourcesHash]
+				require.False(t, slices.ContainsFunc(clique.Spec.PodSpec.Containers[0].Env, func(variable corev1.EnvVar) bool {
+					return variable.Name == "NOVA_REMOTE_PARTITION_IDS"
+				}), "authored runtime options do not replace manifest placement")
 			}
 		}
-		require.NotEmpty(t, hash)
-		configMap := getResource[*corev1.ConfigMap](t, resources, fmt.Sprintf("%s-lpu-%.16s", dynamo.PCSNameForLPX(child), hash))
-		require.NotContains(t, configMap.Data, "model_config.toml")
-		require.NotContains(t, configMap.Data, "datacenter.toml")
-		if partitionData == nil {
-			partitionData = configMap.Data
-		} else {
-			require.Equal(t, partitionData, configMap.Data)
-		}
+		require.Empty(t, resources)
 	}
 }
 

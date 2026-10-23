@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -203,6 +204,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		field.NewPath("metadata"),
 		hasIntraPodFailover(&dgd.Spec),
 		dgd.HasLPXComponent(),
+		lpxTopologyRoleInheritsKubeDiscoveryMode(&dgd.Spec),
 	)...)
 
 	// Validate desired strategy intent; admission has no observed PCS rollout state.
@@ -254,11 +256,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 }
 
 // validateObjectMeta validates DGD objectMeta. objectMeta and fldPath must not be nil.
+// lpxTopologyInheritsDiscoveryMode reports an LPX topology role that takes its
+// Kubernetes discovery mode from these annotations.
 func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	objectMeta *metav1.ObjectMeta,
 	fldPath *field.Path,
 	hasIntraPodFailover bool,
 	hasLPXComponent bool,
+	lpxTopologyInheritsDiscoveryMode bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
@@ -299,6 +304,14 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
 			value,
 			[]string{"pod", "container"},
+		))
+	}
+	if mode := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; lpxTopologyInheritsDiscoveryMode &&
+		mode == string(configv1alpha1.KubeDiscoveryModeContainer) {
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
+			mode,
+			lpxTopologyKubeDiscoveryModeMessage,
 		))
 	}
 	// Restrict the durable workload provider to programs implemented by the controller.

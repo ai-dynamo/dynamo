@@ -29,14 +29,27 @@ func Components(dgd *dynamov1beta1.DynamoGraphDeployment) []*dynamov1beta1.Dynam
 }
 
 // RuntimeSidecarRole names the role whose Pods host component's engine, and so
-// the only role whose template may declare the Dynamo runtime sidecar, the init
-// container named "runtime": the conductor role when component declares one,
-// otherwise the agent role. component must be non-nil.
+// the role whose Dynamo runtime sidecar, the init container named "runtime",
+// serves it: the conductor role when component declares one, otherwise the
+// agent role. Beside a conductor that declares the sidecar, the agent role may
+// declare one too, only to publish topology; see PublishesTopology. component
+// must be non-nil.
 func RuntimeSidecarRole(component *dynamov1beta1.DynamoComponentDeploymentSharedSpec) string {
 	if component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil {
 		return dynamov1beta1.ComponentRoleLPXConductor
 	}
 	return dynamov1beta1.ComponentRoleLPXAgent
+}
+
+// roleRuntimeSidecar returns the "runtime" init container of the named role's
+// template, or nil when component lacks the role, its template, or the sidecar.
+// component must be non-nil; the result points into component.
+func roleRuntimeSidecar(component *dynamov1beta1.DynamoComponentDeploymentSharedSpec, name string) *corev1.Container {
+	role := component.ComponentRole(name)
+	if role == nil || role.PodTemplate == nil {
+		return nil
+	}
+	return common.FindContainerByName(role.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName)
 }
 
 // agentRuntimeSidecar returns the runtime sidecar through which component serves
@@ -45,11 +58,30 @@ func RuntimeSidecarRole(component *dynamov1beta1.DynamoComponentDeploymentShared
 // conductor role or its agent template declares no runtime sidecar. component
 // must be non-nil; the result points into component.
 func agentRuntimeSidecar(component *dynamov1beta1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
-	agent := component.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent)
-	if RuntimeSidecarRole(component) != dynamov1beta1.ComponentRoleLPXAgent || agent == nil || agent.PodTemplate == nil {
+	if RuntimeSidecarRole(component) != dynamov1beta1.ComponentRoleLPXAgent {
 		return nil
 	}
-	return common.FindContainerByName(agent.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName)
+	return roleRuntimeSidecar(component, dynamov1beta1.ComponentRoleLPXAgent)
+}
+
+// PublishesTopology reports whether component declares the LPX topology roles:
+// its conductor and agent role templates both declare the "runtime" sidecar.
+// The conductor's sidecar still fronts the engine; the agent's sidecar only
+// publishes the topology of the Agent allocation and never serves an endpoint,
+// so it changes neither ServesEndpoint nor ComponentGroups. Reconciliation
+// accepts the pair only for a hybrid build. component must be non-nil.
+func PublishesTopology(component *dynamov1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return roleRuntimeSidecar(component, dynamov1beta1.ComponentRoleLPXConductor) != nil &&
+		roleRuntimeSidecar(component, dynamov1beta1.ComponentRoleLPXAgent) != nil
+}
+
+// RuntimeSidecarPermitted reports whether the named role of component may
+// declare the Dynamo "runtime" sidecar: the role that hosts the engine, or the
+// agent role beside a conductor that declares one, to publish topology.
+// component must be non-nil.
+func RuntimeSidecarPermitted(component *dynamov1beta1.DynamoComponentDeploymentSharedSpec, role string) bool {
+	return role == RuntimeSidecarRole(component) ||
+		role == dynamov1beta1.ComponentRoleLPXAgent && PublishesTopology(component)
 }
 
 // ServesEndpoint reports whether component serves its own endpoint, through a

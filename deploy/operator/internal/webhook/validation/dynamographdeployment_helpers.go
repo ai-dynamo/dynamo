@@ -29,6 +29,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -218,6 +219,23 @@ func hasIntraPodFailover(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) bool 
 		failover := failoverFor(&spec.Components[i])
 		if failover != nil && effectiveGMSMode(failover.Mode) == nvidiacomv1beta1.GMSModeIntraPod {
 			return true
+		}
+	}
+	return false
+}
+
+// lpxTopologyRoleInheritsKubeDiscoveryMode reports whether an LPX component declares the topology roles
+// with a role template that sets no Kubernetes discovery mode, so the graph's annotation selects its mode.
+func lpxTopologyRoleInheritsKubeDiscoveryMode(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) bool {
+	for i := range spec.Components {
+		component := &spec.Components[i]
+		if !component.IsLPX() || !dynamolpx.PublishesTopology(component) {
+			continue
+		}
+		for _, name := range []string{nvidiacomv1beta1.ComponentRoleLPXAgent, nvidiacomv1beta1.ComponentRoleLPXConductor} {
+			if _, set := component.ComponentRole(name).PodTemplate.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; !set {
+				return true
+			}
 		}
 	}
 	return false

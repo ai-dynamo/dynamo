@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -680,10 +681,11 @@ func (v *sharedValidation) validateComponentRoleSpec(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	// Only the LPX role whose Pods host the engine may run the Dynamo sidecar; reconciliation checks the build.
+	// Only the LPX role whose Pods host the engine may run the Dynamo sidecar, and beside a conductor
+	// that runs one, the agent role to publish topology; reconciliation checks the build.
 	if role.PodTemplate != nil {
 		lpx := options.component != nil && options.component.IsLPX()
-		hostsEngine := lpx && role.Name == dynamolpx.RuntimeSidecarRole(options.component)
+		permitted := lpx && dynamolpx.RuntimeSidecarPermitted(options.component, role.Name)
 		for i := range role.PodTemplate.Spec.InitContainers {
 			container := &role.PodTemplate.Spec.InitContainers[i]
 			if container.Name != consts.RuntimeContainerName {
@@ -692,10 +694,10 @@ func (v *sharedValidation) validateComponentRoleSpec(
 			runtimePath := fldPath.Child("podTemplate", "spec", "initContainers").Index(i)
 
 			// Only LPX authors have a role that may host the sidecar, so only they are pointed to it.
-			if !hostsEngine {
+			if !permitted {
 				detail := "Dynamo sidecar mode is not supported in multinode or LPX role pod templates"
 				if lpx {
-					detail = "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
+					detail = "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role; beside a conductor that declares it, the agent role may declare it to publish a hybrid build's topology"
 				}
 				allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), detail))
 				continue
@@ -707,6 +709,16 @@ func (v *sharedValidation) validateComponentRoleSpec(
 					"must be Always for the LPX runtime init container",
 				))
 			}
+		}
+
+		// Both topology roles need pod-mode discovery; a role template's annotation overrides the graph's mode.
+		mode := role.PodTemplate.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]
+		if lpx && dynamolpx.PublishesTopology(options.component) && mode == string(configv1alpha1.KubeDiscoveryModeContainer) {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
+				mode,
+				lpxTopologyKubeDiscoveryModeMessage,
+			))
 		}
 	}
 

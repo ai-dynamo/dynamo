@@ -158,6 +158,16 @@ func validateWorkloadConductor(
 	pipeline Pipeline,
 	requiresGPU bool,
 ) error {
+	// Beside a conductor, an Agent runs the Dynamo sidecar only to publish a hybrid build's topology.
+	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
+	if conductor != nil && roleRuntimeSidecar(component, dynamov1beta1.ComponentRoleLPXAgent) != nil &&
+		(pipeline != PipelineHybrid || !PublishesTopology(component)) {
+		return fmt.Errorf(
+			"%w: component %q agent %q sidecar publishes topology only for a hybrid build whose conductor declares the %q sidecar",
+			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName, commonconsts.RuntimeContainerName,
+		)
+	}
+
 	// Only an LPU-only single model's engine runs in the Agent Pods with its runtime sidecar.
 	if agentRuntimeSidecar(component) != nil && pipeline != PipelineSingle {
 		return fmt.Errorf(
@@ -166,7 +176,6 @@ func validateWorkloadConductor(
 		)
 	}
 
-	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
 	// A shared draft and target pair's conductor serves the pair itself, whatever the build.
 	if pipeline == PipelineSpecDecode && conductor != nil &&
 		common.FindContainerByName(conductor.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {

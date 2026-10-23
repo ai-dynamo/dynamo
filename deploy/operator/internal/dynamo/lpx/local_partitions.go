@@ -81,23 +81,18 @@ func selectRemotePartitions(
 	return remote, slices.Sorted(maps.Keys(local)), nil
 }
 
-// applyLocalPartitionIDs publishes the projection's GPU-local partitions into one
-// Cyborg container. The operator owns the variable: it removes any authored value
-// and sets it when the projection has local partitions. Without local partitions,
-// it sets an empty value only when envFrom sources could otherwise supply one;
-// Cyborg treats an empty value as no selection.
+// applyLocalPartitionIDs publishes the same GPU-local selection to Cyborg and Hydra.
+// An empty value authoritatively keeps every manifest runtime partition on LPUs,
+// overriding authored values and bypassing the older operator's ConfigMap adapter.
 func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection) {
 	ids := make([]string, len(projection.localPartitionIDs))
 	for index, id := range projection.localPartitionIDs {
 		ids[index] = strconv.Itoa(id)
 	}
-	publish := len(ids) > 0 || len(container.EnvFrom) > 0
 
 	// Kubernetes expands environment references in order; publish the selection before authored bindings.
 	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
-	if publish {
-		env = append(env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
-	}
+	env = append(env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
 	for _, variable := range container.Env {
 		if variable.Name != localPartitionIDsEnv {
 			env = append(env, variable)

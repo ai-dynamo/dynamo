@@ -512,33 +512,53 @@ func TestResolveWorkloadPlacesRuntimeSidecarWithTheEngine(t *testing.T) {
 		"hybrid":       acquireHybridTestSnapshot(t),
 	}
 
-	t.Log("Cover the multi-Pod agent placement and the builds whose engine runs elsewhere")
+	t.Log("Cover the multi-Pod agent placement, the builds whose engine runs elsewhere, and hybrid topology publishers")
+	const (
+		agentSidecar     = "agent"
+		conductorSidecar = "conductor"
+		topologySidecars = "agent and conductor"
+		agentBeside      = "agent beside a conductor without one"
+	)
 	for _, test := range []struct {
-		name        string
-		build       string
-		sidecarRole string
-		wantAgents  int
-		wantErr     string
+		name       string
+		build      string
+		sidecars   string
+		wantAgents int
+		wantCyborg bool
+		wantErr    string
 	}{
-		{name: "agent sidecar serves a multi-Pod XT build", build: "multi-pod-xt", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 4},
-		{name: "agent sidecar serves a multi-Pod HX build", build: "multi-pod-hx", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 2},
-		{name: "agent sidecar rejects a hybrid build", build: "hybrid", sidecarRole: v1beta1.ComponentRoleLPXAgent,
+		{name: "agent sidecar serves a multi-Pod XT build", build: "multi-pod-xt", sidecars: agentSidecar, wantAgents: 4},
+		{name: "agent sidecar serves a multi-Pod HX build", build: "multi-pod-hx", sidecars: agentSidecar, wantAgents: 2},
+		{name: "agent sidecar rejects a hybrid build", build: "hybrid", sidecars: agentSidecar,
 			wantErr: `component "lpx" agent "runtime" sidecar requires an LPU-only single-model build; declare the conductor role instead`},
-		{name: "conductor sidecar rejects an LPU-only build", build: "hx", sidecarRole: v1beta1.ComponentRoleLPXConductor,
+		{name: "conductor sidecar rejects an LPU-only build", build: "hx", sidecars: conductorSidecar,
 			wantErr: `component "lpx" conductor Dynamo sidecar mode requires a hybrid build whose conductor runs the GPU engine`},
+		{name: "agent and conductor sidecars publish a hybrid build's topology", build: "hybrid", sidecars: topologySidecars, wantAgents: 4, wantCyborg: true},
+		{name: "agent and conductor sidecars reject an LPU-only build", build: "multi-pod-xt", sidecars: topologySidecars,
+			wantErr: `component "lpx" agent "runtime" sidecar publishes topology only for a hybrid build whose conductor declares the "runtime" sidecar`},
+		{name: "agent sidecar beside a conductor without one", build: "hybrid", sidecars: agentBeside,
+			wantErr: `component "lpx" agent "runtime" sidecar publishes topology only for a hybrid build whose conductor declares the "runtime" sidecar`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Author the runtime sidecar, behind a setup init container, in the selected role")
+			t.Log("Author the runtime sidecar, behind a setup init container, in the selected roles")
 			agent, conductor := testLPXPodTemplate("agent"), testLPXPodTemplate("conductor")
+			conductor.Spec.Containers[0].Resources.Limits = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}
 			roles := []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: agent}}
-			sidecarTemplate := agent
-			if test.sidecarRole == v1beta1.ComponentRoleLPXConductor {
-				roles = append(roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor})
-				sidecarTemplate = conductor
+			sidecarTemplates := []*corev1.PodTemplateSpec{agent}
+			switch test.sidecars {
+			case conductorSidecar:
+				sidecarTemplates = []*corev1.PodTemplateSpec{conductor}
+			case topologySidecars:
+				sidecarTemplates = append(sidecarTemplates, conductor)
 			}
-			sidecarTemplate.Spec.InitContainers = []corev1.Container{
-				{Name: "setup", Image: "setup"},
-				{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+			if test.sidecars != agentSidecar {
+				roles = append(roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor})
+			}
+			for _, template := range sidecarTemplates {
+				template.Spec.InitContainers = []corev1.Container{
+					{Name: "setup", Image: "setup"},
+					{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+				}
 			}
 			dgd := newSelectedTestDGD(t, "selected", testLPXComponent("lpx", "build", roles...))
 			before := dgd.DeepCopy()
@@ -553,10 +573,11 @@ func TestResolveWorkloadPlacesRuntimeSidecarWithTheEngine(t *testing.T) {
 			}
 			require.NoError(t, err)
 
-			t.Log("Serve from every Agent Pod the build places")
+			t.Log("Serve from every Agent Pod the build places, or from the Cyborg beside the publishing Agents")
 			plan, err := workload.PlanNodeLocalMaterialization("pcs", dgd.GetComponentByName(workload.ServingComponentName()))
 			require.NoError(t, err)
 			require.Empty(t, plan.ConductorTemplate)
+			require.Equal(t, test.wantCyborg, plan.CyborgTemplate != "")
 			require.Equal(t, []ExpectedAgent{{TemplateName: "agt", Replicas: test.wantAgents}}, plan.Agents)
 		})
 	}

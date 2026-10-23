@@ -70,6 +70,7 @@ func TestComponentGroups(t *testing.T) {
 	const (
 		conductor = "conductor"
 		sidecar   = "agent runtime sidecar"
+		topology  = "agent and conductor runtime sidecars"
 		draft     = "draft"
 	)
 	for _, test := range []struct {
@@ -84,6 +85,8 @@ func TestComponentGroups(t *testing.T) {
 		{name: "shared conductor first", serving: []string{conductor, draft}, want: map[string][]string{"component-0": {"component-0", "component-1"}}},
 		{name: "shared conductor last", serving: []string{draft, conductor}, want: map[string][]string{"component-1": {"component-0", "component-1"}}},
 		{name: "agent runtime sidecar beside a conductor workload", serving: []string{sidecar, conductor}, want: map[string][]string{"component-0": {"component-0"}, "component-1": {"component-1"}}},
+		{name: "topology publisher beside a conductor workload", serving: []string{topology, conductor}, want: map[string][]string{"component-0": {"component-0"}, "component-1": {"component-1"}}},
+		{name: "topology publisher beside a shared draft", serving: []string{draft, topology}, want: map[string][]string{"component-1": {"component-0", "component-1"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Author LPX members beside an ordinary frontend")
@@ -96,6 +99,11 @@ func TestComponentGroups(t *testing.T) {
 					component.Roles = append(component.Roles, dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor")})
 				case sidecar:
 					agent.Spec.InitContainers = []corev1.Container{{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}}
+				case topology:
+					conductorTemplate := testLPXPodTemplate("conductor")
+					conductorTemplate.Spec.InitContainers = []corev1.Container{{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}}
+					agent.Spec.InitContainers = []corev1.Container{{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}}
+					component.Roles = append(component.Roles, dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor, PodTemplate: conductorTemplate})
 				}
 				dgd.Spec.Components = append(dgd.Spec.Components, component)
 			}
@@ -108,6 +116,46 @@ func TestComponentGroups(t *testing.T) {
 			t.Log("Reordering authored components preserves group identity and membership")
 			slices.Reverse(dgd.Spec.Components)
 			require.Equal(t, test.want, ComponentGroups(dgd))
+		})
+	}
+}
+
+func TestPublishesTopology(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		agentSidecar     bool
+		conductor        bool
+		conductorSidecar bool
+		wantTopology     bool
+	}{
+		{name: "agent and conductor sidecars", agentSidecar: true, conductor: true, conductorSidecar: true, wantTopology: true},
+		{name: "conductor sidecar only", conductor: true, conductorSidecar: true},
+		{name: "agent sidecar beside a conductor without one", agentSidecar: true, conductor: true},
+		{name: "agent sidecar hosting the engine without a conductor", agentSidecar: true},
+		{name: "no sidecars", conductor: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Author the selected roles and runtime sidecars")
+			sidecar := []corev1.Container{{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}}
+			agent := testLPXPodTemplate("agent")
+			if test.agentSidecar {
+				agent.Spec.InitContainers = sidecar
+			}
+			component := testLPXComponent("lpx", "build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: agent})
+			if test.conductor {
+				conductor := testLPXPodTemplate("conductor")
+				if test.conductorSidecar {
+					conductor.Spec.InitContainers = sidecar
+				}
+				component.Roles = append(component.Roles, dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor, PodTemplate: conductor})
+			}
+
+			t.Log("Only an agent sidecar beside a conductor sidecar publishes topology; it never adds an endpoint")
+			require.Equal(t, test.wantTopology, PublishesTopology(&component))
+			require.True(t, ServesEndpoint(&component))
+			if test.conductor {
+				require.Equal(t, dynamov1beta1.ComponentRoleLPXConductor, RuntimeSidecarRole(&component))
+			}
 		})
 	}
 }
