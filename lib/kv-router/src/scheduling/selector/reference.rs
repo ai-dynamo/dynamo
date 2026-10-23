@@ -11,9 +11,10 @@ use parking_lot::Mutex;
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
     CandidateData, MaterializedSelectionInput, WorkerInputs, WorkerSelectionContext,
-    WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
+    WorkerSelectionInput, WorkerSelector, select_worker_with_policy, source_prefix_blocks,
 };
 use crate::kv_hints::KvTransferScope;
+use crate::plugins::worker_selection::WorkerTransferInput;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
@@ -284,9 +285,32 @@ fn default_row<C: WorkerConfigLike>(
     );
     // Like the builtin scorer, read fetchable prefixes only when they earn credit.
     if context.weights.shared_cache_multiplier != 0.0 {
-        row.transfer = input.kv_transfer_input(worker, config);
+        row.transfer = kv_transfer_input(input, worker, config);
     }
     row
+}
+
+/// A row's fetch input from the sources [`pick_default_worker`] built before scoring.
+fn kv_transfer_input<C: WorkerConfigLike>(
+    input: &MaterializedSelectionInput<'_>,
+    worker: WorkerWithDpRank,
+    config: &C,
+) -> Option<WorkerTransferInput> {
+    if !input.has_kv_transfer_candidates {
+        return None;
+    }
+    let local_prefix_blocks = input.request.transfer_local_prefix_blocks_for(worker);
+    let source = input.kv_transfer_sources.get().and_then(|sources| {
+        sources.source_for(
+            worker,
+            config.kv_transfer_keys().target()?,
+            local_prefix_blocks as usize,
+        )
+    });
+    Some(WorkerTransferInput {
+        local_prefix_blocks,
+        source_prefix_blocks: source.map(source_prefix_blocks),
+    })
 }
 
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {

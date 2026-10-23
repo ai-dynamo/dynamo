@@ -220,32 +220,6 @@ impl<'a> MaterializedSelectionInput<'a> {
         )
     }
 
-    /// A row's fetch input from sources already built. Rows that scorers read
-    /// are filled after they are all built by [`Self::fill_kv_transfer_sources`]
-    /// instead, and rows nothing reads keep `None`, so building rows costs the
-    /// same as without fetch inputs.
-    fn kv_transfer_input<C: WorkerConfigLike>(
-        &self,
-        worker: WorkerWithDpRank,
-        config: &C,
-    ) -> Option<WorkerTransferInput> {
-        if !self.has_kv_transfer_candidates {
-            return None;
-        }
-        let local_prefix_blocks = self.request.transfer_local_prefix_blocks_for(worker);
-        let source = self.kv_transfer_sources.get().and_then(|sources| {
-            sources.source_for(
-                worker,
-                config.kv_transfer_keys().target()?,
-                local_prefix_blocks as usize,
-            )
-        });
-        Some(WorkerTransferInput {
-            local_prefix_blocks,
-            source_prefix_blocks: source.map(source_prefix_blocks),
-        })
-    }
-
     /// Fill every row's fetch input once all rows are built, so the sources
     /// skip anything shorter than the shortest local prefix. `targets` is
     /// index-aligned with `rows`.

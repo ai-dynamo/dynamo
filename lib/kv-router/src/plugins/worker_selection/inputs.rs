@@ -59,10 +59,10 @@ impl<'a> WorkerCandidate<'a> {
             .then_some(&self.data.load)
     }
 
-    /// The KV prefix this worker could fetch, only when this component declared
-    /// KV_TRANSFER. None also means the host has no transfer data for this
-    /// request: no worker in the partition consumes router hints, or the indexer
-    /// cannot retain the matched block chain.
+    /// The KV prefix this worker could fetch, only for a scorer that declared
+    /// KV_TRANSFER; filters and pickers do not receive it. None also means the
+    /// host has no transfer data for this request: no worker in the partition
+    /// consumes router hints, or the indexer cannot retain the matched block chain.
     pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
         if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
             self.data.transfer
@@ -285,15 +285,8 @@ impl CandidateData {
             } else {
                 WorkerLoadInput::default()
             },
-            transfer: if inputs.contains(WorkerInputs::KV_TRANSFER) {
-                if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
-                    self.transfer
-                } else {
-                    additional.transfer
-                }
-            } else {
-                None
-            },
+            // Filled for scorers once every row is built.
+            transfer: None,
             preferred_taint_multiplier: self
                 .preferred_taint_multiplier
                 .or(additional.preferred_taint_multiplier),
