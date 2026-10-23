@@ -175,7 +175,10 @@ impl OpenAIPreprocessor {
                 if let ToolChoiceGuidance::Json(schema) = &guidance
                     && self.runtime_config.structural_tag.is_some()
                     && super::structural_tag::uses_gpt_oss_required_array(
-                        self.tool_call_parser.as_deref(),
+                        (
+                            self.tool_call_parser.as_deref(),
+                            self.runtime_config.reasoning_parser.as_deref(),
+                        ),
                         &parser_tool_choice,
                         request.inner.parallel_tool_calls,
                     )

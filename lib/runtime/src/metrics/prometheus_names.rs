@@ -187,6 +187,13 @@ pub mod frontend_service {
     /// Total number of LLM requests accepted by the frontend handler
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
 
+    /// Admitted requests that have not produced an output token.
+    pub const AWAITING_FIRST_TOKEN_REQUESTS: &str = "awaiting_first_token_requests";
+    /// Known prompt tokens in inflight requests, labeled by state.
+    pub const INFLIGHT_INPUT_TOKENS: &str = "inflight_input_tokens";
+    /// Total known input tokens of admitted requests.
+    pub const INPUT_TOKENS_TOTAL: &str = "input_tokens_total";
+
     /// Total number of terminal semantic request failures.
     pub const FAILURES_TOTAL: &str = "failures_total";
 

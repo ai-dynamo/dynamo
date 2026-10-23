@@ -4,11 +4,11 @@
 use std::collections::{HashMap, HashSet};
 use std::env::var;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -47,7 +47,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{
+    DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MetricsConfig,
+};
 use crate::local_model::runtime_config::{
     SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
 };
@@ -742,6 +744,14 @@ pub struct HttpService {
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
+    frontend_load_target: Option<FrontendLoadTarget>,
+}
+
+/// Where this service publishes frontend load.
+#[derive(Clone)]
+struct FrontendLoadTarget {
+    runtime: DistributedRuntime,
+    namespace: String,
 }
 
 #[derive(Clone, Builder)]
@@ -846,9 +856,15 @@ pub struct HttpServiceConfig {
     #[builder(default = "default_rl_port()")]
     rl_port: u16,
 
-    /// Distributed runtime used by the RL worker discovery API.
+    /// Distributed runtime used by the RL worker discovery API and to publish
+    /// frontend load to the KV DC Relay.
     #[builder(default = "None")]
-    runtime: Option<Arc<DistributedRuntime>>,
+    runtime: Option<DistributedRuntime>,
+
+    /// Exact Dynamo namespace the frontend was configured with (`--namespace`).
+    /// See [`frontend_load_namespace`](crate::frontend_load::frontend_load_namespace).
+    #[builder(default = "None")]
+    namespace: Option<String>,
 
     /// Interval for SSE comment frames while a streaming response is idle.
     /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
@@ -947,6 +963,9 @@ impl HttpService {
 
         let state = self.state.clone();
         let state_cancel = state.cancel_token().clone();
+        // Telemetry continues during drain and stops on every service exit path.
+        let publisher_cancel = CancellationToken::new();
+        let _publisher_guard = publisher_cancel.clone().drop_guard();
 
         let tls = if self.enable_tls {
             let cert_path = self
@@ -1002,6 +1021,7 @@ impl HttpService {
 
         // Spawn canary after all fallible startup so it won't leak on early errors
         tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+        self.start_frontend_load_publisher(&publisher_cancel);
 
         // The server keeps accepting while inflight requests drain, then gives open
         // connections what is left of the shutdown budget.
@@ -1023,6 +1043,24 @@ impl HttpService {
         state.start_stopping();
         state_cancel.cancel();
         Ok(())
+    }
+
+    fn start_frontend_load_publisher(&self, cancel_token: &CancellationToken) {
+        if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+            return;
+        }
+        let Some(target) = &self.frontend_load_target else {
+            return;
+        };
+        let observer = self.state.service_observer();
+        crate::frontend_load::start_frontend_load_publisher(
+            target.runtime.clone(),
+            target.namespace.clone(),
+            self.state.manager_clone(),
+            self.state.metrics_clone(),
+            move || observer.is_ready(),
+            cancel_token.child_token(),
+        );
     }
 
     async fn spawn_rl_listener_if_configured(
@@ -1241,6 +1279,7 @@ impl HttpServiceConfigBuilder {
 
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        LazyLock::force(&DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
         let metrics_config = config.metrics_config.clone();
         let model_ready_metrics_prefix = metrics_config.prefix();
         let frontend_api_config = config.frontend_api_config.clone();
@@ -1314,7 +1353,9 @@ impl HttpServiceConfigBuilder {
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
-        state.metrics_clone().register(&registry)?;
+        state
+            .metrics_clone()
+            .register_with_model_manager(&registry, Some(state.manager_clone()))?;
 
         // Readiness is evaluated from the live routing catalog at scrape time.
         register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
@@ -1492,7 +1533,7 @@ impl HttpServiceConfigBuilder {
                      or enable_rl) but HttpServiceConfig.runtime is not set."
                 ));
             };
-            let router = super::openai::rl_router(drt.clone())?;
+            let router = super::openai::rl_router(Arc::new(drt.clone()))?;
             tracing::info!(
                 rl_port = config.rl_port,
                 "RL worker discovery enabled at /v1/rl/workers"
@@ -1521,6 +1562,10 @@ impl HttpServiceConfigBuilder {
             generate_engine_capabilities,
             rl_router,
             rl_port: config.rl_port,
+            frontend_load_target: config.runtime.map(|runtime| FrontendLoadTarget {
+                runtime,
+                namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
+            }),
         })
     }
 
