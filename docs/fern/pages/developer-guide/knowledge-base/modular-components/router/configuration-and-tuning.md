@@ -167,12 +167,22 @@ as the pool (`uncached_threshold_tokens: 100000` plus `compute_workers: 2`). It 
 exclusive with `pools`, and either form must be configured: an instance without one fails at
 startup.
 
-Cold selection is least-loaded among eligible tier members. A Cold request with no eligible
-member — including single-worker selections, which cannot form a pool — surfaces as
-`AllEligibleWorkersOverloaded` and returns the overload status code (529 by default, or 429
-via `DYN_HTTP_OVERLOAD_STATUS_CODE`) with `ServiceOverloaded` semantics; it never silently
-falls back to warm workers. Queue-side admission (`uncached_token_queue_limit_per_worker`)
-bounds waiting independently. Warm and cache-affine traffic is unaffected by the pools.
+Cold selection is least-loaded among eligible tier members. With `allow_tier_upgrade`
+(default `true`), a cold request whose own tier has no eligible member tries each higher
+tier in ascending order before failing — a 150K request on a saturated cold-1 may run on
+cold-2 — but never crosses down to a lower tier or into the warm pool. A Cold request with
+no eligible member anywhere — including single-worker selections, which cannot form a pool —
+surfaces as `AllEligibleWorkersOverloaded` and returns the overload status code (529 by
+default, or 429 via `DYN_HTTP_OVERLOAD_STATUS_CODE`) with `ServiceOverloaded` semantics; it
+never silently falls back to warm workers. Queue-side admission
+(`uncached_token_queue_limit_per_worker`) bounds waiting independently. Warm and
+cache-affine traffic is unaffected by the pools.
+
+Classification credits shared-cache hits (for example Mooncake HiCache, configured through
+`shared_cache_type: hicache`) alongside device-resident overlap: a follow-up turn whose
+prefix lives in the shared cache is fetchable by every candidate, so its fresh-prefill
+volume drops accordingly and multi-turn traffic stays out of the cold tiers without
+routing back to the worker that warmed the prefix.
 
 By default the split is strict: a warm request selects only non-pool workers — even when its
 largest cached prefix lives on a pool worker, since borrowing that affinity would drag warm

@@ -86,6 +86,11 @@ struct Parameters {
     /// un-drained. 0 escapes whenever any member remains. Only consulted when
     /// `allow_warm_spillover` is `true`.
     spillover_free_threshold: f64,
+    /// When `true` (the default), a cold request whose own tier has no eligible member
+    /// may upgrade to a higher tier with one (for example a 150K request on a saturated
+    /// cold-1 spilling to cold-2). Upgrading keeps the request inside the cold-pool
+    /// system; it never crosses down to a lower tier or into the warm pool.
+    allow_tier_upgrade: bool,
 }
 
 impl Default for Parameters {
@@ -96,6 +101,7 @@ impl Default for Parameters {
             compute_workers: None,
             allow_warm_spillover: false,
             spillover_free_threshold: 0.5,
+            allow_tier_upgrade: true,
         }
     }
 }
@@ -323,7 +329,11 @@ impl WorkerPicker for UncachedPoolSplitPicker {
         }
 
         let isl = context.prompt_tokens();
-        let best_cached = cached.iter().copied().max().unwrap_or(0);
+        // Shared-cache (for example Mooncake HiCache) hits are worker-independent: any
+        // candidate can fetch those blocks, so they reduce the fresh-prefill volume for
+        // classification the same way device-resident overlap does.
+        let shared_cached = shared_cache_tokens(input.cache(), context.block_size());
+        let best_cached = cached.iter().copied().max().unwrap_or(0) + shared_cached;
         let best_effective = isl - best_cached.min(isl);
 
         match self.classify(isl, best_effective) {
@@ -363,13 +373,59 @@ impl WorkerPicker for UncachedPoolSplitPicker {
                 // classification, not a policy-specific error string: the request then
                 // gets the overload status code (529, or 429 via
                 // DYN_HTTP_OVERLOAD_STATUS_CODE) with ServiceOverloaded semantics.
-                // Returning a row-less Ok here is impossible, so a failed pick with a
-                // plain message lets the host's selected-else branch classify it.
-                select_affine(load, &cached, member_rows.into_iter())
-                    .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+                if let Some(row) = select_affine(load, &cached, member_rows.clone().into_iter()) {
+                    return Ok(row);
+                }
+                // Tier upgrade: this tier has no eligible member and the switch is on,
+                // so try each higher tier (a larger uncached band) that has one. The
+                // request stays inside the cold-pool system: never down to a lower
+                // tier, never into the warm pool.
+                if self.parameters.allow_tier_upgrade
+                    && let Some(index) = self
+                        .parameters
+                        .pools
+                        .iter()
+                        .flat_map(|pools| {
+                            pools
+                                .iter()
+                                .position(|tier| Some(&tier.taint) == taint.as_ref())
+                        })
+                        .next()
+                    {
+                        let pools = self.parameters.pools.clone().unwrap_or_default();
+                        for tier in pools.iter().skip(index + 1) {
+                            let upgraded_rows: Vec<usize> = candidates
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, candidate)| {
+                                    candidate
+                                        .taints()
+                                        .is_some_and(|set| set.contains(&tier.taint))
+                                })
+                                .map(|(row, _)| row)
+                                .collect();
+                            if let Some(row) =
+                                select_affine(load, &cached, upgraded_rows.into_iter())
+                            {
+                                return Ok(row);
+                            }
+                        }
+                    }
+                Err(WorkerSelectionPolicyError::failed("no eligible worker"))
             }
         }
     }
+}
+
+/// Shared-cache (for example Mooncake HiCache) hit tokens for this request. Worker-
+/// independent: the same volume is fetchable by every candidate, so it enters the
+/// classification's fresh-prefill estimate but never the per-row cache comparison that
+/// ranks workers against each other.
+fn shared_cache_tokens(cache: Option<WorkerCacheInputs<'_>>, block_size: u32) -> usize {
+    cache
+        .and_then(|cache| cache.iter().next().and_then(|row| row.shared_hits()))
+        .map(|hits| hits.total_hits as usize * block_size as usize)
+        .unwrap_or(0)
 }
 
 /// Device-resident cached-token estimates, index-aligned with the candidates.
@@ -520,6 +576,28 @@ mod tests {
         allowed: Option<Vec<u64>>,
         shared: Option<&SharedColdIds>,
     ) -> Result<WorkerWithDpRank, dynamo_kv_router::scheduling::KvSchedulerError> {
+        select_result_full(
+            parameters,
+            isl_tokens,
+            workers,
+            pool_taints,
+            allowed,
+            shared,
+            None,
+        )
+    }
+
+    /// Full control surface: additionally injects a shared-cache (Mooncake-style) hit
+    /// volume in blocks, exercising the classification's shared-cache credit.
+    fn select_result_full(
+        parameters: &Parameters,
+        isl_tokens: usize,
+        workers: &[(u64, usize, usize)],
+        pool_taints: &HashMap<u64, Arc<HashSet<String>>>,
+        allowed: Option<Vec<u64>>,
+        shared: Option<&SharedColdIds>,
+        shared_cache_blocks: Option<u32>,
+    ) -> Result<WorkerWithDpRank, dynamo_kv_router::scheduling::KvSchedulerError> {
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
@@ -539,7 +617,12 @@ mod tests {
             overlap: OverlapSignals::default(),
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
+            shared_cache_hits: shared_cache_blocks.map(|blocks| {
+                dynamo_kv_router::protocols::SharedCacheHits::from_ranges(vec![std::ops::Range {
+                    start: 0,
+                    end: blocks,
+                }])
+            }),
             worker_loads: Default::default(),
             resp_tx: None,
         };
@@ -612,6 +695,7 @@ mod tests {
             compute_workers: None,
             allow_warm_spillover: false,
             spillover_free_threshold: 0.5,
+            allow_tier_upgrade: true,
         }
     }
 
@@ -622,6 +706,7 @@ mod tests {
             compute_workers: Some(compute_workers),
             allow_warm_spillover: false,
             spillover_free_threshold: 0.5,
+            allow_tier_upgrade: true,
         }
     }
 
@@ -744,6 +829,7 @@ mod tests {
             compute_workers: None,
             allow_warm_spillover: false,
             spillover_free_threshold: 0.5,
+            allow_tier_upgrade: true,
         };
         let pool_taints = HashMap::new();
         let selected =
@@ -953,6 +1039,92 @@ mod tests {
         let pool_taints = HashMap::from([(A, taint_set(&["cold-1"]))]);
         let selected = select_result(&params, 80, &[(A, 0, 0), (B, 0, 6)], &pool_taints).unwrap();
         assert_eq!(selected, worker(B));
+    }
+
+    #[test]
+    fn tier_upgrade_finds_higher_tier_member() {
+        // Only a cold-2 member exists; a request in cold-1's band ([100, 160)) with the
+        // upgrade switch on (default) routes to the cold-2 worker rather than failing.
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-2"]))]);
+        let selected = select_result(
+            &two_tier_params(),
+            150,
+            &[(A, 0, 0), (B, 0, 6)],
+            &pool_taints,
+        )
+        .unwrap();
+        assert_eq!(selected, worker(A));
+    }
+
+    #[test]
+    fn tier_upgrade_disabled_fails_without_members() {
+        let params = Parameters {
+            allow_tier_upgrade: false,
+            ..two_tier_params()
+        };
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-2"]))]);
+        let result = select_result(&params, 150, &[(A, 0, 0), (B, 0, 6)], &pool_taints);
+        let Err(error) = result else {
+            panic!("disabled upgrade with no cold-1 members must fail");
+        };
+        assert!(
+            matches!(
+                error,
+                dynamo_kv_router::scheduling::KvSchedulerError::AllEligibleWorkersOverloaded
+            ),
+            "expected AllEligibleWorkersOverloaded, got: {error}"
+        );
+    }
+
+    #[test]
+    fn tier_upgrade_never_downgrades() {
+        // A cold-2 request ([160, ∞)) with only cold-1 members available must not fall
+        // back down to them: it fails even though cold-1 could physically run it.
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-1"]))]);
+        let result = select_result(
+            &two_tier_params(),
+            ISL_TOKENS,
+            &[(A, 0, 0), (B, 0, 6)],
+            &pool_taints,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shared_cache_hits_lower_the_cold_classification() {
+        // 160-token prompt whose prefix is fully present in the shared cache (Mooncake):
+        // every worker can fetch it, so effective prefill is 0 and the request is Warm —
+        // it may land on the untaunted worker instead of a cold tier.
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-1"]))]);
+        let selected = select_result_full(
+            &two_tier_params(),
+            ISL_TOKENS,
+            &[(A, 0, 0), (B, 0, 6)],
+            &pool_taints,
+            None,
+            None,
+            Some(10), // ten blocks = 160 tokens, the whole prompt
+        )
+        .unwrap();
+        assert_eq!(selected, worker(B));
+    }
+
+    #[test]
+    fn shared_cache_hits_do_not_change_per_worker_ranking() {
+        // Shared hits are worker-independent: with the same shared volume, the worker
+        // holding device overlap still wins the per-row comparison.
+        let pool_taints = HashMap::new();
+        let selected = select_result_full(
+            &two_tier_params(),
+            80,
+            &[(A, 5, 0), (B, 0, 6)],
+            &pool_taints,
+            None,
+            None,
+            Some(3),
+        )
+        .unwrap();
+        assert_eq!(selected, worker(A));
     }
 
     #[test]
