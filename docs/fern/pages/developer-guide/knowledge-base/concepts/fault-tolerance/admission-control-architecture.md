@@ -98,7 +98,7 @@ apply to the whole worker.
 ### Configuration
 
 > [!NOTE]
-> **Tune these limits to your traffic shape.** The engine-based defaults are starting points; validate
+> **Tune these limits to your traffic shape.** The defaults are starting points; validate
 > the limits with representative request sizes, concurrency, and bursts, watching goodput and latency.
 > Dynamic adaptation to changing traffic is planned as separate router work.
 
@@ -109,7 +109,7 @@ combined capacity of its ranks. Restart the worker to change an explicit setting
 |---|---|---|---|
 | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | `--engine-request-limit`; alias `DYN_ENGINE_REQUEST_LIMIT` | Engine-reported `max_num_seqs`; `10000` until reported. |
 | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Alias `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | Engine-reported `max_num_seqs`; `10000` until reported. |
-| Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Alias `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Twice the engine-reported `max_num_seqs`; `20000` until reported. |
+| Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Alias `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `40000`. |
 
 Both engine limits accept positive integers. The queue limit accepts non-negative integers; `0`
 disables queueing, so requests that cannot enter immediately are rejected.
@@ -118,9 +118,10 @@ An explicit `--engine-request-limit` takes precedence over environment variables
 variable takes precedence over its alias. Invalid environment values log a warning and fall back to
 the next source; an invalid CLI value fails startup.
 
-Defaults follow the engine's reported capacity, while explicit settings remain fixed. Until the engine
-reports its ranks, the gate assumes one rank and handles all requests as unranked. Each setting is
-independent: overriding an engine limit does not change the queue default.
+Engine defaults follow the reported capacity; the queue default stays at 40,000 per rank. Explicit
+settings remain fixed. Until the engine reports its ranks, the gate assumes one rank and handles all
+requests as unranked. Each setting is independent: overriding an engine limit does not change the
+queue default.
 
 ### Best Practices
 
@@ -133,7 +134,7 @@ including requests already streaming, and the waiting limit to bound work still 
 or completion. Validate changes under representative load, watching goodput and latency.
 
 **Keep the default queue unless your bursts require a different size.** The default provides a
-backlog of twice `max_num_seqs` per rank. A deeper queue absorbs longer bursts at the cost of longer
+backlog of 40,000 requests per rank. A deeper queue absorbs longer bursts at the cost of longer
 waits; the gate does not reject requests based on how long they have waited. Set the limit to `0`
 for immediate rejection when engine capacity is unavailable.
 
