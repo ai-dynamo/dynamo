@@ -25,7 +25,6 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
 from typing import Any, Callable
 
 import vllm
@@ -34,22 +33,40 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor import Executor
 
-create_engine_zmq_transport: Callable[..., Any] | None = None
 launch_core_engines: Callable[..., Any] | None = None
 
 
-def _resolve_engine_utils() -> tuple[Callable[..., Any], Callable[..., Any]]:
-    global create_engine_zmq_transport, launch_core_engines
+def _resolve_engine_utils(
+    vllm_config: VllmConfig, process_count: int
+) -> tuple[Any, Any, Callable[..., Any]]:
+    global launch_core_engines
     engine_utils = importlib.import_module("vllm.v1.engine.utils")
 
     if launch_core_engines is None:
         launch_core_engines = engine_utils.launch_core_engines
-    if create_engine_zmq_transport is None:
-        create_engine_zmq_transport = (
-            getattr(engine_utils, "get_engine_zmq_addresses", None)
-            or engine_utils.bind_engine_zmq_listeners
+    # vLLM 0.32 replaces address allocation with supervisor-bound listeners.
+    get_addresses = getattr(engine_utils, "get_engine_zmq_addresses", None)
+    if get_addresses is not None:
+        return get_addresses(vllm_config, process_count), None, launch_core_engines
+    bind_listeners = getattr(engine_utils, "bind_engine_zmq_listeners", None)
+    if bind_listeners is None:
+        raise RuntimeError(
+            f"vLLM {vllm.__version__} provides neither get_engine_zmq_addresses "
+            "nor bind_engine_zmq_listeners"
         )
-    return create_engine_zmq_transport, launch_core_engines
+    listeners = bind_listeners(vllm_config, process_count)
+    return listeners.addresses, listeners, launch_core_engines
+
+
+def _client_listeners(
+    zmq_listeners: Any, process_index: int
+) -> tuple[socket.socket, ...]:
+    if zmq_listeners is None:
+        return ()
+    return (
+        zmq_listeners.inputs[process_index].socket,
+        zmq_listeners.outputs[process_index].socket,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -61,10 +78,8 @@ _ENGINE_ADDRESSES_ENV = "DYN_VLLM_EMBEDDING_ENGINE_ADDRESSES"
 _LISTENER_FDS_ENV = "DYN_VLLM_EMBEDDING_LISTENER_FDS"
 _CHILD_ROLE = "child"
 _RPC_BASE_PATH_ENV = "VLLM_RPC_BASE_PATH"
-# The two shapes _unpack_core_engine_launch accepts were read from these vLLM
-# releases: 0.27.1, which container/context.yaml builds the XPU images on, and
-# 0.28.0, the pin in pyproject.toml. Re-check that helper when either moves.
-_VERIFIED_VLLM_VERSIONS = ("0.27.1", "0.28.0")
+# Re-check the launch shape when either supported pin moves.
+_VERIFIED_VLLM_VERSIONS = ("0.31.0", "0.32.0")
 
 
 def is_embedding_process_child() -> bool:
@@ -133,7 +148,7 @@ def _attach_client(
     stat_loggers: list[Any],
     enable_log_requests: bool,
     disable_log_stats: bool,
-    listeners: tuple[socket.socket, socket.socket] | None = None,
+    listeners: tuple[socket.socket, ...] = (),
 ) -> tuple[AsyncLLM, VllmConfig]:
     client_vllm_config = _client_config(
         vllm_config,
@@ -144,21 +159,17 @@ def _attach_client(
         "input_address": input_address,
         "output_address": output_address,
     }
-    with ExitStack() as stack:
-        if listeners is not None:
-            for key, listener in zip(("input_listener", "output_listener"), listeners):
-                stack.callback(listener.close)
-                client_addresses[key] = listener
-        client = AsyncLLM.from_vllm_config(
-            vllm_config=client_vllm_config,
-            usage_context=usage_context,
-            stat_loggers=stat_loggers,
-            enable_log_requests=enable_log_requests,
-            disable_log_stats=disable_log_stats,
-            client_addresses=client_addresses,
-            client_count=process_count,
-            client_index=process_index,
-        )
+    client_addresses.update(zip(("input_listener", "output_listener"), listeners))
+    client = AsyncLLM.from_vllm_config(
+        vllm_config=client_vllm_config,
+        usage_context=usage_context,
+        stat_loggers=stat_loggers,
+        enable_log_requests=enable_log_requests,
+        disable_log_stats=disable_log_stats,
+        client_addresses=client_addresses,
+        client_count=process_count,
+        client_index=process_index,
+    )
     return client, client_vllm_config
 
 
@@ -427,19 +438,7 @@ def _unrecognized_launch_shape(detail: str) -> RuntimeError:
 
 
 def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
-    """Normalize what ``launch_core_engines`` yields across vLLM releases.
-
-    vLLM 0.28 and later yield a ``CoreEngineLaunch`` object defining no
-    ``__iter__``; earlier releases yield a plain 4-tuple. Duck-typing the
-    yielded object avoids importing ``CoreEngineLaunch``, a name that does not
-    exist before 0.28.
-    """
-    if isinstance(launch, tuple):
-        if len(launch) != 4:
-            raise _unrecognized_launch_shape(
-                f"a {len(launch)}-tuple rather than the expected 4-tuple"
-            )
-        return launch
+    """Read the fields of vLLM's ``CoreEngineLaunch``, which is not iterable."""
     try:
         return (
             launch.engine_manager,
@@ -469,7 +468,7 @@ def create_shared_embedding_engine_client(
     if is_embedding_process_child():
         process_index, inputs, outputs = _decode_child_addresses(process_count)
         listener_fds = json.loads(os.environ.get(_LISTENER_FDS_ENV, "null"))
-        listeners = None
+        listeners: tuple[socket.socket, ...] = ()
         if listener_fds is not None:
             input_fd, output_fd = listener_fds
             listeners = (
@@ -511,13 +510,9 @@ def create_shared_embedding_engine_client(
         vllm_config.parallel_config._api_process_count = process_count
         vllm_config.parallel_config._api_process_rank = -1
         executor_class = Executor.get_class(vllm_config)
-        create_transport, core_engines_launcher = _resolve_engine_utils()
-        transport = create_transport(vllm_config, process_count)
-        if hasattr(transport, "addresses"):
-            zmq_listeners = transport
-            addresses = zmq_listeners.addresses
-        else:
-            addresses = transport
+        addresses, zmq_listeners, core_engines_launcher = _resolve_engine_utils(
+            vllm_config, process_count
+        )
 
         parent_logger_config = _client_config(
             vllm_config,
@@ -557,14 +552,7 @@ def create_shared_embedding_engine_client(
                 )
                 command = [sys.executable, "-m", "dynamo.vllm", *sys.argv[1:]]
                 for process_index in range(1, process_count):
-                    child_listeners = (
-                        (
-                            zmq_listeners.inputs[process_index].socket,
-                            zmq_listeners.outputs[process_index].socket,
-                        )
-                        if zmq_listeners is not None
-                        else ()
-                    )
+                    child_listeners = _client_listeners(zmq_listeners, process_index)
                     listener_fds = tuple(s.fileno() for s in child_listeners)
                     child = subprocess.Popen(
                         command,
@@ -600,14 +588,7 @@ def create_shared_embedding_engine_client(
                     stat_loggers=parent_stat_loggers,
                     enable_log_requests=enable_log_requests,
                     disable_log_stats=disable_log_stats,
-                    listeners=(
-                        (
-                            zmq_listeners.inputs[0].socket,
-                            zmq_listeners.outputs[0].socket,
-                        )
-                        if zmq_listeners is not None
-                        else None
-                    ),
+                    listeners=_client_listeners(zmq_listeners, 0),
                 )
 
             parent_client, parent_config = parent_client_future.result()

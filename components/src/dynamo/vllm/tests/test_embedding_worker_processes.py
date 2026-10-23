@@ -42,22 +42,12 @@ def _vllm_config():
 
 
 def _core_engine_launch_object(engine_manager, addresses):
-    """The shape vLLM 0.28 yields: a ``CoreEngineLaunch`` dataclass.
-
-    Reproduced locally rather than imported, because the name does not exist
-    in the vLLM releases that yield the tuple below.
-    """
     return SimpleNamespace(
         engine_manager=engine_manager,
         coordinator=None,
         addresses=addresses,
         tensor_queue=None,
     )
-
-
-def _core_engine_launch_tuple(engine_manager, addresses):
-    """The shape vLLM yields before 0.28, including the 0.27.1 XPU images."""
-    return (engine_manager, None, addresses, None)
 
 
 def test_child_environment_offsets_system_port_by_index(monkeypatch):
@@ -235,23 +225,7 @@ def test_unpack_core_engine_launch_names_a_renamed_field():
     assert isinstance(raised.value.__cause__, AttributeError)
 
 
-@pytest.mark.parametrize("size", [3, 5], ids=["short-tuple", "long-tuple"])
-def test_unpack_core_engine_launch_rejects_a_resized_tuple(size):
-    """A tuple of the wrong arity must not reach the caller's four-name unpack."""
-    with pytest.raises(RuntimeError) as raised:
-        processes._unpack_core_engine_launch(tuple(range(size)))
-
-    message = str(raised.value)
-    assert f"{size}-tuple" in message
-    _assert_names_verified_versions(message)
-
-
-@pytest.mark.parametrize(
-    "make_launch",
-    [_core_engine_launch_object, _core_engine_launch_tuple],
-    ids=["core-engine-launch-object", "legacy-tuple"],
-)
-def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_launch):
+def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     process_count = 4
     addresses = SimpleNamespace(
         inputs=[f"in{i}" for i in range(process_count)],
@@ -272,13 +246,15 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_l
     # call with the wrong arity fails here instead of at startup.
     @contextmanager
     def launch_context(vllm_config, executor_class, log_stats, addresses):
-        yield make_launch(engine_manager, addresses)
+        yield _core_engine_launch_object(engine_manager, addresses)
 
     parent_client = Mock()
     parent_config = _vllm_config()
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
-    monkeypatch.setattr(processes, "create_engine_zmq_transport", lambda *_: addresses)
+    monkeypatch.setattr(
+        engine_utils, "get_engine_zmq_addresses", lambda *_: addresses, raising=False
+    )
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
     monkeypatch.setattr(processes.subprocess, "Popen", create_child)
@@ -406,7 +382,6 @@ def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
         return real_popen([sys.executable, "-c", child_script], **kwargs)
 
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
-    monkeypatch.setattr(processes, "create_engine_zmq_transport", None)
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
     monkeypatch.setattr(processes.subprocess, "Popen", launch_child)

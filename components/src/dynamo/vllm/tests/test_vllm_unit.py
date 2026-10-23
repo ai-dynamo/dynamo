@@ -1657,7 +1657,9 @@ def test_build_sampling_params_accepts_productive_recursive_guided_json():
     assert sampling_params.structured_outputs.json == schema
 
 
-def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
+def test_build_sampling_params_caps_max_tokens_to_generation_budget():
+    from vllm.version import __version_tuple__
+
     from dynamo.vllm.handlers import build_sampling_params
 
     model_max_len = 100
@@ -1686,6 +1688,13 @@ def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
 
     sp = build_sampling_params(make({"max_tokens": 64}), defaults, model_max_len)
     assert sp.max_tokens == 64
+
+    sp = build_sampling_params(
+        make({"max_tokens": model_max_len}), defaults, model_max_len
+    )
+    assert sp.max_tokens == (
+        remaining if __version_tuple__[:2] >= (0, 32) else model_max_len
+    )
 
     sp = build_sampling_params(make({}), {}, model_max_len)
     assert sp.max_tokens == remaining

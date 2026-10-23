@@ -86,7 +86,7 @@ def test_vllm_token_budget_matches_rejection_policy():
     assert json.loads(value) == {
         "combined_limit": 4096,
         "reject_prompt_overflow": True,
-        "reject_total_overflow": True,
+        "reject_total_overflow": False,
     }
 
 

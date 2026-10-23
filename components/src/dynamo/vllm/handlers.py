@@ -100,7 +100,7 @@ from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from .args import Config
 from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
-from .capacity import publish_vllm_token_budget
+from .capacity import has_vllm_output_clamping, publish_vllm_token_budget
 from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
 from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
@@ -948,11 +948,19 @@ def build_sampling_params(
     # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
     # directly from the request output_options (lib/llm/src/backend.rs).
 
-    # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
-    if model_max_len is not None and provided_max_tokens is None:
+    if model_max_len is not None and has_vllm_output_clamping():
+        from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+
+        sampling_params.max_tokens = get_max_tokens(
+            max_model_len=model_max_len,
+            max_tokens=provided_max_tokens,
+            input_length=input_length,
+            default_sampling_params=default_sampling_params,
+        )
+    elif model_max_len is not None and provided_max_tokens is None:
         # Ensure at least 1 token generation by default when possible
         dynamic_default = max(1, model_max_len - input_length)
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
