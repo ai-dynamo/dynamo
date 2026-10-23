@@ -260,6 +260,9 @@ class frontend_service:
         INTERNAL = "internal"
         # Feature not implemented (501)
         NOT_IMPLEMENTED = "not_implemented"
+        # Media refused by a frontend serving a text-only model
+        # (`--reject-media`)
+        UNSUPPORTED_MODALITY = "unsupported_modality"
 
     class migration_outcome:
         """Migration outcome label values"""

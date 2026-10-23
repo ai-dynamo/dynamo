@@ -459,6 +459,10 @@ pub mod frontend_service {
 
         /// Feature not implemented (501)
         pub const NOT_IMPLEMENTED: &str = "not_implemented";
+
+        /// Media refused by a frontend serving a text-only model
+        /// (`--reject-media`)
+        pub const UNSUPPORTED_MODALITY: &str = "unsupported_modality";
     }
 }
 

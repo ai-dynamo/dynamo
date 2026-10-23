@@ -443,6 +443,15 @@ pub mod llm {
     /// varies per session and per release, wasting tokens and breaking prompt caching.
     pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
 
+    /// When truthy, refuse chat requests that carry image, video, or audio
+    /// content in any message before they are routed. For frontends serving
+    /// text-only models.
+    pub const DYN_REJECT_MEDIA: &str = "DYN_REJECT_MEDIA";
+
+    /// HTTP status (4xx or 5xx) for a request refused by `DYN_REJECT_MEDIA`.
+    /// Defaults to 415.
+    pub const DYN_REJECT_MEDIA_STATUS_CODE: &str = "DYN_REJECT_MEDIA_STATUS_CODE";
+
     /// When truthy, force usage in streaming chat and text-completion responses
     /// regardless of the request's `stream_options.include_usage` value.
     /// Unset or false preserves request-controlled defaults.
@@ -1176,6 +1185,8 @@ mod tests {
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_REJECT_MEDIA,
+            llm::DYN_REJECT_MEDIA_STATUS_CODE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,

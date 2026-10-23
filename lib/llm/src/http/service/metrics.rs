@@ -1024,6 +1024,9 @@ pub enum ErrorType {
     Internal,
     /// Feature not implemented (501)
     NotImplemented,
+    /// Media refused by a text-only frontend (`--reject-media`), labeled apart
+    /// from validation and capacity errors whatever status it is sent with
+    UnsupportedModality,
 }
 
 /// Track response-specific metrics
@@ -2216,6 +2219,7 @@ impl Drop for InflightGuard {
                     ErrorType::Overload => "service overloaded or rate limited",
                     ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
+                    ErrorType::UnsupportedModality => "unsupported input modality",
                     // `request_completion()` routes `(Error, Cancelled)` to
                     // `RequestCompletion::Cancelled`, so only `None` reaches
                     // here. `Cancelled` is listed to keep the match total
@@ -2338,6 +2342,7 @@ impl ErrorType {
             ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
+            ErrorType::UnsupportedModality => frontend_service::error_type::UNSUPPORTED_MODALITY,
         }
     }
 }
@@ -4936,6 +4941,10 @@ mod tests {
         assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
         assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
+        assert_eq!(
+            ErrorType::UnsupportedModality.as_str(),
+            "unsupported_modality"
+        );
     }
 
     #[test]
@@ -5210,6 +5219,7 @@ mod tests {
             ErrorType::ResponseTimeout,
             ErrorType::Internal,
             ErrorType::NotImplemented,
+            ErrorType::UnsupportedModality,
         ];
 
         for error_type in &error_types {

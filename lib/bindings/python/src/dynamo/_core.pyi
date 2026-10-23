@@ -3098,6 +3098,8 @@ class EntrypointArgs:
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
         batch_gateway_url: Optional[str] = None,
+        reject_media: Optional[bool] = None,
+        reject_media_status_code: Optional[int] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3136,6 +3138,8 @@ class EntrypointArgs:
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
             batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
+            reject_media: Optional override: refuse chat requests carrying image, video, or audio content before routing
+            reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
         """
         ...
 

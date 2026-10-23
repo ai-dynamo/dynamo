@@ -442,6 +442,8 @@ async def async_main():
         "metrics_prefix": metrics_prefix,
         "enable_anthropic_api": config.enable_anthropic_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "reject_media": config.reject_media,
+        "reject_media_status_code": config.reject_media_status_code,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "reasoning_field_name": config.reasoning_field_name,

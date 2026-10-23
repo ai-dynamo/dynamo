@@ -338,6 +338,20 @@ fn multimodal_content_parts(
     }
 }
 
+/// Media content types (`audio_url`, `image_url`, `video_url`) carried by any
+/// message of a chat request, current turn or history, in sorted order. Empty
+/// for a text-only request.
+pub(crate) fn request_media_content_types(
+    messages: &[ChatCompletionRequestMessage],
+) -> std::collections::BTreeSet<&'static str> {
+    messages
+        .iter()
+        .filter_map(multimodal_content_parts)
+        .flatten()
+        .filter_map(|part| part.media_info().map(|(content_type, _, _)| content_type))
+        .collect()
+}
+
 #[cfg(feature = "mm-routing")]
 fn image_content_part_url(
     content_part: &ChatCompletionRequestUserMessageContentPart,
