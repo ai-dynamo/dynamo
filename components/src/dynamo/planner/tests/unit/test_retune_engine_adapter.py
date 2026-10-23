@@ -16,7 +16,6 @@ import pytest
 
 from dynamo.planner.core.types import (
     RetuneDecision,
-    RetuneFeedback,
     RetuneParams,
     TickInput,
     WorkerCounts,
@@ -132,17 +131,13 @@ async def test_tick_runs_retune_after_the_pipeline(stub_controller, monkeypatch)
         return outcome
 
     monkeypatch.setattr(engine._orchestrator, "tick", tick_with_audit)
-    feedback = [RetuneFeedback(decision_id="retune-0-w0", target="router", error="422")]
     scheduled = engine.initial_tick(0.0)
 
     effects = await engine.tick(
-        scheduled,
-        TickInput(
-            now_s=scheduled.at_s, worker_counts=_counts(), retune_feedback=feedback
-        ),
+        scheduled, TickInput(now_s=scheduled.at_s, worker_counts=_counts())
     )
 
-    assert controller.ticks == [(scheduled.at_s, _counts(), feedback)]
+    assert controller.ticks == [(scheduled.at_s, _counts())]
     assert effects.router_parameters == ROUTER_MAP
     assert effects.retune_decisions == [decision]
     assert effects.diagnostics.audit_events == [

@@ -42,11 +42,9 @@ from dynamo.llm import KvRouterConfig
 from dynamo.planner.config.planner_config import PlannerConfig, RetuneConfig
 from dynamo.planner.core.types import (
     RetuneDecision,
-    RetuneFeedback,
     RetuneInputs,
     RetuneOutcome,
     RetuneParams,
-    TrafficObservation,
     WorkerCapabilities,
     WorkerCounts,
 )
@@ -54,7 +52,6 @@ from dynamo.planner.plugins.clock import Clock, VirtualClock
 from dynamo.planner.reconfiguration import (
     PREDICTOR_FIELDS,
     candidate_config,
-    prepare_predictor,
     runtime_candidate_errors,
 )
 from dynamo.planner.retune.domains import (
@@ -64,6 +61,7 @@ from dynamo.planner.retune.domains import (
     expand_planner_domain,
     expand_router_domain,
     grid_points,
+    required_history_seconds,
 )
 from dynamo.planner.retune.sweep import (
     SweepRequest,
@@ -71,11 +69,10 @@ from dynamo.planner.retune.sweep import (
     run_sweep,
     with_predictor_fields,
 )
-from dynamo.planner.simulation.load_predictor import _PREDICTOR_ERRORS, predictor_fields
+from dynamo.planner.simulation.load_predictor import predictor_fields
 
 logger = logging.getLogger(__name__)
 
-ROLLBACK_SUFFIX = "-rb"
 _TOP_SCORES = 5
 _EPSILON = 1e-9
 
@@ -114,8 +111,10 @@ class RetuneController:
 
     Construction runs the stage-2 checks (E1-E7) that need the router
     bindings, the worker capabilities or the full candidate set, and raises
-    ``ValueError`` on any failure. ``config`` is the live config object the
-    host mutates; the controller reads the searched planner fields from it.
+    ``ValueError`` on any failure, except that E4 drops the planner grid
+    points that do not validate or fit the deployment. ``config`` is the live
+    config object the host mutates; the controller reads the searched planner
+    fields from it.
     """
 
     def __init__(
@@ -162,6 +161,16 @@ class RetuneController:
             if planner_domain.predictor_candidates
             else None
         )
+        # History before each window that warms the inner predictors; unset,
+        # the minimum the current and candidate predictors need.
+        history_s = retune.history_seconds
+        if history_s is None:
+            history_s = (
+                required_history_seconds(config, planner_domain)
+                if config.enable_throughput_scaling
+                else 0.0
+            )
+        self._history_s = history_s
         planner_keys = set(planner_domain.grid)
         if self._predictor_candidates:
             planner_keys |= PREDICTOR_FIELDS
@@ -173,8 +182,7 @@ class RetuneController:
                     "set it explicitly in the planner config"
                 )
 
-        self._grid = grid_points(router_domain, planner_domain.grid)
-        self._check_planner_candidates(planner_domain.grid)  # E4
+        self._grid = self._feasible_grid(router_domain, planner_domain.grid)  # E4
 
         self._desired_router: dict[str, float] = self._startup_router_values()
         self._pending_planner: dict[str, Any] = {}
@@ -185,8 +193,6 @@ class RetuneController:
         self._last_k = -1
         self._history: deque[tuple[float, dict[str, int]]] = deque()
         self._pending: _PendingSweep | None = None
-        self._last_actuated: RetuneDecision | None = None
-        self._disabled = False
         self._cancel = threading.Event()
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="planner-retune"
@@ -221,12 +227,9 @@ class RetuneController:
         self._last_k = -1
 
     async def on_tick(
-        self,
-        now_s: float,
-        worker_counts: WorkerCounts | None,
-        feedback: Sequence[RetuneFeedback],
+        self, now_s: float, worker_counts: WorkerCounts | None
     ) -> RetuneTickResult:
-        """Record state, handle feedback, harvest a finished sweep, launch."""
+        """Record state, harvest a finished sweep, launch a due window."""
 
         if not self._started:
             raise RuntimeError("RetuneController.start() must be called first")
@@ -240,11 +243,8 @@ class RetuneController:
             if not _same_value(getattr(self._config, key), value)
         }
 
-        if not self._disabled:
-            decisions.extend(self._handle_feedback(now_s, feedback))
-
         pending = self._pending
-        if not self._disabled and pending is not None and pending.future.done():
+        if pending is not None and pending.future.done():
             if pending.ready_at_s is None:
                 pending.decision_latency_s = self._decision_latency_s(pending.future)
                 pending.ready_at_s = pending.launched_at_s + pending.decision_latency_s
@@ -257,9 +257,7 @@ class RetuneController:
         due = self._due_window(now_s)
         if due > self._last_k:
             self._last_k = due
-            if self._disabled:
-                pass
-            elif self._pending is not None:
+            if self._pending is not None:
                 decisions.append(self._skipped(due, now_s, "busy", "sweep in flight"))
             else:
                 launched = await self._launch(due, now_s)
@@ -361,32 +359,67 @@ class RetuneController:
                     )
         return domain
 
-    def _check_planner_candidates(self, grid: Mapping[str, Sequence[Any]]) -> None:
-        """E4: every planner candidate validates and fits the deployment."""
+    def _feasible_grid(
+        self,
+        router_domain: Mapping[str, Sequence[float]],
+        planner_grid: Mapping[str, Sequence[Any]],
+    ) -> list[RetuneParams]:
+        """E4: the grid without the planner points that cannot run here.
 
-        planner_parts: dict[str, dict[str, Any]] = {}
-        for point in grid_points({}, grid):
-            planner_parts[point.key()] = dict(point.planner)
-        if self._predictor_candidates:
-            for part in list(planner_parts.values()):
-                for _, entry in self._predictor_candidates:
-                    merged = {**part, **predictor_fields(entry)}
-                    planner_parts[RetuneParams(planner=merged).key()] = merged
-        for updates in planner_parts.values():
-            if not updates:
-                continue
-            try:
-                candidate = candidate_config(self._config, updates)
-            except ValueError as error:
-                raise ValueError(
-                    f"retune.planner candidate {updates} is invalid: {error}"
-                ) from None
-            errors = runtime_candidate_errors(candidate, self._capabilities)
-            if errors:
-                raise ValueError(
-                    f"retune.planner candidate {updates} cannot run on this "
-                    f"deployment: {'; '.join(errors)}"
-                )
+        Grid points and predictor candidates are checked apart, each on the
+        startup config: no ``PlannerConfig`` validator relates a predictor
+        field to another field, and ``_decide`` checks the combination it
+        applies. A point that fails validation or does not fit the
+        deployment is dropped, as recommend drops an infeasible candidate.
+        An invalid predictor candidate, or a grid value that no point keeps
+        (so also a grid without a valid point), raises.
+        """
+
+        # The retune checks never depend on a candidate; skip them.
+        base = self._config.model_copy(update={"retune": None})
+        # Defensive: retune.planner validation already rejects a predictor
+        # candidate that PlannerConfig would (a non-positive or non-finite
+        # value), so this raises only if the two schemas drift apart.
+        for _, entry in self._predictor_candidates or ():
+            updates = predictor_fields(entry)
+            error = _candidate_error(base, updates, self._capabilities)
+            if error is not None:
+                raise ValueError(f"retune.planner candidate {updates} {error}")
+        points = grid_points({}, planner_grid)
+        rejected: dict[str, str] = {}
+        for point in points:
+            if point.planner:
+                error = _candidate_error(base, point.planner, self._capabilities)
+                if error is not None:
+                    rejected[point.key()] = error
+        if not rejected:
+            return grid_points(router_domain, planner_grid)
+
+        kept = [point for point in points if point.key() not in rejected]
+        for key, values in planner_grid.items():
+            for value in values:
+                if not any(_same_value(p.planner[key], value) for p in kept):
+                    point = next(
+                        p for p in points if _same_value(p.planner[key], value)
+                    )
+                    raise ValueError(
+                        f"no retune.planner candidate with {key}={value!r} fits; "
+                        f"candidate {point.planner} {rejected[point.key()]}"
+                    )
+        first = next(p for p in points if p.key() in rejected)
+        logger.warning(
+            "retune drops %d of %d planner grid points that fail on this "
+            "deployment, for example %s %s",
+            len(rejected),
+            len(points),
+            first.planner,
+            rejected[first.key()],
+        )
+        return [
+            point
+            for point in grid_points(router_domain, planner_grid)
+            if RetuneParams(planner=point.planner).key() not in rejected
+        ]
 
     def _startup_router_values(self) -> dict[str, float]:
         if not self._router_keys:
@@ -472,8 +505,7 @@ class RetuneController:
             base_planner = self._config.model_dump(mode="json")
             base_planner.update(self._pending_planner)
             base_planner["retune"] = None
-            history_s = self._retune.effective_history_seconds
-            history_start_ms = self._ms(start_s - history_s)
+            history_start_ms = self._ms(start_s - self._history_s)
         request = SweepRequest(
             window_index=k,
             window_start_ms=self._ms(start_s),
@@ -482,7 +514,6 @@ class RetuneController:
             as_of_ms=self._ms(as_of_s),
             trace_paths=self._inputs.trace_paths,
             history_paths=self._inputs.history_paths,
-            prune_by_mtime=self._inputs.prune_by_mtime,
             arrival_speedup_ratio=self._inputs.arrival_speedup_ratio,
             engine=self._inputs.engine,
             candidates=candidates,
@@ -651,21 +682,28 @@ class RetuneController:
             return record("dry_run", chosen=chosen, **scores)
 
         predictor_warmup = None
+        if planner_changes:
+            # E4 checked grid points and predictors apart; check the
+            # combination the host will apply, so it never raises.
+            updates = {**self._pending_planner, **planner_changes}
+            error = _candidate_error(self._config, updates, self._capabilities)
+            if error is not None:
+                return record(
+                    "failed", reason=f"planner candidate {updates} {error}", **scores
+                )
         if planner_changes.keys() & PREDICTOR_FIELDS:
+            # Hosts swap a predictor in only warmed; the sweep prepared the
+            # winner on the same warmup.
             if not result.warmup_observations:
                 return record(
                     "failed",
                     reason="predictor change without warmup observations",
                     **scores,
                 )
-            error = self._predictor_warmup_error(
-                planner_changes, result.warmup_observations
-            )
+            error = result.predictor_warmup_error
             if error is not None:
                 return record(
-                    "failed",
-                    reason=f"predictor warmup rejected: {error}",
-                    **scores,
+                    "failed", reason=f"predictor warmup rejected: {error}", **scores
                 )
             predictor_warmup = result.warmup_observations
         decision = record(
@@ -677,123 +715,7 @@ class RetuneController:
         )
         self._desired_router = {key: chosen.router[key] for key in self._router_keys}
         self._pending_planner.update(planner_changes)
-        self._last_actuated = decision
         return decision
-
-    def _predictor_warmup_error(
-        self,
-        planner_changes: Mapping[str, Any],
-        warmup: Sequence[TrafficObservation],
-    ) -> str | None:
-        """Prepare the changed predictor as the host will; ``None`` if it can.
-
-        Hosts swap a predictor in only warmed (``prepare_predictor`` raises
-        on too few effective points or a bad first forecast), so an applied
-        decision must carry a warmup its new predictor accepts. Before any
-        history exists, the window alone can be too short for that predictor.
-        """
-
-        try:
-            candidate = candidate_config(
-                self._config, {**self._pending_planner, **planner_changes}
-            )
-            prepare_predictor(candidate, self._capabilities, warmup)
-        except _PREDICTOR_ERRORS as error:
-            return f"{type(error).__name__}: {error}"
-        return None
-
-    def _handle_feedback(
-        self, now_s: float, feedback: Sequence[RetuneFeedback]
-    ) -> list[RetuneDecision]:
-        last = self._last_actuated
-        if last is None:
-            unmatched = list(feedback)
-            matching: list[RetuneFeedback] = []
-        else:
-            matching = [
-                item for item in feedback if item.decision_id == last.decision_id
-            ]
-            unmatched = [
-                item for item in feedback if item.decision_id != last.decision_id
-            ]
-        for item in unmatched:
-            logger.warning(
-                "ignoring retune feedback for %s (%s): not the last actuated decision",
-                item.decision_id,
-                item.target,
-            )
-        if last is None or not matching:
-            return []
-        errors = "; ".join(f"{item.target}: {item.error}" for item in matching)
-        current = self.current_point()
-
-        if last.outcome == "rolled_back":
-            self._disabled = True
-            self._cancel.set()
-            self._pending = None
-            logger.error(
-                "retune disabled: rollback %s was rejected (%s)",
-                last.decision_id,
-                errors,
-            )
-            return [
-                RetuneDecision(
-                    decision_id=f"{last.decision_id}-failed",
-                    outcome="failed",
-                    window_index=last.window_index,
-                    window_start_s=last.window_start_s,
-                    window_end_s=last.window_end_s,
-                    as_of_s=last.as_of_s,
-                    launched_at_s=None,
-                    decided_at_s=now_s,
-                    num_requests=last.num_requests,
-                    num_candidates=last.num_candidates,
-                    previous=current,
-                    chosen=current,
-                    baseline_score=None,
-                    best_score=None,
-                    reason=f"rollback rejected; retune disabled: {errors}",
-                )
-            ]
-
-        if any(item.target == "planner" for item in matching):
-            # The rejected planner change will never land.
-            for key in last.planner_changes:
-                self._pending_planner.pop(key, None)
-            current = self.current_point()
-        target = last.previous
-        planner_changes = {
-            key: value
-            for key, value in target.planner.items()
-            if not _same_value(current.planner.get(key), value)
-        }
-        rollback = RetuneDecision(
-            decision_id=f"{last.decision_id}{ROLLBACK_SUFFIX}",
-            outcome="rolled_back",
-            window_index=last.window_index,
-            window_start_s=last.window_start_s,
-            window_end_s=last.window_end_s,
-            as_of_s=last.as_of_s,
-            launched_at_s=None,
-            decided_at_s=now_s,
-            num_requests=last.num_requests,
-            num_candidates=last.num_candidates,
-            previous=current,
-            chosen=target,
-            baseline_score=last.baseline_score,
-            best_score=last.best_score,
-            planner_changes=planner_changes,
-            predictor_warmup=(
-                last.predictor_warmup
-                if planner_changes.keys() & PREDICTOR_FIELDS
-                else None
-            ),
-            reason=f"actuation failed: {errors}",
-        )
-        self._desired_router = {key: target.router[key] for key in self._router_keys}
-        self._pending_planner.update(planner_changes)
-        self._last_actuated = rollback
-        return [rollback]
 
     def _skipped(
         self, k: int, now_s: float, outcome: RetuneOutcome, reason: str
@@ -892,6 +814,23 @@ def _check_inner_planner_isolation(config: PlannerConfig) -> None:
         raise ValueError(
             "retune with scaling enabled requires scheduling.gateway.enabled=false"
         )
+
+
+def _candidate_error(
+    config: PlannerConfig,
+    updates: dict[str, Any],
+    capabilities: WorkerCapabilities,
+) -> str | None:
+    """Why ``config`` with ``updates`` cannot run here; ``None`` if it can."""
+
+    try:
+        candidate = candidate_config(config, updates)
+    except ValueError as error:
+        return f"is invalid: {error}"
+    errors = runtime_candidate_errors(candidate, capabilities)
+    if errors:
+        return f"cannot run on this deployment: {'; '.join(errors)}"
+    return None
 
 
 def _same_value(left: Any, right: Any) -> bool:

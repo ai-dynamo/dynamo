@@ -176,18 +176,13 @@ def _independent_preset_mappings(
     group: str,
     control: Mapping[str, Any],
     planner: Mapping[str, Any],
-    default_overrides: Mapping[str, Sequence[Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Expand ``preset: false`` of one group into every knob combination.
 
     Each knob uses its domain in ``planner`` (``type`` in ``control`` for the
     predictor family), or the group's default domain when omitted.
-    ``default_overrides`` replaces the default domain of named knobs of the
-    group; retune uses it to hold a startup-only knob at its running value.
     """
-    names, dimensions = independent_preset_dimensions(
-        group, control, planner, default_overrides
-    )
+    names, dimensions = independent_preset_dimensions(group, control, planner)
     mappings = [
         dict(zip(names, combination, strict=True))
         for combination in itertools.product(*dimensions)
@@ -206,7 +201,6 @@ def independent_preset_dimensions(
     group: str,
     control: Mapping[str, Any],
     planner: Mapping[str, Any],
-    default_overrides: Mapping[str, Sequence[Any]] | None = None,
 ) -> tuple[list[str], list[list[Any]]]:
     """The knob names and value lists whose product ``preset: false`` expands.
 
@@ -266,12 +260,8 @@ def independent_preset_dimensions(
     }
     values, defaults = specifications[group]
     names = list(values)
-    overrides = dict(default_overrides or {})
-    unknown = sorted(set(overrides) - set(names))
-    if unknown:
-        raise ValueError(f"{group} has no knobs {unknown}")
     dimensions = [
-        _public_values(values[name], list(overrides.get(name, defaults[index])))
+        _public_values(values[name], defaults[index])
         for index, name in enumerate(names)
     ]
     return names, dimensions

@@ -314,14 +314,28 @@ def evaluate_preset(
     preset: dict[str, Any],
     interval_s: int,
     warmup: int,
+    *,
+    forecast_warmup: bool = True,
 ) -> float:
-    """Return mean one-step-ahead loss using the production predictor cadence."""
+    """Return mean one-step-ahead loss using the production predictor cadence.
+
+    The first ``warmup`` windows are observed but not scored. With
+    ``forecast_warmup=False`` they are not forecast either, as a predictor
+    swapped in on a warmup is prepared: a candidate then costs three
+    forecasts per scored window, and ARIMA selects its order once on all of
+    the warmup instead of at its fifth point.
+    """
 
     request_predictor, isl_predictor, osl_predictor = _new_predictors(
         preset, interval_s
     )
     losses: list[float] = []
     for index, window in enumerate(windows):
+        if index < warmup and not forecast_warmup:
+            request_predictor.add_data_point(window.num_req)
+            isl_predictor.add_data_point(window.isl)
+            osl_predictor.add_data_point(window.osl)
+            continue
         try:
             n_hat, i_hat, o_hat = (
                 request_predictor.predict_next(),

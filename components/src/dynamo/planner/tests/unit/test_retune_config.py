@@ -12,7 +12,6 @@ from dynamo.planner.config.planner_config import (
     PlannerConfig,
     RetuneConfig,
     RetuneEngineSpec,
-    RetuneLiveConfig,
 )
 from dynamo.planner.core.types import RetuneParams
 from dynamo.planner.reconfiguration import candidate_config
@@ -54,51 +53,24 @@ def _config(mode="disagg", retune=None, **overrides):
 # ---------------------------------------------------------------------------
 
 
-def test_history_seconds_none_resolves_to_required_minimum():
-    sla = _config(retune=_retune(), **SLA_THROUGHPUT)
-    # Default throughput interval 180 s x default prophet_window_size 50.
-    assert sla.retune.effective_history_seconds == 9000.0
-    # The configured value stays "auto" and is not dumped as set.
-    assert sla.retune.history_seconds is None
-    assert "history_seconds" not in sla.model_dump(exclude_unset=True)["retune"]
-
-    retune_only = _config(retune=_retune(), **RETUNE_ONLY)
-    assert retune_only.retune.effective_history_seconds == 0.0
-
-    explicit = _config(retune=_retune(history_seconds=345600), **SLA_THROUGHPUT)
-    assert explicit.retune.history_seconds == 345600.0
-    assert explicit.retune.effective_history_seconds == 345600.0
-
-
-def test_auto_history_is_resolved_again_for_a_runtime_candidate():
-    config = _config(retune=_retune(), **SLA_THROUGHPUT)
-
-    candidate = candidate_config(config, {"prophet_window_size": 60})
-
-    assert candidate.retune.history_seconds is None
-    assert candidate.retune.effective_history_seconds == 180.0 * 60
-    assert config.retune.effective_history_seconds == 9000.0
-
-
 def test_a_shared_retune_instance_is_never_modified():
     shared = RetuneConfig(interval_seconds=600, router=ROUTER)
     fields_set = set(shared.model_fields_set)
 
-    retune_only = _config(retune=shared, **RETUNE_ONLY)
+    _config(retune=shared, **RETUNE_ONLY)
     sla = _config(retune=shared, **SLA_THROUGHPUT)
 
+    # history_seconds stays "auto" (the controller resolves it) and is not
+    # dumped as set.
     assert shared.history_seconds is None
     assert shared.model_fields_set == fields_set
-    assert retune_only.retune is not shared and sla.retune is not shared
-    assert retune_only.retune.effective_history_seconds == 0.0
-    assert sla.retune.effective_history_seconds == 9000.0
+    assert "history_seconds" not in sla.model_dump(exclude_unset=True)["retune"]
 
     written = {**SENSITIVITY_OFF, LSD: {"choices": [70, 90]}}
     planner = RetuneConfig(interval_seconds=600, planner=written)
     config = _config(retune=planner)
     # Domains are stored as written and expanded on use, never written back.
     assert config.retune.planner == planner.planner == written
-    assert config.retune.planner is not planner.planner
     assert expand_planner_domain(config).grid == {LSD: [70, 90]}
 
 
@@ -107,7 +79,8 @@ def test_a_shared_retune_instance_is_never_modified():
     [
         # A retired design field is just an unknown field.
         (RetuneConfig, {"interval_seconds": 600, "traffic_model": "open_loop"}),
-        (RetuneLiveConfig, {"unknown": 1}),
+        # Live-only inputs come with the live planner.
+        (RetuneConfig, {"interval_seconds": 600, "live": {}}),
         (RetuneEngineSpec, {"unknown": 1}),
     ],
 )
@@ -292,7 +265,6 @@ def test_decision_latency_mode_is_validated(overrides, match):
         ({"overlap_score_credit": {"choices": [-1.0]}}, "greater than or equal to 0"),
         ({"overlap_score_credit": {"choices": [1.0, 1]}}, "unique values"),
         ({"overlap_score_credit": True}, "overlap_score_credit: .*valid number"),
-        ({"temperature": None}, "do not accept null"),
         # The list syntax of earlier drafts.
         (
             {"overlap_score_credit": [0.5, 1.0]},
@@ -305,10 +277,6 @@ def test_decision_latency_mode_is_validated(overrides, match):
             {"prefill_load_model": ["ais"]},
             r"prefill_load_model is a bare list; write \{type: \.\.\.\}",
         ),
-        ({"router_temperature": {"choices": [0.0]}}, "write temperature instead"),
-        ({"router_mode": "kv_router"}, "write policy instead"),
-        ({"router_ttl_secs": 1.0}, "router_ttl_secs: Extra inputs are not permitted"),
-        ({"policy": "round_robin"}, "fixed at startup and retune requires kv_router"),
         (
             {"temperature": {"range": {"min": 0.0, "max": 1.0, "step": -0.5}}},
             "temperature.range.step: Input should be greater than 0",
@@ -325,12 +293,6 @@ def test_decision_latency_mode_is_validated(overrides, match):
 def test_router_domain_syntax_is_the_recommendation_schema(router, match):
     with pytest.raises(ValidationError, match=match):
         RetuneConfig(interval_seconds=600, router=router)
-
-
-@pytest.mark.parametrize("router", [None, "default", ROUTER])
-def test_router_domain_is_stored_as_written(router):
-    retune = RetuneConfig(interval_seconds=600, router=router)
-    assert retune.router == router
 
 
 def test_router_domain_expands_to_live_names_and_floats():
@@ -358,44 +320,19 @@ def test_router_domain_expands_to_live_names_and_floats():
     ("router", "match"),
     [
         (
-            {"temperature": {"range": {"min": 0.0, "max": 1.0}}},
-            r"retune.router.temperature is a range without step .*continuous",
-        ),
-        (
             {"temperature": {"range": {"min": 0.01, "max": 1.0, "scale": "log"}}},
             "retune.router.temperature is a log range",
         ),
         (
-            {"temperature": {"range": {"min": 0.0, "max": 1000.0, "step": 1.0e-6}}},
-            "temperature expands to 1000000001 values, more than the limit of 512",
-        ),
-        (
-            # More steps than the 28 digits of the default Decimal context.
-            {"temperature": {"range": {"min": 0.0, "max": 1000.0, "step": 1.0e-30}}},
-            "temperature expands to 1000000000000000000000000000000001 values",
+            {"temperature": {"range": {"min": 0.0, "max": 1000.0, "step": 1.0}}},
+            "temperature expands to 1001 values, more than the limit of 512",
         ),
     ],
-    ids=["no-step", "log", "too-many-values", "beyond-decimal-precision"],
+    ids=["log", "too-many-values"],
 )
 def test_router_ranges_must_be_finite(router, match):
     with pytest.raises(ValidationError, match=match):
         _config(retune=_retune(router=router), **RETUNE_ONLY)
-    # A range with min == max is one value.
-    config = _config(
-        retune=_retune(router={"temperature": {"range": {"min": 0.5, "max": 0.5}}}),
-        **RETUNE_ONLY,
-    )
-    assert expand_router_domain(config.retune)["router_temperature"] == [0.5]
-
-
-def test_extension_knobs_are_searched_only_when_written():
-    router = {**ROUTER, "decode_active_request_weight": {"choices": [0.5, 1.0]}}
-    config = _config(retune=_retune(router=router), **RETUNE_ONLY)
-    domain = expand_router_domain(config.retune)
-    assert domain["decode_active_request_weight"] == [0.5, 1.0]
-    assert "decode_active_request_weight" not in expand_router_domain(
-        _config(retune=_retune(), **RETUNE_ONLY).retune
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -406,16 +343,6 @@ def test_extension_knobs_are_searched_only_when_written():
 @pytest.mark.parametrize(
     ("planner", "overrides", "match"),
     [
-        ({"ttft_ms": {"choices": [100.0, 200.0]}}, {}, "set retune.sla_ttft_ms"),
-        ({"nope": 1}, {}, "nope: Extra inputs are not permitted"),
-        (
-            {"scaling_policy": {"preset": "default"}},
-            {},
-            "fixed when the planner starts",
-        ),
-        ({"load_min_observations": 3}, {}, "fixed when the planner starts"),
-        ({"min_endpoint": {"choices": [1, 2]}}, {}, "write min_workers instead"),
-        ({"max_gpu_budget": 8}, {}, "write max_num_gpus instead"),
         (
             {LSD: {"choices": [70]}},
             {},
@@ -454,12 +381,6 @@ def test_extension_knobs_are_searched_only_when_written():
         ({"ttft_ms": [100.0, 200.0]}, {}, "set retune.sla_ttft_ms"),
     ],
     ids=[
-        "fixed-sla",
-        "unknown",
-        "startup-group",
-        "startup-knob",
-        "live-name",
-        "live-budget-name",
         "group-conflict",
         "requires-scaling",
         "empty",
@@ -779,22 +700,8 @@ def test_default_planner_domain_that_expands_to_nothing_is_empty():
 
 
 # ---------------------------------------------------------------------------
-# Live section and engine spec
+# Engine spec
 # ---------------------------------------------------------------------------
-
-
-def test_live_engine_shape_must_match_mode():
-    agg_engine = {"extra_engine_args": {"block_size": 64}}
-    disagg_engine = {
-        "prefill_engine_args": {"block_size": 64},
-        "decode_engine_args": {"block_size": 64},
-    }
-    with pytest.raises(ValidationError, match="retune.live.engine must set"):
-        _config(retune=_retune(live={"engine": agg_engine}), **RETUNE_ONLY)
-    with pytest.raises(ValidationError, match="retune.live.engine must set"):
-        _config(mode="agg", retune=_retune(live={"engine": disagg_engine}))
-    assert _config(retune=_retune(live={"engine": disagg_engine}), **RETUNE_ONLY)
-    assert _config(mode="agg", retune=_retune(live={"engine": agg_engine}))
 
 
 @pytest.mark.parametrize(
@@ -816,11 +723,6 @@ def test_engine_spec_shape_is_validated(values, match):
         RetuneEngineSpec(**values)
 
 
-def test_live_config_validation():
-    with pytest.raises(ValidationError, match="credentials"):
-        RetuneLiveConfig(frontend_urls=["http://user:pw@10.0.0.5:8000"])
-
-
 def test_engine_spec_replay_kwargs_merge_router_overrides():
     pytest.importorskip("dynamo.llm")
     spec = RetuneEngineSpec(
@@ -830,10 +732,13 @@ def test_engine_spec_replay_kwargs_merge_router_overrides():
     )
     kwargs = spec.replay_kwargs({"overlap_score_credit": 0.5})
 
+    # Every pinned field is a run_trace_replay kwarg.
+    assert set(kwargs) == set(RetuneEngineSpec.model_fields)
     assert kwargs["router_mode"] == "kv_router"
     assert kwargs["router_config"].overlap_score_credit == 0.5
     assert kwargs["router_config"].prefill_load_scale == 2.0
     assert kwargs["prefill_engine_args"] == {"block_size": 64}
+    assert kwargs["prefill_engine_args"] is not spec.prefill_engine_args
     # The startup snapshot itself is never modified.
     assert spec.router_config == {
         "overlap_score_credit": 1.0,
@@ -858,15 +763,6 @@ def test_engine_spec_replay_kwargs_merge_router_overrides():
             {},
             _retune(
                 planner={**SENSITIVITY_OFF, LSD: {"choices": [70, 90]}},
-                live={
-                    "engine": {
-                        "prefill_engine_args": {"block_size": 64},
-                        "decode_engine_args": {"block_size": 64},
-                        "router_config": {"overlap_score_credit": 1.0},
-                    },
-                    "trace_paths": ["/traces/frontend"],
-                    "frontend_urls": ["http://10.0.0.5:8000"],
-                },
                 timeout_seconds=300,
                 sla_ttft_ms=200,
                 dry_run=True,

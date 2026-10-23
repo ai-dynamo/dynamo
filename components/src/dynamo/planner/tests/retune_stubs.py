@@ -20,7 +20,6 @@ from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
 from dynamo.planner.core.types import (
     EngineCapabilities,
     RetuneDecision,
-    RetuneFeedback,
     RetuneInputs,
     WorkerCapabilities,
 )
@@ -56,7 +55,7 @@ class StubController:
         self.args = (config, inputs, capabilities, clock, scale_interval_s)
         self.config = config
         self.started: list[float] = []
-        self.ticks: list[tuple[float, Any, list[RetuneFeedback]]] = []
+        self.ticks: list[tuple[float, Any]] = []
         # Searched planner values as the controller saw them on each tick.
         self.seen_planner_values: list[dict[str, Any]] = []
         self.results: list[StubTickResult] = []
@@ -67,8 +66,8 @@ class StubController:
     def start(self, start_s: float) -> None:
         self.started.append(start_s)
 
-    async def on_tick(self, now_s, worker_counts, feedback):
-        self.ticks.append((now_s, worker_counts, list(feedback)))
+    async def on_tick(self, now_s, worker_counts):
+        self.ticks.append((now_s, worker_counts))
         self.seen_planner_values.append(
             {
                 "load_scaling_down_sensitivity": self.config.load_scaling_down_sensitivity,

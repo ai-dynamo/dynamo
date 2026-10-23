@@ -130,7 +130,7 @@ def _decision(
         num_requests=12,
         num_candidates=3,
         previous=previous,
-        chosen=chosen if outcome in ("applied", "rolled_back", "dry_run") else previous,
+        chosen=chosen if outcome in ("applied", "dry_run") else previous,
         baseline_score=10.0,
         best_score=12.0,
         planner_changes=dict(planner_changes or {}),
@@ -177,7 +177,7 @@ def test_on_tick_always_returns_the_router_parameters_key():
         "batch_drain_limits",
     }
     assert "router_policies" not in tick
-    assert details.retune_events == []
+    assert details.retune_events is None
     assert "retune_events" not in details.to_dict()
 
 
@@ -203,12 +203,22 @@ def test_on_tick_forwards_desired_router_map_and_records_router_policies(
     assert decision["target_prefill"] is None and decision["target_decode"] is None
     (tick,) = details.ticks
     assert tick["router_policies"] == policies
-    assert tick["effects"]["router_parameters"] == ROUTER_MAP
+    assert tick["runtime_decision"]["router_parameters"] == ROUTER_MAP
+    # The effects keep the shape of a planner without retune.
+    assert set(tick["effects"]) == {
+        "scale_to",
+        "next_tick",
+        "diagnostics",
+        "batch_drain_limits",
+    }
+    # With retune configured, the events are reported even when empty.
+    assert details.retune_events == []
+    assert details.to_dict()["retune_events"] == []
 
 
 @pytest.mark.parametrize(
     ("outcome", "value"),
-    [("applied", 70), ("rolled_back", 70), ("kept", 80), ("dry_run", 80)],
+    [("applied", 70), ("kept", 80), ("dry_run", 80)],
 )
 def test_actuated_planner_changes_apply_from_the_next_tick(
     stub_controller, monkeypatch, outcome, value
@@ -281,14 +291,7 @@ def test_predictor_change_installs_a_predictor_warmed_with_the_decision_history(
     assert isinstance(predict._num_req_predictor, ConstantPredictor)
     assert predict._num_req_predictor.predict_next() == 14.0
 
-    # The tick capture carries the warmup length and no per-preset losses;
-    # the retune events keep the full pre-sweep record.
-    (tick,) = details.ticks
-    (captured,) = tick["effects"]["retune_decisions"]
-    assert captured["predictor_warmup"] == 3
-    assert captured["predictor_presweep"] == {
-        key: value for key, value in _PRESWEEP.items() if key != "losses"
-    }
+    # The retune events keep the full pre-sweep record and the warmup length.
     json.dumps(details.ticks)
     (event,) = details.retune_events
     assert event["predictor_warmup"] == 3

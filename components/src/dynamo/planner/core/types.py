@@ -239,10 +239,9 @@ class RetuneInputs:
     time ``s`` maps to trace milliseconds as
     ``trace_origin_ms + s * 1000 * arrival_speedup_ratio``: live uses
     ``(0.0, 1.0)`` (epoch time), replay uses the trace's first arrival and the
-    outer speedup. ``prune_by_mtime`` skips files by modification time and is
-    only valid for live frontend segments. ``history_paths`` hold history
-    before the first window (replay: the planner's warmup trace; live: empty,
-    since ``trace_paths`` already hold history); they share the trace's
+    outer speedup. ``history_paths`` hold history before the first window
+    (replay: the planner's warmup trace when it scales on throughput; live:
+    empty, since ``trace_paths`` already hold history); they share the trace's
     absolute time axis and end at or before its first arrival.
     """
 
@@ -250,7 +249,6 @@ class RetuneInputs:
     trace_paths: tuple[str, ...]
     trace_origin_ms: float = 0.0
     arrival_speedup_ratio: float = 1.0
-    prune_by_mtime: bool = False
     history_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -324,7 +322,7 @@ class RetuneParams:
         return hash(self.key())
 
 
-# Append-only: the values back a Prometheus Enum.
+# Append-only: a live host will export the values as a Prometheus Enum.
 RetuneOutcome = Literal[
     "applied",
     "kept",
@@ -333,7 +331,6 @@ RetuneOutcome = Literal[
     "stale",
     "timeout",
     "failed",
-    "rolled_back",
 ]
 RETUNE_OUTCOMES: tuple[str, ...] = get_args(RetuneOutcome)
 
@@ -342,13 +339,12 @@ RETUNE_OUTCOMES: tuple[str, ...] = get_args(RetuneOutcome)
 class RetuneDecision:
     """Audit record of one retune decision.
 
-    ``decision_id`` is ``retune-<s0>-w<k>`` (``-rb`` for a rollback) and is
-    the live reconfiguration ``request_id``. Times are planner-clock seconds:
-    epoch seconds live, virtual seconds in replay. ``as_of_s`` is the
-    censoring cutoff (the scheduled launch time). ``chosen`` equals
-    ``previous`` unless the outcome is ``applied``, ``rolled_back`` or
-    ``dry_run``. Hosts apply ``planner_changes`` when the outcome is
-    ``applied`` or ``rolled_back``. ``predictor_warmup`` is set iff
+    ``decision_id`` is ``retune-<s0>-w<k>`` and is the live reconfiguration
+    ``request_id``. Times are planner-clock seconds: epoch seconds live,
+    virtual seconds in replay. ``as_of_s`` is the censoring cutoff (the
+    scheduled launch time). ``chosen`` equals ``previous`` unless the outcome
+    is ``applied`` or ``dry_run``. Hosts apply ``planner_changes`` when the
+    outcome is ``applied``. ``predictor_warmup`` is set iff
     ``planner_changes`` replaces the load predictor; hosts warm the new
     predictor with it. ``top`` holds up to five ``(params.key(), score)``
     pairs, best first. ``sweep_wall_s`` is the sweep's wall-clock time and
@@ -427,25 +423,6 @@ class RetuneDecision:
         }
 
 
-@dataclass(frozen=True)
-class RetuneFeedback:
-    """Actuation failure for a retune decision, reported by the host.
-
-    Delivered on the next ``TickInput`` so the engine can roll back.
-    ``target`` names the actuator that failed.
-    """
-
-    decision_id: str
-    target: Literal["planner", "router"]
-    error: str
-
-    def __post_init__(self) -> None:
-        _require_non_empty_string("decision_id", self.decision_id)
-        if self.target not in ("planner", "router"):
-            raise ValueError("target must be 'planner' or 'router'")
-        _require_non_empty_string("error", self.error)
-
-
 @dataclass
 class TickInput:
     """What the adapter provides to the core on each tick.
@@ -459,8 +436,6 @@ class TickInput:
     worker_counts: Optional[WorkerCounts] = None
     fpm_observations: Optional[FpmObservations] = None
     batch: Optional[BatchSchedulingObservation] = None
-    # Actuation failures of earlier retune decisions; empty when none.
-    retune_feedback: list[RetuneFeedback] = field(default_factory=list)
 
 
 @dataclass

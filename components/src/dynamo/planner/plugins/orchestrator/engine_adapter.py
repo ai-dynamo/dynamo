@@ -744,14 +744,14 @@ class OrchestratorEngineAdapter:
         )
 
         # 6. Retune runs after the plugin pipeline, outside the
-        #    orchestrator's per-tick deadline. It only launches or harvests
-        #    sweeps (under a VirtualClock it awaits a launched sweep inline).
-        #    Its audit strings force diagnostics emission in both hosts.
+        #    orchestrator's per-tick deadline. It launches a sweep or turns a
+        #    finished one into a decision; the replays and the preparation of
+        #    a new predictor run in the sweep's worker processes (under a
+        #    VirtualClock the tick awaits a launched sweep inline). Its audit
+        #    strings force diagnostics emission in both hosts.
         if self._retune is not None:
             retune = await self._retune.on_tick(
-                tick_input.now_s,
-                tick_input.worker_counts,
-                tick_input.retune_feedback,
+                tick_input.now_s, tick_input.worker_counts
             )
             effects.router_parameters = retune.router_parameters
             effects.retune_decisions = list(retune.decisions)

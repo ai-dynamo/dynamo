@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Request-trace window reader shared by the replay and live retune hosts.
+"""Request-trace window reader for retune sweeps.
 
-Both hosts read ``dynamo.request.trace.v1`` files (frontend segments live, the
-replay's own trace in simulation) and hand AISimulate a clean, bare-row file:
+It reads ``dynamo.request.trace.v1`` files (in replay, the replay's own trace)
+and hands AISimulate a clean, bare-row file:
 
-* only ``request_end`` rows; tool, ``router_selection`` and ``request_payload``
-  rows are dropped and ``agent_context`` is stripped (open-loop replay);
+* only ``request_end`` rows; every other event type is dropped and
+  ``agent_context`` is stripped (open-loop replay);
 * request times follow the AISimulate rule: arrival is
   ``request_received_ms``, else ``event_time_unix_ms - round(total_time_ms)``;
   completion is ``request_received_ms + round(total_time_ms)`` when both are
@@ -15,64 +15,37 @@ replay's own trace in simulation) and hand AISimulate a clean, bare-row file:
 * a row is selected when its arrival is in ``[start_ms, end_ms)`` and its
   completion is at or before ``as_of_ms`` (censoring);
 * repeated ``request_id`` values keep the first row; one ``trace_block_size``;
-* a truncated final gzip member or a partial final line is tolerated and
-  counted; corruption anywhere else raises.
+* a malformed line or gzip stream raises, as it does for the replay itself.
 
 The window file keeps ``input_sequence_hashes`` (inner replays need them for
-KV reuse) and is sorted in memory. The history reader streams and writes
-hash-free rows: the normalized ``request_received_ms``, ``input_length`` and
-``output_tokens``, which is all predictor warmup needs.
+KV reuse) and is sorted in memory. The history reader streams its rows into
+observation buckets for predictor warmup and keeps none of them.
 """
 
 from __future__ import annotations
 
-import glob
 import gzip
 import json
 import math
 import os
 from collections.abc import Iterator, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, NamedTuple
 
 from dynamo.planner.core.types import TrafficObservation
-from dynamo.planner.offline.trace_data import (
-    _reject_duplicate_copies,
-    _resolve_trace_paths,
-)
+from dynamo.planner.offline.trace_data import _resolve_trace_paths
 
 TRACE_SCHEMA = "dynamo.request.trace.v1"
 
-# Every row_counts key; values count rows unless noted.
+# Every row_counts key; values count rows.
 ROW_COUNT_KEYS: tuple[str, ...] = (
-    "tool",  # tool_start / tool_end / tool_error rows dropped
-    "router_selection",  # router_selection rows dropped
-    "request_payload",  # request_payload rows dropped
-    "other_event",  # rows with any other event type dropped
     "missing_output_tokens",  # request_end rows without output_tokens dropped
-    "outside_window",  # arrival outside [start_ms, end_ms)
     "censored",  # completion after as_of_ms
     "duplicate",  # repeated request_id among selected rows
     "agent_context_stripped",  # kept rows whose agent_context was removed
     "censor_unavailable",  # kept rows without total_time_ms: as_of cannot censor
-    "partial_line",  # unparsable final line without a newline, tolerated
-    "truncated_gzip",  # files whose final gzip member is truncated (files)
-    "pruned_files",  # files skipped by modification time (files)
 )
-
-_TOOL_EVENTS = frozenset({"tool_start", "tool_end", "tool_error"})
-_DROPPED_EVENTS = {
-    "router_selection": "router_selection",
-    "request_payload": "request_payload",
-}
-# ``gzip`` reads a member's 2-byte magic and raises this for a 1-byte tail: a
-# writer that has appended only the first byte of the next member.
-_PARTIAL_GZIP_MAGIC = "Not a gzipped file (%r)" % b"\x1f"
-# Live segment mtimes are stamped by the trace store's clock, request times by
-# the frontends'; prune only files older than the window start by this margin.
-_MTIME_PRUNE_MARGIN_MS = 300_000.0
 
 
 class WindowFile(NamedTuple):
@@ -85,14 +58,6 @@ class WindowFile(NamedTuple):
     path: str
     num_requests: int
     trace_block_size: int | None
-    row_counts: dict[str, int]
-
-
-class HistoryFile(NamedTuple):
-    """Result of ``read_trace_history``; ``path`` is ``None`` when not written."""
-
-    path: str | None
-    num_requests: int
     row_counts: dict[str, int]
 
 
@@ -165,36 +130,15 @@ class ObservationBuckets:
 
 
 def resolve_trace_files(paths: Sequence[str | os.PathLike[str]]) -> list[Path]:
-    """Expand trace files, directories, globs and frontend segment prefixes.
+    """Expand trace files, directories and globs as the planner warmup does.
 
-    A path that is neither an existing file, a directory nor a glob is read
-    as a frontend segment prefix: ``<prefix>.NNNNNN.jsonl.gz`` with any
-    ``.jsonl``/``.jsonl.gz`` suffix of the prefix removed. A file listed more
-    than once is read once.
+    A file listed more than once is read once.
     """
 
     resolved: list[Path] = []
     seen: set[Path] = set()
     for entry in paths:
-        text = os.fspath(entry)
-        path = Path(text)
-        if path.exists() or glob.has_magic(text):
-            matches = _resolve_trace_paths(text)
-        else:
-            prefix = text
-            for suffix in (".jsonl.gz", ".jsonl"):
-                if prefix.endswith(suffix):
-                    prefix = prefix[: -len(suffix)]
-                    break
-            matches = _reject_duplicate_copies(
-                [
-                    Path(match)
-                    for match in glob.glob(f"{glob.escape(prefix)}.[0-9]*.jsonl.gz")
-                ]
-            )
-            if not matches:
-                raise FileNotFoundError(f"no trace file or segment matched {text!r}")
-        for match in matches:
+        for match in _resolve_trace_paths(os.fspath(entry)):
             if match not in seen:
                 seen.add(match)
                 resolved.append(match)
@@ -218,8 +162,8 @@ def trace_origin_ms(
     counts = _new_counts()
     origin: int | None = None
     for path in resolve_trace_files(paths):
-        for record, location in _iter_records(path, counts):
-            event = _request_end_event(record, location, counts)
+        for record, location in _iter_records(path):
+            event = _request_end_event(record, location)
             if event is None:
                 continue
             row = _parse_request_end(event, location, need_hashes=False)
@@ -243,7 +187,6 @@ def read_trace_window(
     as_of_ms: float,
     out_path: str | os.PathLike[str],
     *,
-    prune_by_mtime: bool,
     buckets: ObservationBuckets | None = None,
 ) -> WindowFile:
     """Write the requests that arrived in ``[start_ms, end_ms)`` to ``out_path``.
@@ -251,16 +194,14 @@ def read_trace_window(
     Rows whose completion is after ``as_of_ms`` are censored. The output is a
     bare-row ``dynamo.request.trace.v1`` file sorted by (arrival, completion,
     request_id) with ``request_received_ms`` set to the normalized arrival, so
-    AISimulate replays it as is. ``prune_by_mtime`` skips files last modified
-    more than five minutes (a clock-skew margin) before ``start_ms``; only live
-    frontend segments, written in completion order, may use it. ``buckets``,
-    when given, receives every kept row.
+    AISimulate replays it as is. ``buckets``, when given, receives every kept
+    row.
     """
 
     counts = _new_counts()
     selected: dict[str, _RequestRow] = {}
     for row in _iter_selected_rows(
-        paths, start_ms, end_ms, as_of_ms, counts, prune_by_mtime, need_hashes=True
+        paths, start_ms, end_ms, as_of_ms, counts, need_hashes=True
     ):
         if row.request_id in selected:
             counts["duplicate"] += 1
@@ -297,44 +238,25 @@ def read_trace_history(
     start_ms: float,
     end_ms: float,
     as_of_ms: float,
-    out_path: str | os.PathLike[str] | None,
     *,
-    prune_by_mtime: bool,
-    buckets: ObservationBuckets | None = None,
-) -> HistoryFile:
-    """Stream the requests that arrived in ``[start_ms, end_ms)``.
+    buckets: Sequence[ObservationBuckets] = (),
+) -> int:
+    """Count the requests that arrived in ``[start_ms, end_ms)``.
 
     Selection and request times are those of ``read_trace_window``. Rows are
-    never held in memory: each is written to ``out_path`` (when set) as a
-    hash-free ``request_end`` row, in input order, and added to ``buckets``
-    (when set). Request IDs are not de-duplicated, because that would need
+    streamed, never held in memory, and each is added to every bucket set in
+    ``buckets``. Request IDs are not de-duplicated, because that would need
     the whole history's IDs in memory; the window file is de-duplicated.
     """
 
-    counts = _new_counts()
     num_requests = 0
-    with _open_output(out_path) if out_path is not None else nullcontext() as sink:
-        for row in _iter_selected_rows(
-            paths,
-            start_ms,
-            end_ms,
-            as_of_ms,
-            counts,
-            prune_by_mtime,
-            need_hashes=False,
-        ):
-            num_requests += 1
-            _count_kept(row, counts)
-            if buckets is not None:
-                buckets.add(row.arrival_ms, row.input_length, row.output_tokens)
-            if sink is not None:
-                sink.write(_dumps(_history_record(row)))
-                sink.write("\n")
-    return HistoryFile(
-        path=None if out_path is None else os.fspath(out_path),
-        num_requests=num_requests,
-        row_counts=counts,
-    )
+    for row in _iter_selected_rows(
+        paths, start_ms, end_ms, as_of_ms, _new_counts(), need_hashes=False
+    ):
+        num_requests += 1
+        for target in buckets:
+            target.add(row.arrival_ms, row.input_length, row.output_tokens)
+    return num_requests
 
 
 def _new_counts() -> dict[str, int]:
@@ -363,22 +285,12 @@ def _iter_selected_rows(
     end_ms: float,
     as_of_ms: float,
     counts: dict[str, int],
-    prune_by_mtime: bool,
     *,
     need_hashes: bool,
 ) -> Iterator[_RequestRow]:
     for path in resolve_trace_files(paths):
-        # A file's mtime is at or after every row written to it, and rows
-        # complete after they arrive: an older file has no arrival >= start.
-        # The margin absorbs skew between the store's and the frontends' clocks.
-        if (
-            prune_by_mtime
-            and path.stat().st_mtime * 1000.0 < start_ms - _MTIME_PRUNE_MARGIN_MS
-        ):
-            counts["pruned_files"] += 1
-            continue
-        for record, location in _iter_records(path, counts):
-            event = _request_end_event(record, location, counts)
+        for record, location in _iter_records(path):
+            event = _request_end_event(record, location)
             if event is None:
                 continue
             row = _parse_request_end(event, location, need_hashes=need_hashes)
@@ -386,7 +298,6 @@ def _iter_selected_rows(
                 counts["missing_output_tokens"] += 1
                 continue
             if not start_ms <= row.arrival_ms < end_ms:
-                counts["outside_window"] += 1
                 continue
             if row.completion_ms > as_of_ms:
                 counts["censored"] += 1
@@ -394,50 +305,26 @@ def _iter_selected_rows(
             yield row
 
 
-def _iter_records(
-    path: Path, counts: dict[str, int]
-) -> Iterator[tuple[dict[str, Any], str]]:
-    """Yield JSON objects, tolerating only a truncated tail.
-
-    A truncated final gzip member ends the file early (``EOFError``, or a
-    1-byte member header); an unparsable final line without a newline is a
-    write in progress. Both are counted. A malformed line anywhere else, or a
-    corrupt gzip stream, raises.
-    """
+def _iter_records(path: Path) -> Iterator[tuple[dict[str, Any], str]]:
+    """Yield the JSON object of every non-blank line; a malformed one raises."""
 
     opener = gzip.open if path.name.endswith(".gz") else open
     with opener(path, "rb") as source:
-        line_number = 0
-        try:
-            for raw in source:
-                line_number += 1
-                if not raw.strip():
-                    continue
-                location = f"{path}:{line_number}"
-                try:
-                    record = json.loads(raw)
-                except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                    if not raw.endswith(b"\n"):
-                        counts["partial_line"] += 1
-                        continue
-                    raise ValueError(f"invalid JSON at {location}: {error}") from error
-                if not isinstance(record, dict):
-                    raise ValueError(f"trace row at {location} must be a JSON object")
-                yield record, location
-        except EOFError:
-            counts["truncated_gzip"] += 1
-        except gzip.BadGzipFile as error:
-            # Only a strict prefix of the next member's magic is a write in
-            # progress; any other bad header is corruption.
-            if str(error) != _PARTIAL_GZIP_MAGIC:
-                raise
-            counts["truncated_gzip"] += 1
+        for line_number, raw in enumerate(source, start=1):
+            if not raw.strip():
+                continue
+            location = f"{path}:{line_number}"
+            try:
+                record = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise ValueError(f"invalid JSON at {location}: {error}") from error
+            if not isinstance(record, dict):
+                raise ValueError(f"trace row at {location} must be a JSON object")
+            yield record, location
 
 
-def _request_end_event(
-    record: dict[str, Any], location: str, counts: dict[str, int]
-) -> dict[str, Any] | None:
-    """Return the ``request_end`` event of a bare or enveloped row, or drop it."""
+def _request_end_event(record: dict[str, Any], location: str) -> dict[str, Any] | None:
+    """The ``request_end`` event of a bare or enveloped row; ``None`` otherwise."""
 
     event = record.get("event", record)
     if not isinstance(event, dict):
@@ -446,14 +333,7 @@ def _request_end_event(
         raise ValueError(
             f"expected {TRACE_SCHEMA} at {location}, got {event.get('schema')!r}"
         )
-    event_type = event.get("event_type")
-    if event_type == "request_end":
-        return event
-    if event_type in _TOOL_EVENTS:
-        counts["tool"] += 1
-    else:
-        counts[_DROPPED_EVENTS.get(str(event_type), "other_event")] += 1
-    return None
+    return event if event.get("event_type") == "request_end" else None
 
 
 def _parse_request_end(
@@ -558,18 +438,4 @@ def _window_record(row: _RequestRow) -> dict[str, Any]:
         "event_type": "request_end",
         "event_time_unix_ms": row.event_time_ms,
         "request": request,
-    }
-
-
-def _history_record(row: _RequestRow) -> dict[str, Any]:
-    return {
-        "schema": TRACE_SCHEMA,
-        "event_type": "request_end",
-        "event_time_unix_ms": row.event_time_ms,
-        "request": {
-            "request_id": row.request_id,
-            "output_tokens": row.output_tokens,
-            "request_received_ms": row.arrival_ms,
-            "replay": {"input_length": row.input_length},
-        },
     }

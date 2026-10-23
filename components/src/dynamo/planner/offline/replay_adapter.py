@@ -206,45 +206,6 @@ def _merge_traffic(
     return merged
 
 
-# Outcomes whose ``planner_changes`` the host must apply (DESIGN §3.4).
-_ACTUATED_RETUNE_OUTCOMES = frozenset({"applied", "rolled_back"})
-
-
-def _retune_decision_tick_record(decision: RetuneDecision) -> dict[str, Any]:
-    """Compact per-tick record of a retune decision.
-
-    ``RetuneDecision.to_dict`` already replaces ``predictor_warmup`` with its
-    length. The per-preset pre-sweep ``losses`` are dropped here too; the
-    full record is kept once in ``PlannerReplayDetails.retune_events``.
-    """
-    record = decision.to_dict()
-    presweep = record["predictor_presweep"]
-    if presweep is not None:
-        record["predictor_presweep"] = {
-            key: value for key, value in presweep.items() if key != "losses"
-        }
-    return record
-
-
-def _effects_tick_record(effects: PlannerEffects, *, retune: bool) -> dict[str, Any]:
-    """Tick-capture form of ``PlannerEffects``.
-
-    ``asdict`` would expand every retune decision's ``predictor_warmup``
-    (thousands of observations per predictor swap) into each tick, so the
-    decisions are serialized compactly. Every other field keeps its
-    ``asdict`` form. Without ``retune`` the retune fields are omitted, so
-    tick captures of planners without retune keep their previous shape.
-    """
-    record = asdict(replace(effects, retune_decisions=[]))
-    if not retune:
-        del record["router_parameters"], record["retune_decisions"]
-        return record
-    record["retune_decisions"] = [
-        _retune_decision_tick_record(decision) for decision in effects.retune_decisions
-    ]
-    return record
-
-
 class ReplayPlannerAdapter:
     """Context-managed planner scaling policy for offline replay."""
 
@@ -438,18 +399,23 @@ class ReplayPlannerAdapter:
         }
         tick_ordinal = int(result["tick_ordinal"])
         if self._capture_details:
-            retune = self._config.retune is not None
+            # The desired router map is in ``runtime_decision``, and retune
+            # decisions are recorded once in ``retune_events`` (their
+            # ``decided_at_s`` is the tick's time). Clearing the decisions
+            # first keeps ``asdict`` from expanding ``predictor_warmup``.
+            effects_record = asdict(replace(effects, retune_decisions=[]))
+            del effects_record["router_parameters"], effects_record["retune_decisions"]
             tick_record = {
                 "ordinal": tick_ordinal,
                 "at_ms": tick.at_s * 1000.0,
                 "scheduled_tick": asdict(tick),
                 "input": self._tick_input_record(tick_input),
                 "topology": self._topology_record(result),
-                "effects": _effects_tick_record(effects, retune=retune),
+                "effects": effects_record,
                 "runtime_decision": decision,
             }
             router_policies = result.get("router_policies")
-            if retune and router_policies is not None:
+            if self._config.retune is not None and router_policies is not None:
                 # Replay router state (revision and parameters per worker
                 # type) before this tick's router update.
                 tick_record["router_policies"] = [
@@ -466,9 +432,9 @@ class ReplayPlannerAdapter:
     def _apply_retune_decisions(self, decisions: Sequence[RetuneDecision]) -> None:
         """Record retune decisions and apply their planner changes.
 
-        Planner changes take effect from the next tick, as live. Candidates
-        were validated when the controller built its candidate set, so any
-        error here is a bug and fails the replay.
+        Planner changes take effect from the next tick, as live. The
+        controller validated them when it decided, so any error here is a
+        bug and fails the replay.
         """
         if not decisions:
             return
@@ -477,7 +443,7 @@ class ReplayPlannerAdapter:
         capabilities = self._capabilities or WorkerCapabilities()
         for decision in decisions:
             changes = decision.planner_changes
-            if decision.outcome not in _ACTUATED_RETUNE_OUTCOMES or not changes:
+            if decision.outcome != "applied" or not changes:
                 continue
             engine = self._engine
             if not isinstance(engine, ReconfigurableEngineProtocol):
@@ -521,10 +487,13 @@ class ReplayPlannerAdapter:
             ),
             total_ticks=self._total_ticks,
             html_report_path=html_report_path,
-            # Full decision records, including the predictor pre-sweep losses
-            # that the per-tick capture omits. Recorded like scaling events,
-            # independent of ``capture_details``.
-            retune_events=[decision.to_dict() for decision in self._retune_decisions],
+            # Recorded like scaling events, independent of ``capture_details``;
+            # present (possibly empty) whenever retune is configured.
+            retune_events=(
+                None
+                if self._config.retune is None
+                else [decision.to_dict() for decision in self._retune_decisions]
+            ),
         )
 
     @staticmethod

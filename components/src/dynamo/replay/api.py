@@ -5,7 +5,6 @@
 
 import functools
 import json
-import logging
 import math
 import os
 from collections.abc import Callable, Sequence
@@ -26,10 +25,8 @@ from dynamo.replay.report import (
 )
 
 if TYPE_CHECKING:
-    from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
-    from dynamo.planner.core.types import RetuneInputs
-
-logger = logging.getLogger(__name__)
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.core.types import RetuneInputs, TrafficObservation
 
 _AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
 
@@ -99,6 +96,9 @@ class _TraceReplayOptions(_CommonReplayOptions, total=False):
     trace_num_prefix_groups: int
     report_jsonl_path: str | os.PathLike[str] | None
     max_sim_time_ms: float | None
+    # Internal to retune sweeps; not part of the public API.
+    _planner_warmup_observations: "Sequence[TrafficObservation] | None"
+    _deterministic: bool
 
 
 class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
@@ -183,6 +183,7 @@ def _retune_inputs(
     # ``_planner_replay_adapter``).
     from dynamo.planner.config.planner_config import RetuneEngineSpec
     from dynamo.planner.core.types import RetuneInputs
+    from dynamo.planner.offline.trace_data import detect_trace_format
     from dynamo.planner.retune.window import read_trace_history, trace_origin_ms
     from dynamo.replay.config import load_engine_args
 
@@ -203,9 +204,6 @@ def _retune_inputs(
         kv_event_lag_ms=kv_event_lag_ms,
         benchmark_granularity=benchmark_granularity,
     )
-    if config.retune is not None and config.retune.live.engine is not None:
-        _warn_live_engine_mismatch(config.retune.live.engine, engine)
-
     trace_paths = tuple(os.fspath(path) for path in trace_files)
     row_counts: dict[str, int] = {}
     origin_ms = trace_origin_ms(trace_paths, row_counts=row_counts)
@@ -218,23 +216,26 @@ def _retune_inputs(
             "Dynamo trace)"
         )
     history_paths: tuple[str, ...] = ()
-    if config.load_predictor_warmup_trace is not None:
-        history_paths = (config.load_predictor_warmup_trace,)
+    # Only an inner planner that scales on throughput reads the history (to
+    # warm its predictors), so other configs leave the warmup trace alone.
+    warmup_trace = config.load_predictor_warmup_trace
+    if config.enable_throughput_scaling and warmup_trace is not None:
+        if detect_trace_format(warmup_trace) == "mooncake":
+            raise ValueError(
+                "planner.retune with throughput scaling reads "
+                "load_predictor_warmup_trace as recorded history, which needs "
+                "a dynamo.request.trace.v1 trace on the replayed trace's "
+                "absolute time axis; Mooncake timestamps are relative"
+            )
+        history_paths = (warmup_trace,)
         # History and windows are read on one time axis; an overlapping
         # history would count requests twice in predictor warmup.
-        overlap = read_trace_history(
-            history_paths,
-            origin_ms,
-            math.inf,
-            math.inf,
-            None,
-            prune_by_mtime=False,
-        )
-        if overlap.num_requests:
+        overlap = read_trace_history(history_paths, origin_ms, math.inf, math.inf)
+        if overlap:
             raise ValueError(
                 "planner.retune history (load_predictor_warmup_trace) must end "
                 "at or before the first replayed request on the same absolute "
-                f"time axis; {overlap.num_requests} history requests arrive at "
+                f"time axis; {overlap} history requests arrive at "
                 f"or after {origin_ms:.0f} ms"
             )
     return RetuneInputs(
@@ -243,31 +244,7 @@ def _retune_inputs(
         history_paths=history_paths,
         trace_origin_ms=origin_ms,
         arrival_speedup_ratio=arrival_speedup_ratio,
-        # File modification times say nothing about row times in replay.
-        prune_by_mtime=False,
     )
-
-
-def _warn_live_engine_mismatch(
-    live: "RetuneEngineSpec", derived: "RetuneEngineSpec"
-) -> None:
-    """Log where ``retune.live.engine`` differs from the replayed engine.
-
-    The replay host ignores ``retune.live``; the comparison makes a replay of
-    a deployment's config a check of its live engine snapshot.
-    """
-
-    live_fields = live.model_dump()
-    derived_fields = derived.model_dump()
-    differing = sorted(
-        name for name in derived_fields if live_fields[name] != derived_fields[name]
-    )
-    if differing:
-        logger.warning(
-            "planner.retune.live.engine differs from the engine this replay "
-            "runs in fields %s; retune candidates replay the replay engine",
-            differing,
-        )
 
 
 def _planner_config_arg(planner_config):
@@ -431,6 +408,12 @@ def run_trace_replay(
     weka_nested_timestamp_basis=None,
     telemetry_options=None,
     kv_event_lag_ms=None,
+    # Internal: a retune sweep's inner planner is warmed with the history it
+    # already bucketed instead of its load_predictor_warmup_trace.
+    _planner_warmup_observations=None,
+    # Internal: a retune sweep replays the baseline and every candidate with
+    # the canonical router seed and ordinal request ids (common random numbers).
+    _deterministic=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
@@ -505,6 +488,7 @@ def run_trace_replay(
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
         "kv_event_lag_ms": kv_event_lag_ms,
+        "deterministic": _deterministic,
     }
     replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
@@ -561,6 +545,7 @@ def run_trace_replay(
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
             retune_inputs_factory=retune_inputs_factory,
+            warmup_observations=_planner_warmup_observations,
         )
         with adapter_scope as adapter:
             native = _run_mocker_trace_replay(

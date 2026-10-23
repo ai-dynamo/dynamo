@@ -147,7 +147,6 @@ def test_explicit_domains_use_the_recommendation_syntax():
     assert router_domain == {
         "overlap_score_credit": [0.5, 1.0, 2.0],
         "prefill_load_scale": [1.0],
-        # Decimal steps: no float drift at the endpoint.
         "router_temperature": [0.0, 0.1, 0.2],
         "decode_active_request_weight": [0.5, 1.0],
     }
@@ -243,50 +242,6 @@ def test_custom_predictor_mapping_values_take_their_field_types():
     assert with_predictor_fields(grid_point, baseline, predictor_fields(entry)) == (
         baseline
     )
-
-
-def test_predictor_candidates_are_expanded_once_per_spec(monkeypatch):
-    # candidate_config validates retune again for every planner candidate the
-    # controller checks, so the predictor expansion is memoized by spec.
-    from dynamo.planner.reconfiguration import candidate_config
-    from dynamo.planner.retune import domains
-
-    calls = []
-    expand = domains._expand_predictor_candidates
-
-    def counting(public, limit):
-        calls.append(limit)
-        return expand(public, limit)
-
-    monkeypatch.setattr(domains, "_PREDICTOR_CANDIDATE_CACHE", {})
-    monkeypatch.setattr(domains, "_expand_predictor_candidates", counting)
-    planner = {
-        "load_predictor": {"preset": False, "type": "kalman"},
-        "kalman_r": {"choices": [1, 2]},
-    }
-    config = _config(router=None, planner=planner, **SLA_THROUGHPUT)
-    first = expand_planner_domain(config)
-    candidate_config(config, {"decode_min_endpoint": 2})
-    second = expand_planner_domain(config)
-    assert len(calls) == 1
-    assert second == first and len(first.predictor_candidates) == 32
-    # Callers get their own mappings.
-    first.predictor_candidates[0][1]["kalman_r"] = 99.0
-    assert expand_planner_domain(config).predictor_candidates[0][1]["kalman_r"] == 1.0
-    # A different domain or limit is expanded again.
-    _config(
-        router=None,
-        planner={**planner, "kalman_r": {"choices": [1, 3]}},
-        **SLA_THROUGHPUT,
-    )
-    assert len(calls) == 2
-    PlannerConfig(
-        namespace="test-ns",
-        mode="disagg",
-        retune={**config.retune.model_dump(), "max_candidates": 100},
-        **SLA_THROUGHPUT,
-    )
-    assert calls[-1] == 100 and len(calls) == 3
 
 
 def test_explicit_planner_group_that_does_not_apply_is_an_error():

@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -28,7 +28,11 @@ from dynamo.replay.config import canonical_upstream_config
 
 if TYPE_CHECKING:
     from dynamo.planner.config.planner_config import PlannerConfig
-    from dynamo.planner.core.types import EngineCapabilities, RetuneInputs
+    from dynamo.planner.core.types import (
+        EngineCapabilities,
+        RetuneInputs,
+        TrafficObservation,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -203,13 +207,15 @@ def prepare_planner_replay(
     capture_details: bool = True,
     performance_model_metadata: dict[str, Any] | None = None,
     retune_inputs_factory: Callable[[PlannerConfig], RetuneInputs] | None = None,
+    warmup_observations: Sequence[TrafficObservation] | None = None,
 ):
     """Create and bootstrap the scaling component for an offline replay.
 
     ``retune_inputs_factory`` builds the retune inputs (trace, time axis and
     pinned engine) from the parsed planner config. It is required when the
     config sets ``retune``; only trace replay entry points that support
-    retune provide one.
+    retune provide one. ``warmup_observations``, when set, warm the load
+    predictor instead of the config's ``load_predictor_warmup_trace``.
     """
 
     from dynamo.planner.config.planner_config import PlannerConfig
@@ -251,9 +257,9 @@ def prepare_planner_replay(
             )
         retune_inputs = retune_inputs_factory(planner_config)
 
-    warmup_observations = None
-    if planner_config.load_predictor_warmup_trace is not None:
-        warmup_observations = extract_traffic_observations_from_trace(
+    warmup = None if warmup_observations is None else list(warmup_observations)
+    if warmup is None and planner_config.load_predictor_warmup_trace is not None:
+        warmup = extract_traffic_observations_from_trace(
             planner_config.load_predictor_warmup_trace,
             planner_config.throughput_adjustment_interval_seconds,
         )
@@ -262,7 +268,7 @@ def prepare_planner_replay(
         planner_config=planner_config,
         capabilities=capabilities,
         benchmark_granularity=benchmark_granularity,
-        warmup_observations=warmup_observations,
+        warmup_observations=warmup,
         capture_details=capture_details,
         retune_inputs=retune_inputs,
     )
@@ -401,6 +407,7 @@ def planner_replay_adapter(
     capture_details: bool = True,
     performance_model_metadata: dict[str, Any] | None = None,
     retune_inputs_factory: Callable[[PlannerConfig], RetuneInputs] | None = None,
+    warmup_observations: Sequence[TrafficObservation] | None = None,
 ) -> Iterator:
     """Own Planner preparation, replay execution, and cleanup as one scope."""
 
@@ -413,6 +420,7 @@ def planner_replay_adapter(
         benchmark_granularity=benchmark_granularity,
         capture_details=capture_details,
         retune_inputs_factory=retune_inputs_factory,
+        warmup_observations=warmup_observations,
     )
     with adapter:
         yield adapter

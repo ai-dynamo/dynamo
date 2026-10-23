@@ -686,53 +686,6 @@ def test_independent_float_range_includes_exact_endpoint() -> None:
 
     presets = plan.state["search_space"]["load_predictor"]["preset"]
     assert sorted({preset["kalman_r"] for preset in presets}) == [0.1, 0.2, 0.3]
-    assert planner_provider_module._public_values(
-        {"range": {"min": 0.0, "max": 0.3, "step": 0.1}}, []
-    ) == [0.0, 0.1, 0.2, 0.3]
-    integers = planner_provider_module._public_values(
-        {"range": {"min": 1, "max": 10, "step": 3}}, []
-    )
-    assert integers == [1, 4, 7, 10]
-    assert all(type(value) is int for value in integers)
-
-
-def test_independent_preset_default_overrides_replace_only_named_defaults() -> None:
-    mappings = planner_provider_module._independent_preset_mappings(
-        "load_sensitivity",
-        {"preset": False},
-        {},
-        default_overrides={"load_min_observations": [4]},
-    )
-    assert mappings == [
-        {"load_scaling_down_sensitivity": value, "load_min_observations": 4}
-        for value in (70, 80, 90)
-    ]
-    explicit = planner_provider_module._independent_preset_mappings(
-        "load_sensitivity",
-        {"preset": False},
-        {"load_scaling_down_sensitivity": {"choices": [60]}},
-        default_overrides={"load_min_observations": [4]},
-    )
-    assert explicit == [
-        {"load_scaling_down_sensitivity": 60, "load_min_observations": 4}
-    ]
-    assert (
-        len(
-            planner_provider_module._independent_preset_mappings(
-                "load_sensitivity", {"preset": False}, {}
-            )
-        )
-        == 9
-    )
-    with pytest.raises(
-        ValueError, match=r"load_sensitivity has no knobs \['kalman_r'\]"
-    ):
-        planner_provider_module._independent_preset_mappings(
-            "load_sensitivity",
-            {"preset": False},
-            {},
-            default_overrides={"kalman_r": [1.0]},
-        )
 
 
 def test_custom_fpm_preset_validation_ignores_prometheus_environment(

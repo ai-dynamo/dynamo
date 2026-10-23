@@ -119,33 +119,11 @@ def test_retune_keeps_easy_mode_scaling_unless_both_flags_are_false() -> None:
     assert config.retune.planner == _SENSITIVITY
 
 
-@pytest.mark.parametrize(
-    "retune, message",
-    [
-        ({**_RETUNE, "unknown_knob": 1}, "unknown_knob"),
-        ({**_RETUNE, "interval_seconds": 7}, "multiple of"),
-        (
-            {**_RETUNE, "planner": _SENSITIVITY},
-            "requires load or throughput scaling",
-        ),
-        (
-            {**_RETUNE, "router": {"router_temperature": {"choices": [0.0]}}},
-            "write temperature instead",
-        ),
-        ({**_RETUNE, "router": {}}, "retune.router is empty"),
-    ],
-    ids=[
-        "unknown-field",
-        "interval-not-a-tick-multiple",
-        "planner-domain-no-scaling",
-        "live-router-name",
-        "empty-router",
-    ],
-)
-def test_retune_mapping_is_validated_by_planner_config(retune, message) -> None:
-    with pytest.raises(ValueError, match=message):
+def test_retune_mapping_is_validated_by_planner_config() -> None:
+    # PlannerConfig owns the retune checks; the provider passes its errors on.
+    with pytest.raises(ValueError, match="unknown_knob"):
         create_provider().compile_prediction(
-            {**_RETUNE_ONLY, "retune": retune}, _context()
+            {**_RETUNE_ONLY, "retune": {**_RETUNE, "unknown_knob": 1}}, _context()
         )
 
 

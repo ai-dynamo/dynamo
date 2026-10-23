@@ -16,8 +16,6 @@ pytest.importorskip(
 
 from pydantic import ValidationError
 
-import dynamo.planner.simulation.provider as planner_provider_module
-from dynamo.aisimulate.domains import finite_values, require_enumerable
 from dynamo.planner.reconfiguration import PREDICTOR_FIELDS, RUNTIME_FIELDS
 from dynamo.planner.simulation.config import (
     PLANNER_PRESET_GROUPS,
@@ -29,7 +27,6 @@ from dynamo.planner.simulation.config import (
     PlannerRecommendationConfig,
     PlannerRetuneConfig,
 )
-from dynamo.planner.simulation.load_predictor import distinct_predictor_candidates
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -104,17 +101,17 @@ def test_explicit_retune_domains_parse_with_recommendation_syntax() -> None:
             "decode_scale_up_kv_rate": {"range": {"min": 80, "max": 90, "step": 5}},
         }
     )
-    require_enumerable(public, prefix="retune.planner.")
-    assert finite_values("m", public.max_num_gpus, None, limit=8) == [-1, 16]
-    assert finite_values("m", public.min_num_gpus, None, limit=8) == [2, 4, 6]
-    assert finite_values(
-        "r", public.max_throughput_scaling_replicas, None, limit=8
-    ) == [3]
-    assert finite_values("k", public.decode_scale_up_kv_rate, None, limit=8) == [
-        80.0,
-        85.0,
-        90.0,
-    ]
+    assert public.model_fields_set == {
+        "load_sensitivity",
+        "load_scaling_down_sensitivity",
+        "decode_min_workers",
+        "load_predictor",
+        "max_num_gpus",
+        "min_num_gpus",
+        "max_throughput_scaling_replicas",
+        "prefill_scale_down_queue_tokens",
+        "decode_scale_up_kv_rate",
+    }
 
 
 @pytest.mark.parametrize("name", sorted(PLANNER_RETUNE_STARTUP_ONLY))
@@ -163,36 +160,3 @@ def test_live_names_point_to_the_public_name(live: str, public: str) -> None:
 def test_retune_config_rejections(config, match) -> None:
     with pytest.raises(ValidationError, match=match):
         PlannerRetuneConfig.model_validate(config)
-
-
-def test_continuous_ranges_are_rejected_before_preset_expansion() -> None:
-    public = PlannerRetuneConfig.model_validate(
-        {
-            "load_predictor": {"preset": False},
-            "kalman_r": {"range": {"min": 0.5, "max": 8.0, "scale": "log"}},
-        }
-    )
-    with pytest.raises(ValueError, match="retune.planner.kalman_r is a log range"):
-        require_enumerable(public, prefix="retune.planner.")
-
-
-@pytest.mark.parametrize(
-    ("control", "mappings", "distinct"),
-    [
-        ({"preset": False}, 256, 40),
-        ({"preset": False, "type": {"choices": ["arima", "kalman"]}}, 128, 34),
-    ],
-)
-def test_predictor_preset_off_deduplicates_to_distinct_predictors(
-    control, mappings, distinct
-) -> None:
-    public = PlannerRetuneConfig.model_validate({"load_predictor": control})
-    entries = planner_provider_module._independent_preset_mappings(
-        "load_predictor",
-        public.load_predictor.model_dump(),
-        public.model_dump(mode="python", exclude_none=True),
-    )
-    assert len(entries) == mappings
-    candidates = distinct_predictor_candidates(entries)
-    assert len(candidates) == distinct
-    assert candidates[0][0] == "custom_0"

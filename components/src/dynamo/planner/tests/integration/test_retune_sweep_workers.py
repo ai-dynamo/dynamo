@@ -4,7 +4,7 @@
 # Optional-dependency preflight must run before the sweep module imports it.
 
 """Retune sweeps on real spawned workers: isolation, deadline, cancellation,
-the trace read and the pre-sweep.
+the trace read, the pre-sweep and the workers' temporary files.
 
 Each test runs ``run_sweep`` end to end, so it spawns worker processes that
 import the evaluators from ``dynamo.planner.tests.retune_sweep_helpers``.
@@ -13,7 +13,6 @@ import the evaluators from ``dynamo.planner.tests.retune_sweep_helpers``.
 import errno
 import multiprocessing
 import os
-import signal
 import threading
 import time
 
@@ -25,7 +24,6 @@ pytest.importorskip(
 )
 
 from dynamo.planner.core.types import RetuneParams
-from dynamo.planner.retune import sweep as sweep_module
 from dynamo.planner.retune.sweep import run_sweep
 from dynamo.planner.tests.retune_sweep_helpers import (
     ABORT,
@@ -38,6 +36,7 @@ from dynamo.planner.tests.retune_sweep_helpers import (
     predictor_candidates,
     retune_params,
     sweep_request,
+    temp_dir_evaluator,
     trace_rows,
     write_trace,
 )
@@ -71,7 +70,6 @@ def test_a_dead_worker_fails_only_its_candidate(tmp_path):
 
     assert result.status == "ok", result.error
     assert result.num_requests == 30
-    assert result.row_counts["outside_window"] == 1
     assert result.scores[aborts.key()] is None
     assert result.scores[raises.key()] is None
     assert "exited with code" in result.metrics[aborts.key()]["error"]
@@ -191,32 +189,62 @@ def test_run_sweep_presweep_fixes_the_winner_into_non_baseline_candidates(tmp_pa
     # The baseline keeps the current predictor; candidates carry the winner's.
     assert result.metrics[baseline.key()]["planner"]["load_predictor"] == "arima"
     assert result.metrics[candidate.key()]["planner"] == presweep["fields"]
-    # Inner planners are warmed from the history file, never the outer trace.
+    # Inner planners are warmed from the history's 20 intervals before the
+    # window, never from the outer warmup trace.
     metrics = result.metrics[candidate.key()]
-    assert metrics["warmup_trace"] != "/outer/warmup.jsonl"
-    assert metrics["history_rows"] == result.row_counts["history_requests"] > 0
+    assert metrics["warmup_trace"] is None
+    assert metrics["warmup"] == [2.0 + bucket for bucket in range(20)]
     assert metrics["retune"] is None
     assert metrics["reports"] == (None, 0)
-    # Warmup covers history and window at the throughput interval.
+    # A predictor swap's warmup covers history and window at the throughput
+    # interval, and the winner was prepared on it.
     observations = result.warmup_observations
     assert len(observations) == 30
     assert all(obs.duration_s == interval_s for obs in observations)
     assert sum(obs.num_req for obs in observations) == len(arrivals)
+    assert result.predictor_warmup_error is None
 
 
 @pytest.mark.timeout(240)
-def test_empty_window_and_read_errors_end_the_sweep(tmp_path):
-    trace = write_trace(tmp_path / "trace.jsonl", trace_rows([ORIGIN_MS - 5_000]))
+def test_worker_temp_files_are_removed_with_the_sweep(tmp_path):
+    trace = write_trace(
+        tmp_path / "trace.jsonl", trace_rows([ORIGIN_MS + 1_000 * i for i in range(5)])
+    )
     baseline = retune_params(1.0)
 
     result = run_sweep(
-        sweep_request([trace], [baseline], baseline), evaluator=fake_evaluator
+        sweep_request([trace], [baseline, retune_params(0.0)], baseline),
+        evaluator=temp_dir_evaluator,
     )
+
+    assert result.status == "ok", result.error
+    # The workers are killed at the end, but their temporary directories
+    # lived in the sweep directory and went with it.
+    temp_dirs = [metrics["temp_dir"] for metrics in result.metrics.values()]
+    assert len(temp_dirs) == 2
+    assert not any(os.path.exists(path) for path in temp_dirs)
+
+
+@pytest.mark.timeout(240)
+def test_empty_window_and_read_errors_end_the_sweep(tmp_path, caplog):
+    # The only request in the window completes after the sweep's cutoff.
+    trace = write_trace(
+        tmp_path / "trace.jsonl",
+        trace_rows([ORIGIN_MS - 5_000, ORIGIN_MS + 5_000], total_ms=60_000.0),
+    )
+    baseline = retune_params(1.0)
+
+    with caplog.at_level("INFO", logger="dynamo.planner.retune.sweep"):
+        result = run_sweep(
+            sweep_request([trace], [baseline], baseline), evaluator=fake_evaluator
+        )
 
     assert result.status == "empty", result.error
     assert result.num_requests == 0
-    assert result.row_counts["outside_window"] == 1
+    assert result.row_counts["censored"] == 1
     assert result.scores == {}
+    # The log says why the window was empty.
+    assert "empty window, row counts {'censored': 1}" in caplog.text
     # A read error is a failed result too: run_sweep never raises.
     missing = run_sweep(
         sweep_request([str(tmp_path / "missing")], [baseline], baseline),
@@ -246,30 +274,14 @@ def _hold_fifo_open(fifo, reading, stop, fds):
 
 
 @pytest.mark.timeout(240)
-@pytest.mark.parametrize(
-    "status, error",
-    [("timeout", "sweep exceeded its deadline"), ("failed", "sweep cancelled")],
-    ids=["deadline", "cancel"],
-)
-def test_a_hung_trace_read_ends_at_the_deadline_or_on_cancel(
-    tmp_path, monkeypatch, status, error
-):
+def test_a_hung_trace_read_ends_on_cancel(tmp_path):
     # The trace is a FIFO no one writes to: the read worker blocks in it,
-    # as on a stuck network filesystem.
+    # as on a stuck network filesystem, and is killed on cancel. The
+    # deadline kills it the same way (the deadline test above).
     fifo = tmp_path / "trace.jsonl"
     os.mkfifo(fifo)
     baseline = retune_params(1.0)
-    # The read worker's import fits in the deadline; the test then moves the
-    # deadline (or cancels) once the read is blocked.
     request = sweep_request([str(fifo)], [baseline], baseline, timeout_s=200.0)
-    pools = []
-
-    class RecordingPool(sweep_module._WorkerPool):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            pools.append(self)
-
-    monkeypatch.setattr(sweep_module, "_WorkerPool", RecordingPool)
     cancel = threading.Event()
     reading, stop, fds = threading.Event(), threading.Event(), []
     blocked_at = []
@@ -279,10 +291,7 @@ def test_a_hung_trace_read_ends_at_the_deadline_or_on_cancel(
             if stop.is_set():
                 return
         blocked_at.append(time.monotonic())
-        if status == "timeout":
-            pools[0]._deadline = time.monotonic() + 1.0
-        else:
-            cancel.set()
+        cancel.set()
 
     threads = [
         threading.Thread(
@@ -302,64 +311,8 @@ def test_a_hung_trace_read_ends_at_the_deadline_or_on_cancel(
             os.close(fd)
 
     assert blocked_at, "the read worker never opened the trace"
-    assert (result.status, result.error) == (status, error)
+    assert (result.status, result.error) == ("failed", "sweep cancelled")
     # Stopped while reading: nothing was counted.
     assert (result.num_requests, result.row_counts, result.scores) == (0, {}, {})
     assert time.monotonic() - blocked_at[0] < 30
-    assert multiprocessing.active_children() == []
-
-
-@pytest.mark.timeout(240)
-def test_presweep_dispatch_to_stalled_workers_honours_cancel(tmp_path, monkeypatch):
-    # 6,000 one-second buckets of history before a 10-s window: inline, the
-    # pre-sweep observations would be ~350 KB, above a pipe's socket buffer.
-    window_start = ORIGIN_MS
-    history_s = 6_000
-    trace = write_trace(
-        tmp_path / "trace.jsonl",
-        trace_rows(
-            [window_start - 1_000 * (history_s - i) for i in range(history_s)]
-            + [window_start + 1_000 * i for i in range(10)]
-        ),
-    )
-    baseline = retune_params(1.0)
-    request = sweep_request(
-        [trace],
-        [baseline],
-        baseline,
-        history_start_ms=window_start - 1_000 * history_s,
-        base_planner={
-            "mode": "agg",
-            "enable_throughput_scaling": True,
-            "throughput_adjustment_interval_seconds": 1,
-        },
-        predictor_candidates=predictor_candidates(
-            "constant_last", "kalman_default_raw"
-        ),
-        max_parallel=2,
-        timeout_s=200.0,
-    )
-    cancel = threading.Event()
-    seen = {}
-    run_presweep = sweep_module._run_presweep
-
-    def stalled_presweep(request, pool, inputs, *args):
-        # Freeze every worker, so none reads its pipe: as if each were still
-        # importing. The dispatch must not wait for them.
-        for worker in pool._workers:
-            os.kill(worker.process.pid, signal.SIGSTOP)
-        seen["observations"] = len(inputs.observations)
-        seen["stalled_at"] = time.monotonic()
-        threading.Timer(1.0, cancel.set).start()
-        return run_presweep(request, pool, inputs, *args)
-
-    monkeypatch.setattr(sweep_module, "_run_presweep", stalled_presweep)
-
-    result = run_sweep(request, cancel=cancel, evaluator=fake_evaluator)
-
-    assert (result.status, result.error) == ("failed", "sweep cancelled")
-    assert seen["observations"] == history_s + 10
-    assert time.monotonic() - seen["stalled_at"] < 15
-    assert result.num_requests == 10
-    assert result.row_counts["history_requests"] == history_s
     assert multiprocessing.active_children() == []

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 
 import psutil
@@ -22,7 +23,11 @@ from dynamo.llm import KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config
 from dynamo.planner.config.planner_config import RetuneEngineSpec
 from dynamo.planner.core.types import RetuneParams
-from dynamo.planner.retune.sweep import SweepRequest, evaluate_candidate
+from dynamo.planner.retune.sweep import (
+    SweepRequest,
+    _read_observations,
+    evaluate_candidate,
+)
 from dynamo.planner.simulation.load_predictor import distinct_predictor_candidates
 
 SCHEMA = "dynamo.request.trace.v1"
@@ -102,7 +107,6 @@ def sweep_request(trace_paths, candidates, baseline, **overrides):
         "history_start_ms": ORIGIN_MS,
         "as_of_ms": ORIGIN_MS + 20_000,
         "trace_paths": tuple(trace_paths),
-        "prune_by_mtime": False,
         "arrival_speedup_ratio": 1.0,
         "engine": RetuneEngineSpec(),
         "candidates": tuple(sorted(candidates, key=RetuneParams.key)),
@@ -126,25 +130,26 @@ def fake_evaluator(
     params,
     replicas,
     base_planner,
+    warmup_path,
     sla_ttft_ms,
     sla_itl_ms,
     window_s,
 ):
     if params.router.get("router_temperature") == HANG:
         time.sleep(600)
-    warmup_trace = (
-        None
-        if base_planner is None
-        else base_planner.get("load_predictor_warmup_trace")
-    )
-    history_rows = None
-    if warmup_trace is not None:
-        with open(warmup_trace, encoding="utf-8") as source:
-            history_rows = sum(1 for _ in source)
     return 1.0 + params.router.get("overlap_score_credit", 0.0), {
         "planner": dict(params.planner),
-        "warmup_trace": warmup_trace,
-        "history_rows": history_rows,
+        "warmup_trace": (
+            None
+            if base_planner is None
+            else base_planner.get("load_predictor_warmup_trace", "?")
+        ),
+        # Requests per warmup bucket the inner planner would see.
+        "warmup": (
+            None
+            if warmup_path is None
+            else [obs.num_req for obs in _read_observations(warmup_path)]
+        ),
         "retune": None if base_planner is None else base_planner.get("retune", "?"),
         "reports": (
             None
@@ -155,6 +160,18 @@ def fake_evaluator(
             )
         ),
     }
+
+
+def temp_dir_evaluator(*args):
+    """Score as ``fake_evaluator`` after creating a temporary directory.
+
+    cmdstanpy creates one on import and removes it only in an ``atexit``
+    hook, which a killed worker never runs.
+    """
+
+    path = tempfile.mkdtemp()
+    score, metrics = fake_evaluator(*args)
+    return score, {**metrics, "temp_dir": path}
 
 
 def abort_raise_or_evaluate(window_path, engine, arrival_speedup_ratio, params, *rest):

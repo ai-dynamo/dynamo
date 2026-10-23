@@ -6,7 +6,6 @@
 """Unit tests for the retune controller with a scripted ``run_sweep``."""
 
 import json
-import re
 import threading
 from collections import deque
 
@@ -22,7 +21,6 @@ from dynamo.llm import KvRouterConfig
 from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
 from dynamo.planner.core.types import (
     EngineCapabilities,
-    RetuneFeedback,
     RetuneInputs,
     RetuneParams,
     TrafficObservation,
@@ -31,7 +29,7 @@ from dynamo.planner.core.types import (
 )
 from dynamo.planner.plugins.clock import VirtualClock, WallClock
 from dynamo.planner.reconfiguration import PREDICTOR_FIELDS
-from dynamo.planner.retune import RetuneController, RetuneTickResult
+from dynamo.planner.retune.controller import RetuneController, RetuneTickResult
 from dynamo.planner.retune.sweep import SweepResult
 from dynamo.planner.simulation.load_predictor import (
     LOAD_PREDICTOR_PRESETS,
@@ -192,35 +190,37 @@ def _apply_planner_changes(config):
 
     def apply(_now, result):
         for decision in result.decisions:
-            if decision.outcome in ("applied", "rolled_back"):
+            if decision.outcome == "applied":
                 for key, value in decision.planner_changes.items():
                     setattr(config, key, value)
 
     return apply
 
 
-async def _run(
-    controller,
-    until,
-    *,
-    start=0.0,
-    counts=None,
-    feedback=None,
-    after_tick=None,
-):
+async def _run(controller, until, *, start=0.0, counts=None, after_tick=None):
     ticks = []
     now = start
     while now <= until + 1e-9:
         tick_counts = counts(now) if callable(counts) else (counts or _counts())
-        result = await controller.on_tick(
-            now, tick_counts, (feedback or {}).get(now, [])
-        )
+        result = await controller.on_tick(now, tick_counts)
         assert isinstance(result, RetuneTickResult)
         ticks.append((now, result))
         if after_tick is not None:
             after_tick(now, result)
         now += STEP
     return ticks
+
+
+def _blocking(finish):
+    """A sweep that waits for ``release`` before it returns ``finish``."""
+
+    release = threading.Event()
+
+    def run(request):
+        release.wait(30)
+        return finish(request)
+
+    return run, release
 
 
 def _decisions(ticks):
@@ -300,21 +300,14 @@ async def test_windows_launch_at_l_k_and_decide_one_tick_later(sweeps):
 
 
 async def test_busy_when_the_previous_sweep_is_still_running(sweeps):
-    release = threading.Event()
-    finish = _scored(lambda _c, _r: 1.0)
-
-    def blocking(request):
-        release.wait(30)
-        return finish(request)
-
-    sweeps.default = blocking
+    sweeps.default, release = _blocking(_scored(lambda _c, _r: 1.0))
     controller = _controller(_s1(), clock=WallClock())
     try:
-        launch = await controller.on_tick(65.0, _counts(), [])
-        busy = await controller.on_tick(125.0, _counts(), [])
+        launch = await controller.on_tick(65.0, _counts())
+        busy = await controller.on_tick(125.0, _counts())
         release.set()
         controller._pending.future.result(timeout=30)
-        harvest = await controller.on_tick(130.0, _counts(), [])
+        harvest = await controller.on_tick(130.0, _counts())
     finally:
         release.set()
         controller.close()
@@ -358,6 +351,12 @@ MEASURED = {"decision_latency_seconds": "measured"}
             20.0,
         ),
         (MEASURED, _raise_boom, 70.0, 5.0),
+        (
+            {**MEASURED, "timeout_seconds": 20.0},
+            _scored(lambda _c, _r: 1.0, wall_s=float("nan")),
+            85.0,
+            20.0,
+        ),
     ],
     ids=[
         "constant-floor",
@@ -367,6 +366,7 @@ MEASURED = {"decision_latency_seconds": "measured"}
         "measured-scaled",
         "measured-capped-at-timeout",
         "measured-raises",
+        "measured-nan-uses-timeout",
     ],
 )
 async def test_decision_latency_modes(sweeps, retune, result, decided_at, latency):
@@ -418,7 +418,7 @@ async def test_measured_timeout_decides_in_the_next_launch_tick(sweeps):
     now = 0.0
     # Accumulate like the engine adapter does (last tick + interval).
     for _ in range(round(6 * INTERVAL / step)):
-        result = await controller.on_tick(now, _counts(), [])
+        result = await controller.on_tick(now, _counts())
         outcomes.extend((d.outcome, d.window_index) for d in result.decisions)
         now += step
 
@@ -427,33 +427,16 @@ async def test_measured_timeout_decides_in_the_next_launch_tick(sweeps):
     assert len(sweeps.requests) == 4
 
 
-async def test_measured_non_finite_wall_time_uses_the_timeout(sweeps):
-    sweeps.default = _scored(lambda _c, _r: 1.0, wall_s=float("nan"))
-    controller = _controller(_s1(**MEASURED, timeout_seconds=20.0))
-
-    ticks = await _run(controller, 115)
-
-    ((now, decision),) = _decisions(ticks)
-    assert (now, decision.decision_latency_s) == (85.0, 20.0)
-
-
 async def test_measured_latency_live_decides_after_the_sweep_finishes(sweeps):
-    release = threading.Event()
-    finish = _scored(lambda _c, _r: 1.0, wall_s=12.0)
-
-    def blocking(request):
-        release.wait(30)
-        return finish(request)
-
-    sweeps.default = blocking
+    sweeps.default, release = _blocking(_scored(lambda _c, _r: 1.0, wall_s=12.0))
     controller = _controller(_s1(**MEASURED), clock=WallClock())
     try:
-        launch = await controller.on_tick(65.0, _counts(), [])
-        running = await controller.on_tick(70.0, _counts(), [])
+        launch = await controller.on_tick(65.0, _counts())
+        running = await controller.on_tick(70.0, _counts())
         release.set()
         controller._pending.future.result(timeout=30)
-        early = await controller.on_tick(75.0, _counts(), [])
-        harvest = await controller.on_tick(80.0, _counts(), [])
+        early = await controller.on_tick(75.0, _counts())
+        harvest = await controller.on_tick(80.0, _counts())
     finally:
         release.set()
         controller.close()
@@ -668,10 +651,19 @@ async def test_same_tick_planner_change_is_not_stale(sweeps, host_applies):
     assert config.load_scaling_down_sensitivity == (70 if host_applies else 80)
 
 
-async def test_predictor_presweep_winner_is_applied_with_warmup(sweeps):
+@pytest.mark.parametrize(
+    ("history", "history_s"),
+    # Unset, the history covers the throughput interval (10 s) x the largest
+    # prophet_window_size (50) of the current and candidate predictors.
+    [({}, 500.0), ({"history_seconds": 3600.0}, 3600.0)],
+    ids=["auto-history", "explicit-history"],
+)
+async def test_predictor_presweep_winner_is_applied_with_warmup(
+    sweeps, history, history_s
+):
     config = _config(
         "agg",
-        {"router": None, "planner": "default"},
+        {"router": None, "planner": "default", **history},
         optimization_target="sla",
         enable_load_scaling=False,
         enable_throughput_scaling=True,
@@ -701,8 +693,6 @@ async def test_predictor_presweep_winner_is_applied_with_warmup(sweeps):
         LOAD_PREDICTOR_PRESETS
     )
     assert request.history_paths == ("history.jsonl",)
-    history_s = config.retune.effective_history_seconds
-    assert history_s > 0
     assert request.history_start_ms == ORIGIN_MS - history_s * 1000
     assert request.baseline.planner["load_predictor"] == "arima"
     ((_, decision),) = _decisions(ticks)
@@ -727,15 +717,21 @@ def _sla_predictor_config(planner, **overrides):
     )
 
 
-def _window_only_warmup(count=4):
+def _window_only_warmup():
     # W_0 with no history before the trace: 600 s / 180 s -> 4 buckets.
     return tuple(
         TrafficObservation(duration_s=180.0, num_req=num_req, isl=900.0, osl=90.0)
-        for num_req in (100.0, 130.0, 80.0, 150.0)[:count]
+        for num_req in (100.0, 130.0, 80.0, 150.0)
     )
 
 
-_REJECTED_WARMUP = "predictor warmup rejected: .*warmup points; received 4"
+def _too_short(min_points):
+    return (
+        f"ValueError: KalmanPredictor needs {min_points} effective warmup "
+        "points; received 4"
+    )
+
+
 KALMAN_MIN_POINTS_60 = {
     "load_predictor": "kalman",
     "load_predictor_log1p": False,
@@ -748,16 +744,15 @@ KALMAN_MIN_POINTS_60 = {
 
 
 @pytest.mark.parametrize(
-    ("candidates", "overrides", "winner", "warmup", "labels", "history_s", "reason"),
+    ("candidates", "overrides", "winner", "labels", "history_s", "warmup_error"),
     [
         (
             ["arima_raw", "kalman_default_raw"],
             {},
             ("kalman_default_raw", "kalman_default_raw"),
-            4,
             ["arima_raw", "kalman_default_raw"],
             180.0 * 50,
-            _REJECTED_WARMUP,
+            _too_short(5),
         ),
         (
             # A mapping candidate; its kalman_min_points also sets the history
@@ -765,35 +760,34 @@ KALMAN_MIN_POINTS_60 = {
             [KALMAN_MIN_POINTS_60],
             {"load_predictor": "kalman", "kalman_min_points": 2},
             ("custom_0", KALMAN_MIN_POINTS_60),
-            4,
             ["custom_0"],
             180.0 * 60,
-            _REJECTED_WARMUP,
+            _too_short(60),
         ),
         (
             ["arima_raw", "constant_last"],
             {},
             ("constant_last", "constant_last"),
-            0,
             ["arima_raw", "constant_last"],
             180.0 * 50,
-            "predictor change without warmup observations",
+            None,
         ),
     ],
     ids=["kalman-needs-5", "kalman-min-points-60", "no-warmup"],
 )
 async def test_predictor_swap_with_too_short_a_warmup_fails(
-    sweeps, candidates, overrides, winner, warmup, labels, history_s, reason
+    sweeps, candidates, overrides, winner, labels, history_s, warmup_error
 ):
     config = _sla_predictor_config(
         {"load_predictor": {"preset": candidates}}, **overrides
     )
-    assert config.retune.effective_history_seconds == history_s
-    # The pre-sweep winner is fixed into every non-baseline candidate.
+    # The pre-sweep winner is fixed into every non-baseline candidate; the
+    # sweep prepared it on the warmup it returns.
     sweeps.default = _scored(
         lambda c, r: 1.0 if c == r.baseline else 2.0,
         predictor_presweep=_presweep(*winner),
-        warmup_observations=_window_only_warmup(warmup) or None,
+        warmup_observations=None if warmup_error is None else _window_only_warmup(),
+        predictor_warmup_error=warmup_error,
     )
     controller = _controller(config)
 
@@ -801,9 +795,14 @@ async def test_predictor_swap_with_too_short_a_warmup_fails(
 
     (request,) = sweeps.requests
     assert [label for label, _ in request.predictor_candidates] == labels
+    assert request.history_start_ms == ORIGIN_MS - history_s * 1000
     ((_, decision),) = _decisions(ticks)
     assert decision.outcome == "failed"
-    assert re.search(reason, decision.reason), decision.reason
+    assert decision.reason == (
+        "predictor change without warmup observations"
+        if warmup_error is None
+        else f"predictor warmup rejected: {warmup_error}"
+    )
     assert decision.planner_changes == {} and decision.predictor_warmup is None
     # Nothing is pending: the next sweep's baseline is still the current point.
     assert controller.current_point() == RetuneParams(
@@ -841,69 +840,6 @@ async def test_a_baseline_duplicate_is_listed_once_and_kept(sweeps):
     keys = [key for key, _ in decision.top]
     assert keys[0] == request.baseline.key()
     assert len(keys) == len(set(keys)) == 3
-
-
-# ---------------------------------------------------------------------------
-# Feedback and rollback
-# ---------------------------------------------------------------------------
-
-
-async def test_router_feedback_rolls_back_and_failed_rollback_disables(sweeps):
-    sweeps.default = _best_wins()
-    controller = _controller(_s1())
-    feedback = {
-        75.0: [
-            RetuneFeedback("retune-0-w0", "router", "422 invalid policy parameters"),
-            RetuneFeedback("retune-9-w9", "router", "unrelated"),
-        ],
-        80.0: [RetuneFeedback("retune-0-w0-rb", "router", "422 again")],
-    }
-
-    ticks = await _run(controller, 200, feedback=feedback)
-
-    decisions = _decisions(ticks)
-    assert [(now, d.outcome, d.decision_id) for now, d in decisions] == [
-        (70.0, "applied", "retune-0-w0"),
-        (75.0, "rolled_back", "retune-0-w0-rb"),
-        (80.0, "failed", "retune-0-w0-rb-failed"),
-    ]
-    rollback = decisions[1][1]
-    assert rollback.chosen == STARTUP and rollback.previous == BEST
-    assert "422 invalid policy parameters" in rollback.reason
-    assert dict(ticks)[75.0].router_parameters == _startup_map()
-    assert "retune disabled" in decisions[2][1].reason
-    # Disabled: no further launches, the desired map stays at the rollback.
-    assert [e for _, e in _events(ticks) if "launch" in e] == ["retune:launch w=0"]
-    assert ticks[-1][1].router_parameters == _startup_map()
-
-
-@pytest.mark.parametrize(
-    ("target", "host_applies", "reverted"),
-    [("planner", False, {}), ("router", True, {LSD: 80})],
-    ids=["planner-rejected", "router-rejected"],
-)
-async def test_planner_rollback_reverts_an_applied_change(
-    sweeps, target, host_applies, reverted
-):
-    config = _s2()
-    sweeps.default = _scored(lambda c, _r: 2.0 if c.planner[LSD] == 70 else 1.0)
-    controller = _controller(config)
-    feedback = {75.0: [RetuneFeedback("retune-0-w0", target, "rejected")]}
-
-    ticks = await _run(
-        controller,
-        75,
-        feedback=feedback,
-        after_tick=_apply_planner_changes(config) if host_applies else None,
-    )
-
-    decisions = _decisions(ticks)
-    assert [d.outcome for _, d in decisions] == ["applied", "rolled_back"]
-    # A rejected planner change never landed, so nothing needs reverting; a
-    # router rejection reverts the planner change the host applied.
-    assert decisions[1][1].planner_changes == reverted
-    assert config.load_scaling_down_sensitivity == 80
-    assert controller.current_point() == RetuneParams(planner={LSD: 80})
 
 
 # ---------------------------------------------------------------------------
@@ -983,7 +919,38 @@ async def test_zero_startup_credit_collapses_the_default_domain(sweeps):
     assert {c.router["overlap_score_credit"] for c in request.candidates} == {0.0}
 
 
-def test_planner_candidates_must_fit_the_deployment():
+def test_planner_grid_points_that_do_not_fit_are_dropped(caplog):
+    # Scale-up must stay above scale-down: (0.6, 0.7) is invalid, but every
+    # value still appears in a valid point.
+    config = _config(
+        "agg",
+        {
+            "router": None,
+            "planner": {
+                **SENSITIVITY_GRID,
+                "decode_scale_up_kv_rate": {"choices": [0.6, 0.8]},
+                "decode_scale_down_kv_rate": {"choices": [0.4, 0.7]},
+            },
+        },
+        optimization_target="load",
+        decode_scale_up_kv_rate=0.8,
+        decode_scale_down_kv_rate=0.4,
+    )
+
+    with caplog.at_level("WARNING", logger=controller_module.__name__):
+        controller = _controller(config)
+
+    rates = {
+        (p.planner["decode_scale_up_kv_rate"], p.planner["decode_scale_down_kv_rate"])
+        for p in controller._grid
+    }
+    assert rates == {(0.6, 0.4), (0.8, 0.4), (0.8, 0.7)}
+    assert len(controller._grid) == 9
+    (record,) = [r for r in caplog.records if "drops" in r.getMessage()]
+    assert "retune drops 3 of 12 planner grid points" in record.getMessage()
+
+
+def test_planner_values_that_never_fit_the_deployment_raise():
     config = _config(
         "agg",
         {"router": None, "planner": {"min_workers": {"choices": [1, 4]}}},
@@ -992,8 +959,42 @@ def test_planner_candidates_must_fit_the_deployment():
     )
     capabilities = WorkerCapabilities(decode=EngineCapabilities(num_gpu=1))
 
-    with pytest.raises(ValueError, match="retune.planner candidate"):
+    with pytest.raises(
+        ValueError, match="no retune.planner candidate with min_endpoint=4 fits"
+    ):
         _controller(config, capabilities=capabilities)
+
+
+async def test_planner_changes_that_no_longer_fit_fail_the_decision(sweeps):
+    # A grid point fit at startup, but the budget dropped before the decision.
+    config = _config(
+        "agg",
+        {"router": None, "planner": {"min_workers": {"choices": [1, 2]}}},
+        optimization_target="throughput",
+        max_gpu_budget=4,
+    )
+    sweeps.default = _scored(
+        lambda c, _r: 2.0 if c.planner["min_endpoint"] == 2 else 1.0
+    )
+    controller = _controller(
+        config, capabilities=WorkerCapabilities(decode=EngineCapabilities(num_gpu=1))
+    )
+
+    def lower_budget(now, _result):
+        if now == 65.0:
+            config.max_gpu_budget = 1
+
+    ticks = await _run(controller, 70, after_tick=lower_budget)
+
+    ((_, decision),) = _decisions(ticks)
+    assert decision.outcome == "failed"
+    assert decision.reason.startswith("planner candidate ")
+    assert decision.reason.endswith(
+        "cannot run on this deployment: minimum endpoint footprint requires "
+        "2 GPUs, exceeding max_gpu_budget=1"
+    )
+    assert decision.planner_changes == {}
+    assert controller.current_point().planner["min_endpoint"] == 1
 
 
 def test_scaling_retune_rejects_external_plugin_gateways():

@@ -33,7 +33,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PrivateAttr,
     SecretStr,
     SerializerFunctionWrapHandler,
     TypeAdapter,
@@ -713,10 +712,10 @@ class BatchSchedulingConfig(BaseModel):
 class RetuneEngineSpec(BaseModel):
     """Pinned engine that every retune candidate replay runs against.
 
-    A typed allowlist of ``dynamo.replay.run_trace_replay`` keyword arguments.
-    The replay host derives it from the outer run; a live planner reads it from
-    ``retune.live.engine``. ``router_config`` is the startup ``KvRouterConfig``
-    snapshot in its JSON (serde) form, so it can cross process boundaries.
+    A typed allowlist of ``dynamo.replay.run_trace_replay`` keyword arguments,
+    derived by the replay host from the outer run. ``router_config`` is the
+    startup ``KvRouterConfig`` snapshot in its JSON (serde) form, so it can
+    cross process boundaries.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -747,9 +746,7 @@ class RetuneEngineSpec(BaseModel):
     )
     performance_model_metadata: dict[str, Any] | None = None
     model_name: str | None = Field(
-        default=None,
-        min_length=1,
-        description="Served model name; also the live GET /router_policy filter.",
+        default=None, min_length=1, description="Served model name."
     )
     kv_event_lag_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     benchmark_granularity: int = Field(default=8, gt=0)
@@ -788,78 +785,16 @@ class RetuneEngineSpec(BaseModel):
         # native extension; only replay workers construct these objects.
         from dynamo.llm import AisPerfConfig, KvRouterConfig
 
+        # Every field is a run_trace_replay kwarg; model_dump deep-copies.
+        kwargs = self.model_dump()
         overrides = dict(router_overrides or {})
-        router_config = None
         if self.router_config is not None or overrides:
-            router_config = KvRouterConfig.from_json(
+            kwargs["router_config"] = KvRouterConfig.from_json(
                 json.dumps({**(self.router_config or {}), **overrides})
             )
-        ais_perf_config = (
-            None
-            if self.ais_perf_config is None
-            else AisPerfConfig(config=deepcopy(self.ais_perf_config))
-        )
-        return {
-            "extra_engine_args": deepcopy(self.extra_engine_args),
-            "prefill_engine_args": deepcopy(self.prefill_engine_args),
-            "decode_engine_args": deepcopy(self.decode_engine_args),
-            "router_mode": self.router_mode,
-            "router_config": router_config,
-            "ais_perf_config": ais_perf_config,
-            "performance_model_metadata": deepcopy(self.performance_model_metadata),
-            "model_name": self.model_name,
-            "kv_event_lag_ms": self.kv_event_lag_ms,
-            "benchmark_granularity": self.benchmark_granularity,
-        }
-
-
-class RetuneLiveConfig(BaseModel):
-    """Live-only retune inputs. The replay host ignores this section."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    trace_paths: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Frontend request-trace segment prefixes, globs, or directories "
-            "read for each retune window."
-        ),
-    )
-    engine: RetuneEngineSpec | None = Field(
-        default=None,
-        description="Engine snapshot of the deployment; required live.",
-    )
-    frontend_urls: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Frontend base URLs for router updates when the connector cannot "
-            "discover frontends, e.g. http://10.0.0.5:8000."
-        ),
-    )
-    reconcile_interval_seconds: float = Field(
-        default=30.0,
-        gt=0,
-        allow_inf_nan=False,
-        description=(
-            "Cadence for reconciling frontend router parameters. Changes are "
-            "also pushed immediately."
-        ),
-    )
-
-    @field_validator("trace_paths")
-    @classmethod
-    def _validate_trace_paths(cls, value: list[str]) -> list[str]:
-        if any(not path for path in value):
-            raise ValueError("trace_paths entries must be non-empty")
-        return value
-
-    @field_validator("frontend_urls")
-    @classmethod
-    def _validate_frontend_urls(cls, value: list[str]) -> list[str]:
-        return [
-            _validate_http_url(url, field_name="retune.live.frontend_urls")
-            for url in value
-        ]
+        if self.ais_perf_config is not None:
+            kwargs["ais_perf_config"] = AisPerfConfig(config=kwargs["ais_perf_config"])
+        return kwargs
 
 
 class RetuneConfig(BaseModel):
@@ -991,13 +926,6 @@ class RetuneConfig(BaseModel):
             "the planner. ttft_ms and itl_ms are never searched."
         ),
     )
-    live: RetuneLiveConfig = Field(
-        default_factory=RetuneLiveConfig,
-        description="Live-only inputs; ignored by the replay host.",
-    )
-
-    # Set by PlannerConfig validation, which resolves history_seconds=None.
-    _effective_history_seconds: float | None = PrivateAttr(default=None)
 
     @field_validator("router", "planner")
     @classmethod
@@ -1059,19 +987,6 @@ class RetuneConfig(BaseModel):
                 f"{timeout}, {self.interval_seconds}"
             )
         return self
-
-    @property
-    def effective_history_seconds(self) -> float:
-        """History before each window that warms predictors.
-
-        ``PlannerConfig`` validation resolves ``history_seconds=None`` to the
-        minimum its predictors need; a standalone section reports its own
-        value, or 0 when unset.
-        """
-
-        if self._effective_history_seconds is not None:
-            return self._effective_history_seconds
-        return self.history_seconds or 0.0
 
     @property
     def effective_timeout_seconds(self) -> float:
@@ -1938,20 +1853,17 @@ class PlannerConfig(BaseModel):
                     )
 
         if self.retune is not None:
-            self.retune = self._validate_retune(self.retune)
+            self._validate_retune(self.retune)
 
         return self
 
-    def _validate_retune(self, retune: RetuneConfig) -> RetuneConfig:
+    def _validate_retune(self, retune: RetuneConfig) -> None:
         """Check ``retune`` against the rest of the planner configuration.
 
-        Returns a validated copy with the effective history resolved, so a
-        ``RetuneConfig`` instance shared by several configs is never
-        modified. The search domains stay as written: ``retune.domains``
-        expands them again wherever the grid is needed.
+        ``retune`` is never modified: ``history_seconds=None`` is resolved by
+        the retune controller, and the search domains stay as written
+        (``retune.domains`` expands them wherever the grid is needed).
         """
-
-        retune = retune.model_copy(deep=True)
 
         # The module imports this one at module scope; import it on use.
         from dynamo.planner.retune.domains import (
@@ -1974,22 +1886,12 @@ class PlannerConfig(BaseModel):
                 "scheduling.scale_interval_seconds "
                 f"({self.scheduling.scale_interval_seconds}s)"
             )
-        engine = retune.live.engine
-        if engine is not None and engine.is_disagg != (self.mode == "disagg"):
-            raise ValueError(
-                "retune.live.engine must set prefill_engine_args and "
-                "decode_engine_args for mode='disagg', and neither for mode='agg'"
-            )
-
         planner_domain = expand_planner_domain(self)
         router_domain = expand_router_domain(retune)
 
-        history_seconds = retune.history_seconds
-        if self.enable_throughput_scaling:
+        if self.enable_throughput_scaling and retune.history_seconds is not None:
             required = required_history_seconds(self, planner_domain)
-            if history_seconds is None:
-                history_seconds = required
-            elif history_seconds < required:
+            if retune.history_seconds < required:
                 raise ValueError(
                     f"retune.history_seconds must be >= {required:g}s "
                     "(throughput_adjustment_interval_seconds x "
@@ -1997,7 +1899,6 @@ class PlannerConfig(BaseModel):
                     "current predictor and the load_predictor candidates) to "
                     "warm throughput predictors"
                 )
-        retune._effective_history_seconds = history_seconds or 0.0
 
         if not router_domain and planner_domain.empty:
             raise ValueError(
@@ -2012,7 +1913,6 @@ class PlannerConfig(BaseModel):
                 "omitted AISimulate knob searches its default domain, so pin "
                 "knobs with a scalar to shrink the grid"
             )
-        return retune
 
     def _validate_retune_planner_grid(
         self,

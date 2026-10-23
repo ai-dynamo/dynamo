@@ -28,7 +28,6 @@ pull in the AISimulate sweeper.
 from __future__ import annotations
 
 import itertools
-import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -57,12 +56,6 @@ LOAD_SCALING_DOWN_SENSITIVITY = "load_scaling_down_sensitivity"
 # which bounds the expansion's memory. The AISimulate default load-predictor
 # domain is 256 combinations.
 MAX_PRESET_COMBINATIONS = 65_536
-# Predictor candidates already expanded, by load-predictor spec and limit.
-# ``candidate_config`` validates ``retune`` again for every planner candidate
-# the controller checks (E4), and a large ``preset: false`` expansion takes
-# tens of milliseconds.
-_PREDICTOR_CANDIDATE_CACHE: dict[str, tuple[PredictorCandidate, ...]] = {}
-_PREDICTOR_CANDIDATE_CACHE_SIZE = 32
 
 
 @dataclass(frozen=True)
@@ -436,14 +429,7 @@ def _load_sensitivities(
     if control is None or control.preset == "default":
         entries = list(LOAD_SENSITIVITY)
     elif control.preset in (False, {}):
-        entries = list(
-            _preset_off_entries(
-                "load_sensitivity",
-                public,
-                limit,
-                {"load_min_observations": [running]},
-            )
-        )
+        entries = list(_preset_off_entries("load_sensitivity", public, limit))
     else:
         entries = _preset_entries(LoadSensitivitySearch, "load_sensitivity", control)
         for entry in entries:
@@ -453,8 +439,8 @@ def _load_sensitivities(
                     "load_min_observations, which is fixed at startup; it must "
                     f"equal the running value {running}"
                 )
-    # A preset's load_min_observations stays at the running value: only the
-    # runtime part of each entry is searched.
+    # Only the runtime part of each entry is searched: the inner planner keeps
+    # the running load_min_observations, which is fixed at startup.
     return list(
         dict.fromkeys(
             load_sensitivity_fields(entry)[LOAD_SCALING_DOWN_SENSITIVITY]
@@ -474,27 +460,6 @@ def _predictor_candidates(
                 "optimization_target='sla' with throughput scaling"
             )
         return None
-    from dynamo.planner.simulation.config import PLANNER_PRESET_GROUPS
-
-    # Everything the expansion reads. JSON keeps 1 and 1.0 apart, which an
-    # integer or float range bound depends on.
-    spec = public.model_dump(
-        mode="json",
-        include={"load_predictor", *PLANNER_PRESET_GROUPS["load_predictor"]},
-    )
-    key = json.dumps([limit, spec], sort_keys=True)
-    candidates = _PREDICTOR_CANDIDATE_CACHE.get(key)
-    if candidates is None:
-        candidates = tuple(_expand_predictor_candidates(public, limit))
-        if len(_PREDICTOR_CANDIDATE_CACHE) >= _PREDICTOR_CANDIDATE_CACHE_SIZE:
-            del _PREDICTOR_CANDIDATE_CACHE[next(iter(_PREDICTOR_CANDIDATE_CACHE))]
-        _PREDICTOR_CANDIDATE_CACHE[key] = candidates
-    return [(label, dict(entry)) for label, entry in candidates]
-
-
-def _expand_predictor_candidates(
-    public: PlannerRetuneConfig, limit: int
-) -> list[PredictorCandidate]:
     from dynamo.planner.simulation.load_predictor import (
         LOAD_PREDICTOR_PRESETS,
         distinct_predictor_candidates,
@@ -559,7 +524,6 @@ def _preset_off_entries(
     group: str,
     public: PlannerRetuneConfig,
     limit: int,
-    default_overrides: Mapping[str, Sequence[Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Every combination ``preset: false`` of ``group`` stands for.
 
@@ -582,10 +546,7 @@ def _preset_off_entries(
             )
     control = getattr(public, group).model_dump(mode="python", exclude_none=True)
     names, dimensions = independent_preset_dimensions(
-        group,
-        control,
-        public.model_dump(mode="python", exclude_none=True),
-        default_overrides,
+        group, control, public.model_dump(mode="python", exclude_none=True)
     )
     combinations = math.prod(len(values) for values in dimensions)
     if combinations > MAX_PRESET_COMBINATIONS:

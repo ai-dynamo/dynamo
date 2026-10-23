@@ -18,6 +18,7 @@ import random
 import threading
 import time
 import types
+from collections import deque
 from multiprocessing.reduction import ForkingPickler
 
 import pytest
@@ -31,17 +32,13 @@ from dynamo.planner.core.types import RetuneParams, TrafficObservation
 from dynamo.planner.retune import sweep as sweep_module
 from dynamo.planner.retune.sweep import (
     GOODPUT_KEY,
-    predictor_presweep,
     score_summary,
     with_predictor_fields,
 )
-from dynamo.planner.retune.window import (
-    ObservationBuckets,
-    read_trace_history,
-    read_trace_window,
-)
+from dynamo.planner.retune.window import ObservationBuckets
 from dynamo.planner.tests.retune_sweep_helpers import (
     ORIGIN_MS,
+    fake_evaluator,
     predictor_candidates,
     retune_params,
     sweep_request,
@@ -137,7 +134,7 @@ def test_request_rejects_unsorted_or_foreign_baseline():
 # ---------------------------------------------------------------------------
 
 
-def test_read_task_matches_the_trace_readers(tmp_path):
+def test_read_task_writes_the_window_and_buckets_the_history(tmp_path):
     # Two warmup intervals of history, then the window; one row per second.
     window_start = ORIGIN_MS
     arrivals = [window_start - 20_000 + 1_000 * i for i in range(30)]
@@ -152,75 +149,52 @@ def test_read_task_matches_the_trace_readers(tmp_path):
         base_planner={"enable_throughput_scaling": True},
     )
 
-    def buckets():
-        return ObservationBuckets(request.window_end_ms, 10_000.0, 10.0)
+    def read(out, buckets_interval_ms=10_000.0, **changes):
+        buckets = ObservationBuckets(
+            request.window_end_ms, buckets_interval_ms, buckets_interval_ms / 1000
+        )
+        spec = sweep_module._ReadSpec.from_request(
+            request, buckets, write_observations=True
+        )
+        return sweep_module._read_sweep_inputs(
+            dataclasses.replace(spec, **changes), str(tmp_path / out)
+        )
 
-    out = tmp_path / "out"
-    out.mkdir()
-    spec = sweep_module._ReadSpec.from_request(
-        request, buckets(), write_observations=True
-    )
-    inputs = sweep_module._read_sweep_inputs(spec, str(out))
+    def warmup(inputs):
+        return [
+            obs.num_req for obs in sweep_module._read_observations(inputs.warmup_path)
+        ]
 
-    # The same calls run_sweep made on its own thread before the read moved
-    # into a worker task.
-    expected_buckets = buckets()
-    window = read_trace_window(
-        [trace],
-        request.window_start_ms,
-        request.window_end_ms,
-        request.as_of_ms,
-        tmp_path / "window.jsonl",
-        prune_by_mtime=False,
-        buckets=expected_buckets,
-    )
-    history = read_trace_history(
-        [trace],
-        request.history_start_ms,
-        request.window_start_ms,
-        request.as_of_ms,
-        tmp_path / "history.jsonl",
-        prune_by_mtime=False,
-        buckets=expected_buckets,
-    )
-    expected_counts = {
-        **window.row_counts,
-        **{f"history_{key}": value for key, value in history.row_counts.items()},
-        "history_requests": history.num_requests,
-    }
-    assert (inputs.num_requests, history.num_requests) == (10, 20)
-    assert inputs.row_counts == expected_counts
-    assert inputs.observations == tuple(expected_buckets.observations())
-    assert len(inputs.observations) == 3
-    for name in ("window", "history"):
-        produced = getattr(inputs, f"{name}_path")
-        assert produced == str(out / f"{name}.jsonl")
-        assert (out / f"{name}.jsonl").read_text() == (
-            tmp_path / f"{name}.jsonl"
-        ).read_text()
-    # The pre-sweep workers load the observations from this file.
+    inputs = read("out")
+
+    assert inputs.num_requests == 10
+    assert inputs.window_path == str(tmp_path / "out" / "window.jsonl")
+    assert inputs.row_counts["history_requests"] == 20
+    # History and window share the pre-sweep buckets, which end at the
+    # window end; the pre-sweep workers load them from a file.
+    assert [obs.num_req for obs in inputs.observations] == [10.0, 10.0, 10.0]
     assert sweep_module._read_observations(inputs.observations_path) == list(
         inputs.observations
     )
+    # The inner planner's warmup is the history alone, in buckets that end at
+    # the window start: off the grid of the window end, a pre-sweep bucket
+    # straddles the window start, but no warmup bucket does.
+    assert warmup(inputs) == [10.0, 10.0]
+    assert warmup(read("off-grid", 7_000.0)) == [6.0, 7.0, 7.0]
 
-    # An empty window stops before the history; a read error propagates (the
-    # worker reports it as the read task's failure).
-    empty = sweep_module._read_sweep_inputs(
-        dataclasses.replace(
-            spec, window_start_ms=ORIGIN_MS + 60_000, window_end_ms=ORIGIN_MS + 70_000
-        ),
-        str(tmp_path / "empty"),
+    # The history is read only for a planner that scales on throughput (the
+    # only one with a load predictor), and not for an empty window.
+    no_scaling = read("no-scaling", buckets=None)
+    empty = read(
+        "empty", window_start_ms=ORIGIN_MS + 60_000, window_end_ms=ORIGIN_MS + 70_000
     )
-    assert (empty.num_requests, empty.history_path, empty.observations) == (
-        0,
-        None,
-        None,
-    )
-    assert empty.row_counts["outside_window"] == 31
-    assert "history_requests" not in empty.row_counts
-    missing = dataclasses.replace(spec, trace_paths=(str(tmp_path / "missing"),))
+    for unread, num_requests in [(no_scaling, 10), (empty, 0)]:
+        assert unread.num_requests == num_requests
+        assert (unread.observations, unread.warmup_path) == (None, None)
+        assert "history_requests" not in unread.row_counts
+    # A read error propagates: the worker reports it as the task's failure.
     with pytest.raises(FileNotFoundError):
-        sweep_module._read_sweep_inputs(missing, str(tmp_path / "missing-out"))
+        read("missing", trace_paths=(str(tmp_path / "missing"),))
 
 
 # ---------------------------------------------------------------------------
@@ -229,12 +203,16 @@ def test_read_task_matches_the_trace_readers(tmp_path):
 
 
 class _FakeProcess:
-    """Stands in for a worker process; ``wait`` never sees its sentinel."""
+    """Stands in for a worker process; ``wait`` never sees its sentinel.
 
-    def __init__(self, name, *, alive=True, dies_on_kill=True):
+    ``events``, when given, records every kill and join in order.
+    """
+
+    def __init__(self, name, *, alive=True, dies_on_kill=True, join_s=0.0, events=None):
         self.name, self.pid, self.exitcode = name, None, None
-        self.alive, self.dies_on_kill = alive, dies_on_kill
-        self.kills, self.joins = 0, []
+        self.alive, self.dies_on_kill, self.join_s = alive, dies_on_kill, join_s
+        self.joins = []
+        self.events = [] if events is None else events
         self._never_ready, self._writer = os.pipe()
         self.sentinel = self._never_ready
 
@@ -242,70 +220,225 @@ class _FakeProcess:
         return self.alive
 
     def kill(self):
-        self.kills += 1
+        self.events.append(("kill", self.name))
         self.alive = not self.dies_on_kill
 
     def join(self, timeout=None):
         self.joins.append(timeout)
+        self.events.append(("join", self.name))
+        time.sleep(self.join_s)
 
     def release(self):
         os.close(self._never_ready)
         os.close(self._writer)
 
 
-def test_a_task_whose_workers_die_before_accepting_it_fails():
-    pool = sweep_module._WorkerPool(1, time.monotonic() + 60, threading.Event())
-    spawned = []
+def _fake_worker(name, sent, *, alive=True, send=None):
+    conn = types.SimpleNamespace(
+        send=send or (lambda task: sent.append((name, task[0]))),
+        close=lambda: None,
+    )
+    return sweep_module._Worker(process=_FakeProcess(name, alive=alive), conn=conn)
 
-    def dead_worker():
-        worker = sweep_module._Worker(
-            process=_FakeProcess("dead", alive=False),
-            conn=types.SimpleNamespace(close=lambda: None),
-        )
-        pool._workers.append(worker)
-        spawned.append(worker)
-        return worker
 
-    pool._spawn = dead_worker
+def test_the_pool_never_runs_more_than_max_parallel_workers(tmp_path):
+    pool = sweep_module._WorkerPool(
+        2, time.monotonic() + 60, threading.Event(), str(tmp_path)
+    )
+    sent = []
 
-    results = pool.run([("task", print, ())])
+    def spawn():
+        pool._workers.append(_fake_worker(f"w{len(pool._workers)}", sent))
+        return pool._workers[-1]
 
-    ok, error = results["task"]
-    assert not ok and "before accepting the task 3 times" in error
-    assert len(spawned) == 3 and pool._workers == []
-    for worker in spawned:
+    pool._spawn = spawn
+
+    pool.start(5)
+    assert len(pool._workers) == 2
+    pending = deque((f"t{i}", print, ()) for i in range(5))
+    pool._dispatch(pending)
+
+    assert len(pool._workers) == 2 and len(sent) == 2 and len(pending) == 3
+    for worker in pool._workers:
         worker.process.release()
 
 
-def test_close_waits_only_for_workers_that_answered(caplog):
-    pool = sweep_module._WorkerPool(3, time.monotonic() + 60, threading.Event())
-    sent = []
-    workers = []
-    for name, answered, dies_on_kill in [
-        ("answered", True, True),
-        ("importing", False, True),
-        ("stuck-in-io", False, False),
-    ]:
-        conn = types.SimpleNamespace(send=sent.append, close=lambda: None)
-        process = _FakeProcess(name, dies_on_kill=dies_on_kill)
-        workers.append(
-            sweep_module._Worker(process=process, conn=conn, answered=answered)
-        )
+def test_workers_that_died_idle_are_replaced_without_failing_a_task(tmp_path):
+    pool = sweep_module._WorkerPool(
+        3, time.monotonic() + 60, threading.Event(), str(tmp_path)
+    )
+    sent: list[tuple[str, str]] = []
+
+    def broken_pipe(task):
+        raise BrokenPipeError("worker exited")
+
+    # Two idle workers were killed while another task ran; a third dies
+    # between the liveness check and the send.
+    workers = [
+        _fake_worker("dead-1", sent, alive=False),
+        _fake_worker("dead-2", sent, alive=False),
+        _fake_worker("dying", sent, send=broken_pipe),
+    ]
     pool._workers = list(workers)
 
-    pool.close(kill=False)
+    def spawn():
+        workers.append(_fake_worker(f"new-{len(workers) - 3}", sent))
+        pool._workers.append(workers[-1])
+        return workers[-1]
 
-    answered, importing, stuck = (worker.process for worker in workers)
-    # Only the worker that answered a task is asked to exit and waited for.
-    assert sent == [None]
-    assert answered.joins[0] == sweep_module._JOIN_TIMEOUT_S
-    assert (importing.kills, stuck.kills) == (1, 1)
-    # Every wait is bounded: a worker that survives SIGKILL is left behind.
-    for process in (answered, importing, stuck):
-        assert None not in process.joins
+    pool._spawn = spawn
+    pending = deque([("a", print, ()), ("b", print, ())])
+
+    pool._dispatch(pending)
+    pool._dispatch(pending)
+
+    # No task failed: the one the dying worker did not take went to a new one.
+    assert sent == [("new-0", "a"), ("new-1", "b")] and not pending
+    assert [worker.process.name for worker in pool._workers] == ["new-0", "new-1"]
+    for worker in workers:
+        worker.process.release()
+
+
+def test_close_kills_every_worker_within_one_bounded_wait(tmp_path, caplog):
+    pool = sweep_module._WorkerPool(
+        3, time.monotonic() + 60, threading.Event(), str(tmp_path)
+    )
+    events: list[tuple[str, str]] = []
+    processes = [
+        _FakeProcess("stuck-in-io", dies_on_kill=False, join_s=0.2, events=events),
+        _FakeProcess("busy", events=events),
+        _FakeProcess("idle", events=events),
+    ]
+    # The pipes cannot send: an idle worker is not asked to exit.
+    pool._workers = [
+        sweep_module._Worker(
+            process=process, conn=types.SimpleNamespace(close=lambda: None)
+        )
+        for process in processes
+    ]
+    pool._workers[1].task_id = "task"
+
+    pool.close()
+
+    stuck, busy, idle = processes
+    # Every worker is killed before the first wait, so one that survives
+    # SIGKILL does not delay the others' kill.
+    assert events[:3] == [("kill", process.name) for process in processes]
+    # One wait shared by every worker, so a worker that survives SIGKILL
+    # holds the sweep thread for it only once.
+    assert stuck.joins[0] <= sweep_module._JOIN_TIMEOUT_S
+    assert busy.joins[0] <= sweep_module._JOIN_TIMEOUT_S - 0.2
+    assert idle.joins[0] <= busy.joins[0]
+    for process in processes:
         process.release()
     assert "stuck-in-io" in caplog.text and "leaving it behind" in caplog.text
     assert pool._workers == []
+
+
+class _InlinePool:
+    """Runs each task in this process, reporting errors as a worker does."""
+
+    def __init__(self, *args):
+        pass
+
+    def start(self, count):
+        pass
+
+    def close(self):
+        pass
+
+    def run(self, tasks):
+        results = {}
+        for task_id, function, args in tasks:
+            try:
+                results[task_id] = (True, function(*args))
+            except Exception as error:
+                results[task_id] = (False, f"{type(error).__name__}: {error}")
+        return results
+
+
+def test_equivalent_candidates_replay_once_and_share_the_score(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep_module, "_WorkerPool", _InlinePool)
+    evaluated = []
+
+    def counting_evaluator(*args):
+        evaluated.append(args[3])
+        return fake_evaluator(*args)
+
+    trace = write_trace(
+        tmp_path / "trace.jsonl", trace_rows([ORIGIN_MS + 100 * i for i in range(5)])
+    )
+    # Without a pre-sweep winner, ``same`` evaluates as the baseline does.
+    baseline = retune_params(
+        1.0, load_scaling_down_sensitivity=80, load_predictor="arima"
+    )
+    same = retune_params(1.0, load_scaling_down_sensitivity=80)
+    other = retune_params(1.0, load_scaling_down_sensitivity=70)
+
+    result = sweep_module.run_sweep(
+        sweep_request([trace], [baseline, same, other], baseline),
+        evaluator=counting_evaluator,
+    )
+
+    assert result.status == "ok", result.error
+    assert len(evaluated) == 2
+    assert result.scores[same.key()] == result.scores[baseline.key()] is not None
+
+
+def test_a_predictor_winner_is_prepared_in_the_sweep(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep_module, "_WorkerPool", _InlinePool)
+    prepared = []
+    tasks: list[str] = []
+
+    def prepare_predictor(config, capabilities, observations):
+        tasks.append("prepare")
+        prepared.append((config.load_predictor, config.retune, list(observations)))
+        if config.kalman_min_points > len(observations):
+            raise ValueError(f"needs {config.kalman_min_points} warmup points")
+
+    def evaluator(*args):
+        tasks.append("replay")
+        return fake_evaluator(*args)
+
+    monkeypatch.setattr(sweep_module, "prepare_predictor", prepare_predictor)
+    trace = write_trace(
+        tmp_path / "trace.jsonl",
+        trace_rows([ORIGIN_MS + 1_000 * i for i in range(-20, 10)]),
+    )
+    baseline = retune_params(1.0, load_predictor="arima", load_predictor_log1p=False)
+    request = sweep_request(
+        [trace],
+        [baseline, retune_params(0.0)],
+        baseline,
+        history_start_ms=ORIGIN_MS - 20_000,
+        base_planner={
+            "mode": "agg",
+            "enable_throughput_scaling": True,
+            "throughput_adjustment_interval_seconds": 5,
+            "retune": {"interval_seconds": 10},
+        },
+        predictor_candidates=predictor_candidates("constant_last"),
+    )
+
+    def run_with_winner(fields):
+        presweep = {"winner": "w", "fields": fields, "losses": {"w": 0.1}}
+        monkeypatch.setattr(sweep_module, "_run_presweep", lambda *_: presweep)
+        tasks.clear()
+        return sweep_module.run_sweep(request, evaluator=evaluator)
+
+    # A winner that keeps the current predictor needs no preparation.
+    kept = run_with_winner({"load_predictor": "arima", "load_predictor_log1p": False})
+    assert kept.status == "ok", kept.error
+    assert (kept.predictor_warmup_error, prepared) == (None, [])
+
+    # A new one is prepared once, on the swap's warmup, and its error kept.
+    kalman = {"load_predictor": "kalman", "kalman_min_points": 60}
+    swapped = run_with_winner(kalman)
+    assert swapped.status == "ok", swapped.error
+    assert prepared == [("kalman", None, list(swapped.warmup_observations))]
+    assert swapped.predictor_warmup_error == "ValueError: needs 60 warmup points"
+    # Queued ahead of the replays, so a long fit overlaps them.
+    assert tasks == ["prepare", "replay", "replay"]
 
 
 # ---------------------------------------------------------------------------
@@ -328,126 +461,56 @@ def _wavy(count, *, seed=7):
     ]
 
 
-def _predictors_module():
+def test_presweep_task_forecasts_only_the_window(monkeypatch, tmp_path):
     # The predictor module imports all three forecasting libraries.
     for name in ("filterpy", "pmdarima", "prophet"):
         pytest.importorskip(name)
-    from dynamo.planner.core.load import predictors
-
-    return predictors
-
-
-def _spy_on_forecasts(monkeypatch, predictor_class):
-    """Record the history size each ``predict_next`` call sees."""
+    from dynamo.planner.core.load.predictors import ConstantPredictor
+    from dynamo.planner.simulation.load_predictor import complete_predictor_preset
 
     seen: list[int] = []
-    original = predictor_class.predict_next
+    predict_next = ConstantPredictor.predict_next
 
-    def predict_next(self):
+    def spy(self):
         seen.append(len(self.data_buffer))
-        return original(self)
+        return predict_next(self)
 
-    monkeypatch.setattr(predictor_class, "predict_next", predict_next)
-    return seen
-
-
-# Importing the forecasting libraries and the Prophet fits dominate;
-# contended CI runners (arm64) fit Prophet slower.
-@pytest.mark.timeout(120)
-# Prophet/pandas emit this on newer NumPy; CI turns warnings into errors.
-@pytest.mark.filterwarnings(
-    "ignore:The 'generic' unit for NumPy timedelta is deprecated:DeprecationWarning"
-)
-def test_presweep_ranking_matches_evaluate_preset(monkeypatch, tmp_path):
-    predictors = _predictors_module()
-    from dynamo.planner.simulation.load_predictor import (
-        LOAD_PREDICTOR_PRESETS,
-        Window,
-        evaluate_preset,
-    )
-
-    def evaluate_preset_losses(observations, names, eval_steps):
-        windows = [Window(obs.num_req, obs.isl, obs.osl) for obs in observations]
-        warmup = len(windows) - eval_steps
-        return {
-            name: evaluate_preset(windows, LOAD_PREDICTOR_PRESETS[name], 180, warmup)
-            for name in names
-        }
-
-    def ranking(losses):
-        return sorted(losses, key=lambda name: (losses[name], list(losses).index(name)))
-
-    # Long history: a forecast does not change the state constant and Kalman
-    # predictors carry into the next bucket, so warming the history without
-    # forecasting it changes nothing. (ARIMA instead fits once on the whole
-    # history.)
-    constant = _spy_on_forecasts(monkeypatch, predictors.ConstantPredictor)
-    kalman = _spy_on_forecasts(monkeypatch, predictors.KalmanPredictor)
-    names = ["constant_last", "kalman_default_raw", "kalman_reactive_log1p"]
-    candidates = predictor_candidates(*names)
+    monkeypatch.setattr(ConstantPredictor, "predict_next", spy)
     history, window = 300, 20
-    long = _wavy(history + window)
-    result = predictor_presweep(long, candidates, 180, eval_steps=window)
-
-    assert (result["warmup_steps"], result["eval_steps"]) == (history, window)
-    # Three series x window buckets forecasts per preset, none for history:
-    # the first forecast already sees every history bucket.
-    assert (len(constant), len(kalman)) == (3 * window, 2 * 3 * window)
-    assert constant[:3] == kalman[:3] == [history] * 3
-    assert constant[-3:] == kalman[-3:] == [history + window - 1] * 3
-    expected = evaluate_preset_losses(long, names, window)
-    assert result["losses"] == pytest.approx(expected, rel=1e-12)
-    assert ranking(result["losses"]) == ranking(expected)
-    assert result["winner"] == ranking(expected)[0]
-    # A sweep worker reads the same observations from the sweep's file.
-    path = sweep_module._write_observations(tmp_path / "observations.json", long)
-    via_file = sweep_module._presweep_task(path, candidates, 180, window)
-    assert via_file["losses"] == result["losses"]
-
-    # A window shorter than one predictor interval has nothing to score.
-    nothing = predictor_presweep(
-        long, predictor_candidates("constant_last"), 180, eval_steps=0
+    path = sweep_module._write_observations(
+        tmp_path / "observations.json", _wavy(history + window)
     )
-    assert (nothing["winner"], nothing["fields"]) == (None, {})
-    assert nothing["losses"] == {"constant_last": None}
 
-    # Prophet refits on every forecast, so it gets the 5 history points it
-    # needs to fit and two window buckets: 3 x 2 fits. (log1p fits on this
-    # few points take seconds each.)
-    names = ["constant_last", "prophet_w20_raw"]
-    short = _wavy(5 + 2)
-    result = predictor_presweep(short, predictor_candidates(*names), 180, eval_steps=2)
-    expected = evaluate_preset_losses(short, names, 2)
-    assert result["losses"] == pytest.approx(expected, rel=1e-9)
-    assert ranking(result["losses"]) == ranking(expected)
+    loss = sweep_module._presweep_task(path, "constant_last", 180, window)
+
+    # Three series x window buckets forecasts, none for history: the first
+    # forecast already sees every history bucket.
+    assert loss is not None
+    assert len(seen) == 3 * window and seen[:3] == [history] * 3
+    # A complete mapping scores exactly as the preset it spells out.
+    mapping = complete_predictor_preset("constant_last")
+    assert sweep_module._presweep_task(path, mapping, 180, window) == loss
+    # A window shorter than one predictor interval has nothing to score.
+    assert sweep_module._presweep_task(path, mapping, 180, 0) is None
 
 
-def test_presweep_candidates_are_labelled_mappings():
+def test_presweep_summary_picks_the_earliest_lowest_loss():
     from dynamo.planner.simulation.load_predictor import (
         complete_predictor_preset,
         predictor_fields,
     )
 
-    # A complete mapping scores exactly as the preset it spells out.
-    observations = _wavy(40)
+    # The winner's fields come from its own mapping; ties go to the earliest.
     same = complete_predictor_preset("kalman_default_raw")
-    result = predictor_presweep(
-        observations,
-        (("kalman_default_raw", "kalman_default_raw"), ("custom_1", same)),
-        180,
-        eval_steps=10,
-    )
-    losses = result["losses"]
-    assert set(losses) == {"kalman_default_raw", "custom_1"}
-    assert losses["custom_1"] == losses["kalman_default_raw"]
-    # Ties go to the earliest candidate.
-    assert result["winner"] == "kalman_default_raw"
-
-    # The winner's fields come from its own mapping.
     tuned = {**same, "kalman_q_level": 5.0, "kalman_min_points": 3}
     summary = sweep_module._presweep_summary(
-        {"constant_last": 0.5, "custom_1": 0.25, "custom_2": None},
-        {"constant_last": "constant_last", "custom_1": tuned, "custom_2": same},
+        {"constant_last": 0.5, "custom_1": 0.25, "custom_2": None, "custom_3": 0.25},
+        {
+            "constant_last": "constant_last",
+            "custom_1": tuned,
+            "custom_2": same,
+            "custom_3": same,
+        },
         10,
         30,
         0.0,
@@ -494,7 +557,7 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
         predictor_candidates=predictor_candidates(*presets),
     )
     cancel = threading.Event()
-    pool = sweep_module._WorkerPool(2, time.monotonic() + 60, cancel)
+    pool = sweep_module._WorkerPool(2, time.monotonic() + 60, cancel, str(tmp_path))
     # The workers' pipe ends, never read: workers that are still importing.
     unread = []
     processes = []
@@ -516,7 +579,7 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
             sweep_module._run_presweep(request, pool, inputs, 60_000.0, 60)
     finally:
         timer.cancel()
-        pool.close(kill=True)
+        pool.close()
 
     assert time.monotonic() - started < 10
     # Every preset was dispatched, as a message that carries only the path.
@@ -526,10 +589,11 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
     ]
     for task_id, function, args in messages:
         assert function is sweep_module._presweep_task
-        assert args[0] == path
-        # One (label, complete mapping) candidate per task.
-        ((label, entry),) = args[1]
-        assert task_id == f"predictor-presweep:{label}" and len(entry) == 7
+        # One complete-mapping candidate per task; the 10 window buckets
+        # are scored.
+        observations_path, entry, interval_s, eval_steps = args
+        assert (observations_path, interval_s, eval_steps) == (path, 60, 10)
+        assert len(entry) == 7
         assert len(ForkingPickler.dumps((task_id, function, args))) < 1024
     assert sweep_module._read_observations(path) == observations
     for process, conn in zip(processes, unread):

@@ -5,11 +5,9 @@
 
 import gzip
 import json
-import os
 
 import pytest
 
-from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.planner.retune.window import (
     ROW_COUNT_KEYS,
     ObservationBuckets,
@@ -84,8 +82,8 @@ def _jsonl(*records):
     return "".join(json.dumps(record) + "\n" for record in records).encode("utf-8")
 
 
-def _write(path, records, *, trailing=""):
-    text = "".join(json.dumps(record) + "\n" for record in records) + trailing
+def _write(path, records):
+    text = "".join(json.dumps(record) + "\n" for record in records)
     if str(path).endswith(".gz"):
         with gzip.open(path, "wt", encoding="utf-8") as sink:
             sink.write(text)
@@ -98,7 +96,7 @@ def _read(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-def _window(paths, tmp_path, start=0, end=10_000, as_of=None, **kwargs):
+def _window(paths, tmp_path, start=0, end=10_000, as_of=None):
     out = tmp_path / "out" / "window.jsonl"
     result = read_trace_window(
         [str(path) for path in paths],
@@ -106,8 +104,6 @@ def _window(paths, tmp_path, start=0, end=10_000, as_of=None, **kwargs):
         end,
         end if as_of is None else as_of,
         out,
-        prune_by_mtime=kwargs.pop("prune_by_mtime", False),
-        **kwargs,
     )
     return result, _read(out)
 
@@ -144,14 +140,10 @@ def test_envelope_and_bare_rows_become_sorted_bare_rows(tmp_path):
     assert rows[1]["request"]["replay"]["input_length"] == 64
     counts = result.row_counts
     assert (
-        counts["tool"],
-        counts["router_selection"],
-        counts["request_payload"],
-        counts["other_event"],
         counts["agent_context_stripped"],
         counts["missing_output_tokens"],
         counts["duplicate"],
-    ) == (3, 1, 1, 1, 1, 1, 1)
+    ) == (1, 1, 1)
 
 
 def test_missing_received_ms_uses_ais_arrival_rule(tmp_path):
@@ -203,7 +195,6 @@ def test_as_of_censors_by_ais_completion_time(tmp_path):
     ]
     assert result.row_counts["censored"] == 2
     assert result.row_counts["censor_unavailable"] == 1
-    assert result.row_counts["outside_window"] == 2
 
 
 def test_mixed_block_sizes_are_rejected(tmp_path):
@@ -219,29 +210,6 @@ def test_mixed_block_sizes_are_rejected(tmp_path):
         _window([trace], tmp_path, end=60_000)
 
 
-def test_truncated_gzip_member_and_partial_line_are_tolerated(tmp_path):
-    # Live segments read while their writer is mid-member: half of the next
-    # member, or only the first byte of its header (R2).
-    member = gzip.compress(_jsonl(_request_end("b", 1_100)))
-    segment = tmp_path / "frontend.000000.jsonl.gz"
-    segment.write_bytes(
-        gzip.compress(_jsonl(_request_end("a", 1_000))) + member[: len(member) // 2]
-    )
-    magic_prefix = tmp_path / "frontend.000001.jsonl.gz"
-    magic_prefix.write_bytes(gzip.compress(_jsonl(_request_end("d", 1_300))) + b"\x1f")
-    partial = _write(
-        tmp_path / "plain.jsonl",
-        [_request_end("c", 1_200)],
-        trailing='{"schema": "dynamo.request.trac',
-    )
-
-    result, rows = _window([segment, magic_prefix, partial], tmp_path)
-
-    assert [row["request"]["request_id"] for row in rows] == ["a", "c", "d"]
-    assert result.row_counts["truncated_gzip"] == 2
-    assert result.row_counts["partial_line"] == 1
-
-
 @pytest.mark.parametrize(
     "name, content, error, match",
     [
@@ -253,21 +221,28 @@ def test_truncated_gzip_member_and_partial_line_are_tolerated(tmp_path):
             ValueError,
             "invalid JSON",
         ),
+        # A partial last line (a writer cut off mid-row) is not skipped.
+        (
+            "trace.jsonl",
+            _jsonl(_request_end("a", 1_000)) + b'{"schema": "dyn',
+            ValueError,
+            "invalid JSON",
+        ),
         (
             "trace.jsonl",
             _jsonl({"timestamp": 0, "input_length": 1, "output_length": 1}),
             ValueError,
             SCHEMA,
         ),
-        # Any byte after a complete member other than the gzip magic's first.
+        # A truncated final gzip member, as the replay's own loader rejects it.
         (
-            "frontend.000000.jsonl.gz",
-            gzip.compress(_jsonl(_request_end("a", 1_000))) + b"B",
-            gzip.BadGzipFile,
+            "trace.jsonl.gz",
+            gzip.compress(_jsonl(_request_end("a", 1_000)))[:-8],
+            EOFError,
             None,
         ),
     ],
-    ids=["middle-line", "foreign-schema", "r2-bad-gzip-header"],
+    ids=["middle-line", "partial-final-line", "foreign-schema", "truncated-gzip"],
 )
 def test_corrupt_input_raises(tmp_path, name, content, error, match):
     trace = tmp_path / name
@@ -292,7 +267,7 @@ def test_trace_origin_is_the_earliest_ais_arrival_over_all_files(tmp_path):
 
     counts: dict[str, int] = {}
     assert trace_origin_ms([str(first), str(second)], row_counts=counts) == 3_500.0
-    assert counts["tool"] == 1 and counts["agent_context_stripped"] == 0
+    assert counts["agent_context_stripped"] == 0
     assert trace_origin_ms([str(first)]) == 5_000.0
     agentic = _write(
         tmp_path / "agentic.jsonl",
@@ -305,79 +280,56 @@ def test_trace_origin_is_the_earliest_ais_arrival_over_all_files(tmp_path):
         trace_origin_ms([str(empty)])
 
 
-def test_segment_prefix_glob_and_directory_resolution(tmp_path):
-    segments = tmp_path / "segments"
-    segments.mkdir()
+def test_directories_and_globs_resolve_each_file_once(tmp_path):
+    traces = tmp_path / "traces"
+    traces.mkdir()
     for index in range(2):
         _write(
-            segments / f"frontend.{index:06d}.jsonl.gz",
+            traces / f"frontend.{index:06d}.jsonl.gz",
             [_request_end(f"r{index}", 1_000 + index)],
         )
 
-    by_prefix = resolve_trace_files([str(segments / "frontend")])
-    by_suffixed_prefix = resolve_trace_files([str(segments / "frontend.jsonl.gz")])
-    by_dir = resolve_trace_files([str(segments), str(segments / "*.jsonl.gz")])
+    resolved = resolve_trace_files(
+        [
+            str(traces),
+            str(traces / "*.jsonl.gz"),
+            str(traces / "frontend.000001.jsonl.gz"),
+        ]
+    )
 
-    assert by_prefix == by_suffixed_prefix == by_dir
-    assert [path.name for path in by_prefix] == [
+    assert [path.name for path in resolved] == [
         "frontend.000000.jsonl.gz",
         "frontend.000001.jsonl.gz",
     ]
-    with pytest.raises(FileNotFoundError):
-        resolve_trace_files([str(tmp_path / "missing")])
 
 
-def test_mtime_pruning_only_when_enabled_with_a_clock_skew_margin(tmp_path):
-    start, end = 1_000_000, 2_000_000
-    old = _write(tmp_path / "old.jsonl", [_request_end("old", 400_000)])
-    skewed = _write(tmp_path / "skewed.jsonl", [_request_end("skewed", start + 4_000)])
-    new = _write(tmp_path / "new.jsonl", [_request_end("new", start + 100_000)])
-    # mtimes in epoch seconds. old was last written 400 s before the window;
-    # skewed's store clock runs behind the frontends', so its mtime is 100 s
-    # before the window although it holds an in-window row.
-    os.utime(old, (600.0, 600.0))
-    os.utime(skewed, (900.0, 900.0))
-    os.utime(new, (1_200.0, 1_200.0))
-    files = [old, skewed, new]
-
-    unpruned, _ = _window(files, tmp_path, start=start, end=end)
-    pruned, rows = _window(files, tmp_path, start=start, end=end, prune_by_mtime=True)
-
-    assert unpruned.num_requests == 2
-    assert unpruned.row_counts["pruned_files"] == 0
-    assert [row["request"]["request_id"] for row in rows] == ["skewed", "new"]
-    assert pruned.row_counts["pruned_files"] == 1
-
-
-def test_history_is_streamed_without_hashes_and_bucketed(tmp_path):
+def test_history_is_counted_into_every_bucket_set(tmp_path):
     trace = _write(
         tmp_path / "trace.jsonl",
         [
             _request_end("h0", 1_000, isl=100, osl=10),
-            _request_end("h1", 1_500, isl=300, osl=30),
+            _request_end("h1", 2_500, isl=300, osl=30),
             _request_end("h2", 3_500, isl=200, osl=20),
             _request_end("w0", 4_200, isl=50, osl=5),
         ],
     )
-    out = tmp_path / "history.jsonl"
-    buckets = ObservationBuckets(end_ms=4_000, interval_ms=1_000, duration_s=1.0)
+    # Bucket sets ending at the window end and at the history end.
+    to_window_end = ObservationBuckets(end_ms=5_000, interval_ms=2_000, duration_s=2.0)
+    to_history_end = ObservationBuckets(end_ms=4_000, interval_ms=2_000, duration_s=2.0)
 
-    history = read_trace_history(
-        [str(trace)], 0, 4_000, 4_000, out, prune_by_mtime=False, buckets=buckets
+    num_requests = read_trace_history(
+        [str(trace)], 0, 4_000, 4_000, buckets=(to_window_end, to_history_end)
     )
 
-    assert history.num_requests == 3
-    assert history.path == str(out)
-    rows = _read(out)
-    for row in rows:
-        assert "input_sequence_hashes" not in row["request"]["replay"]
-        assert "trace_block_size" not in row["request"]["replay"]
-    # Buckets end at 4_000: [1_000, 2_000), [2_000, 3_000), [3_000, 4_000).
-    assert [(o.num_req, o.isl, o.osl) for o in buckets.observations()] == [
+    assert num_requests == 3
+    # [1_000, 3_000) and [3_000, 5_000); w0 is not history.
+    assert [(o.num_req, o.isl, o.osl) for o in to_window_end.observations()] == [
         (2.0, 200.0, 20.0),
-        (0.0, 0.0, 0.0),
         (1.0, 200.0, 20.0),
     ]
-    # The hash-free file is a valid planner warmup trace.
-    warmup = extract_traffic_observations_from_trace(str(out), 1)
-    assert sum(observation.num_req for observation in warmup) == 3
+    # [0, 2_000) and [2_000, 4_000).
+    assert [(o.num_req, o.isl, o.osl) for o in to_history_end.observations()] == [
+        (1.0, 100.0, 10.0),
+        (2.0, 250.0, 25.0),
+    ]
+    assert read_trace_history([str(trace)], 0, 4_000, 4_000) == 3

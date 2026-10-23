@@ -16,8 +16,8 @@ point and the replay router picks it up mid-run.
 
 from __future__ import annotations
 
+import inspect
 import json
-import logging
 from pathlib import Path
 
 import pytest
@@ -29,8 +29,10 @@ pytest.importorskip(
 
 from dynamo.llm import KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config
-from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
+from dynamo.planner.core.types import RetuneParams, TrafficObservation
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+from dynamo.planner.retune import sweep
 from dynamo.replay import api, run_synthetic_trace_replay, run_trace_replay
 
 pytestmark = [
@@ -240,8 +242,53 @@ def test_retune_lands_router_and_planner_changes_mid_run(tmp_path, monkeypatch):
     assert {policy["parameters"]["router_temperature"] for policy in later} == {0.0}
 
 
+@pytest.mark.integration
+@pytest.mark.timeout(120)
+def test_candidate_replays_share_common_random_numbers(tmp_path):
+    # Near-random routing (router_temperature 100) makes every placement a
+    # draw from the selector's rng; candidate replays share one canonical
+    # seed, so equal decisions give equal scores.
+    window = _write_trace(
+        tmp_path / "window.jsonl", count=200, gap_ms=40, blocks=16, output_tokens=128
+    )
+    engine = RetuneEngineSpec(
+        extra_engine_args=_engine(),
+        router_config=json.loads(KvRouterConfig(router_temperature=100.0).to_json()),
+    )
+
+    def evaluate(router: dict) -> tuple[float, dict]:
+        return sweep.evaluate_candidate(
+            str(window),
+            engine,
+            1.0,
+            RetuneParams(router=router, planner={}),
+            {"aggregated": 4},
+            None,
+            None,
+            60.0,
+            100.0,
+            8.0,
+        )
+
+    baseline = evaluate({})
+    assert evaluate({}) == baseline
+    # Replay reports no shared cache hits, so this candidate changes no
+    # routing decision: it ties the baseline, and the controller keeps it.
+    assert evaluate({"shared_cache_multiplier": 0.5}) == baseline
+    assert evaluate({"router_temperature": 0.0})[0] != baseline[0]
+
+
 def _guard_config() -> dict:
     return _retune_only("agg")
+
+
+def _throughput_config(warmup_trace: Path) -> dict:
+    # Throughput scaling warms the inner planner's predictors from history.
+    return _guard_config() | {
+        "optimization_target": "sla",
+        "enable_throughput_scaling": True,
+        "load_predictor_warmup_trace": str(warmup_trace),
+    }
 
 
 def _inputs_kwargs(trace: Path, **overrides) -> dict:
@@ -366,7 +413,7 @@ def test_synthetic_replay_rejects_retune():
 
 
 @pytest.mark.unit
-def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path, caplog):
+def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path):
     trace = _write_trace(
         tmp_path / "trace.jsonl",
         count=3,
@@ -384,22 +431,16 @@ def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path, caplog):
         prefix="history",
     )
     router_config = KvRouterConfig(router_temperature=0.25)
-    payload = _guard_config() | {"load_predictor_warmup_trace": str(history)}
-    payload["retune"]["live"] = {
-        "engine": {"router_mode": "kv_router", "model_name": "deployed-model"}
-    }
-    config = PlannerConfig.model_validate(payload)
+    config = PlannerConfig.model_validate(_throughput_config(history))
 
-    with caplog.at_level(logging.WARNING, logger="dynamo.replay.api"):
-        inputs = api._retune_inputs(
-            config, **_inputs_kwargs(trace, router_config=router_config)
-        )
+    inputs = api._retune_inputs(
+        config, **_inputs_kwargs(trace, router_config=router_config)
+    )
 
     assert inputs.trace_paths == (str(trace),)
     assert inputs.history_paths == (str(history),)
     assert inputs.trace_origin_ms == float(_BASE_MS + 500)
     assert inputs.arrival_speedup_ratio == 2.0
-    assert inputs.prune_by_mtime is False
     engine = inputs.engine
     assert engine.extra_engine_args == normalize_mocker_config(
         {"engine": {"max_num_seqs": 8}}
@@ -410,9 +451,6 @@ def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path, caplog):
     assert engine.model_name == "test-model"
     assert engine.kv_event_lag_ms == 5.0
     assert engine.benchmark_granularity == 4
-    # The replay ignores retune.live but reports where its engine differs.
-    assert "planner.retune.live.engine differs" in caplog.text
-    assert "extra_engine_args" in caplog.text and "model_name" in caplog.text
 
     # History and windows share one time axis, so history must end before
     # the first replayed request.
@@ -427,3 +465,132 @@ def test_retune_inputs_pin_the_outer_engine_and_time_axis(tmp_path, caplog):
     )
     with pytest.raises(ValueError, match="2 history requests arrive"):
         api._retune_inputs(config, **_inputs_kwargs(trace))
+
+
+@pytest.mark.unit
+def test_only_a_throughput_planner_reads_the_warmup_trace_as_history(tmp_path):
+    trace = _write_trace(
+        tmp_path / "trace.jsonl", count=3, gap_ms=100, blocks=1, output_tokens=2
+    )
+    mooncake = tmp_path / "mooncake.jsonl"
+    mooncake.write_text(
+        json.dumps({"timestamp": 0, "input_length": 64, "output_length": 2}) + "\n"
+    )
+    # Without throughput scaling no predictor is warmed from history, so a
+    # Mooncake warmup trace, or one overlapping the replay, is never read.
+    for overrides in (
+        {},
+        {"enable_load_scaling": True, "optimization_target": "throughput"},
+    ):
+        for warmup in (mooncake, trace):
+            payload = _guard_config() | overrides
+            payload["load_predictor_warmup_trace"] = str(warmup)
+            config = PlannerConfig.model_validate(payload)
+            inputs = api._retune_inputs(config, **_inputs_kwargs(trace))
+            assert inputs.history_paths == ()
+
+    config = PlannerConfig.model_validate(_throughput_config(mooncake))
+    with pytest.raises(ValueError, match="dynamo.request.trace.v1 .* relative"):
+        api._retune_inputs(config, **_inputs_kwargs(trace))
+
+
+# Every run_trace_replay kwarg, classified for retune candidate replays, so a
+# new kwarg cannot silently replay candidates on another engine.
+_PINNED = set(RetuneEngineSpec.model_fields)  # from the outer replay
+_PER_CANDIDATE = {  # set by sweep.evaluate_candidate
+    "num_workers",
+    "num_prefill_workers",
+    "num_decode_workers",
+    "trace_format",
+    "arrival_speedup_ratio",
+    "planner_config",
+    "sla_ttft_ms",
+    "sla_itl_ms",
+    "capture_per_request",
+    "capture_planner_details",
+    "_planner_warmup_observations",
+    "_deterministic",
+}
+_REJECTED = {  # by _retune_inputs: retune replays complete open-loop windows
+    "replay_concurrency",
+    "agentic_lanes",
+    "agentic_snapshot",
+    "agentic_warmup",
+    "agentic_profile",
+    "max_sim_time_ms",
+}
+_IGNORED = {  # no effect on a candidate's engine or score
+    "replay_mode",  # a planner replay is offline
+    "execution_model",  # names the target model of agentic rows only
+    "report_jsonl_path",  # outputs of the outer replay
+    "telemetry_options",
+    "sla_e2e_ms",  # the score uses the TTFT and ITL SLAs
+    "trace_block_size",  # a Dynamo trace carries its block size
+    "trace_shared_prefix_ratio",  # other trace formats only
+    "trace_num_prefix_groups",
+    "weka_nested_timestamp_basis",
+}
+
+
+@pytest.mark.unit
+def test_every_replay_kwarg_is_classified_for_retune(tmp_path, monkeypatch):
+    groups = [_PINNED, _PER_CANDIDATE, _REJECTED, _IGNORED]
+    params = set(inspect.signature(run_trace_replay).parameters) - {"trace_files"}
+    assert set().union(*groups) == params
+    assert sum(len(group) for group in groups) == len(params)
+
+    # A candidate replay passes exactly the pinned and per-candidate kwargs.
+    calls: list[dict] = []
+
+    def recording_replay(trace_files, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(sweep, "run_trace_replay", recording_replay)
+    warmup = [TrafficObservation(60.0, 12.0, 512.0, 64.0)]
+    warmup_path = sweep._write_observations(tmp_path / "warmup.json", warmup)
+    disagg = RetuneEngineSpec(prefill_engine_args={}, decode_engine_args={})
+    for engine, replicas, base_planner in (
+        (RetuneEngineSpec(), {"aggregated": 1}, {"mode": "agg"}),
+        (disagg, {"prefill": 1, "decode": 1}, None),
+    ):
+        with pytest.raises(RuntimeError, match="recorded"):
+            sweep.evaluate_candidate(
+                "window.jsonl",
+                engine,
+                1.0,
+                RetuneParams(router={}, planner={}),
+                replicas,
+                base_planner,
+                warmup_path,
+                100.0,
+                10.0,
+                60.0,
+            )
+    assert set().union(*calls) == _PINNED | _PER_CANDIDATE
+    # Common random numbers; an inner planner is warmed from the read task's
+    # buckets.
+    assert [call["_deterministic"] for call in calls] == [True, True]
+    assert [call["_planner_warmup_observations"] for call in calls] == [warmup, None]
+
+
+@pytest.mark.unit
+def test_run_trace_replay_hands_the_warmup_to_the_inner_planner(monkeypatch):
+    received = {}
+
+    def recording_adapter(**kwargs):
+        received.update(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(api, "_planner_replay_adapter", lambda: recording_adapter)
+    warmup = [TrafficObservation(60.0, 12.0, 512.0, 64.0)]
+
+    with pytest.raises(RuntimeError, match="recorded"):
+        run_trace_replay(
+            ["window.jsonl"],
+            trace_format="dynamo",
+            planner_config={"mode": "agg"},
+            _planner_warmup_observations=warmup,
+        )
+
+    assert received["warmup_observations"] is warmup
