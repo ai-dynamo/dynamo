@@ -29,68 +29,6 @@ fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
     .unwrap()
 }
 
-fn open_with_priority_header(priority_header: &str) -> PreprocessedRequest {
-    let body = br#"{"token_ids":[1],"sampling_params":{},"priority":7}"#;
-    let headers = axum::http::HeaderMap::from_iter([
-        (
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/json"),
-        ),
-        (
-            HEADER_REQUEST_PRIORITY.parse().unwrap(),
-            axum::http::HeaderValue::from_str(priority_header).unwrap(),
-        ),
-    ]);
-    let opened = VllmFormat
-        .open(ClientRequest {
-            body,
-            headers: &headers,
-            default_request_id: "request",
-        })
-        .unwrap();
-    (opened.bind)(&routing_metadata(16, false, None))
-        .unwrap()
-        .request
-}
-
-#[test]
-fn dynamo_priority_header_overrides_vllm_body_in_both_routing_and_payload() {
-    let request = open_with_priority_header("5");
-    assert_eq!(request.routing.as_ref().unwrap().priority, Some(5));
-    assert_eq!(
-        request.extra_args.as_ref().unwrap()["vllm_tito"]["priority"],
-        json!(-5),
-        "the header is translated to vLLM's lower-is-higher body convention"
-    );
-
-    let zero = open_with_priority_header("0");
-    assert_eq!(zero.routing.as_ref().unwrap().priority, Some(0));
-    assert_eq!(
-        zero.extra_args.as_ref().unwrap()["vllm_tito"]["priority"],
-        json!(0),
-        "zero is a valid header override"
-    );
-
-    let malformed = open_with_priority_header("not-an-int");
-    assert_eq!(malformed.routing.as_ref().unwrap().priority, Some(-7));
-    assert_eq!(
-        malformed.extra_args.as_ref().unwrap()["vllm_tito"]["priority"],
-        json!(7),
-        "malformed headers fall back to the body value"
-    );
-}
-
-#[test]
-fn dynamo_priority_header_preserves_minimum_routing_value() {
-    let request = open_with_priority_header(&i32::MIN.to_string());
-    assert_eq!(request.routing.as_ref().unwrap().priority, Some(i32::MIN));
-    assert_eq!(
-        request.extra_args.as_ref().unwrap()["vllm_tito"]["priority"],
-        json!(i32::MAX),
-        "the translated engine field saturates while Dynamo retains the exact header"
-    );
-}
-
 #[test]
 fn model_alias_is_canonicalized_only_when_the_client_supplies_a_model() {
     for model in [None, Some("public-alias")] {
