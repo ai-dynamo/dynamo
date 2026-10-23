@@ -18,7 +18,7 @@ import logging
 import math
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict
 from enum import Enum
@@ -38,6 +38,7 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
@@ -709,11 +710,6 @@ class BatchSchedulingConfig(BaseModel):
         )
 
 
-# Router values reject strings and bools; ints are accepted as floats.
-RetuneRouterValue = Annotated[float, Field(strict=True)]
-RetunePlannerValue = int | float | str | bool
-
-
 class RetuneEngineSpec(BaseModel):
     """Pinned engine that every retune candidate replay runs against.
 
@@ -871,9 +867,11 @@ class RetuneConfig(BaseModel):
 
     Every ``interval_seconds`` the planner replays the previous window of
     recorded traffic against a grid of candidate parameters and applies the
-    best point by SLA goodput per GPU. ``router`` keys are PATCH
-    ``/router_policy`` parameter names; ``planner`` keys are runtime-changeable
-    ``PlannerConfig`` fields. Either domain may be the literal ``"default"``.
+    best point by SLA goodput per GPU. ``router`` and ``planner`` are search
+    domains in the AISimulate recommendation syntax of the Dynamo router and
+    planner adapters (``RouterRetuneConfig``, ``PlannerRetuneConfig``), stored
+    as written; ``retune.domains`` expands them into a grid keyed by live
+    names. Either may be the literal ``"default"``; ``None`` searches nothing.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -960,19 +958,25 @@ class RetuneConfig(BaseModel):
         default=False,
         description="Decide and record without actuating.",
     )
-    router: Literal["default"] | dict[str, list[RetuneRouterValue]] = Field(
-        default_factory=dict,
+    router: Literal["default"] | dict[str, Any] | None = Field(
+        default=None,
         description=(
-            "Router PolicyParameters name -> candidate values, or 'default' "
-            "for the Dynamo router simulation default domain."
+            "Router search domain in the AISimulate recommend syntax: public "
+            "knobs overlap_score_credit, prefill_load_scale and temperature, "
+            "plus the retune extension knobs, each a scalar, {choices: [...]} "
+            "or {range: {min, max, step}}. An omitted AISimulate knob searches "
+            "its AISimulate default domain; a scalar pins it. 'default' is the "
+            "AISimulate default domain; null does not search the router."
         ),
     )
-    planner: Literal["default"] | dict[str, list[RetunePlannerValue]] = Field(
-        default_factory=dict,
+    planner: Literal["default"] | dict[str, Any] | None = Field(
+        default=None,
         description=(
-            "Runtime PlannerConfig field -> candidate values, or 'default' for "
-            "the relevant Dynamo planner simulation default domain. ttft_ms "
-            "and itl_ms are never searched."
+            "Planner search domain in the AISimulate recommend syntax, limited "
+            "to what a running planner can change: the load_sensitivity and "
+            "load_predictor groups and the runtime knobs. 'default' searches "
+            "the applicable AISimulate default domain; null does not search "
+            "the planner. ttft_ms and itl_ms are never searched."
         ),
     )
     live: RetuneLiveConfig = Field(
@@ -983,44 +987,31 @@ class RetuneConfig(BaseModel):
     # Set by PlannerConfig validation, which resolves history_seconds=None.
     _effective_history_seconds: float | None = PrivateAttr(default=None)
 
-    @field_validator("router")
+    @field_validator("router", "planner")
     @classmethod
-    def _validate_router_domain(
-        cls, value: Literal["default"] | dict[str, list[float]]
-    ) -> Literal["default"] | dict[str, list[float]]:
-        if value == "default":
-            return value
-        for key, choices in value.items():
-            if not key:
-                raise ValueError("retune.router keys must be non-empty")
-            if not choices:
-                raise ValueError(f"retune.router.{key} must list at least one value")
-            if any(not math.isfinite(choice) or choice < 0 for choice in choices):
-                raise ValueError(
-                    f"retune.router.{key} values must be finite and non-negative"
-                )
-            if len(set(choices)) != len(choices):
-                raise ValueError(f"retune.router.{key} values must be distinct")
-        return value
+    def _validate_domain_syntax(
+        cls, value: Literal["default"] | dict[str, Any] | None, info: ValidationInfo
+    ) -> Literal["default"] | dict[str, Any] | None:
+        """Parse a section with its adapter schema; store it as written.
 
-    @field_validator("planner")
-    @classmethod
-    def _validate_planner_domain(
-        cls, value: Literal["default"] | dict[str, list[RetunePlannerValue]]
-    ) -> Literal["default"] | dict[str, list[RetunePlannerValue]]:
-        if value == "default":
+        Catches what needs no planner context: syntax, unknown and live names
+        (with the public name to use), and knobs fixed at startup.
+        """
+
+        if value is None or value == "default":
             return value
-        for key, choices in value.items():
-            if not choices:
-                raise ValueError(f"retune.planner.{key} must list at least one value")
-            if any(
-                isinstance(choice, float) and not math.isfinite(choice)
-                for choice in choices
-            ):
-                raise ValueError(f"retune.planner.{key} values must be finite")
-            # Pair with the bool flag so True and 1 stay distinct.
-            if len({(isinstance(c, bool), c) for c in choices}) != len(choices):
-                raise ValueError(f"retune.planner.{key} values must be distinct")
+        section = info.field_name
+        if not value:
+            raise ValueError(
+                f"retune.{section} is empty; write 'default' to search the "
+                f"default domain, or remove it to keep every {section} "
+                "parameter unchanged"
+            )
+        # Imported on use: the adapter schemas import AISimulate and this
+        # module.
+        from dynamo.planner.retune.domains import parse_retune_section
+
+        parse_retune_section(section, value)  # type: ignore[call-overload]
         return value
 
     @model_validator(mode="after")
@@ -1920,17 +1911,17 @@ class PlannerConfig(BaseModel):
     def _validate_retune(self, retune: RetuneConfig) -> RetuneConfig:
         """Check ``retune`` against the rest of the planner configuration.
 
-        Returns a validated copy, so a ``RetuneConfig`` instance shared by
-        several configs is never modified: planner domain values are stored as
-        their field types and the effective history is resolved, while
-        ``history_seconds`` keeps its configured value (``None`` stays auto).
+        Returns a validated copy with the effective history resolved, so a
+        ``RetuneConfig`` instance shared by several configs is never
+        modified. The search domains stay as written: ``retune.domains``
+        expands them again wherever the grid is needed.
         """
 
         retune = retune.model_copy(deep=True)
 
-        # Both modules import this one at module scope; import them on use.
-        from dynamo.planner.reconfiguration import PREDICTOR_FIELDS, RUNTIME_FIELDS
+        # The module imports this one at module scope; import it on use.
         from dynamo.planner.retune.domains import (
+            describe_grid,
             expand_planner_domain,
             expand_router_domain,
             grid_size,
@@ -1956,14 +1947,6 @@ class PlannerConfig(BaseModel):
                 "decode_engine_args for mode='disagg', and neither for mode='agg'"
             )
 
-        if retune.planner != "default":
-            # Store values as their field types (e.g. kalman_r 1 -> 1.0) so
-            # candidates compare equal to the live config by canonical key.
-            planner = self._validate_retune_planner_keys(
-                retune.planner, PREDICTOR_FIELDS, RUNTIME_FIELDS
-            )
-            if planner:
-                retune.planner = planner
         planner_domain = expand_planner_domain(self)
         router_domain = expand_router_domain(retune)
 
@@ -1977,8 +1960,8 @@ class PlannerConfig(BaseModel):
                     f"retune.history_seconds must be >= {required:g}s "
                     "(throughput_adjustment_interval_seconds x "
                     "max(prophet_window_size, kalman_min_points) over the "
-                    "current and candidate values) to warm throughput "
-                    "predictors"
+                    "current predictor and the load_predictor candidates) to "
+                    "warm throughput predictors"
                 )
         retune._effective_history_seconds = history_seconds or 0.0
 
@@ -1990,52 +1973,42 @@ class PlannerConfig(BaseModel):
         if size > retune.max_candidates:
             raise ValueError(
                 f"retune grid has {size} candidates, exceeding "
-                f"retune.max_candidates={retune.max_candidates}"
+                f"retune.max_candidates={retune.max_candidates} "
+                f"({describe_grid(router_domain, planner_domain.grid)}); an "
+                "omitted AISimulate knob searches its default domain, so pin "
+                "knobs with a scalar to shrink the grid"
             )
         return retune
 
-    def _validate_retune_planner_keys(
+    def _validate_retune_planner_grid(
         self,
-        domain: Mapping[str, list[RetunePlannerValue]],
-        predictor_fields: frozenset[str],
-        runtime_fields: frozenset[str],
-    ) -> dict[str, list[RetunePlannerValue]]:
-        """Reject planner search keys that are unknown, fixed, or inert.
+        grid: Mapping[str, Sequence[Any]],
+        public_names: Mapping[str, str],
+    ) -> dict[str, list[Any]]:
+        """R7: reject planner grid fields that are inert in this configuration.
 
-        Each value must pass the field's strict validation, as a runtime
-        reconfiguration would. Returns the domain with validated values.
+        ``grid`` is keyed by ``PlannerConfig`` field; ``public_names`` gives
+        the ``retune.planner`` name to report. Each value must pass the
+        field's strict validation, as a runtime reconfiguration would.
+        Returns the grid with validated values (``80`` becomes ``80.0`` for a
+        float field), so candidates compare equal to the live config by key.
         """
 
-        if domain and not self.scaling_enabled():
-            raise ValueError(
-                "retune.planner requires load or throughput scaling; "
-                "retune-only mode searches router parameters only"
-            )
         active_endpoints = (
             {"min_endpoint"}
             if self.mode == "agg"
             else {"prefill_min_endpoint", "decode_min_endpoint"}
         )
-        validated: dict[str, list[RetunePlannerValue]] = {}
-        for key, values in domain.items():
-            if key in ("ttft_ms", "itl_ms"):
-                raise ValueError(
-                    f"retune.planner.{key} is not searchable; ttft_ms and itl_ms "
-                    "define the fixed SLA (use retune.sla_ttft_ms/sla_itl_ms to "
-                    "override the scoring SLA)"
-                )
-            if key not in runtime_fields:
-                raise ValueError(
-                    f"retune.planner.{key} is not a runtime-changeable planner field"
-                )
-            if key in predictor_fields:
-                relevant = (
-                    self.optimization_target == "sla" and self.enable_throughput_scaling
-                )
-                requirement = "optimization_target='sla' with throughput scaling"
-            elif key in ("min_endpoint", "prefill_min_endpoint", "decode_min_endpoint"):
+        validated: dict[str, list[Any]] = {}
+        for key, values in grid.items():
+            name = f"retune.planner.{public_names.get(key, key)}"
+            if key in ("min_endpoint", "prefill_min_endpoint", "decode_min_endpoint"):
                 relevant = key in active_endpoints
-                requirement = f"an endpoint field active in mode={self.mode!r}"
+                requirement = (
+                    "mode='agg' (use prefill_min_workers/decode_min_workers in disagg)"
+                    if key == "min_endpoint"
+                    else "mode='disagg' (use min_workers in agg)"
+                )
             elif key == "max_throughput_scaling_replicas":
                 relevant = self.enable_throughput_scaling
                 requirement = "enable_throughput_scaling"
@@ -2057,8 +2030,7 @@ class PlannerConfig(BaseModel):
                 requirement = ""
             if not relevant:
                 raise ValueError(
-                    f"retune.planner.{key} has no effect here; it requires "
-                    f"{requirement}"
+                    f"{name} has no effect here; it requires {requirement}"
                 )
             adapter = _strict_field_adapter(key)
             validated[key] = []
@@ -2070,7 +2042,7 @@ class PlannerConfig(BaseModel):
                         item["msg"] for item in error.errors(include_input=False)
                     )
                     raise ValueError(
-                        f"retune.planner.{key} value {value!r} is invalid: {message}"
+                        f"{name} value {value!r} is invalid: {message}"
                     ) from None
         return validated
 

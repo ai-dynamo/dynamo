@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
 from aisimulate.config.common import Choices, IntegerRange, NumericRange
@@ -18,6 +19,62 @@ NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveFloat = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
 Policy = Literal["disabled", "enabled"]
 Predictor = Literal["constant", "arima", "prophet", "kalman"]
+
+# Public planner knobs whose name is also the ``PlannerConfig`` field name.
+PLANNER_PASSTHROUGH: tuple[str, ...] = (
+    "enable_throughput_scaling",
+    "enable_load_scaling",
+    "throughput_adjustment_interval_seconds",
+    "load_adjustment_interval_seconds",
+    "max_throughput_scaling_replicas",
+    "max_num_fpm_samples",
+    "fpm_sample_bucket_size",
+    "load_scaling_down_sensitivity",
+    "load_min_observations",
+    "load_predictor",
+    "load_predictor_log1p",
+    "prophet_window_size",
+    "kalman_q_level",
+    "kalman_q_trend",
+    "kalman_r",
+    "kalman_min_points",
+)
+# Public planner knob -> ``PlannerConfig`` field, for every knob a prediction
+# materializes into the planner configuration.
+PLANNER_PUBLIC_TO_CONFIG: dict[str, str] = {
+    **{name: name for name in PLANNER_PASSTHROUGH},
+    "target": "optimization_target",
+    "max_num_gpus": "max_gpu_budget",
+    "min_num_gpus": "min_gpu_budget",
+    "min_workers": "min_endpoint",
+    "prefill_min_workers": "prefill_min_endpoint",
+    "decode_min_workers": "decode_min_endpoint",
+}
+# Preset group -> the independent knobs its ``preset`` stands for.
+PLANNER_PRESET_GROUPS: dict[str, frozenset[str]] = {
+    "scaling_policy": frozenset(
+        {
+            "enable_throughput_scaling",
+            "enable_load_scaling",
+            "throughput_adjustment_interval_seconds",
+            "load_adjustment_interval_seconds",
+        }
+    ),
+    "fpm_sampling": frozenset({"max_num_fpm_samples", "fpm_sample_bucket_size"}),
+    "load_sensitivity": frozenset(
+        {"load_scaling_down_sensitivity", "load_min_observations"}
+    ),
+    "load_predictor": frozenset(
+        {
+            "load_predictor_log1p",
+            "prophet_window_size",
+            "kalman_q_level",
+            "kalman_q_trend",
+            "kalman_r",
+            "kalman_min_points",
+        }
+    ),
+}
 
 
 class ScalingPolicyMapping(BaseModel):
@@ -136,28 +193,7 @@ class PlannerRecommendationConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_preset_conflicts(self) -> PlannerRecommendationConfig:
-        groups = {
-            "scaling_policy": {
-                "enable_throughput_scaling",
-                "enable_load_scaling",
-                "throughput_adjustment_interval_seconds",
-                "load_adjustment_interval_seconds",
-            },
-            "fpm_sampling": {"max_num_fpm_samples", "fpm_sample_bucket_size"},
-            "load_sensitivity": {
-                "load_scaling_down_sensitivity",
-                "load_min_observations",
-            },
-            "load_predictor": {
-                "load_predictor_log1p",
-                "prophet_window_size",
-                "kalman_q_level",
-                "kalman_q_trend",
-                "kalman_r",
-                "kalman_min_points",
-            },
-        }
-        for group, knobs in groups.items():
+        for group, knobs in PLANNER_PRESET_GROUPS.items():
             control = getattr(self, group)
             if control is None:
                 conflicts = sorted(
@@ -219,5 +255,132 @@ class PlannerRecommendationConfig(BaseModel):
             if root * root != value:
                 raise ValueError(
                     "fpm_sample_bucket_size values must be perfect squares"
+                )
+        return self
+
+
+# Retune knob domains leave value bounds (for example ``max_gpu_budget: -1``)
+# to the ``PlannerConfig`` validation of each expanded value.
+StrictInt = Annotated[int, Field(strict=True)]
+StrictFiniteFloat = Annotated[float, Field(strict=True, allow_inf_nan=False)]
+StrictIntDomain: TypeAlias = StrictInt | Choices[StrictInt] | IntegerRange
+StrictFloatDomain: TypeAlias = (
+    StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange
+)
+
+# Public knobs and groups fixed when the planner starts. A retune domain that
+# names one is rejected; retune keeps the running value.
+PLANNER_RETUNE_STARTUP_ONLY = frozenset(
+    {
+        "policy",
+        "scaling_policy",
+        "fpm_sampling",
+        "enable_throughput_scaling",
+        "enable_load_scaling",
+        "throughput_adjustment_interval_seconds",
+        "load_adjustment_interval_seconds",
+        "max_num_fpm_samples",
+        "fpm_sample_bucket_size",
+        "load_min_observations",
+    }
+)
+# Runtime ``PlannerConfig`` fields without an AISimulate public name. Retune
+# accepts them under their own names.
+PLANNER_RETUNE_EXTENSIONS: tuple[str, ...] = (
+    "prefill_scale_up_queue_tokens",
+    "prefill_scale_down_queue_tokens",
+    "decode_scale_up_kv_rate",
+    "decode_scale_down_kv_rate",
+)
+# Public retune grid knob -> ``PlannerConfig`` field. Retune searches these
+# only when written; omitted, each keeps its current value.
+PLANNER_RETUNE_KNOBS: dict[str, str] = {
+    **{
+        name: PLANNER_PUBLIC_TO_CONFIG[name]
+        for name in (
+            "min_workers",
+            "prefill_min_workers",
+            "decode_min_workers",
+            "max_num_gpus",
+            "min_num_gpus",
+            "max_throughput_scaling_replicas",
+        )
+    },
+    **{name: name for name in PLANNER_RETUNE_EXTENSIONS},
+}
+# Preset groups retune searches the runtime part of:
+# ``load_scaling_down_sensitivity`` in the goodput grid, the load predictor in
+# the forecast-loss pre-sweep.
+PLANNER_RETUNE_GROUPS: tuple[str, ...] = ("load_sensitivity", "load_predictor")
+_PLANNER_FIXED_SLA = ("ttft_ms", "itl_ms")
+_PLANNER_LIVE_NAME_HINTS = {
+    live: public for public, live in PLANNER_RETUNE_KNOBS.items() if live != public
+}
+
+
+class PlannerRetuneConfig(PlannerRecommendationConfig):
+    """``retune.planner``: the recommendation schema, restricted to what a
+    running planner can change.
+
+    Syntax, preset groups and the preset-conflict rules are the recommendation
+    ones. ``PLANNER_RETUNE_STARTUP_ONLY`` knobs are rejected; ``max_num_gpus``
+    and ``max_throughput_scaling_replicas``, scalars in recommend, accept a
+    domain here, and like ``min_num_gpus`` and ``PLANNER_RETUNE_EXTENSIONS``
+    keep their current value when omitted. The SLA (``ttft_ms``/``itl_ms``) is
+    not a knob. Retune knobs do not accept ``null``, and role minimums do not
+    list ``null`` (inherit ``min_workers``) yet.
+    """
+
+    policy: Policy | Choices[Policy] | None = None
+    # Recommend pins these two to one value; retune searches them, so the
+    # override widens the field type on purpose.
+    max_num_gpus: StrictIntDomain | None = None  # type: ignore[assignment]
+    min_num_gpus: StrictIntDomain | None = None
+    max_throughput_scaling_replicas: IntDomain | None = None  # type: ignore[assignment]
+    prefill_scale_up_queue_tokens: StrictIntDomain | None = None
+    prefill_scale_down_queue_tokens: StrictIntDomain | None = None
+    decode_scale_up_kv_rate: StrictFloatDomain | None = None
+    decode_scale_down_kv_rate: StrictFloatDomain | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_fixed_knobs_and_live_names(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        for name in _PLANNER_FIXED_SLA:
+            if name in value:
+                raise ValueError(
+                    f"retune.planner.{name} is the planner SLA and stays fixed "
+                    f"during retune; set retune.sla_{name} to change the SLA "
+                    "that retune scores against"
+                )
+        for live, public in _PLANNER_LIVE_NAME_HINTS.items():
+            if live in value:
+                raise ValueError(
+                    f"retune.planner.{live} is not a public planner name; "
+                    f"write {public} instead"
+                )
+        startup = sorted(PLANNER_RETUNE_STARTUP_ONLY.intersection(value))
+        if startup:
+            raise ValueError(
+                f"retune.planner cannot change {startup}: they are fixed when "
+                "the planner starts, and retune keeps their running values"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _reject_null_knob_values(self) -> PlannerRetuneConfig:
+        for name in PLANNER_RETUNE_KNOBS:
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(
+                    f"retune.planner.{name} does not accept null; omit it to "
+                    "keep the current value"
+                )
+        for name in ("prefill_min_workers", "decode_min_workers"):
+            domain = getattr(self, name)
+            if isinstance(domain, Choices) and None in domain.choices:
+                raise ValueError(
+                    f"retune.planner.{name} does not accept null (inherit "
+                    "min_workers) yet; list explicit worker counts"
                 )
         return self

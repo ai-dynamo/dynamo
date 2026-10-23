@@ -3,29 +3,66 @@
 
 """Search-domain expansion for planner retune.
 
-``retune.router`` and ``retune.planner`` are either explicit Cartesian domains
-or the literal ``"default"``. These helpers turn both forms into concrete
-domains keyed by live wire names, so config validation and the retune
-controller size and enumerate the same grid.
+``retune.router`` and ``retune.planner`` use the AISimulate recommendation
+syntax of the Dynamo router and planner adapters: public knob names, each a
+scalar, ``{choices: [...]}`` or ``{range: {min, max, step?}}``, and the
+planner preset groups. ``RouterRetuneConfig`` and ``PlannerRetuneConfig``
+parse a section; the helpers here expand it into a finite Cartesian grid
+keyed by live names (PATCH ``/router_policy`` parameters and ``PlannerConfig``
+fields) plus the load-predictor candidates of the forecast-loss pre-sweep, so
+config validation and the retune controller size and enumerate the same grid.
+
+- An omitted AISimulate knob searches its AISimulate default domain; a scalar
+  pins it. ``default`` omits every knob.
+- Knobs fixed at startup keep their running value.
+- Retune extension knobs (no AISimulate default domain) keep their current
+  value when omitted.
+- The load predictor is never a grid dimension: its candidates go to the
+  pre-sweep, and every non-baseline candidate uses the winner.
+
+The adapter schemas and providers are imported on use: they import
+``PlannerConfig``, whose validation imports this module, and the providers
+pull in the AISimulate sweeper.
 """
 
 from __future__ import annotations
 
 import itertools
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
+
+from pydantic import BaseModel, ValidationError
 
 from dynamo.planner.core.types import RetuneParams
 
 if TYPE_CHECKING:
     from dynamo.planner.config.planner_config import PlannerConfig, RetuneConfig
+    from dynamo.planner.simulation.config import PlannerRetuneConfig
+    from dynamo.planner.simulation.provider import (
+        LoadPredictorSearch,
+        LoadSensitivitySearch,
+    )
+    from dynamo.router.simulation.config import RouterRetuneConfig
+
+Section = Literal["router", "planner"]
+# (label, mapping of every public predictor knob), as the pre-sweep ranks them.
+PredictorCandidate = tuple[str, dict[str, Any]]
 
 OVERLAP_SCORE_CREDIT = "overlap_score_credit"
-PREFILL_LOAD_SCALE = "prefill_load_scale"
-ROUTER_TEMPERATURE = "router_temperature"
 LOAD_SCALING_DOWN_SENSITIVITY = "load_scaling_down_sensitivity"
+# Combinations a ``preset: false`` group may expand to before deduplication,
+# which bounds the expansion's memory. The AISimulate default load-predictor
+# domain is 256 combinations.
+MAX_PRESET_COMBINATIONS = 65_536
+# Predictor candidates already expanded, by load-predictor spec and limit.
+# ``candidate_config`` validates ``retune`` again for every planner candidate
+# the controller checks (E4), and a large ``preset: false`` expansion takes
+# tens of milliseconds.
+_PREDICTOR_CANDIDATE_CACHE: dict[str, tuple[PredictorCandidate, ...]] = {}
+_PREDICTOR_CANDIDATE_CACHE_SIZE = 32
 
 
 @dataclass(frozen=True)
@@ -33,93 +70,557 @@ class PlannerDomain:
     """Expanded planner search domain.
 
     ``grid`` holds the goodput-grid dimensions (``PlannerConfig`` field ->
-    candidate values). ``predictor_presets`` is set only by
-    ``planner: default`` on an SLA planner with throughput scaling: the
-    predictor is then chosen per sweep by the forecast-loss pre-sweep over
-    these ``LOAD_PREDICTOR_PRESETS`` names and is not a grid dimension.
+    candidate values). ``predictor_candidates`` is set when the load
+    predictor is searched (``optimization_target='sla'`` with throughput
+    scaling): the forecast-loss pre-sweep picks one of these ``(label,
+    mapping)`` candidates per sweep, and it is not a grid dimension.
     """
 
     grid: dict[str, list[Any]] = field(default_factory=dict)
-    predictor_presets: list[str] | None = None
+    predictor_candidates: list[PredictorCandidate] | None = None
 
     @property
     def empty(self) -> bool:
         """True when the domain neither searches fields nor picks a predictor."""
 
-        return not self.grid and not self.predictor_presets
+        return not self.grid and not self.predictor_candidates
+
+
+@overload
+def parse_retune_section(
+    section: Literal["router"], spec: str | Mapping[str, Any]
+) -> RouterRetuneConfig:
+    ...
+
+
+@overload
+def parse_retune_section(
+    section: Literal["planner"], spec: str | Mapping[str, Any]
+) -> PlannerRetuneConfig:
+    ...
+
+
+def parse_retune_section(
+    section: Section, spec: str | Mapping[str, Any]
+) -> RouterRetuneConfig | PlannerRetuneConfig:
+    """Validate one retune section against its adapter schema.
+
+    ``"default"`` parses as ``{}`` (every knob omitted). Raises ``ValueError``
+    with the schema's messages, and a hint for a bare value list.
+    """
+
+    schema: type[BaseModel]
+    if section == "router":
+        from dynamo.router.simulation.config import RouterRetuneConfig
+
+        schema = RouterRetuneConfig
+    else:
+        from dynamo.planner.simulation.config import PlannerRetuneConfig
+
+        schema = PlannerRetuneConfig
+    name = f"retune.{section}"
+    raw: Any = {} if spec == "default" else spec
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{name} must be 'default' or a mapping, got {raw!r}")
+    for key, value in raw.items():
+        if isinstance(value, list) and (hint := _bare_list_hint(section, key, value)):
+            raise ValueError(f"{name}.{key} is a bare list; {hint}")
+    try:
+        return schema.model_validate(raw)
+    except ValidationError as error:
+        raise ValueError(_schema_error(name, raw, error)) from None
+
+
+def _bare_list_hint(section: Section, key: str, value: list[Any]) -> str | None:
+    """How to write ``key`` instead of the bare list ``value``.
+
+    ``None`` for a key whose own schema error says what to write: unknown, a
+    live name, the SLA, or a knob fixed at startup (the router ``policy``
+    included).
+    """
+
+    if section == "router":
+        from dynamo.router.simulation.config import RouterRetuneConfig
+
+        if key not in RouterRetuneConfig.model_fields or key == "policy":
+            return None
+        if key == "prefill_load_model":
+            # Fixed at startup: retune accepts only the running load model.
+            return "write {type: ...} with the running load model, or omit it"
+    else:
+        from dynamo.planner.simulation.config import (
+            PLANNER_RETUNE_GROUPS,
+            PLANNER_RETUNE_STARTUP_ONLY,
+            PlannerRetuneConfig,
+        )
+
+        if (
+            key not in PlannerRetuneConfig.model_fields
+            or key in PLANNER_RETUNE_STARTUP_ONLY
+        ):
+            return None
+        if key in PLANNER_RETUNE_GROUPS:
+            return _preset_group_hint(key)
+    return f"write a scalar, {{choices: {value}}} or {{range: {{min, max, step}}}}"
+
+
+def _preset_group_hint(group: str) -> str:
+    if group == "load_predictor":
+        from dynamo.planner.simulation.load_predictor import LOAD_PREDICTOR_PRESETS
+
+        presets = list(LOAD_PREDICTOR_PRESETS)
+        off = "{preset: false, type: {choices: [...]}} to search predictor types"
+    else:
+        from dynamo.planner.simulation.presets import LOAD_SENSITIVITY
+
+        presets = list(LOAD_SENSITIVITY)
+        off = (
+            "{preset: false} with load_scaling_down_sensitivity: {choices: [...]} "
+            "next to it"
+        )
+    return (
+        f"{group} is a preset group: write {{preset: [...]}} listing preset names "
+        f"({', '.join(presets)}) or complete mappings, or {off}"
+    )
+
+
+def _union_arm(part: object) -> str | None:
+    """The union member a ``loc`` part names; ``None`` for a field or index."""
+
+    if not isinstance(part, str):
+        return None
+    if part.startswith("Choices["):
+        return "choices"
+    if part in ("NumericRange", "IntegerRange"):
+        return "range"
+    if part.startswith("list["):
+        return "list"
+    if part.startswith("dict["):
+        return "dict"
+    if part.startswith(("constrained-", "literal[", "function-")) or part in (
+        "int",
+        "float",
+        "bool",
+        "str",
+        "none",
+    ):
+        return "scalar"
+    return None
+
+
+def _value_shape(value: object) -> str:
+    if isinstance(value, Mapping):
+        if "choices" in value:
+            return "choices"
+        if "range" in value:
+            return "range"
+        return "mapping"
+    if isinstance(value, list):
+        return "list"
+    return "scalar"
+
+
+def _arm_matches(arm: str, shape: str) -> bool:
+    if arm == shape:
+        return True
+    if arm == "dict":
+        return shape in ("choices", "range", "mapping")
+    return shape == "mapping" and arm in ("choices", "range")
+
+
+def _schema_error(name: str, raw: Mapping[str, Any], error: ValidationError) -> str:
+    """One line per schema error, keeping the union member the value is shaped as.
+
+    A knob is a union of scalar, ``Choices`` and range; pydantic reports every
+    member's error. Only those of the member the written value looks like
+    (``{choices}``, ``{range}`` or a scalar) are kept.
+    """
+
+    messages: list[str] = []
+    for item in error.errors(include_url=False):
+        path = name
+        value: Any = raw
+        relevant = True
+        written = True
+        fields = [part for part in item["loc"] if _union_arm(part) is None]
+        for part in item["loc"]:
+            arm = _union_arm(part)
+            if arm is not None:
+                if not _arm_matches(arm, _value_shape(value)):
+                    relevant = False
+                    break
+                continue
+            if isinstance(part, int):
+                path += f"[{part}]"
+                written = written and isinstance(value, list) and part < len(value)
+                value = value[part] if written else None
+            elif item["type"] == "missing" and len(fields) > 1 and part is fields[-1]:
+                # A required key the written mapping lacks. (Every section
+                # field is optional: a missing one comes from a nested model.)
+                path += f".{part}"
+            else:
+                path += f".{part}"
+                written = written and isinstance(value, Mapping) and part in value
+                value = value[part] if written else None
+        if not relevant:
+            continue
+        message = str(item["msg"]).removeprefix("Value error, ")
+        if path != name and not written:
+            # Raised by a nested model a validator checks (a preset mapping):
+            # the location is inside that model, not the section.
+            message = (
+                f"{name}: {path.removeprefix(name + '.')}: {message} "
+                f"(in {item['input']!r})"
+            )
+        elif path != name:
+            message = f"{path}: {message}"
+        elif not message.startswith(name):
+            message = f"{name}: {message}"
+        if message not in messages:
+            messages.append(message)
+    return "; ".join(messages) or f"{name} is invalid: {error}"
 
 
 def expand_router_domain(
-    retune: RetuneConfig, *, zero_startup_credit: bool = False
+    retune: RetuneConfig,
+    *,
+    startup_load_model: str | None = None,
+    zero_startup_credit: bool = False,
 ) -> dict[str, list[float]]:
     """Return the router search domain keyed by PATCH ``/router_policy`` names.
 
-    ``router: default`` is the Dynamo router simulation default domain:
-    ``overlap_score_credit`` x ``prefill_load_scale`` x ``router_temperature``.
+    An omitted AISimulate knob (``overlap_score_credit``,
+    ``prefill_load_scale``, ``temperature``) takes its AISimulate default
+    domain; ``router: default`` is all three (3 x 9 x 4 = 108 points). An
+    extension knob is a dimension only when written. Each dimension may hold
+    at most ``retune.max_candidates`` values.
 
-    ``zero_startup_credit`` is the hook for the E3 credit rule. Resolving the
-    startup credit needs the ``KvRouterConfig`` binding, so the caller (the
-    retune controller) decides it. When true, the default domain collapses
-    ``overlap_score_credit`` to ``[0.0]``. An explicit domain is returned
-    unchanged; the caller rejects it instead if it lists a positive credit.
+    ``startup_load_model`` and ``zero_startup_credit`` need the startup
+    ``KvRouterConfig``, so the retune controller passes them (stage 2):
+    a written ``prefill_load_model.type`` must equal the startup model (the
+    serde form ``"aic"`` reads as ``"ais"``), and a zero startup credit (E3)
+    collapses an omitted ``overlap_score_credit`` to ``[0.0]``. A written
+    positive credit is left for the caller to reject per candidate.
     """
 
-    if retune.router != "default":
-        return {key: list(values) for key, values in retune.router.items()}
-    # Imported on use: the router simulation package loads its sweep provider,
-    # which config validation (the caller) must not import eagerly.
+    spec = retune.router
+    if spec is None:
+        return {}
+    from dynamo.aisimulate.domains import finite_values
     from dynamo.router.simulation.config import (
-        OVERLAP_SCORE_CREDIT_DEFAULTS,
-        PREFILL_LOAD_SCALE_DEFAULTS,
-        TEMPERATURE_DEFAULTS,
+        ROUTER_KNOB_DEFAULTS,
+        ROUTER_PUBLIC_TO_LIVE,
+        ROUTER_RETUNE_EXTENSIONS,
     )
 
-    return {
-        OVERLAP_SCORE_CREDIT: (
-            [0.0] if zero_startup_credit else list(OVERLAP_SCORE_CREDIT_DEFAULTS)
-        ),
-        PREFILL_LOAD_SCALE: list(PREFILL_LOAD_SCALE_DEFAULTS),
-        ROUTER_TEMPERATURE: list(TEMPERATURE_DEFAULTS),
-    }
+    public = parse_retune_section("router", spec)
+    if startup_load_model is not None:
+        _check_startup_load_model(public, startup_load_model)
+    limit = retune.max_candidates
+    domain: dict[str, list[float]] = {}
+    for name, defaults in ROUTER_KNOB_DEFAULTS.items():
+        value = getattr(public, name)
+        live = ROUTER_PUBLIC_TO_LIVE[name]
+        if name == OVERLAP_SCORE_CREDIT and value is None and zero_startup_credit:
+            domain[live] = [0.0]
+            continue
+        values = finite_values(f"retune.router.{name}", value, defaults, limit=limit)
+        domain[live] = [float(item) for item in values]
+    for name in ROUTER_RETUNE_EXTENSIONS:
+        if name in public.model_fields_set:
+            values = finite_values(
+                f"retune.router.{name}", getattr(public, name), None, limit=limit
+            )
+            domain[name] = [float(item) for item in values]
+    return domain
+
+
+def _check_startup_load_model(public: RouterRetuneConfig, startup: str) -> None:
+    from aisimulate.config.common import Choices
+
+    model = public.prefill_load_model
+    if (
+        "prefill_load_model" not in public.model_fields_set
+        or "type" not in model.model_fields_set
+    ):
+        return
+    running = "ais" if startup == "aic" else startup
+    written = (
+        list(model.type.choices) if isinstance(model.type, Choices) else [model.type]
+    )
+    if written != [running]:
+        raise ValueError(
+            "retune.router.prefill_load_model.type is fixed at startup, and "
+            f"retune keeps the running {running!r}; got {written}"
+        )
 
 
 def expand_planner_domain(config: PlannerConfig) -> PlannerDomain:
     """Return the planner search domain of ``config.retune``.
 
-    ``planner: default`` keeps only the runtime-changeable part that applies to
-    ``config``: ``load_scaling_down_sensitivity`` from the ``LOAD_SENSITIVITY``
-    presets when load scaling is enabled, and the predictor pre-sweep presets
-    when ``optimization_target == 'sla'`` with throughput scaling. It expands to
-    an empty domain otherwise. An explicit domain becomes the grid as is,
-    including any explicitly listed predictor fields.
+    Only what a running planner can change and what applies to ``config`` is
+    searched:
+
+    - ``load_sensitivity``, with load scaling: the ``load_scaling_down_sensitivity``
+      of its entries (``load_min_observations`` is fixed at startup). Omitted,
+      the three AISimulate presets give {70, 80, 90}.
+    - ``load_predictor``, with ``optimization_target='sla'`` and throughput
+      scaling: the distinct predictor candidates of the pre-sweep. Omitted,
+      the 11 AISimulate presets.
+    - Any written ``PLANNER_RETUNE_KNOBS`` knob, under its ``PlannerConfig``
+      name.
+
+    An omitted group that does not apply is skipped; a written one raises, as
+    does any written knob without load or throughput scaling. Grid values
+    pass R7 (``PlannerConfig._validate_retune_planner_grid``).
     """
 
     retune = config.retune
     if retune is None:
         raise ValueError("planner config has no retune section")
-    if retune.planner != "default":
-        return PlannerDomain(
-            grid={key: list(values) for key, values in retune.planner.items()}
+    spec = retune.planner
+    if spec is None:
+        return PlannerDomain()
+    from dynamo.aisimulate.domains import finite_values, require_enumerable
+    from dynamo.planner.simulation.config import PLANNER_RETUNE_KNOBS
+
+    public = parse_retune_section("planner", spec)
+    explicit = public.model_fields_set
+    if explicit and not config.scaling_enabled():
+        raise ValueError(
+            "retune.planner requires load or throughput scaling; "
+            "retune-only mode searches router parameters only"
         )
+    # Before any preset expansion: it would read a log integer range as every
+    # integer in it and a log float range as its two endpoints.
+    require_enumerable(public, prefix="retune.planner.")
+    limit = retune.max_candidates
 
     grid: dict[str, list[Any]] = {}
-    predictor_presets: list[str] | None = None
-    # Imported on use: both simulation modules import PlannerConfig at module
-    # scope, and config validation calls this function.
-    if config.enable_load_scaling:
-        from dynamo.planner.simulation.presets import LOAD_SENSITIVITY
+    public_names: dict[str, str] = {}
+    sensitivities = _load_sensitivities(config, public, limit)
+    if sensitivities is not None:
+        grid[LOAD_SCALING_DOWN_SENSITIVITY] = sensitivities
+    for name, live in PLANNER_RETUNE_KNOBS.items():
+        if name in explicit:
+            grid[live] = finite_values(
+                f"retune.planner.{name}", getattr(public, name), None, limit=limit
+            )
+            public_names[live] = name
+    grid = config._validate_retune_planner_grid(grid, public_names)
+    return PlannerDomain(
+        grid=grid, predictor_candidates=_predictor_candidates(config, public, limit)
+    )
 
-        grid[LOAD_SCALING_DOWN_SENSITIVITY] = list(
-            dict.fromkeys(
-                preset[LOAD_SCALING_DOWN_SENSITIVITY]
-                for preset in LOAD_SENSITIVITY.values()
+
+def _load_sensitivities(
+    config: PlannerConfig, public: PlannerRetuneConfig, limit: int
+) -> list[Any] | None:
+    explicit = "load_sensitivity" in public.model_fields_set
+    if not config.enable_load_scaling:
+        if explicit:
+            raise ValueError(
+                "retune.planner.load_sensitivity has no effect here; it requires "
+                "enable_load_scaling"
+            )
+        return None
+    from dynamo.planner.simulation.presets import (
+        LOAD_SENSITIVITY,
+        load_sensitivity_fields,
+    )
+    from dynamo.planner.simulation.provider import LoadSensitivitySearch
+
+    control = public.load_sensitivity
+    running = config.load_min_observations
+    entries: list[str | dict[str, Any]]
+    if control is None or control.preset == "default":
+        entries = list(LOAD_SENSITIVITY)
+    elif control.preset in (False, {}):
+        entries = list(
+            _preset_off_entries(
+                "load_sensitivity",
+                public,
+                limit,
+                {"load_min_observations": [running]},
             )
         )
-    if config.optimization_target == "sla" and config.enable_throughput_scaling:
-        from dynamo.planner.simulation.load_predictor import LOAD_PREDICTOR_PRESETS
+    else:
+        entries = _preset_entries(LoadSensitivitySearch, "load_sensitivity", control)
+        for entry in entries:
+            if isinstance(entry, dict) and entry["load_min_observations"] != running:
+                raise ValueError(
+                    f"retune.planner.load_sensitivity.preset entry {entry} sets "
+                    "load_min_observations, which is fixed at startup; it must "
+                    f"equal the running value {running}"
+                )
+    # A preset's load_min_observations stays at the running value: only the
+    # runtime part of each entry is searched.
+    return list(
+        dict.fromkeys(
+            load_sensitivity_fields(entry)[LOAD_SCALING_DOWN_SENSITIVITY]
+            for entry in entries
+        )
+    )
 
-        predictor_presets = list(LOAD_PREDICTOR_PRESETS)
-    return PlannerDomain(grid=grid, predictor_presets=predictor_presets)
+
+def _predictor_candidates(
+    config: PlannerConfig, public: PlannerRetuneConfig, limit: int
+) -> list[PredictorCandidate] | None:
+    explicit = "load_predictor" in public.model_fields_set
+    if not (config.optimization_target == "sla" and config.enable_throughput_scaling):
+        if explicit:
+            raise ValueError(
+                "retune.planner.load_predictor has no effect here; it requires "
+                "optimization_target='sla' with throughput scaling"
+            )
+        return None
+    from dynamo.planner.simulation.config import PLANNER_PRESET_GROUPS
+
+    # Everything the expansion reads. JSON keeps 1 and 1.0 apart, which an
+    # integer or float range bound depends on.
+    spec = public.model_dump(
+        mode="json",
+        include={"load_predictor", *PLANNER_PRESET_GROUPS["load_predictor"]},
+    )
+    key = json.dumps([limit, spec], sort_keys=True)
+    candidates = _PREDICTOR_CANDIDATE_CACHE.get(key)
+    if candidates is None:
+        candidates = tuple(_expand_predictor_candidates(public, limit))
+        if len(_PREDICTOR_CANDIDATE_CACHE) >= _PREDICTOR_CANDIDATE_CACHE_SIZE:
+            del _PREDICTOR_CANDIDATE_CACHE[next(iter(_PREDICTOR_CANDIDATE_CACHE))]
+        _PREDICTOR_CANDIDATE_CACHE[key] = candidates
+    return [(label, dict(entry)) for label, entry in candidates]
+
+
+def _expand_predictor_candidates(
+    public: PlannerRetuneConfig, limit: int
+) -> list[PredictorCandidate]:
+    from dynamo.planner.simulation.load_predictor import (
+        LOAD_PREDICTOR_PRESETS,
+        distinct_predictor_candidates,
+    )
+    from dynamo.planner.simulation.provider import LoadPredictorSearch
+
+    control = public.load_predictor
+    entries: list[str | dict[str, Any]]
+    if control is None or control.preset == "default":
+        entries = list(LOAD_PREDICTOR_PRESETS)
+    elif control.preset in (False, {}):
+        entries = list(_preset_off_entries("load_predictor", public, limit))
+    else:
+        entries = _preset_entries(LoadPredictorSearch, "load_predictor", control)
+    candidates = distinct_predictor_candidates(entries)
+    if len(candidates) > limit:
+        raise ValueError(
+            f"retune.planner.load_predictor has {len(candidates)} distinct "
+            f"predictor candidates, exceeding retune.max_candidates={limit}"
+        )
+    return candidates
+
+
+def _preset_entries(
+    search: type[LoadSensitivitySearch] | type[LoadPredictorSearch],
+    group: str,
+    control: Any,
+) -> list[str | dict[str, Any]]:
+    """Validate a preset list (names, or complete mappings) of ``group``.
+
+    A mapping's values come back as their field types (``kalman_r: 1`` is
+    ``1.0``), as in the named presets and ``PlannerConfig``: a candidate equal
+    to the running predictor then has the running config's
+    ``RetuneParams.key``.
+    """
+
+    from dynamo.planner.simulation.config import (
+        LoadPredictorMapping,
+        LoadSensitivityMapping,
+    )
+
+    mapping_model: type[BaseModel] = (
+        LoadPredictorMapping if group == "load_predictor" else LoadSensitivityMapping
+    )
+    try:
+        entries = search.model_validate({"preset": control.preset}).preset
+        return [
+            mapping_model.model_validate(entry).model_dump()
+            if isinstance(entry, dict)
+            else entry
+            for entry in entries
+        ]
+    except ValidationError as error:
+        message = "; ".join(
+            str(item["msg"]).removeprefix("Value error, ")
+            for item in error.errors(include_url=False)
+        )
+        raise ValueError(f"retune.planner.{group}.preset: {message}") from None
+
+
+def _preset_off_entries(
+    group: str,
+    public: PlannerRetuneConfig,
+    limit: int,
+    default_overrides: Mapping[str, Sequence[Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Every combination ``preset: false`` of ``group`` stands for.
+
+    Like AISimulate recommend: a written group knob uses its domain, an
+    omitted one its AISimulate default domain. The written domains and the
+    number of combinations are bounded before anything is built.
+    """
+
+    from dynamo.aisimulate.domains import domain_size
+    from dynamo.planner.simulation.config import PLANNER_PRESET_GROUPS
+    from dynamo.planner.simulation.provider import independent_preset_dimensions
+
+    for knob in sorted(PLANNER_PRESET_GROUPS[group] & public.model_fields_set):
+        value = getattr(public, knob)
+        size = None if value is None else domain_size(value, None)
+        if size is not None and size > limit:
+            raise ValueError(
+                f"retune.planner.{knob} expands to {size} values, more than the "
+                f"limit of {limit}"
+            )
+    control = getattr(public, group).model_dump(mode="python", exclude_none=True)
+    names, dimensions = independent_preset_dimensions(
+        group,
+        control,
+        public.model_dump(mode="python", exclude_none=True),
+        default_overrides,
+    )
+    combinations = math.prod(len(values) for values in dimensions)
+    if combinations > MAX_PRESET_COMBINATIONS:
+        raise ValueError(
+            f"retune.planner.{group} with preset: false expands to {combinations} "
+            f"combinations, more than {MAX_PRESET_COMBINATIONS}; narrow its knob "
+            "domains"
+        )
+    return [
+        dict(zip(names, combination, strict=True))
+        for combination in itertools.product(*dimensions)
+    ]
+
+
+def describe_grid(
+    router: Mapping[str, Sequence[Any]], planner: Mapping[str, Sequence[Any]]
+) -> str:
+    """Each grid dimension's size under its public name, for R8 errors."""
+
+    from dynamo.planner.simulation.config import PLANNER_RETUNE_KNOBS
+    from dynamo.router.simulation.config import ROUTER_PUBLIC_TO_LIVE
+
+    parts = []
+    for section, domain, names in (
+        ("router", router, ROUTER_PUBLIC_TO_LIVE),
+        ("planner", planner, PLANNER_RETUNE_KNOBS),
+    ):
+        public = {live: name for name, live in names.items()}
+        if domain:
+            sizes = " x ".join(
+                f"{public.get(key, key)} {len(values)}"
+                for key, values in domain.items()
+            )
+            parts.append(f"{section} {sizes}")
+    return "; ".join(parts)
 
 
 def grid_size(*domains: Mapping[str, Sequence[Any]]) -> int:
@@ -153,21 +654,18 @@ def required_history_seconds(config: PlannerConfig, domain: PlannerDomain) -> fl
     """Trace history needed to warm every predictor the sweep may run.
 
     ``throughput_adjustment_interval_seconds`` x the largest
-    ``prophet_window_size`` or ``kalman_min_points`` over the current config,
-    the grid values and the pre-sweep presets' fields.
+    ``prophet_window_size`` or ``kalman_min_points`` over the current config
+    and the pre-sweep candidates' predictor fields.
     """
 
-    window_sizes = [
-        config.prophet_window_size,
-        *domain.grid.get("prophet_window_size", ()),
-    ]
-    min_points = [config.kalman_min_points, *domain.grid.get("kalman_min_points", ())]
-    if domain.predictor_presets:
+    window_sizes = [config.prophet_window_size]
+    min_points = [config.kalman_min_points]
+    if domain.predictor_candidates:
         # Imported on use: the module imports PlannerConfig at module scope.
         from dynamo.planner.simulation.load_predictor import predictor_fields
 
-        for preset in domain.predictor_presets:
-            fields = predictor_fields(preset)
+        for _, entry in domain.predictor_candidates:
+            fields = predictor_fields(entry)
             window_sizes.append(
                 fields.get("prophet_window_size", config.prophet_window_size)
             )

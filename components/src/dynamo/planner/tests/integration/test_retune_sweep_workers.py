@@ -35,6 +35,7 @@ from dynamo.planner.tests.retune_sweep_helpers import (
     abort_raise_or_evaluate,
     disagg_engine,
     fake_evaluator,
+    predictor_candidates,
     retune_params,
     sweep_request,
     trace_rows,
@@ -169,7 +170,9 @@ def test_run_sweep_presweep_fixes_the_winner_into_non_baseline_candidates(tmp_pa
         history_start_ms=window_start - 200_000,
         as_of_ms=window_start + 200_000,
         base_planner=base_planner,
-        predictor_presets=("constant_last", "kalman_default_raw"),
+        predictor_candidates=predictor_candidates(
+            "constant_last", "kalman_default_raw"
+        ),
         max_parallel=1,
         history_paths=(warmup_trace,),
     )
@@ -330,7 +333,9 @@ def test_presweep_dispatch_to_stalled_workers_honours_cancel(tmp_path, monkeypat
             "enable_throughput_scaling": True,
             "throughput_adjustment_interval_seconds": 1,
         },
-        predictor_presets=("constant_last", "kalman_default_raw"),
+        predictor_candidates=predictor_candidates(
+            "constant_last", "kalman_default_raw"
+        ),
         max_parallel=2,
         timeout_s=200.0,
     )

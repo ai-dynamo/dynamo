@@ -23,6 +23,7 @@ from dynamo.mocker.config import normalize_mocker_config
 from dynamo.planner.config.planner_config import RetuneEngineSpec
 from dynamo.planner.core.types import RetuneParams
 from dynamo.planner.retune.sweep import SweepRequest, evaluate_candidate
+from dynamo.planner.simulation.load_predictor import distinct_predictor_candidates
 
 SCHEMA = "dynamo.request.trace.v1"
 ORIGIN_MS = 1_700_000_000_000
@@ -87,6 +88,12 @@ def retune_params(credit=1.0, temperature=0.0, **planner):
     )
 
 
+def predictor_candidates(*entries):
+    """Pre-sweep ``(label, mapping)`` candidates, as ``retune.planner`` gives them."""
+
+    return tuple(distinct_predictor_candidates(list(entries)))
+
+
 def sweep_request(trace_paths, candidates, baseline, **overrides):
     values = {
         "window_index": 0,
@@ -102,7 +109,7 @@ def sweep_request(trace_paths, candidates, baseline, **overrides):
         "baseline": baseline,
         "replicas": {"aggregated": 2},
         "base_planner": None,
-        "predictor_presets": None,
+        "predictor_candidates": None,
         "sla_ttft_ms": 500.0,
         "sla_itl_ms": 30.0,
         "max_parallel": 2,

@@ -42,6 +42,7 @@ from dynamo.planner.retune.window import (
 )
 from dynamo.planner.tests.retune_sweep_helpers import (
     ORIGIN_MS,
+    predictor_candidates,
     retune_params,
     sweep_request,
     trace_rows,
@@ -383,9 +384,10 @@ def test_presweep_ranking_matches_evaluate_preset(monkeypatch, tmp_path):
     constant = _spy_on_forecasts(monkeypatch, predictors.ConstantPredictor)
     kalman = _spy_on_forecasts(monkeypatch, predictors.KalmanPredictor)
     names = ["constant_last", "kalman_default_raw", "kalman_reactive_log1p"]
+    candidates = predictor_candidates(*names)
     history, window = 300, 20
     long = _wavy(history + window)
-    result = predictor_presweep(long, names, 180, eval_steps=window)
+    result = predictor_presweep(long, candidates, 180, eval_steps=window)
 
     assert (result["warmup_steps"], result["eval_steps"]) == (history, window)
     # Three series x window buckets forecasts per preset, none for history:
@@ -399,11 +401,13 @@ def test_presweep_ranking_matches_evaluate_preset(monkeypatch, tmp_path):
     assert result["winner"] == ranking(expected)[0]
     # A sweep worker reads the same observations from the sweep's file.
     path = sweep_module._write_observations(tmp_path / "observations.json", long)
-    via_file = sweep_module._presweep_task(path, names, 180, window)
+    via_file = sweep_module._presweep_task(path, candidates, 180, window)
     assert via_file["losses"] == result["losses"]
 
     # A window shorter than one predictor interval has nothing to score.
-    nothing = predictor_presweep(long, ["constant_last"], 180, eval_steps=0)
+    nothing = predictor_presweep(
+        long, predictor_candidates("constant_last"), 180, eval_steps=0
+    )
     assert (nothing["winner"], nothing["fields"]) == (None, {})
     assert nothing["losses"] == {"constant_last": None}
 
@@ -412,10 +416,54 @@ def test_presweep_ranking_matches_evaluate_preset(monkeypatch, tmp_path):
     # few points take seconds each.)
     names = ["constant_last", "prophet_w20_raw"]
     short = _wavy(5 + 2)
-    result = predictor_presweep(short, names, 180, eval_steps=2)
+    result = predictor_presweep(short, predictor_candidates(*names), 180, eval_steps=2)
     expected = evaluate_preset_losses(short, names, 2)
     assert result["losses"] == pytest.approx(expected, rel=1e-9)
     assert ranking(result["losses"]) == ranking(expected)
+
+
+def test_presweep_candidates_are_labelled_mappings():
+    from dynamo.planner.simulation.load_predictor import (
+        complete_predictor_preset,
+        predictor_fields,
+    )
+
+    # A complete mapping scores exactly as the preset it spells out.
+    observations = _wavy(40)
+    same = complete_predictor_preset("kalman_default_raw")
+    result = predictor_presweep(
+        observations,
+        (("kalman_default_raw", "kalman_default_raw"), ("custom_1", same)),
+        180,
+        eval_steps=10,
+    )
+    losses = result["losses"]
+    assert set(losses) == {"kalman_default_raw", "custom_1"}
+    assert losses["custom_1"] == losses["kalman_default_raw"]
+    # Ties go to the earliest candidate.
+    assert result["winner"] == "kalman_default_raw"
+
+    # The winner's fields come from its own mapping.
+    tuned = {**same, "kalman_q_level": 5.0, "kalman_min_points": 3}
+    summary = sweep_module._presweep_summary(
+        {"constant_last": 0.5, "custom_1": 0.25, "custom_2": None},
+        {"constant_last": "constant_last", "custom_1": tuned, "custom_2": same},
+        10,
+        30,
+        0.0,
+    )
+    assert summary["winner"] == "custom_1"
+    assert summary["fields"] == predictor_fields(tuned)
+    assert summary["fields"]["kalman_q_level"] == 5.0
+
+    # Labels key the pre-sweep tasks and records.
+    with pytest.raises(ValueError, match="labels must be unique"):
+        sweep_request(
+            ["t"],
+            [retune_params(1.0)],
+            retune_params(1.0),
+            predictor_candidates=(("a", "constant_last"), ("a", same)),
+        )
 
 
 @pytest.mark.timeout(60)
@@ -443,7 +491,7 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
         [retune_params(1.0)],
         retune_params(1.0),
         window_end_ms=ORIGIN_MS + 600_000,
-        predictor_presets=presets,
+        predictor_candidates=predictor_candidates(*presets),
     )
     cancel = threading.Event()
     pool = sweep_module._WorkerPool(2, time.monotonic() + 60, cancel)
@@ -479,6 +527,9 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
     for task_id, function, args in messages:
         assert function is sweep_module._presweep_task
         assert args[0] == path
+        # One (label, complete mapping) candidate per task.
+        ((label, entry),) = args[1]
+        assert task_id == f"predictor-presweep:{label}" and len(entry) == 7
         assert len(ForkingPickler.dumps((task_id, function, args))) < 1024
     assert sweep_module._read_observations(path) == observations
     for process, conn in zip(processes, unread):

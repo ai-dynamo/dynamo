@@ -666,6 +666,75 @@ def test_fpm_bucket_range_keeps_only_perfect_square_choices() -> None:
         )
 
 
+def test_independent_float_range_includes_exact_endpoint() -> None:
+    # Accumulating ``current += step`` in float reached 0.30000000000000004
+    # and dropped the 0.3 endpoint.
+    plan = create_provider().compile_recommendation(
+        {
+            "policy": "enabled",
+            "load_predictor": {"preset": False, "type": "kalman"},
+            "kalman_r": {"range": {"min": 0.1, "max": 0.3, "step": 0.1}},
+        },
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+            optimization={"target": "goodput"},
+            sweep=_sweep_context(target="goodput"),
+        ),
+    )
+
+    presets = plan.state["search_space"]["load_predictor"]["preset"]
+    assert sorted({preset["kalman_r"] for preset in presets}) == [0.1, 0.2, 0.3]
+    assert planner_provider_module._public_values(
+        {"range": {"min": 0.0, "max": 0.3, "step": 0.1}}, []
+    ) == [0.0, 0.1, 0.2, 0.3]
+    integers = planner_provider_module._public_values(
+        {"range": {"min": 1, "max": 10, "step": 3}}, []
+    )
+    assert integers == [1, 4, 7, 10]
+    assert all(type(value) is int for value in integers)
+
+
+def test_independent_preset_default_overrides_replace_only_named_defaults() -> None:
+    mappings = planner_provider_module._independent_preset_mappings(
+        "load_sensitivity",
+        {"preset": False},
+        {},
+        default_overrides={"load_min_observations": [4]},
+    )
+    assert mappings == [
+        {"load_scaling_down_sensitivity": value, "load_min_observations": 4}
+        for value in (70, 80, 90)
+    ]
+    explicit = planner_provider_module._independent_preset_mappings(
+        "load_sensitivity",
+        {"preset": False},
+        {"load_scaling_down_sensitivity": {"choices": [60]}},
+        default_overrides={"load_min_observations": [4]},
+    )
+    assert explicit == [
+        {"load_scaling_down_sensitivity": 60, "load_min_observations": 4}
+    ]
+    assert (
+        len(
+            planner_provider_module._independent_preset_mappings(
+                "load_sensitivity", {"preset": False}, {}
+            )
+        )
+        == 9
+    )
+    with pytest.raises(
+        ValueError, match=r"load_sensitivity has no knobs \['kalman_r'\]"
+    ):
+        planner_provider_module._independent_preset_mappings(
+            "load_sensitivity",
+            {"preset": False},
+            {},
+            default_overrides={"kalman_r": [1.0]},
+        )
+
+
 def test_custom_fpm_preset_validation_ignores_prometheus_environment(
     monkeypatch, tmp_path
 ) -> None:

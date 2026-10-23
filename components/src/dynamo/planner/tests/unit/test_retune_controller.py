@@ -30,10 +30,12 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.plugins.clock import VirtualClock, WallClock
+from dynamo.planner.reconfiguration import PREDICTOR_FIELDS
 from dynamo.planner.retune import RetuneController, RetuneTickResult
 from dynamo.planner.retune.sweep import SweepResult
 from dynamo.planner.simulation.load_predictor import (
     LOAD_PREDICTOR_PRESETS,
+    distinct_predictor_candidates,
     predictor_fields,
 )
 
@@ -48,10 +50,30 @@ ORIGIN_MS = 1_000_000.0
 INTERVAL = 60.0
 GRACE = 5.0
 STEP = 5.0
-ROUTER = {"overlap_score_credit": [0.0, 1.0], "router_temperature": [0.0, 0.5]}
-STARTUP = RetuneParams(router={"overlap_score_credit": 1.0, "router_temperature": 0.0})
-BEST = RetuneParams(router={"overlap_score_credit": 0.0, "router_temperature": 0.5})
+# AISimulate recommend syntax; prefill_load_scale is pinned (an omitted knob
+# searches its default domain), so it is a one-value dimension.
+ROUTER = {
+    "overlap_score_credit": {"choices": [0.0, 1.0]},
+    "prefill_load_scale": 1.0,
+    "temperature": {"choices": [0.0, 0.5]},
+}
+
+
+def _router_point(credit, temperature):
+    return {
+        "overlap_score_credit": credit,
+        "prefill_load_scale": 1.0,
+        "router_temperature": temperature,
+    }
+
+
+STARTUP = RetuneParams(router=_router_point(1.0, 0.0))
+BEST = RetuneParams(router=_router_point(0.0, 0.5))
 LSD = "load_scaling_down_sensitivity"
+SENSITIVITY_GRID = {
+    "load_sensitivity": {"preset": False},
+    LSD: {"choices": [70, 80, 90]},
+}
 
 
 class FakeSweeps:
@@ -116,7 +138,7 @@ def _s1(mode="agg", **retune):
 
 
 def _s2(**retune):
-    retune = {"router": {}, "planner": {LSD: [70, 80, 90]}, **retune}
+    retune = {"router": None, "planner": SENSITIVITY_GRID, **retune}
     return _config("agg", retune, optimization_target="throughput")
 
 
@@ -209,10 +231,10 @@ def _events(ticks):
     return [(now, event) for now, result in ticks for event in result.audit_events]
 
 
-def _presweep(winner):
+def _presweep(winner, entry=None):
     return {
         "winner": winner,
-        "fields": predictor_fields(winner),
+        "fields": predictor_fields(winner if entry is None else entry),
         "losses": {winner: 0.1},
         "eval_steps": 6,
         "wall_s": 0.0,
@@ -427,7 +449,11 @@ async def test_applied_router_change_updates_the_desired_map(sweeps, mode):
 
 async def test_candidate_set_is_canonical_and_window_independent(sweeps):
     sweeps.default = _best_wins()
-    grid = {"overlap_score_credit": [0.0, 0.5], "router_temperature": [0.0, 0.5]}
+    grid = {
+        "overlap_score_credit": {"choices": [0.0, 0.5]},
+        "prefill_load_scale": 1.0,
+        "temperature": {"choices": [0.0, 0.5]},
+    }
     controller = _controller(_s1(router=grid))
 
     await _run(controller, 130)
@@ -435,10 +461,7 @@ async def test_candidate_set_is_canonical_and_window_independent(sweeps):
     first, second = sweeps.requests
     # The startup point (credit 1.0) joins the grid as a fifth candidate.
     points = [(c, t) for c in (0.0, 0.5) for t in (0.0, 0.5)] + [(1.0, 0.0)]
-    keys = sorted(
-        RetuneParams(router={"overlap_score_credit": c, "router_temperature": t}).key()
-        for c, t in points
-    )
+    keys = sorted(RetuneParams(router=_router_point(c, t)).key() for c, t in points)
     assert [candidate.key() for candidate in first.candidates] == keys
     assert first.candidates == second.candidates
     assert (first.baseline, second.baseline) == (STARTUP, BEST)
@@ -512,7 +535,7 @@ async def test_same_tick_planner_change_is_not_stale(sweeps, host_applies):
 async def test_predictor_presweep_winner_is_applied_with_warmup(sweeps):
     config = _config(
         "agg",
-        {"router": {}, "planner": "default"},
+        {"router": None, "planner": "default"},
         optimization_target="sla",
         enable_load_scaling=False,
         enable_throughput_scaling=True,
@@ -534,7 +557,13 @@ async def test_predictor_presweep_winner_is_applied_with_warmup(sweeps):
     ticks = await _run(controller, 70)
 
     (request,) = sweeps.requests
-    assert request.predictor_presets == tuple(LOAD_PREDICTOR_PRESETS)
+    # (label, complete public mapping) for each of the 11 presets.
+    assert request.predictor_candidates == tuple(
+        distinct_predictor_candidates(list(LOAD_PREDICTOR_PRESETS))
+    )
+    assert [label for label, _ in request.predictor_candidates] == list(
+        LOAD_PREDICTOR_PRESETS
+    )
     assert request.history_paths == ("history.jsonl",)
     history_s = config.retune.effective_history_seconds
     assert history_s > 0
@@ -553,7 +582,7 @@ async def test_predictor_presweep_winner_is_applied_with_warmup(sweeps):
 def _sla_predictor_config(planner, **overrides):
     return _config(
         "agg",
-        {"router": {}, "planner": planner, "interval_seconds": 600.0},
+        {"router": None, "planner": planner, "interval_seconds": 600.0},
         optimization_target="sla",
         enable_load_scaling=False,
         enable_throughput_scaling=True,
@@ -571,54 +600,78 @@ def _window_only_warmup(count=4):
 
 
 _REJECTED_WARMUP = "predictor warmup rejected: .*warmup points; received 4"
+KALMAN_MIN_POINTS_60 = {
+    "load_predictor": "kalman",
+    "load_predictor_log1p": False,
+    "prophet_window_size": 50,
+    "kalman_q_level": 1.0,
+    "kalman_q_trend": 0.1,
+    "kalman_r": 10.0,
+    "kalman_min_points": 60,
+}
 
 
 @pytest.mark.parametrize(
-    ("planner", "overrides", "winner", "warmup", "reason"),
+    ("candidates", "overrides", "winner", "warmup", "labels", "history_s", "reason"),
     [
         (
-            {"load_predictor": ["arima", "kalman"]},
+            ["arima_raw", "kalman_default_raw"],
             {},
-            {"load_predictor": "kalman"},
+            ("kalman_default_raw", "kalman_default_raw"),
             4,
+            ["arima_raw", "kalman_default_raw"],
+            180.0 * 50,
             _REJECTED_WARMUP,
         ),
         (
-            {"kalman_min_points": [2, 20]},
+            # A mapping candidate; its kalman_min_points also sets the history
+            # every sweep reads (R7b).
+            [KALMAN_MIN_POINTS_60],
             {"load_predictor": "kalman", "kalman_min_points": 2},
-            {"kalman_min_points": 20},
+            ("custom_0", KALMAN_MIN_POINTS_60),
             4,
+            ["custom_0"],
+            180.0 * 60,
             _REJECTED_WARMUP,
         ),
         (
-            {"load_predictor": ["arima", "constant"]},
+            ["arima_raw", "constant_last"],
             {},
-            {"load_predictor": "constant"},
+            ("constant_last", "constant_last"),
             0,
+            ["arima_raw", "constant_last"],
+            180.0 * 50,
             "predictor change without warmup observations",
         ),
     ],
-    ids=["kalman-needs-5", "kalman-min-points-20", "no-warmup"],
+    ids=["kalman-needs-5", "kalman-min-points-60", "no-warmup"],
 )
 async def test_predictor_swap_with_too_short_a_warmup_fails(
-    sweeps, planner, overrides, winner, warmup, reason
+    sweeps, candidates, overrides, winner, warmup, labels, history_s, reason
 ):
-    config = _sla_predictor_config(planner, **overrides)
+    config = _sla_predictor_config(
+        {"load_predictor": {"preset": candidates}}, **overrides
+    )
+    assert config.retune.effective_history_seconds == history_s
+    # The pre-sweep winner is fixed into every non-baseline candidate.
     sweeps.default = _scored(
-        lambda c, _r: 2.0 if all(c.planner[k] == v for k, v in winner.items()) else 1.0,
+        lambda c, r: 1.0 if c == r.baseline else 2.0,
+        predictor_presweep=_presweep(*winner),
         warmup_observations=_window_only_warmup(warmup) or None,
     )
     controller = _controller(config)
 
     ticks = await _run(controller, 610)
 
+    (request,) = sweeps.requests
+    assert [label for label, _ in request.predictor_candidates] == labels
     ((_, decision),) = _decisions(ticks)
     assert decision.outcome == "failed"
     assert re.search(reason, decision.reason), decision.reason
     assert decision.planner_changes == {} and decision.predictor_warmup is None
     # Nothing is pending: the next sweep's baseline is still the current point.
     assert controller.current_point() == RetuneParams(
-        planner={key: getattr(config, key) for key in planner}
+        planner={key: getattr(config, key) for key in PREDICTOR_FIELDS}
     )
 
 
@@ -627,7 +680,7 @@ async def test_a_baseline_duplicate_is_listed_once_and_kept(sweeps):
     # point with the current sensitivity is the baseline after the pre-sweep.
     config = _config(
         "agg",
-        {"router": {}, "planner": "default"},
+        {"router": None, "planner": "default"},
         optimization_target="sla",
         enable_load_scaling=True,
         enable_throughput_scaling=True,
@@ -730,9 +783,13 @@ async def test_planner_rollback_reverts_an_applied_change(
         ({}, {"router_mode": "round_robin"}, "kv_router"),
         ({}, {"router_policy_config": {"name": "custom"}}, "default router policy"),
         ({}, {"conditional_disagg_enabled": True}, "conditional disaggregation"),
-        ({"router": {"router_ttl_secs": [1.0]}}, {}, "not router policy parameters"),
         (
-            {"router": {"host_cache_hit_weight": [0.5, 1.5]}},
+            {"router": {**ROUTER, "prefill_load_model": {"type": "ais"}}},
+            {},
+            "prefill_load_model.type is fixed at startup",
+        ),
+        (
+            {"router": {**ROUTER, "host_cache_hit_weight": {"choices": [0.5, 1.5]}}},
             {},
             "not a valid router configuration",
         ),
@@ -742,7 +799,7 @@ async def test_planner_rollback_reverts_an_applied_change(
         "round-robin",
         "custom-policy",
         "cond-disagg",
-        "unknown-key",
+        "load-model-pin",
         "out-of-range",
         "zero-credit-forbids",
     ],
@@ -751,6 +808,30 @@ def test_router_domain_engine_requirements(retune, engine_kwargs, match):
     engine = _engine(**engine_kwargs)
     with pytest.raises(ValueError, match=match):
         _controller(_s1(**retune), engine=engine)
+
+
+@pytest.mark.parametrize("written", [None, "ais", {"choices": ["ais"]}])
+def test_startup_ais_load_model_matches_a_written_ais(written):
+    # The startup KvRouterConfig serializes the AIS load model as "aic".
+    engine = _engine(router_prefill_load_model="ais")
+    assert engine.router_config["router_prefill_load_model"] == "ais"
+    assert (
+        json.loads(
+            KvRouterConfig.from_json(json.dumps(engine.router_config)).to_json()
+        )["router_prefill_load_model"]
+        == "aic"
+    )
+    router = dict(ROUTER)
+    if written is not None:
+        router["prefill_load_model"] = {"type": written}
+    controller = _controller(_s1(router=router), engine=engine)
+    assert len(controller._grid) == 4
+
+    with pytest.raises(ValueError, match="keeps the running 'ais'"):
+        _controller(
+            _s1(router={**ROUTER, "prefill_load_model": {"type": "none"}}),
+            engine=engine,
+        )
 
 
 async def test_zero_startup_credit_collapses_the_default_domain(sweeps):
@@ -769,7 +850,7 @@ async def test_zero_startup_credit_collapses_the_default_domain(sweeps):
 def test_planner_candidates_must_fit_the_deployment():
     config = _config(
         "agg",
-        {"router": {}, "planner": {"min_endpoint": [1, 4]}},
+        {"router": None, "planner": {"min_workers": {"choices": [1, 4]}}},
         optimization_target="throughput",
         max_gpu_budget=2,
     )

@@ -116,7 +116,13 @@ def _config() -> dict:
                 "interval_seconds": 120,
                 "grace_seconds": 1,
                 "max_parallel": 2,
-                "router": {"router_temperature": [0.0, 100.0]},
+                # AISimulate recommend syntax: credit and scale pinned at
+                # the router's values, temperature searched.
+                "router": {
+                    "overlap_score_credit": 1.0,
+                    "prefill_load_scale": 1.0,
+                    "temperature": {"choices": [0.0, 100.0]},
+                },
             },
         },
         # Also the retune scoring SLA (planner.retune sets none).
@@ -176,8 +182,9 @@ def test_predict_cli_reports_retune_decisions(tmp_path: Path) -> None:
     assert first["window_index"] == 0
     assert (first["launched_at_s"], first["decided_at_s"]) == (125.0, 130.0)
     assert first["outcome"] == "applied", first
-    assert first["previous"]["router"] == {"router_temperature": 100.0}
-    assert first["chosen"]["router"] == {"router_temperature": 0.0}
+    pinned = {"overlap_score_credit": 1.0, "prefill_load_scale": 1.0}
+    assert first["previous"]["router"] == {**pinned, "router_temperature": 100.0}
+    assert first["chosen"]["router"] == {**pinned, "router_temperature": 0.0}
     assert len(first["top"]) == 2
     assert first["best_score"] > first["baseline_score"]
 

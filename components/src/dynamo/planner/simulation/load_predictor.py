@@ -188,7 +188,9 @@ class LoadPredictorResult:
         }
 
 
-def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+def internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """Expand one predictor preset into the internal form the scorers take."""
+
     complete = complete_predictor_preset(entry)
     return {
         "family": complete["load_predictor"],
@@ -204,7 +206,7 @@ def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
 def predictor_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
     """Expand a winner into concrete PlannerConfig predictor fields."""
 
-    preset = _internal_preset(entry)
+    preset = internal_preset(entry)
     family = preset["family"]
     fields: dict[str, Any] = {
         "load_predictor": family,
@@ -357,7 +359,7 @@ def evaluate_preset(
 
 def _common_warmup(entries: list[str | dict[str, Any]], interval_s: int) -> int:
     minimum_points = [
-        _new_predictors(_internal_preset(entry), interval_s)[0].minimum_data_points
+        _new_predictors(internal_preset(entry), interval_s)[0].minimum_data_points
         for entry in entries
     ]
     return max(minimum_points) if minimum_points else 0
@@ -365,6 +367,32 @@ def _common_warmup(entries: list[str | dict[str, Any]], interval_s: int) -> int:
 
 def _entry_label(entry: str | dict[str, Any], index: int) -> str:
     return entry if isinstance(entry, str) else f"custom_{index}"
+
+
+def distinct_predictor_candidates(
+    entries: list[str | dict[str, Any]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Label and complete predictor candidates, dropping behavioural duplicates.
+
+    Returns ``(label, mapping)`` pairs: the label is the preset name, or
+    ``custom_<index>`` with the entry's position in ``entries`` (the
+    recommendation pre-sweep labels); the mapping holds every public predictor
+    knob. Two entries are duplicates when they give the same
+    ``predictor_fields``, that is the same planner predictor; the first one is
+    kept.
+    """
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    seen: set[tuple[tuple[str, Any], ...]] = set()
+    for index, entry in enumerate(entries):
+        key = tuple(sorted(predictor_fields(entry).items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            (_entry_label(entry, index), complete_predictor_preset(entry))
+        )
+    return candidates
 
 
 def sweep_load_predictor(
@@ -422,7 +450,7 @@ def sweep_load_predictor(
             disable=not show_progress,
         )
         for label, entry in progress:
-            loss = evaluate_preset(windows, _internal_preset(entry), interval_s, warmup)
+            loss = evaluate_preset(windows, internal_preset(entry), interval_s, warmup)
             losses[label] = loss
             progress.set_postfix_str(f"{label}={loss:.3f}")
             if loss < best_loss:

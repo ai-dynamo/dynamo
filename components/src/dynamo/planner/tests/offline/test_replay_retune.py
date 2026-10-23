@@ -64,7 +64,10 @@ def _load_scaling_config() -> PlannerConfig:
         optimization_target="throughput",
         retune={
             "interval_seconds": 60,
-            "planner": {"load_scaling_down_sensitivity": [70, 80, 90]},
+            "planner": {
+                "load_sensitivity": {"preset": False},
+                "load_scaling_down_sensitivity": {"choices": [70, 80, 90]},
+            },
         },
         **_QUIET,
     )
@@ -78,7 +81,7 @@ def _predictor_config() -> PlannerConfig:
         enable_throughput_scaling=True,
         retune={
             "interval_seconds": 60,
-            "planner": {"load_predictor": ["arima", "constant"]},
+            "planner": {"load_predictor": {"preset": ["arima_raw", "constant_last"]}},
         },
         **_QUIET,
     )

@@ -33,10 +33,20 @@ pytestmark = [
     pytest.mark.planner,
 ]
 
+# AISimulate recommend syntax with public names; credit and scale are pinned.
+_ROUTER_DOMAIN: dict[str, Any] = {
+    "overlap_score_credit": 1.0,
+    "prefill_load_scale": 1.0,
+    "temperature": {"choices": [0.0, 100.0]},
+}
 _RETUNE: dict[str, Any] = {
     "interval_seconds": 120,
     "grace_seconds": 1,
-    "router": {"router_temperature": [0.0, 100.0]},
+    "router": _ROUTER_DOMAIN,
+}
+_SENSITIVITY = {
+    "load_sensitivity": {"preset": False},
+    "load_scaling_down_sensitivity": {"choices": [70, 90]},
 }
 _RETUNE_ONLY: dict[str, Any] = {
     "policy": "enabled",
@@ -91,14 +101,14 @@ def test_retune_only_planner_hook_keeps_both_scaling_flags_explicit() -> None:
         config.model_fields_set
     )
     assert config.retune is not None and not config.scaling_enabled()
-    assert config.retune.router == {"router_temperature": [0.0, 100.0]}
+    assert config.retune.router == _ROUTER_DOMAIN
     assert spec.config["policy"] == "enabled"
     assert spec.config["retune"] == _RETUNE
 
 
 def test_retune_keeps_easy_mode_scaling_unless_both_flags_are_false() -> None:
     # Scenario 2 with a load-scaling planner: flags omitted, easy mode applies.
-    retune = {**_RETUNE, "planner": {"load_scaling_down_sensitivity": [70, 90]}}
+    retune = {**_RETUNE, "planner": _SENSITIVITY}
     spec = create_provider().compile_prediction(
         {"policy": "enabled", "retune": retune}, _context()
     )
@@ -106,7 +116,7 @@ def test_retune_keeps_easy_mode_scaling_unless_both_flags_are_false() -> None:
     config = _host_config(spec)
     assert config.enable_load_scaling and not config.enable_throughput_scaling
     assert config.retune is not None
-    assert config.retune.planner == {"load_scaling_down_sensitivity": [70, 90]}
+    assert config.retune.planner == _SENSITIVITY
 
 
 @pytest.mark.parametrize(
@@ -115,11 +125,22 @@ def test_retune_keeps_easy_mode_scaling_unless_both_flags_are_false() -> None:
         ({**_RETUNE, "unknown_knob": 1}, "unknown_knob"),
         ({**_RETUNE, "interval_seconds": 7}, "multiple of"),
         (
-            {**_RETUNE, "planner": {"load_scaling_down_sensitivity": [70]}},
+            {**_RETUNE, "planner": _SENSITIVITY},
             "requires load or throughput scaling",
         ),
+        (
+            {**_RETUNE, "router": {"router_temperature": {"choices": [0.0]}}},
+            "write temperature instead",
+        ),
+        ({**_RETUNE, "router": {}}, "retune.router is empty"),
     ],
-    ids=["unknown-field", "interval-not-a-tick-multiple", "planner-domain-no-scaling"],
+    ids=[
+        "unknown-field",
+        "interval-not-a-tick-multiple",
+        "planner-domain-no-scaling",
+        "live-router-name",
+        "empty-router",
+    ],
 )
 def test_retune_mapping_is_validated_by_planner_config(retune, message) -> None:
     with pytest.raises(ValueError, match=message):

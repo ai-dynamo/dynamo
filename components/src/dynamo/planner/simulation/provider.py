@@ -40,10 +40,16 @@ from pydantic import (
 )
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.aisimulate.domains import stepped_numeric_values
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 from dynamo.planner.config.planner_config import PlannerConfig
 
-from .config import PlannerRecommendationConfig, Policy
+from .config import (
+    PLANNER_PASSTHROUGH,
+    PLANNER_PUBLIC_TO_CONFIG,
+    PlannerRecommendationConfig,
+    Policy,
+)
 from .load_predictor import (
     LOAD_PREDICTOR_PRESETS,
     complete_predictor_preset,
@@ -82,33 +88,6 @@ _PREDICTOR_KEYS = frozenset(
 )
 _PROVIDER_API_VERSION = 1
 _PLANNER_HOOK_API_VERSION = 1
-_PLANNER_PASSTHROUGH = (
-    "enable_throughput_scaling",
-    "enable_load_scaling",
-    "throughput_adjustment_interval_seconds",
-    "load_adjustment_interval_seconds",
-    "max_throughput_scaling_replicas",
-    "max_num_fpm_samples",
-    "fpm_sample_bucket_size",
-    "load_scaling_down_sensitivity",
-    "load_min_observations",
-    "load_predictor",
-    "load_predictor_log1p",
-    "prophet_window_size",
-    "kalman_q_level",
-    "kalman_q_trend",
-    "kalman_r",
-    "kalman_min_points",
-)
-_PUBLIC_CONFIG_FIELDS = {
-    **{name: name for name in _PLANNER_PASSTHROUGH},
-    "target": "optimization_target",
-    "max_num_gpus": "max_gpu_budget",
-    "min_num_gpus": "min_gpu_budget",
-    "min_workers": "min_endpoint",
-    "prefill_min_workers": "prefill_min_endpoint",
-    "decode_min_workers": "decode_min_endpoint",
-}
 # Accepted by ``aisimulate predict`` only. ``retune`` is an opaque mapping that
 # ``PlannerConfig`` validates; a recommendation sweep has no use for either.
 _RETUNE = "retune"
@@ -181,12 +160,13 @@ def _public_values(value: Any, defaults: list[Any]) -> list[Any]:
             or step <= 0
         ):
             raise ValueError("Planner independent numeric ranges require step")
-        values = []
-        current = minimum
-        while current <= maximum:
-            values.append(current)
-            current += step
-        return values
+        if all(isinstance(bound, int) for bound in (minimum, maximum, step)):
+            return list(range(minimum, maximum + 1, step))
+        # Decimal steps: accumulating ``current += step`` in float drifted past
+        # the endpoint and dropped it (0.0..0.3 step 0.1 lost 0.3). Every
+        # value is a float, the first one included: the old loop kept an int
+        # ``min`` (raw legacy input such as min 1, step 0.5) as an int.
+        return stepped_numeric_values(minimum, maximum, step)
     if isinstance(value, Mapping):
         raise ValueError("Planner domains must contain exactly choices or range")
     return [value]
@@ -196,7 +176,43 @@ def _independent_preset_mappings(
     group: str,
     control: Mapping[str, Any],
     planner: Mapping[str, Any],
+    default_overrides: Mapping[str, Sequence[Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Expand ``preset: false`` of one group into every knob combination.
+
+    Each knob uses its domain in ``planner`` (``type`` in ``control`` for the
+    predictor family), or the group's default domain when omitted.
+    ``default_overrides`` replaces the default domain of named knobs of the
+    group; retune uses it to hold a startup-only knob at its running value.
+    """
+    names, dimensions = independent_preset_dimensions(
+        group, control, planner, default_overrides
+    )
+    mappings = [
+        dict(zip(names, combination, strict=True))
+        for combination in itertools.product(*dimensions)
+    ]
+    if group == "fpm_sampling":
+        mappings = [
+            mapping
+            for mapping in mappings
+            if math.isqrt(mapping["fpm_sample_bucket_size"]) ** 2
+            == mapping["fpm_sample_bucket_size"]
+        ]
+    return mappings
+
+
+def independent_preset_dimensions(
+    group: str,
+    control: Mapping[str, Any],
+    planner: Mapping[str, Any],
+    default_overrides: Mapping[str, Sequence[Any]] | None = None,
+) -> tuple[list[str], list[list[Any]]]:
+    """The knob names and value lists whose product ``preset: false`` expands.
+
+    Lets a caller bound the number of combinations before building them.
+    Arguments as for ``_independent_preset_mappings``.
+    """
     specifications: dict[str, tuple[dict[str, Any], list[Any]]] = {
         "scaling_policy": (
             {
@@ -250,22 +266,15 @@ def _independent_preset_mappings(
     }
     values, defaults = specifications[group]
     names = list(values)
+    overrides = dict(default_overrides or {})
+    unknown = sorted(set(overrides) - set(names))
+    if unknown:
+        raise ValueError(f"{group} has no knobs {unknown}")
     dimensions = [
-        _public_values(values[name], defaults[index])
+        _public_values(values[name], list(overrides.get(name, defaults[index])))
         for index, name in enumerate(names)
     ]
-    mappings = [
-        dict(zip(names, combination, strict=True))
-        for combination in itertools.product(*dimensions)
-    ]
-    if group == "fpm_sampling":
-        mappings = [
-            mapping
-            for mapping in mappings
-            if math.isqrt(mapping["fpm_sample_bucket_size"]) ** 2
-            == mapping["fpm_sample_bucket_size"]
-        ]
-    return mappings
+    return names, dimensions
 
 
 def _validate_preset_entries(
@@ -671,7 +680,7 @@ class DynamoPlannerSweepConfigProvider:
     ) -> AdapterReplaySpec:
         unknown = (
             set(config)
-            - _PUBLIC_CONFIG_FIELDS.keys()
+            - PLANNER_PUBLIC_TO_CONFIG.keys()
             - {"policy", *_PREDICTION_ONLY_FIELDS}
         )
         if unknown:
@@ -1059,7 +1068,7 @@ def _public_planner_config(
         "policy": "enabled",
         **{
             public: planner_config[runtime]
-            for public, runtime in _PUBLIC_CONFIG_FIELDS.items()
+            for public, runtime in PLANNER_PUBLIC_TO_CONFIG.items()
             if planner_config.get(runtime) is not None
         },
         **{
@@ -1183,7 +1192,7 @@ def _planner_config_payload(
         "live_dashboard_port": 0,
         "metric_pulling_prometheus_extra_query_params": None,
     }
-    for key in _PLANNER_PASSTHROUGH:
+    for key in PLANNER_PASSTHROUGH:
         if key in candidate_config and not (
             key.endswith("_interval_seconds") and candidate_config[key] is None
         ):
@@ -1216,7 +1225,7 @@ def _planner_config_payload(
             sample, "attention_dp"
         )
 
-    for public, runtime in _PUBLIC_CONFIG_FIELDS.items():
+    for public, runtime in PLANNER_PUBLIC_TO_CONFIG.items():
         if public != runtime and public in candidate_config:
             payload[runtime] = candidate_config[public]
 
@@ -1267,7 +1276,7 @@ def _planner_config_payload(
         )
     # Serialize only adapter-owned fields, never environment-derived connection credentials.
     dumped = resolved.model_dump(
-        mode="json", include=set(payload) | set(_PUBLIC_CONFIG_FIELDS.values())
+        mode="json", include=set(payload) | set(PLANNER_PUBLIC_TO_CONFIG.values())
     )
     if _RETUNE in payload:
         # Hand the replay host the validated mapping as written, not the dump

@@ -54,7 +54,9 @@ from dynamo.planner.reconfiguration import (
     runtime_candidate_errors,
 )
 from dynamo.planner.retune.domains import (
+    LOAD_SCALING_DOWN_SENSITIVITY,
     OVERLAP_SCORE_CREDIT,
+    PredictorCandidate,
     expand_planner_domain,
     expand_router_domain,
     grid_points,
@@ -149,13 +151,13 @@ class RetuneController:
         self._router_searched = bool(router_domain)
 
         planner_domain = expand_planner_domain(config)
-        self._predictor_presets: tuple[str, ...] | None = (
-            tuple(planner_domain.predictor_presets)
-            if planner_domain.predictor_presets
+        self._predictor_candidates: tuple[PredictorCandidate, ...] | None = (
+            tuple(planner_domain.predictor_candidates)
+            if planner_domain.predictor_candidates
             else None
         )
         planner_keys = set(planner_domain.grid)
-        if self._predictor_presets:
+        if self._predictor_candidates:
             planner_keys |= PREDICTOR_FIELDS
         self._planner_keys = tuple(sorted(planner_keys))
         for key in self._planner_keys:
@@ -185,16 +187,23 @@ class RetuneController:
         )
         logger.info(
             "retune enabled: interval=%ss grace=%ss %d grid points, router keys %s, "
-            "planner keys %s, predictor presets %s, scoring SLA ttft=%sms itl=%sms",
+            "planner keys %s, predictor candidates %s, scoring SLA ttft=%sms itl=%sms",
             retune.interval_seconds,
             retune.grace_seconds,
             len(self._grid),
             list(self._router_keys),
             list(self._planner_keys),
-            list(self._predictor_presets or ()),
+            [label for label, _ in self._predictor_candidates or ()],
             self._sla_ttft_ms,
             self._sla_itl_ms,
         )
+        if LOAD_SCALING_DOWN_SENSITIVITY in planner_domain.grid:
+            logger.info(
+                "retune searches load_scaling_down_sensitivity %s; "
+                "load_min_observations is fixed at startup and stays %s",
+                planner_domain.grid[LOAD_SCALING_DOWN_SENSITIVITY],
+                config.load_min_observations,
+            )
 
     # ------------------------------------------------------------------ API
 
@@ -285,7 +294,7 @@ class RetuneController:
     # ------------------------------------------------------ stage-2 checks
 
     def _router_domain(self, retune: RetuneConfig) -> dict[str, list[float]]:
-        if retune.router != "default" and not retune.router:
+        if retune.router is None:
             return {}
         engine = self._inputs.engine
         startup = self._startup_router_json
@@ -315,14 +324,19 @@ class RetuneController:
             for worker_type, parameters in startup_maps.items()
             if worker_type != "decode" and parameters[OVERLAP_SCORE_CREDIT] == 0
         }
-        domain = expand_router_domain(retune, zero_startup_credit=bool(zero_credit))
-        allowed = set(KvRouterConfig().policy_parameters("aggregated"))
-        unknown = set(domain) - allowed
-        if unknown:  # E2
-            raise ValueError(
-                f"retune.router keys {sorted(unknown)} are not router policy "
-                f"parameters; expected a subset of {sorted(allowed)}"
-            )
+        # The schema keeps prefill_load_model.type at its startup value; the
+        # serde form of the AIS load model is "aic".
+        startup_load_model = json.loads(
+            KvRouterConfig.from_json(json.dumps(startup)).to_json()
+        )["router_prefill_load_model"]
+        domain = expand_router_domain(
+            retune,
+            startup_load_model=startup_load_model,
+            zero_startup_credit=bool(zero_credit),
+        )
+        # E2: the schema admits only PolicyParameters names; every candidate
+        # must also be a valid router configuration (for example
+        # host_cache_hit_weight <= 1).
         for point in grid_points(domain, {}):
             try:
                 maps = self._router_map(point.router)
@@ -346,10 +360,10 @@ class RetuneController:
         planner_parts: dict[str, dict[str, Any]] = {}
         for point in grid_points({}, grid):
             planner_parts[point.key()] = dict(point.planner)
-        if self._predictor_presets:
+        if self._predictor_candidates:
             for part in list(planner_parts.values()):
-                for preset in self._predictor_presets:
-                    merged = {**part, **predictor_fields(preset)}
+                for _, entry in self._predictor_candidates:
+                    merged = {**part, **predictor_fields(entry)}
                     planner_parts[RetuneParams(planner=merged).key()] = merged
         for updates in planner_parts.values():
             if not updates:
@@ -468,8 +482,8 @@ class RetuneController:
             baseline=baseline,
             replicas=replicas,
             base_planner=base_planner,
-            predictor_presets=(
-                self._predictor_presets if base_planner is not None else None
+            predictor_candidates=(
+                self._predictor_candidates if base_planner is not None else None
             ),
             sla_ttft_ms=self._sla_ttft_ms,
             sla_itl_ms=self._sla_itl_ms,

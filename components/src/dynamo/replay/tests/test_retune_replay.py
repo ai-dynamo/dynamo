@@ -49,6 +49,21 @@ _LAUNCH_S = 125.0
 _DECIDE_S = 130.0
 _HEAD_REQUESTS = 500
 _TAIL_REQUESTS = 125
+# AISimulate recommend syntax: credit and scale pinned at the router's
+# startup values, so the grid is the two temperatures.
+_ROUTER_DOMAIN = {
+    "overlap_score_credit": 1.0,
+    "prefill_load_scale": 1.0,
+    "temperature": {"choices": [0.0, 100.0]},
+}
+
+
+def _router_point(temperature: float) -> dict[str, float]:
+    return {
+        "overlap_score_credit": 1.0,
+        "prefill_load_scale": 1.0,
+        "router_temperature": temperature,
+    }
 
 
 def _write_trace(
@@ -125,7 +140,7 @@ def _retune_only(mode: str, **retune) -> dict:
             "interval_seconds": _INTERVAL_S,
             "grace_seconds": 1,
             "max_parallel": 2,
-            "router": {"router_temperature": [0.0, 100.0]},
+            "router": _ROUTER_DOMAIN,
             **retune,
         },
     }
@@ -169,8 +184,11 @@ def test_retune_lands_router_and_planner_changes_mid_run(tmp_path, monkeypatch):
             "max_parallel": 2,
             "sla_ttft_ms": 60.0,
             "sla_itl_ms": 100.0,
-            "router": {"router_temperature": [0.0, 100.0]},
-            "planner": {"load_scaling_down_sensitivity": [70, 90]},
+            "router": _ROUTER_DOMAIN,
+            "planner": {
+                "load_sensitivity": {"preset": False},
+                "load_scaling_down_sensitivity": {"choices": [70, 90]},
+            },
         },
     }
 
@@ -190,8 +208,8 @@ def test_retune_lands_router_and_planner_changes_mid_run(tmp_path, monkeypatch):
     assert first["outcome"] == "applied", first
     assert first["launched_at_s"] == _LAUNCH_S
     assert first["decided_at_s"] == _DECIDE_S
-    assert first["previous"]["router"] == {"router_temperature": 100.0}
-    assert first["chosen"]["router"] == {"router_temperature": 0.0}
+    assert first["previous"]["router"] == _router_point(100.0)
+    assert first["chosen"]["router"] == _router_point(0.0)
     assert first["best_score"] > first["baseline_score"]
     assert report.to_dict()["planner"]["retune_events"] == report.planner.retune_events
 

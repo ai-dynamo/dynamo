@@ -16,6 +16,7 @@ from dynamo.planner.config.planner_config import (
 )
 from dynamo.planner.core.types import RetuneParams
 from dynamo.planner.reconfiguration import candidate_config
+from dynamo.planner.retune.domains import expand_planner_domain, expand_router_domain
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -24,7 +25,15 @@ pytestmark = [
     pytest.mark.planner,
 ]
 
-ROUTER = {"overlap_score_credit": [0.0, 1.0], "prefill_load_scale": [0.5, 1.0]}
+# AISimulate recommend syntax. An omitted AISimulate knob searches its default
+# domain, so temperature is pinned with a scalar: a 2 x 2 grid.
+ROUTER = {
+    "overlap_score_credit": {"choices": [0.0, 1.0]},
+    "prefill_load_scale": {"choices": [0.5, 1.0]},
+    "temperature": 0.0,
+}
+LSD = "load_scaling_down_sensitivity"
+SENSITIVITY_OFF = {"load_sensitivity": {"preset": False}}
 RETUNE_ONLY = {"enable_load_scaling": False, "enable_throughput_scaling": False}
 SLA_THROUGHPUT = {"optimization_target": "sla", "enable_throughput_scaling": True}
 
@@ -84,17 +93,13 @@ def test_a_shared_retune_instance_is_never_modified():
     assert retune_only.retune.effective_history_seconds == 0.0
     assert sla.retune.effective_history_seconds == 9000.0
 
-    planner = RetuneConfig(
-        interval_seconds=600,
-        history_seconds=9000,
-        planner={"kalman_r": [1, 2.5]},
-    )
-    config = _config(retune=planner, **SLA_THROUGHPUT)
-    assert [type(value) for value in config.retune.planner["kalman_r"]] == [
-        float,
-        float,
-    ]
-    assert [type(value) for value in planner.planner["kalman_r"]] == [int, float]
+    written = {**SENSITIVITY_OFF, LSD: {"choices": [70, 90]}}
+    planner = RetuneConfig(interval_seconds=600, planner=written)
+    config = _config(retune=planner)
+    # Domains are stored as written and expanded on use, never written back.
+    assert config.retune.planner == planner.planner == written
+    assert config.retune.planner is not planner.planner
+    assert expand_planner_domain(config).grid == {LSD: [70, 90]}
 
 
 @pytest.mark.parametrize(
@@ -180,7 +185,7 @@ def test_legacy_configs_without_retune_are_unchanged(overrides):
 
 
 # ---------------------------------------------------------------------------
-# R2-R6: mode, cadence, timing and router domain
+# R2-R6: mode, cadence, timing and domain syntax
 # ---------------------------------------------------------------------------
 
 
@@ -222,23 +227,118 @@ def test_retune_timing_order_is_enforced(overrides):
 @pytest.mark.parametrize(
     ("router", "match"),
     [
-        ({"overlap_score_credit": []}, "at least one value"),
-        ({"overlap_score_credit": [float("nan")]}, "finite and non-negative"),
-        ({"overlap_score_credit": [1.0, 1]}, "distinct"),
-        ({"overlap_score_credit": [True]}, "valid number"),
-        ({"": [1.0]}, "non-empty"),
+        ({"overlap_score_credit": {"choices": []}}, "nonempty list"),
+        (
+            {"overlap_score_credit": {"choices": [float("nan")]}},
+            r"overlap_score_credit.choices\[0\]: Input should be a finite number",
+        ),
+        ({"overlap_score_credit": {"choices": [-1.0]}}, "greater than or equal to 0"),
+        ({"overlap_score_credit": {"choices": [1.0, 1]}}, "unique values"),
+        ({"overlap_score_credit": True}, "overlap_score_credit: .*valid number"),
+        ({"temperature": None}, "do not accept null"),
+        # The list syntax of earlier drafts.
+        (
+            {"overlap_score_credit": [0.5, 1.0]},
+            r"bare list; .*\{choices: \[0.5, 1.0\]\}",
+        ),
+        # A bare list under a name the schema rejects gets that rejection.
+        ({"router_temperature": [0.0, 0.1]}, "write temperature instead"),
+        ({"policy": ["round_robin", "kv_router"]}, "retune requires kv_router"),
+        (
+            {"prefill_load_model": ["ais"]},
+            r"prefill_load_model is a bare list; write \{type: \.\.\.\}",
+        ),
+        ({"router_temperature": {"choices": [0.0]}}, "write temperature instead"),
+        ({"router_mode": "kv_router"}, "write policy instead"),
+        ({"router_ttl_secs": 1.0}, "router_ttl_secs: Extra inputs are not permitted"),
+        ({"policy": "round_robin"}, "fixed at startup and retune requires kv_router"),
+        (
+            {"temperature": {"range": {"min": 0.0, "max": 1.0, "step": -0.5}}},
+            "temperature.range.step: Input should be greater than 0",
+        ),
+        ({"prefill_load_model": {"type": "aic"}}, "Input should be 'none' or 'ais'"),
+        (
+            {"temperature": {"range": {"min": 0.0}}},
+            r"retune.router.temperature.range.max: Field required \[",
+        ),
+        ({}, "retune.router is empty; write 'default'"),
         ("all", "default"),
     ],
 )
-def test_router_domain_values_are_validated(router, match):
+def test_router_domain_syntax_is_the_recommendation_schema(router, match):
     with pytest.raises(ValidationError, match=match):
         RetuneConfig(interval_seconds=600, router=router)
 
 
-def test_router_domain_accepts_ints_as_floats():
-    retune = RetuneConfig(interval_seconds=600, router={"router_temperature": [0, 1]})
-    assert retune.router == {"router_temperature": [0.0, 1.0]}
-    assert {type(value) for value in retune.router["router_temperature"]} == {float}
+@pytest.mark.parametrize("router", [None, "default", ROUTER])
+def test_router_domain_is_stored_as_written(router):
+    retune = RetuneConfig(interval_seconds=600, router=router)
+    assert retune.router == router
+
+
+def test_router_domain_expands_to_live_names_and_floats():
+    config = _config(
+        retune=_retune(
+            router={"temperature": {"choices": [0, 1]}, "prefill_load_scale": 1}
+        ),
+        **RETUNE_ONLY,
+    )
+    assert config.retune.router == {
+        "temperature": {"choices": [0, 1]},
+        "prefill_load_scale": 1,
+    }
+    domain = expand_router_domain(config.retune)
+    # An omitted AISimulate knob searches its AISimulate default domain.
+    assert domain == {
+        "overlap_score_credit": [0.0, 0.5, 1.0],
+        "prefill_load_scale": [1.0],
+        "router_temperature": [0.0, 1.0],
+    }
+    assert {type(value) for values in domain.values() for value in values} == {float}
+
+
+@pytest.mark.parametrize(
+    ("router", "match"),
+    [
+        (
+            {"temperature": {"range": {"min": 0.0, "max": 1.0}}},
+            r"retune.router.temperature is a range without step .*continuous",
+        ),
+        (
+            {"temperature": {"range": {"min": 0.01, "max": 1.0, "scale": "log"}}},
+            "retune.router.temperature is a log range",
+        ),
+        (
+            {"temperature": {"range": {"min": 0.0, "max": 1000.0, "step": 1.0e-6}}},
+            "temperature expands to 1000000001 values, more than the limit of 512",
+        ),
+        (
+            # More steps than the 28 digits of the default Decimal context.
+            {"temperature": {"range": {"min": 0.0, "max": 1000.0, "step": 1.0e-30}}},
+            "temperature expands to 1000000000000000000000000000000001 values",
+        ),
+    ],
+    ids=["no-step", "log", "too-many-values", "beyond-decimal-precision"],
+)
+def test_router_ranges_must_be_finite(router, match):
+    with pytest.raises(ValidationError, match=match):
+        _config(retune=_retune(router=router), **RETUNE_ONLY)
+    # A range with min == max is one value.
+    config = _config(
+        retune=_retune(router={"temperature": {"range": {"min": 0.5, "max": 0.5}}}),
+        **RETUNE_ONLY,
+    )
+    assert expand_router_domain(config.retune)["router_temperature"] == [0.5]
+
+
+def test_extension_knobs_are_searched_only_when_written():
+    router = {**ROUTER, "decode_active_request_weight": {"choices": [0.5, 1.0]}}
+    config = _config(retune=_retune(router=router), **RETUNE_ONLY)
+    domain = expand_router_domain(config.retune)
+    assert domain["decode_active_request_weight"] == [0.5, 1.0]
+    assert "decode_active_request_weight" not in expand_router_domain(
+        _config(retune=_retune(), **RETUNE_ONLY).retune
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,11 +349,71 @@ def test_router_domain_accepts_ints_as_floats():
 @pytest.mark.parametrize(
     ("planner", "overrides", "match"),
     [
-        ({"ttft_ms": [100.0, 200.0]}, {}, "define the fixed SLA"),
-        ({"nope": [1]}, {}, "not a runtime-changeable"),
-        ({"max_gpu_budget": [8, 16]}, RETUNE_ONLY, "retune.planner requires load or"),
+        ({"ttft_ms": {"choices": [100.0, 200.0]}}, {}, "set retune.sla_ttft_ms"),
+        ({"nope": 1}, {}, "nope: Extra inputs are not permitted"),
+        (
+            {"scaling_policy": {"preset": "default"}},
+            {},
+            "fixed when the planner starts",
+        ),
+        ({"load_min_observations": 3}, {}, "fixed when the planner starts"),
+        ({"min_endpoint": {"choices": [1, 2]}}, {}, "write min_workers instead"),
+        ({"max_gpu_budget": 8}, {}, "write max_num_gpus instead"),
+        (
+            {LSD: {"choices": [70]}},
+            {},
+            "load_sensitivity uses the default preset and cannot be combined",
+        ),
+        ({"max_num_gpus": {"choices": [8, 16]}}, RETUNE_ONLY, "requires load or"),
+        ({}, {}, "retune.planner is empty; write 'default'"),
+        (
+            {"load_predictor": {"preset": [{"load_predictor": "kalman"}]}},
+            {},
+            # A preset mapping lists every knob, as in AISimulate recommend.
+            r"kalman_r: Field required \(in \{'load_predictor': 'kalman'\}\)",
+        ),
+        # Bare lists (the syntax of earlier drafts): a preset group takes
+        # preset names, and a name the schema rejects gets that rejection.
+        (
+            {"load_predictor": ["arima", "kalman"]},
+            {},
+            r"load_predictor is a bare list; load_predictor is a preset group: "
+            r"write \{preset: \[\.\.\.\]\} listing preset names \(constant_last, "
+            r"arima_raw, .*\{preset: false, type: \{choices: \[\.\.\.\]\}\}",
+        ),
+        (
+            {"load_sensitivity": ["aggressive"]},
+            {},
+            r"preset names \(aggressive, default, conservative\) .*\{preset: false\} "
+            r"with load_scaling_down_sensitivity",
+        ),
+        (
+            {"min_workers": [1, 2]},
+            {},
+            r"min_workers is a bare list; write a scalar, \{choices: \[1, 2\]\}",
+        ),
+        ({"enable_load_scaling": [True, False]}, {}, "fixed when the planner starts"),
+        ({"min_endpoint": [1, 2]}, {}, "write min_workers instead"),
+        ({"ttft_ms": [100.0, 200.0]}, {}, "set retune.sla_ttft_ms"),
     ],
-    ids=["fixed-sla", "not-runtime", "requires-scaling"],
+    ids=[
+        "fixed-sla",
+        "unknown",
+        "startup-group",
+        "startup-knob",
+        "live-name",
+        "live-budget-name",
+        "group-conflict",
+        "requires-scaling",
+        "empty",
+        "incomplete-mapping",
+        "bare-list-predictor-group",
+        "bare-list-sensitivity-group",
+        "bare-list-knob",
+        "bare-list-startup-knob",
+        "bare-list-live-name",
+        "bare-list-sla",
+    ],
 )
 def test_planner_domain_rejects_non_runtime_fields(planner, overrides, match):
     with pytest.raises(ValidationError, match=match):
@@ -270,20 +430,25 @@ def test_planner_domain_rejects_non_runtime_fields(planner, overrides, match):
                 "enable_load_scaling": True,
                 "enable_throughput_scaling": False,
             },
-            {"kalman_r": [1.0]},
+            {"load_predictor": {"preset": ["arima_raw"]}},
             "optimization_target='sla' with throughput scaling",
         ),
-        ("disagg", {}, {"max_throughput_scaling_replicas": [2]}, "enable_throughput"),
+        (
+            "disagg",
+            {},
+            {"max_throughput_scaling_replicas": {"choices": [2]}},
+            "enable_throughput",
+        ),
         (
             "disagg",
             {**SLA_THROUGHPUT, "enable_load_scaling": False},
-            {"load_scaling_down_sensitivity": [70]},
+            {**SENSITIVITY_OFF, LSD: {"choices": [70]}},
             "enable_load_scaling",
         ),
         (
             "disagg",
             {},
-            {"decode_scale_up_kv_rate": [80.0]},
+            {"decode_scale_up_kv_rate": {"choices": [80.0]}},
             "optimization_target='load'",
         ),
         (
@@ -293,10 +458,16 @@ def test_planner_domain_rejects_non_runtime_fields(planner, overrides, match):
                 "decode_scale_up_kv_rate": 80,
                 "decode_scale_down_kv_rate": 40,
             },
-            {"prefill_scale_up_queue_tokens": [100]},
+            {"prefill_scale_up_queue_tokens": {"choices": [100]}},
             "with a prefill role",
         ),
-        ("disagg", {}, {"min_endpoint": [1, 2]}, "active in mode='disagg'"),
+        ("disagg", {}, {"min_workers": {"choices": [1, 2]}}, "requires mode='agg'"),
+        (
+            "agg",
+            {},
+            {"decode_min_workers": {"choices": [1, 2]}},
+            "requires mode='disagg'",
+        ),
     ],
 )
 def test_planner_domain_keys_must_affect_a_registered_builtin(
@@ -306,57 +477,192 @@ def test_planner_domain_keys_must_affect_a_registered_builtin(
     with pytest.raises(ValidationError, match="has no effect here") as error:
         _config(mode=mode, retune=retune, **overrides)
     assert requirement in str(error.value)
+    # Errors name the public knob.
+    assert f"retune.planner.{next(iter(planner))}" in str(error.value)
+
+
+LOAD_TARGET = {
+    "optimization_target": "load",
+    "prefill_scale_up_queue_tokens": 1000,
+    "prefill_scale_down_queue_tokens": 100,
+    "decode_scale_up_kv_rate": 80,
+    "decode_scale_down_kv_rate": 40,
+}
 
 
 @pytest.mark.parametrize(
-    ("overrides", "planner"),
+    ("overrides", "planner", "grid"),
     [
-        ({}, {"min_gpu_budget": [-1, 4], "max_gpu_budget": [8, 16]}),
         (
+            {},
             {
-                "optimization_target": "load",
-                "prefill_scale_up_queue_tokens": 1000,
-                "prefill_scale_down_queue_tokens": 100,
-                "decode_scale_up_kv_rate": 80,
-                "decode_scale_down_kv_rate": 40,
+                "min_num_gpus": {"choices": [-1, 4]},
+                "max_num_gpus": {"range": {"min": 8, "max": 16, "step": 8}},
+            },
+            # The omitted load_sensitivity group searches its default domain.
+            {LSD: [70, 80, 90], "min_gpu_budget": [-1, 4], "max_gpu_budget": [8, 16]},
+        ),
+        (
+            LOAD_TARGET,
+            {
+                "prefill_scale_up_queue_tokens": {"choices": [800, 1200]},
+                "decode_scale_down_kv_rate": {"choices": [30, 50.0]},
+                "decode_min_workers": 2,
             },
             {
+                LSD: [70, 80, 90],
                 "prefill_scale_up_queue_tokens": [800, 1200],
                 "decode_scale_down_kv_rate": [30.0, 50.0],
+                "decode_min_endpoint": [2],
             },
         ),
     ],
 )
-def test_relevant_planner_domains_are_accepted(overrides, planner):
+def test_relevant_planner_domains_are_accepted(overrides, planner, grid):
     config = _config(retune=_retune(planner=planner, history_seconds=9000), **overrides)
-    assert config.retune is not None
-    assert set(config.retune.planner) == set(planner)
+    assert config.retune is not None and config.retune.planner == planner
+
+    domain = expand_planner_domain(config)
+
+    # Keyed by PlannerConfig field; float fields hold floats.
+    assert domain.grid == grid
+    assert domain.predictor_candidates is None
+    for key, values in grid.items():
+        assert [type(value) for value in domain.grid[key]] == [
+            type(value) for value in values
+        ]
+
+
+@pytest.mark.parametrize(
+    ("planner", "overrides", "match"),
+    [
+        ({**SENSITIVITY_OFF, LSD: {"choices": [70.0]}}, {}, "valid integer"),
+        ({**SENSITIVITY_OFF, LSD: {"choices": [101]}}, {}, "must be <= 100"),
+        (
+            {"load_predictor": {"preset": False, "type": "linear"}},
+            {},
+            "'constant', 'arima', 'prophet' or 'kalman'",
+        ),
+        (
+            {
+                "load_predictor": {"preset": False},
+                "load_predictor_log1p": {"choices": [True, 2]},
+            },
+            {},
+            "valid boolean",
+        ),
+        (
+            {"load_predictor": {"preset": ["arima_fast"]}},
+            {},
+            "invalid choice 'arima_fast'",
+        ),
+        (
+            {"load_sensitivity": {"preset": ["aggressive", "relaxed"]}},
+            {},
+            "invalid choice 'relaxed'",
+        ),
+        # Bounds come from PlannerConfig: a GPU budget may be -1, not -2.
+        ({"max_num_gpus": {"choices": [-2, 8]}}, {}, "greater than or equal to -1"),
+        (
+            {"decode_scale_up_kv_rate": {"choices": [80.0, 120.0]}},
+            LOAD_TARGET,
+            "decode_scale_up_kv_rate value 120.0 is invalid: .*less than or equal to 100",
+        ),
+    ],
+)
+def test_planner_domain_values_follow_strict_field_types(planner, overrides, match):
+    overrides = overrides or {"enable_load_scaling": True, **SLA_THROUGHPUT}
+    with pytest.raises(ValidationError, match=match):
+        _config(retune=_retune(planner=planner, history_seconds=9000), **overrides)
 
 
 @pytest.mark.parametrize(
     ("planner", "match"),
     [
-        ({"load_scaling_down_sensitivity": [70.0]}, "valid integer"),
-        ({"load_scaling_down_sensitivity": [101]}, "less than or equal to 100"),
-        ({"load_predictor": ["linear"]}, "'constant', 'arima', 'prophet' or 'kalman'"),
-        # True and 1 are distinct values; 1 then fails the strict bool type.
-        ({"load_predictor_log1p": [True, 1]}, "valid boolean"),
+        (
+            {**SENSITIVITY_OFF, LSD: {"range": {"min": 60, "max": 90, "scale": "log"}}},
+            "load_scaling_down_sensitivity is a log range",
+        ),
+        (
+            {
+                "load_predictor": {"preset": False},
+                "kalman_r": {"range": {"min": 1.0, "max": 10.0}},
+            },
+            "kalman_r is a range without step",
+        ),
+        (
+            {"min_workers": {"range": {"min": 1, "max": 4096, "step": 1}}},
+            "min_workers expands to 4096 values, more than the limit of 512",
+        ),
+        (
+            {
+                "load_predictor": {"preset": False},
+                "kalman_r": {"range": {"min": 1.0, "max": 100.0, "step": 0.01}},
+            },
+            "kalman_r expands to 9901 values",
+        ),
+        (
+            {
+                "load_predictor": {"preset": False},
+                "kalman_q_level": {"choices": [float(i + 1) for i in range(64)]},
+                "kalman_q_trend": {"choices": [float(i + 1) for i in range(64)]},
+            },
+            "expands to 262144 combinations, more than 65536",
+        ),
     ],
+    ids=["log", "no-step", "dimension-limit", "group-knob-limit", "combinations"],
 )
-def test_planner_domain_values_follow_strict_field_types(planner, match):
+def test_planner_ranges_must_be_finite_and_bounded(planner, match):
     with pytest.raises(ValidationError, match=match):
         _config(
-            retune=_retune(planner=planner), enable_load_scaling=True, **SLA_THROUGHPUT
+            mode="agg",
+            retune=_retune(planner=planner, history_seconds=9000),
+            enable_load_scaling=True,
+            **SLA_THROUGHPUT,
         )
 
 
+def test_load_sensitivity_mappings_keep_the_startup_observations():
+    mapping = {LSD: 60, "load_min_observations": 5}
+    config = _config(
+        retune=_retune(
+            planner={"load_sensitivity": {"preset": ["aggressive", mapping]}}
+        )
+    )
+    # A named preset is projected onto its runtime knob; the running
+    # load_min_observations (5) stays.
+    assert expand_planner_domain(config).grid == {LSD: [70, 60]}
+    with pytest.raises(ValidationError, match="must equal the running value 5"):
+        _config(
+            retune=_retune(
+                planner={
+                    "load_sensitivity": {
+                        "preset": [{LSD: 60, "load_min_observations": 3}]
+                    }
+                }
+            )
+        )
+    # preset: false holds load_min_observations at its running value.
+    config = _config(
+        retune=_retune(planner={**SENSITIVITY_OFF, LSD: {"choices": [60, 70]}}),
+        load_min_observations=8,
+    )
+    assert expand_planner_domain(config).grid == {LSD: [60, 70]}
+
+
 def test_history_must_warm_every_candidate_predictor():
-    planner = {"prophet_window_size": [20, 100], "load_predictor": ["prophet"]}
+    planner = {
+        "load_predictor": {"preset": False, "type": "prophet"},
+        "prophet_window_size": {"choices": [20, 100]},
+    }
     with pytest.raises(ValidationError, match=r">= 18000s"):
         _config(retune=_retune(planner=planner, history_seconds=9000), **SLA_THROUGHPUT)
-    assert _config(
+    config = _config(
         retune=_retune(planner=planner, history_seconds=18000), **SLA_THROUGHPUT
     )
+    # prophet x log1p {false, true} x window {20, 100}; the Kalman knobs do
+    # not change a Prophet predictor.
+    assert len(expand_planner_domain(config).predictor_candidates) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -365,13 +671,49 @@ def test_history_must_warm_every_candidate_predictor():
 
 
 def test_grid_size_is_capped_by_max_candidates():
-    router = {"overlap_score_credit": [0.0, 0.5, 1.0], "prefill_load_scale": [1.0, 2.0]}
-    planner = {"load_scaling_down_sensitivity": [70, 80, 90]}
+    router = {
+        "overlap_score_credit": {"choices": [0.0, 0.5, 1.0]},
+        "prefill_load_scale": {"choices": [1.0, 2.0]},
+        "temperature": 0.0,
+    }
+    planner = {**SENSITIVITY_OFF, LSD: {"choices": [70, 80, 90]}}
     retune = _retune(router=router, planner=planner, max_candidates=17)
-    with pytest.raises(ValidationError, match="18 candidates, exceeding"):
+    with pytest.raises(ValidationError, match="18 candidates, exceeding") as error:
         _config(retune=retune)
+    # Each dimension's size, under its public name.
+    assert (
+        "(router overlap_score_credit 3 x prefill_load_scale 2 x temperature 1; "
+        "planner load_scaling_down_sensitivity 3)"
+    ) in str(error.value)
     retune["max_candidates"] = 18
     assert _config(retune=retune)
+
+
+def test_omitted_router_knobs_search_their_default_domain():
+    # Proposal example 2.5-B: credit 3 x scale 9 x temperature 2.
+    retune = _retune(router={"temperature": {"choices": [0.0, 0.1]}}, max_candidates=53)
+    with pytest.raises(ValidationError, match="54 candidates") as error:
+        _config(retune=retune, **RETUNE_ONLY)
+    assert "prefill_load_scale 9" in str(error.value)
+    assert "pin knobs with a scalar" in str(error.value)
+
+
+def test_predictor_candidates_are_capped_by_max_candidates():
+    planner = {"load_predictor": {"preset": False}}
+    # 256 combinations, 40 distinct predictors.
+    with pytest.raises(ValidationError, match="40 distinct predictor candidates"):
+        _config(
+            retune=_retune(planner=planner, history_seconds=9000, max_candidates=39),
+            **SLA_THROUGHPUT,
+        )
+    config = _config(
+        retune=_retune(planner=planner, history_seconds=9000, max_candidates=40),
+        **SLA_THROUGHPUT,
+    )
+    domain = expand_planner_domain(config)
+    assert len(domain.predictor_candidates) == 40
+    # The pre-sweep is not a grid dimension.
+    assert domain.grid == {}
 
 
 def test_default_planner_domain_that_expands_to_nothing_is_empty():
@@ -458,7 +800,7 @@ def test_engine_spec_replay_kwargs_merge_router_overrides():
         (
             {},
             _retune(
-                planner={"load_scaling_down_sensitivity": [70, 90]},
+                planner={**SENSITIVITY_OFF, LSD: {"choices": [70, 90]}},
                 live={
                     "engine": {
                         "prefill_engine_args": {"block_size": 64},
@@ -477,7 +819,10 @@ def test_engine_spec_replay_kwargs_merge_router_overrides():
         (
             SLA_THROUGHPUT,
             _retune(
-                planner={"kalman_r": [1, 2.5], "load_predictor": ["arima", "kalman"]},
+                planner={
+                    "load_predictor": {"preset": False, "type": "kalman"},
+                    "kalman_r": {"choices": [1, 2.5]},
+                },
                 history_seconds=9000,
             ),
             {"load_predictor": "kalman", "kalman_r": 2.5},

@@ -674,6 +674,6 @@ def test_native_planner_rejects_retune_config():
             enable_throughput_scaling=False,
             retune={
                 "interval_seconds": 600,
-                "router": {"overlap_score_credit": [0.0, 1.0]},
+                "router": {"overlap_score_credit": {"choices": [0.0, 1.0]}},
             },
         )

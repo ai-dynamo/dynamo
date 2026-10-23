@@ -106,7 +106,14 @@ def retune_only_config(**overrides) -> PlannerConfig:
         mode="agg",
         enable_load_scaling=False,
         enable_throughput_scaling=False,
-        retune={"interval_seconds": 60, "router": {"router_temperature": [0.0, 0.5]}},
+        retune={
+            "interval_seconds": 60,
+            "router": {
+                "overlap_score_credit": 1.0,
+                "prefill_load_scale": 1.0,
+                "temperature": {"choices": [0.0, 0.5]},
+            },
+        },
         **overrides,
     )
 

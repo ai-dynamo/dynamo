@@ -59,9 +59,9 @@ from dynamo.planner.retune.window import (
 # rule identical to ``evaluate_preset``.
 from dynamo.planner.simulation.load_predictor import (
     _PREDICTOR_ERRORS,
-    LOAD_PREDICTOR_PRESETS,
     Window,
     _new_predictors,
+    internal_preset,
     predictor_fields,
     window_loss,
 )
@@ -71,6 +71,8 @@ logger = logging.getLogger(__name__)
 
 SweepStatus = Literal["ok", "empty", "timeout", "failed"]
 Evaluator = Callable[..., tuple[float, dict[str, Any]]]
+# (label, predictor preset name or mapping of public predictor knobs)
+PredictorCandidate = tuple[str, str | Mapping[str, Any]]
 
 GOODPUT_KEY = "goodput_output_throughput_tok_s"
 WORKER_NICENESS = 10
@@ -97,9 +99,11 @@ class SweepRequest:
     ``replicas`` maps worker type (``aggregated`` or ``prefill``/``decode``)
     to the ready count at window start. ``base_planner`` is the current
     planner config dump for an inner planner (``None``: fixed replicas, no
-    planner). ``predictor_presets`` names the ``LOAD_PREDICTOR_PRESETS``
-    the forecast-loss pre-sweep chooses from; its winner's predictor fields
-    are fixed into every non-baseline candidate.
+    planner). ``predictor_candidates`` are the ``(label, entry)`` load
+    predictors the forecast-loss pre-sweep chooses from (an entry is a
+    preset name or a mapping of public predictor knobs, as
+    ``retune.planner.load_predictor`` lists them); its winner's predictor
+    fields are fixed into every non-baseline candidate.
     """
 
     window_index: int
@@ -115,7 +119,7 @@ class SweepRequest:
     baseline: RetuneParams
     replicas: dict[str, int]
     base_planner: dict[str, Any] | None
-    predictor_presets: tuple[str, ...] | None
+    predictor_candidates: tuple[PredictorCandidate, ...] | None
     sla_ttft_ms: float
     sla_itl_ms: float
     max_parallel: int
@@ -137,10 +141,10 @@ class SweepRequest:
             raise ValueError("max_parallel must be at least 1")
         if not self.timeout_s > 0:
             raise ValueError("timeout_s must be positive")
-        if self.predictor_presets:
-            unknown = set(self.predictor_presets) - set(LOAD_PREDICTOR_PRESETS)
-            if unknown:
-                raise ValueError(f"unknown predictor presets: {sorted(unknown)}")
+        if self.predictor_candidates:
+            labels = [label for label, _ in self.predictor_candidates]
+            if len(set(labels)) != len(labels):
+                raise ValueError(f"predictor candidate labels must be unique: {labels}")
 
     @property
     def window_s(self) -> float:
@@ -160,8 +164,9 @@ class SweepResult:
     carry the evaluated ``params`` (the candidate with any pre-sweep
     predictor fields) and either score inputs or ``error``.
     ``predictor_presweep`` is ``{winner, fields, losses, eval_steps,
-    warmup_steps, wall_s}`` (plus ``errors`` when a preset's task failed)
-    when the pre-sweep ran. ``warmup_observations`` covers history
+    warmup_steps, wall_s}`` (plus ``errors`` when a candidate's task failed)
+    when the pre-sweep ran; ``winner`` and the ``losses`` keys are candidate
+    labels. ``warmup_observations`` covers history
     and window, bucketed at the inner planner's throughput interval, for a
     predictor swap. ``row_counts`` holds the window reader's counts plus the
     history reader's under ``history_<key>``.
@@ -350,19 +355,21 @@ def _observe(predictors: Sequence[Any], bucket: Window) -> None:
 
 def predictor_presweep(
     observations: Sequence[TrafficObservation],
-    presets: Sequence[str],
+    candidates: Sequence[PredictorCandidate],
     interval_s: int,
     eval_steps: int,
 ) -> dict[str, Any]:
-    """Rank predictor presets by one-step forecast loss on the window.
+    """Rank load-predictor candidates by one-step forecast loss on the window.
 
-    The last ``eval_steps`` observations are the window ``W_k``; the ones
-    before them are history that only warms each preset's predictors
-    (``preset_window_loss``), so a preset costs ``3 * eval_steps`` forecasts
-    however long the history is. Returns ``{winner, fields, losses,
-    eval_steps, warmup_steps, wall_s}``; ``losses`` maps every preset to its
-    mean loss, or ``None`` when it failed or had nothing to score, and
-    ``winner`` is the lowest loss (earliest preset on ties) or ``None``.
+    ``candidates`` are ``(label, entry)`` pairs; an entry is a preset name or
+    a mapping of public predictor knobs. The last ``eval_steps`` observations
+    are the window ``W_k``; the ones before them are history that only warms
+    each candidate's predictors (``preset_window_loss``), so a candidate
+    costs ``3 * eval_steps`` forecasts however long the history is. Returns
+    ``{winner, fields, losses, eval_steps, warmup_steps, wall_s}``;
+    ``losses`` maps every label to its mean loss, or ``None`` when it failed
+    or had nothing to score, and ``winner`` is the lowest loss (earliest
+    candidate on ties) or ``None``.
     """
 
     started = time.monotonic()
@@ -371,31 +378,38 @@ def predictor_presweep(
     warmup_steps = len(windows) - eval_steps
     history, window = windows[:warmup_steps], windows[warmup_steps:]
     losses: dict[str, float | None] = {}
-    for name in presets:
+    for label, entry in candidates:
         loss = preset_window_loss(
-            history, window, LOAD_PREDICTOR_PRESETS[name], interval_s
+            history, window, internal_preset(_plain(entry)), interval_s
         )
-        losses[name] = loss if math.isfinite(loss) else None
+        losses[label] = loss if math.isfinite(loss) else None
     return _presweep_summary(
-        losses, eval_steps, warmup_steps, time.monotonic() - started
+        losses, dict(candidates), eval_steps, warmup_steps, time.monotonic() - started
     )
+
+
+def _plain(entry: str | Mapping[str, Any]) -> str | dict[str, Any]:
+    """A candidate entry in the form the ``load_predictor`` helpers take."""
+
+    return entry if isinstance(entry, str) else dict(entry)
 
 
 def _presweep_summary(
     losses: Mapping[str, float | None],
+    entries: Mapping[str, str | Mapping[str, Any]],
     eval_steps: int,
     warmup_steps: int,
     wall_s: float,
 ) -> dict[str, Any]:
     winner: str | None = None
     best = math.inf
-    for name, loss in losses.items():
-        # Strict comparison: the earliest preset wins ties.
+    for label, loss in losses.items():
+        # Strict comparison: the earliest candidate wins ties.
         if loss is not None and loss < best:
-            winner, best = name, loss
+            winner, best = label, loss
     return {
         "winner": winner,
-        "fields": {} if winner is None else predictor_fields(winner),
+        "fields": {} if winner is None else predictor_fields(_plain(entries[winner])),
         "losses": dict(losses),
         "eval_steps": eval_steps,
         "warmup_steps": warmup_steps,
@@ -428,7 +442,7 @@ def _read_observations(path: str | os.PathLike[str]) -> list[TrafficObservation]
 
 def _presweep_task(
     observations_path: str,
-    presets: Sequence[str],
+    candidates: Sequence[PredictorCandidate],
     interval_s: int,
     eval_steps: int,
 ) -> dict[str, Any]:
@@ -439,7 +453,7 @@ def _presweep_task(
     """
 
     return predictor_presweep(
-        _read_observations(observations_path), presets, interval_s, eval_steps
+        _read_observations(observations_path), candidates, interval_s, eval_steps
     )
 
 
@@ -620,11 +634,11 @@ def _run_sweep(
             duration_s=float(interval_s),
         )
     )
-    presets = tuple(request.predictor_presets or ())
+    predictors = tuple(request.predictor_candidates or ())
     # (bucket length in trace ms, planner interval in s) when the pre-sweep runs
     presweep_interval = (
         (buckets.interval_ms, interval_s)
-        if presets and buckets is not None and interval_s
+        if predictors and buckets is not None and interval_s
         else None
     )
     spec = _ReadSpec.from_request(
@@ -640,7 +654,7 @@ def _run_sweep(
         # Start every worker the later rounds can use now, so they import
         # while the first one reads instead of after it.
         pool.start(
-            max(len(request.candidates), len(presets) if presweep_interval else 0)
+            max(len(request.candidates), len(predictors) if presweep_interval else 0)
         )
         read = pool.run([(_READ_TASK, _read_sweep_inputs, (spec, str(work_dir)))])
         ok, value = read[_READ_TASK]
@@ -762,20 +776,20 @@ def _inner_throughput_interval(base_planner: Mapping[str, Any] | None) -> int | 
 
 
 def _presweep_tasks(
-    presets: Sequence[str],
+    candidates: Sequence[PredictorCandidate],
     observations_path: str,
     interval_s: int,
     eval_steps: int,
 ) -> list[tuple[str, Callable[..., Any], tuple[Any, ...]]]:
-    """One task per preset; each carries the observations file's path."""
+    """One task per candidate; each carries the observations file's path."""
 
     return [
         (
-            f"{_PRESWEEP_TASK}:{name}",
+            f"{_PRESWEEP_TASK}:{label}",
             _presweep_task,
-            (observations_path, (name,), interval_s, eval_steps),
+            (observations_path, ((label, entry),), interval_s, eval_steps),
         )
-        for name in presets
+        for label, entry in candidates
     ]
 
 
@@ -786,7 +800,7 @@ def _run_presweep(
     interval_ms: float,
     interval_s: int,
 ) -> dict[str, Any]:
-    """Score every preset in its own worker task, then pick the winner.
+    """Score every predictor candidate in its own worker task, then pick one.
 
     ``inputs.observations`` are history and window buckets ending at the
     window end; only the buckets wholly inside ``W_k`` are forecast and
@@ -802,22 +816,26 @@ def _run_presweep(
     )
     eval_steps = min(len(inputs.observations), window_steps)
     warmup_steps = len(inputs.observations) - eval_steps
-    presets = tuple(request.predictor_presets or ())
+    candidates = tuple(request.predictor_candidates or ())
     outcomes = pool.run(
-        _presweep_tasks(presets, inputs.observations_path, interval_s, eval_steps)
+        _presweep_tasks(candidates, inputs.observations_path, interval_s, eval_steps)
     )
     losses: dict[str, float | None] = {}
     errors: dict[str, str] = {}
-    for name in presets:
-        ok, value = outcomes[f"{_PRESWEEP_TASK}:{name}"]
+    for label, _ in candidates:
+        ok, value = outcomes[f"{_PRESWEEP_TASK}:{label}"]
         if ok:
-            losses[name] = value["losses"][name]
+            losses[label] = value["losses"][label]
         else:
-            # A failed preset cannot win; the others still compete.
-            losses[name] = None
-            errors[name] = value
+            # A failed candidate cannot win; the others still compete.
+            losses[label] = None
+            errors[label] = value
     summary = _presweep_summary(
-        losses, eval_steps, warmup_steps, time.monotonic() - started
+        losses,
+        dict(candidates),
+        eval_steps,
+        warmup_steps,
+        time.monotonic() - started,
     )
     if errors:
         summary["errors"] = errors
