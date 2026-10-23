@@ -47,6 +47,7 @@ use crate::response_merge::{Assembler, RuleSet};
 use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened,
 };
+use dynamo_llm::protocols::common::extensions::HEADER_REQUEST_PRIORITY;
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_llm::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
@@ -202,7 +203,13 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             })
         })()
         .map_err(ClientError::new);
-        let priority = request.priority.unwrap_or_default();
+        // Dynamo's priority header uses the same higher-is-higher scale as
+        // SGLang's request field. A valid header wins; malformed values fall
+        // back to the body field.
+        let priority = header(HEADER_REQUEST_PRIORITY)
+            .and_then(|value| value.trim().parse().ok())
+            .or(request.priority)
+            .unwrap_or_default();
         let cache_namespace = request.cache_namespace().map(str::to_owned);
         let stream = request.stream;
         let (input_ids, body) = request.into_worker_envelope(&request_id);

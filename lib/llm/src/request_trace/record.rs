@@ -52,10 +52,22 @@ fn event_time_unix_ms_from_request(request: &RequestTraceMetrics) -> u64 {
         })
 }
 
+/// Use the logical response count when a route owns it independently of
+/// per-attempt router metrics. ITL must use the same denominator.
+pub(super) fn set_output_tokens(request: &mut RequestTraceMetrics, tokens: Option<u64>) {
+    if let Some(tokens) = tokens {
+        request.output_tokens = Some(tokens);
+        request.avg_itl_ms = tokens.checked_sub(1).filter(|n| *n > 0).and_then(|gaps| {
+            Some((request.total_time_ms? - request.ttft_ms?).max(0.0) / gaps as f64)
+        });
+    }
+}
+
 pub(crate) fn emit_request_end(
     request_id: String,
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
+    output_tokens: Option<u64>,
 ) {
     let timing = tracker.get_timing_info();
     let event_time_unix_ms = timing.total_time_ms.map_or_else(unix_time_ms, |elapsed| {
@@ -92,6 +104,7 @@ pub(crate) fn emit_request_end(
         replay: Some(replay),
         finish_reason_metadata: None,
     };
+    set_output_tokens(&mut request, output_tokens);
     sanitize_request(&mut request);
 
     publish(RequestTraceRecord {
@@ -248,6 +261,7 @@ mod tests {
                 input_length: 3,
                 input_sequence_hashes: vec![11, 22],
             },
+            None,
         );
 
         let record = loop {
