@@ -25,6 +25,8 @@
 //! - `python/sglang/srt/managers/scheduler_components/batch_result_processor.py`
 //!   (`_maybe_collect_routed_experts`) and `disaggregation/prefill.py`: which
 //!   server reports which `routed_experts` rows (`sequence_final`).
+//! - `python/sglang/srt/sampling/sampling_params.py`: the `max_new_tokens`
+//!   default a migrated request continues from.
 //!
 //! `components/src/dynamo/sglang/tests/test_sglang_generate_merge_contract.py`
 //! checks the file against the installed SGLang and fails on unclassified
@@ -36,6 +38,7 @@ use dynamo_runtime::error::DynamoError;
 use serde_json::{Value, json};
 
 use super::generate::SglangGenerateRequest;
+use super::migrate::{Continuation, RequestRules};
 use super::{CAPABILITY, PAYLOAD_KEY, RESPONSE_KEY};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -46,7 +49,7 @@ use dynamo_llm::generate_format::{
 };
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
-use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use dynamo_llm::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
 use dynamo_llm::protocols::response_merge::prefill_annotations;
 
 /// Shared with the SGLang contract test.
@@ -56,6 +59,9 @@ const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
 
 static RULES: LazyLock<Arc<RuleSet>> =
     LazyLock::new(|| Arc::new(RuleSet::from_json(RULES_JSON).expect("valid merge_rules.json")));
+pub(super) static REQUEST_RULES: LazyLock<RequestRules> =
+    LazyLock::new(|| serde_json::from_str(RULES_JSON).expect("valid merge_rules.json"));
+
 /// The response join table.
 pub fn rules() -> Arc<RuleSet> {
     RULES.clone()
@@ -63,7 +69,7 @@ pub fn rules() -> Arc<RuleSet> {
 
 /// The client-facing half of the format; the default is SGLang's own body
 /// and response. Formats that only reshape what clients send and receive
-/// implement this and keep SGLang's joining and P/D.
+/// implement this and keep SGLang's joining, P/D, and migration.
 pub trait ClientCodec: Send + Sync + 'static {
     /// Response field semantics; extend the native rules to add engine fields.
     fn rules(&self) -> Arc<RuleSet> {
@@ -202,6 +208,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         let (input_ids, body) = request.into_worker_envelope(&request_id);
         let rules = self.rules.clone();
         let prefill_need = rules.prefill_need(&body);
+        let prompt_tokens = input_ids.len();
         let codec = self.codec.clone();
         Ok(Opened {
             model: None,
@@ -210,6 +217,7 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             input_tokens,
             validation,
             bind: Box::new(move |worker| {
+                let continuation = Continuation::new(&REQUEST_RULES, &body, worker.engine_info);
                 let request = PreprocessedRequest::builder()
                     .model(worker.model.to_string())
                     .token_ids(input_ids)
@@ -230,16 +238,24 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                         ..Default::default()
                     }))
                     .extra_args(Some(json!({ PAYLOAD_KEY: body })))
-                    .annotations(prefill_annotations(prefill_need, stream))
+                    .annotations(prefill_annotations(prefill_need))
                     .build()
                     .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {
                     request,
+                    migration: continuation.as_ref().map(|_| ()).map_err(Clone::clone),
                     exchange: Box::new(Exchange {
-                        assembler: Assembler::with_codec(rules, codec.clone()),
+                        assembler: Assembler::with_codec(
+                            rules,
+                            continuation.is_ok(),
+                            codec.clone(),
+                        ),
+                        continuation,
                         codec,
+                        delivered: 0,
                         request_id,
                         stream,
+                        prompt_tokens,
                     }),
                 })
             }),
@@ -274,8 +290,12 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
 struct Exchange<C: ClientCodec> {
     codec: Arc<C>,
     assembler: Assembler<C>,
+    continuation: Result<Continuation, String>,
+    /// Generated tokens seen across attempts.
+    delivered: usize,
     request_id: String,
     stream: bool,
+    prompt_tokens: usize,
 }
 
 impl<C: ClientCodec> GenerateExchange for Exchange<C> {
@@ -298,6 +318,10 @@ impl<C: ClientCodec> GenerateExchange for Exchange<C> {
             self.assembler.set_prefill(response);
             return Ok(());
         }
+        self.delivered += response
+            .get("output_ids")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
         // Workers submit a private SGLang request ID; the client sees its own.
         if let Some(meta) = response.get_mut("meta_info").and_then(Value::as_object_mut)
             && meta.contains_key("id")
@@ -317,6 +341,47 @@ impl<C: ClientCodec> GenerateExchange for Exchange<C> {
             }
             Ok(())
         })
+    }
+
+    fn migrate(
+        &mut self,
+        delivered_tokens: usize,
+        request: &mut PreprocessedRequest,
+    ) -> Result<Option<LLMEngineOutput>, String> {
+        let continuation = self.continuation.as_ref().map_err(Clone::clone)?;
+        if delivered_tokens != self.delivered {
+            return Err(format!(
+                "Dynamo delivered {delivered_tokens} tokens but SGLang reported {}",
+                self.delivered
+            ));
+        }
+        let prompt_delivered = self.assembler.prompt_delivered();
+        self.assembler.migrate(delivered_tokens as u64);
+        let Some(body) = continuation.retry(&REQUEST_RULES, delivered_tokens, prompt_delivered)
+        else {
+            // The budget is spent: an attempt that generates nothing, whose
+            // counts the join rebases onto the delivered tokens.
+            let mut response = json!({
+                "output_ids": [],
+                "meta_info": {
+                    "id": self.request_id,
+                    "finish_reason": {"type": "length", "length": 0},
+                    "prompt_tokens": self.prompt_tokens,
+                    "completion_tokens": 0,
+                },
+            });
+            if continuation.returns_logprobs() {
+                response["meta_info"]["output_token_logprobs"] = json!([]);
+                response["meta_info"]["output_token_logprobs_length"] = json!(0);
+            }
+            return Ok(Some(LLMEngineOutput {
+                finish_reason: Some(FinishReason::Length),
+                engine_data: Some(json!({ RESPONSE_KEY: response })),
+                ..Default::default()
+            }));
+        };
+        request.extra_args = Some(json!({ PAYLOAD_KEY: body }));
+        Ok(None)
     }
 
     fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
@@ -394,7 +459,9 @@ mod tests {
                     default_request_id: "id",
                 })
                 .unwrap();
-            let mut exchange = bind(&crate::testkit::worker()).unwrap().exchange;
+            let mut exchange = bind(&crate::testkit::worker(&Value::Null))
+                .unwrap()
+                .exchange;
             for chunk in fixture["stream"].as_array().unwrap() {
                 let output = LLMEngineOutput {
                     engine_data: Some(json!({ RESPONSE_KEY: chunk })),
@@ -458,7 +525,9 @@ mod tests {
             assert_eq!(simulated.len(), recorded.as_array().unwrap().len());
             for (sim, real) in simulated.iter().zip(recorded.as_array().unwrap()) {
                 for (path, class) in RULES.fields() {
-                    if matches!(class, FieldClass::Attempt) || path.contains("cached_tokens") {
+                    if matches!(class, FieldClass::Attempt | FieldClass::Cumulative)
+                        || path.contains("cached_tokens")
+                    {
                         continue;
                     }
                     let (sim, real) = (sim.pointer(path), real.pointer(path));

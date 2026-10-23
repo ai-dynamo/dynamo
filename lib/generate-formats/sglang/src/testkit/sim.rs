@@ -3,17 +3,22 @@
 
 //! A model of SGLang's incremental `/generate` stream.
 //!
-//! The simulator answers the request body. Recorded fixtures check its shapes.
+//! The simulator answers the body it is sent, so a format that builds a wrong
+//! retry body (an unreduced budget, prompt-side flags left on) gets a wrong
+//! stream back and fails the laws. It is an ideal engine: a retry continues
+//! with exactly the tokens the first attempt would have generated, and
+//! recomputed values equal the originals. `fixtures` checks that the shapes
+//! it produces match recorded SGLang streams.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Map, Value, json};
 
-const DEFAULT_MAX_NEW_TOKENS: u32 = 128;
+use crate::DEFAULT_MAX_NEW_TOKENS;
 /// Generated when a request asks for more tokens than the ground truth holds,
 /// so an over-long budget shows up as extra output.
 pub const FILLER_TOKEN: u32 = 0;
 
-/// What an aggregated run generates.
+/// What an unmigrated aggregated run generates.
 #[derive(Debug, Clone)]
 pub struct Truth {
     pub prompt: Vec<u32>,
@@ -123,11 +128,19 @@ pub fn stream(
     role: Role,
     engine_info: &Value,
 ) -> Vec<Value> {
+    let delivered = prompt.len() - truth.prompt.len();
     assert_eq!(
-        prompt,
+        &prompt[..truth.prompt.len()],
         truth.prompt.as_slice(),
-        "the worker receives the client prompt"
+        "a retry prompt starts with the client prompt"
     );
+    for (i, &id) in prompt[truth.prompt.len()..].iter().enumerate() {
+        assert_eq!(
+            id,
+            truth.token(i).0,
+            "a retry prompt holds the delivered tokens"
+        );
+    }
     let sampling = body.get("sampling_params").and_then(Value::as_object);
     // `--preferred-sampling-params` is a JSON string on the command line.
     let preferred = match engine_info.get("preferred_sampling_params") {
@@ -184,27 +197,27 @@ pub fn stream(
         if experts {
             meta["routed_experts"] = json!(STANDARD.encode(truth.rows(0, prompt_len)));
         }
-        return vec![json!({"output_ids": [truth.token(0).0], "meta_info": meta})];
+        return vec![json!({"output_ids": [truth.token(delivered).0], "meta_info": meta})];
     }
 
-    // Generate until the budget or the truth's EOS.
-    let remaining = truth.output.len();
+    // The attempt generates until the budget or the truth's EOS.
+    let remaining = truth.output.len().saturating_sub(delivered);
     let (generated, stop) = if truth.stop && remaining <= budget {
         (remaining, true)
     } else {
         (budget, false)
     };
-    let end = generated;
+    let end = delivered + generated;
     let mut ends: Vec<usize> = truth
         .cuts
         .iter()
         .copied()
-        .filter(|&cut| cut > 0 && cut < end)
+        .filter(|&cut| cut > delivered && cut < end)
         .collect();
     ends.push(end);
 
     let mut chunks = Vec::with_capacity(ends.len());
-    let mut from = 0;
+    let mut from = delivered;
     let (prompt_logprobs, prompt_tops) = if return_logprob && role == Role::Aggregated {
         input_logprobs()
     } else {
@@ -217,8 +230,8 @@ pub fn stream(
             "id": rid,
             "finish_reason": Value::Null,
             "prompt_tokens": prompt_len,
-            "completion_tokens": to,
-            "cached_tokens": truth.cached_tokens,
+            "completion_tokens": to - delivered,
+            "cached_tokens": if delivered == 0 { truth.cached_tokens } else { 0 },
             "weight_version": "default",
         });
         if last {
@@ -230,7 +243,7 @@ pub fn stream(
         }
         if return_logprob {
             meta["input_token_logprobs"] = json!(prompt_logprobs);
-            meta["output_token_logprobs_length"] = json!(to);
+            meta["output_token_logprobs_length"] = json!(to - delivered);
             meta["output_token_logprobs"] = Value::Array(
                 tokens
                     .iter()
