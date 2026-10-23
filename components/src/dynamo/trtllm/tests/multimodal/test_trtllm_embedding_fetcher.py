@@ -34,7 +34,6 @@ pytestmark = [
 
 def create_mock_encode_client(
     embeddings: list[torch.Tensor],
-    processed_prompt: str = "prompt",
     prompt_token_ids: list[int] | None = None,
 ) -> AsyncMock:
     """Create mock encode client that returns embeddings via CUDA IPC handles."""
@@ -43,12 +42,21 @@ def create_mock_encode_client(
         def data(self):
             return {
                 "ep_disaggregated_params": {
-                    "multimodal_embedding_handles": [
-                        f"h{i}" for i in range(len(embeddings))
-                    ]
+                    "multimodal": {
+                        "schema_version": 1,
+                        "items": [
+                            {
+                                "item_ref": ["image", i],
+                                "embeddings": {"multimodal_embedding": f"h{i}"},
+                                "output_embedding_length": tensor.shape[0],
+                            }
+                            for i, tensor in enumerate(embeddings)
+                        ],
+                        "request_layout": {
+                            "prompt_token_ids": prompt_token_ids or [1, 2, 3]
+                        },
+                    }
                 },
-                "processed_prompt": processed_prompt,
-                "prompt_token_ids": prompt_token_ids or [1, 2, 3],
             }
 
     async def mock_round_robin(req: dict[str, Any], context=None) -> Any:
@@ -94,7 +102,7 @@ class TestFetchEmbeddingsFromEncoder:
             )
 
         assert len(result) == 2
-        assert "_epd_processed_prompt" not in request
+        assert request == {"messages": []}
 
     @pytest.mark.asyncio
     async def test_all_cached_no_request_sent(self, encoder_cache):
@@ -195,13 +203,12 @@ class TestFetchEmbeddingsFromEncoder:
 
     @pytest.mark.asyncio
     async def test_no_cache_returns_disaggregated_params(self):
-        """No cache: returns DisaggregatedParams directly, request updated with metadata."""
+        """Full-request layouts stay in the handoff without mutating the request."""
         request: dict[str, Any] = {"messages": []}
 
         # Pass one embedding so mock generates one handle (DisaggregatedParams requires non-empty handles)
         mock_client = create_mock_encode_client(
             [torch.ones(10, 256)],
-            processed_prompt="test <image>",
             prompt_token_ids=[10, 20],
         )
 
@@ -210,8 +217,8 @@ class TestFetchEmbeddingsFromEncoder:
         )
 
         assert isinstance(result, DisaggregatedParams)
-        assert request["_epd_processed_prompt"] == "test <image>"
-        assert request["_epd_prompt_token_ids"] == [10, 20]
+        assert result.multimodal["request_layout"]["prompt_token_ids"] == [10, 20]
+        assert request == {"messages": []}
 
     @pytest.mark.asyncio
     async def test_empty_urls_raises_error(self, encoder_cache):
