@@ -29,19 +29,22 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
+    kv_router::{
+        KvRouter, RouteRequest, metrics::RouterRequestMetrics, to_worker_selection_session_context,
+    },
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
-        preprocessor::owned_abort_error,
+        preprocessor::{RoutingHints, owned_abort_error},
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
+        explicit_target, explicit_target_from_hints, from_table, invalid_argument,
+        subagent_group_affinity_id,
     },
 };
 
@@ -313,6 +316,9 @@ pub(crate) struct RoutePlan {
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
     affinity: Option<Hold>,
+    /// The phase the plan was admitted for. Dispatch tracks under this phase
+    /// rather than re-deriving it from the request.
+    phase: RequestPhase,
     /// Carried forward from the [`RoutePreview`] this plan was admitted from, so
     /// preview, admission and dispatch draw on one budget instead of three.
     budget: CleanupBudget,
@@ -353,6 +359,23 @@ impl RoutePlanSignals {
 }
 
 impl RoutePlan {
+    /// The worker and DP rank this plan admitted.
+    pub(crate) fn target(&self) -> AffinityTarget {
+        route_target(self.selection.worker)
+    }
+
+    /// Release a plan that will not be dispatched: abort its classifier
+    /// lifecycle, if any, and free its booking.
+    pub(crate) async fn abort_with_error(
+        mut self,
+        error: Option<&dynamo_kv_router::scheduling::AbortCause>,
+    ) {
+        if let Some(lifecycle) = self.selection.request_lifecycle.as_deref_mut() {
+            lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
+        }
+        self.cleanup.finish().await;
+    }
+
     #[cfg(test)]
     pub(crate) fn cleanup_budget_remaining(&self) -> std::time::Duration {
         self.budget.remaining()
@@ -597,14 +620,14 @@ impl RoutingHost {
     /// it cannot be rejected against, or rebind, the group.
     fn group_binding_id(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         explicit: Option<AffinityTarget>,
         phase: RequestPhase,
     ) -> Option<Arc<SessionAffinityId>> {
         if explicit.is_some() {
             return None;
         }
-        let agent = request.content().agent_context.as_ref()?;
+        let agent = request.agent_context()?;
         let parent_session_id = agent.parent_session_id.as_deref()?;
         let binding_id = if phase == RequestPhase::Prefill {
             let parent = parent_session_id.trim();
@@ -639,7 +662,15 @@ impl RoutingHost {
         request: &PreprocessedRequest,
         phase: RequestPhase,
     ) -> Result<(), Error> {
-        let Some(routing) = request.routing.as_ref() else {
+        self.validate_explicit_worker_hints(request.routing.as_ref(), phase)
+    }
+
+    fn validate_explicit_worker_hints(
+        &self,
+        routing: Option<&RoutingHints>,
+        phase: RequestPhase,
+    ) -> Result<(), Error> {
+        let Some(routing) = routing else {
             return Ok(());
         };
         let target = match phase {
@@ -726,7 +757,7 @@ impl RoutingHost {
 
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         budget: &CleanupBudget,
@@ -736,14 +767,14 @@ impl RoutingHost {
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
     {
-        let staged_kv = StagedKv::for_request(request.content());
+        let staged_kv = StagedKv::for_route(request);
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
-        let Some(session_id) = affinity_id(request)? else {
+        let Some(session_id) = request.session_affinity_id()? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target(request.content(), phase)?;
+        let explicit = explicit_target_from_hints(request.routing_hints(), phase)?;
         let session_id = self
             .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);
@@ -752,7 +783,7 @@ impl RoutingHost {
             return Ok((select(target).await?, None));
         }
 
-        let request_context = request.context();
+        let request_context = request.engine_context();
         let operation = self
             .acquire_affinity_slot(
                 affinity,

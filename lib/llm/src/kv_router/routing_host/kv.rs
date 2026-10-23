@@ -11,7 +11,7 @@ impl RoutingHost {
     #[allow(clippy::too_many_arguments)]
     async fn select_request_outcome(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         affinity_target: Option<AffinityTarget>,
@@ -19,15 +19,14 @@ impl RoutingHost {
         admission: FindBestMatchAdmission,
         budget: &CleanupBudget,
     ) -> Result<SelectionOutcome, Error> {
-        let context_id = request.context().id().to_string();
-        let staged_kv = StagedKv::for_request(request.content());
-        let policy_class = request.metadata().get("policy-class").cloned();
+        let request_context = request.engine_context();
+        let context_id = request_context.id().to_string();
+        let staged_kv = StagedKv::for_route(request);
+        let policy_class = request.policy_class().map(str::to_owned);
         let session_context = request
-            .agent_context
-            .as_ref()
+            .agent_context()
             .map(to_worker_selection_session_context);
-        let routing_parts = RoutingRequestParts::new(request);
-        let request_context = request.context().clone();
+        let routing_parts = RoutingRequestParts::for_route(request);
         let selection_future = self
             .select_worker_outcome(
                 &context_id,
@@ -65,7 +64,7 @@ impl RoutingHost {
 
     async fn select_request(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         affinity_target: Option<AffinityTarget>,
@@ -86,12 +85,12 @@ impl RoutingHost {
 
     pub(super) async fn select_with_affinity(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         budget: &CleanupBudget,
     ) -> Result<(WorkerSelection, Option<Hold>), Error> {
-        self.validate_explicit_worker(request.content(), phase)?;
+        self.validate_explicit_worker_hints(request.routing_hints(), phase)?;
         let select = || {
             self.select_with_session_affinity(request, phase, is_query_only, budget, |target| {
                 self.select_request(request, phase, is_query_only, target, budget)
@@ -115,7 +114,7 @@ impl RoutingHost {
     /// test-thread stack under `block_on`.
     async fn select_with_request_lifecycle<Fut>(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         select: impl FnOnce() -> Fut,
     ) -> Result<(WorkerSelection, Option<Hold>), Error>
@@ -129,15 +128,16 @@ impl RoutingHost {
             RequestPhase::Prefill => return select().await,
             RequestPhase::Decode | RequestPhase::Aggregated => {}
         }
+        let request_context = request.engine_context();
+        let request_id = request_context.id();
         let mut lifecycle = request
-            .migration_state
-            .as_ref()
+            .migration_state()
             .and_then(|state| state.take_request_lifecycle());
         if lifecycle.is_none() {
             lifecycle = self
                 .kv_router()
-                .begin_request_lifecycle(request.context().id())
-                .map_err(|error| classifier_failure_response(request.context().id(), &error))?
+                .begin_request_lifecycle(request_id)
+                .map_err(|error| classifier_failure_response(request_id, &error))?
                 .map(Box::new);
         }
 
@@ -147,13 +147,10 @@ impl RoutingHost {
                 if let Some(mut lifecycle) = lifecycle.take() {
                     if let Some(classifier_error) = classification_failure(&error) {
                         lifecycle.abort(Some(classifier_abort_error(classifier_error)));
-                        return Err(classifier_failure_response(
-                            request.context().id(),
-                            classifier_error,
-                        ));
+                        return Err(classifier_failure_response(request_id, classifier_error));
                     }
                     if crate::migration::is_migratable(error.as_ref())
-                        && let Some(state) = request.migration_state.as_ref()
+                        && let Some(state) = request.migration_state()
                     {
                         lifecycle.prepare_retry();
                         state.store_request_lifecycle(lifecycle);
@@ -277,23 +274,58 @@ impl RoutingHost {
                 }
             })
         };
-        let (mut selection, affinity) = self
+        let (selection, affinity) = self
             .select_with_request_lifecycle(request, phase, select)
             .await?;
-        let signals = self.route_signals(&selection);
         drop(route_guard);
-        Ok(RoutePlan {
-            signals,
+        Ok(self.route_plan(request, phase, selection, affinity, budget))
+    }
+
+    /// Admit a KV route for `request` without dispatching it.
+    ///
+    /// Selection goes through the same pin, session-affinity and classifier
+    /// handling as a dispatched route. The returned plan owns the booking: send
+    /// it with [`Self::dispatch_kv_plan`] or release it with
+    /// [`RoutePlan::abort_with_error`].
+    pub(crate) async fn plan_kv_route(
+        &self,
+        request: &dyn RouteRequest,
+        phase: RequestPhase,
+    ) -> Result<RoutePlan, Error> {
+        let budget = CleanupBudget::default();
+        if self.kv_router_if_enabled().is_none() {
+            return Err(anyhow::anyhow!("KV route plans require KV routing"));
+        }
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let (selection, affinity) = self
+            .select_with_affinity(request, phase, false, &budget)
+            .await?;
+        drop(route_guard);
+        Ok(self.route_plan(request, phase, selection, affinity, budget))
+    }
+
+    fn route_plan(
+        &self,
+        request: &dyn RouteRequest,
+        phase: RequestPhase,
+        mut selection: WorkerSelection,
+        affinity: Option<Hold>,
+        budget: CleanupBudget,
+    ) -> RoutePlan {
+        RoutePlan {
+            signals: self.route_signals(&selection),
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),
-                request.context().id().to_string(),
+                request.engine_context().id().to_string(),
                 selection.worker,
                 selection.booking.take(),
             ),
             selection,
             affinity,
+            phase,
             budget,
-        })
+        }
     }
 
     pub(crate) async fn dispatch_kv_plan(
@@ -305,12 +337,13 @@ impl RoutingHost {
             mut selection,
             cleanup,
             mut affinity,
+            phase,
             budget,
             ..
         } = plan;
         let selected_target = route_target(selection.worker);
         let guard = match self
-            .track_planned_selection(&request, &mut selection, cleanup, &budget)
+            .track_planned_selection(&request, &mut selection, phase, cleanup, &budget)
             .await
         {
             Ok(guard) => guard,
@@ -385,10 +418,10 @@ impl RoutingHost {
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
+        phase: RequestPhase,
         cleanup: KvRequestCleanup,
         budget: &CleanupBudget,
     ) -> Result<RequestGuard, Error> {
-        let phase = request.phase();
         self.track_selection_with_cleanup(request, selection, phase, false, Some(cleanup), budget)
             .await
     }
@@ -656,48 +689,21 @@ impl RoutingHost {
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        let budget = CleanupBudget::default();
-        let phase = RequestPhase::Prefill;
-        let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only, &budget)
-            .await?;
-        let mut guard = match self
-            .track_selection(&request, &mut selection, phase, is_query_only, &budget)
-            .await
-        {
-            Ok(guard) => guard,
-            Err(error) => return Err(error),
-        };
-        let selected_target = route_target(selection.worker);
-        let metadata = match prepare(&mut request, selected_target) {
+        // `PrefillRouter` serves query-only requests before reaching the prefill
+        // hop, so a planned (booked) route is always the right shape here.
+        if request.get_annotation_value("query_instance_id").is_some() {
+            return Err(anyhow::anyhow!(
+                "query-only requests do not take the prefill hop"
+            ));
+        }
+        let plan = self.plan_kv_route(&request, RequestPhase::Prefill).await?;
+        let metadata = match prepare(&mut request, plan.target()) {
             Ok(metadata) => metadata,
             Err(error) => {
-                guard.abort_with_error(Some(error.as_ref())).await;
+                plan.abort_with_error(Some(error.as_ref())).await;
                 return Err(error);
             }
         };
-        drop(route_guard);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_valid(selected_target)
-                    && let Some(operation) = operation.take()
-                {
-                    operation.invalidate();
-                }
-                return Err(error);
-            }
-        };
-        Ok((
-            metadata,
-            self.bind_affinity(operation, selected_target, stream)?,
-        ))
+        Ok((metadata, self.dispatch_kv_plan(request, plan).await?))
     }
 }

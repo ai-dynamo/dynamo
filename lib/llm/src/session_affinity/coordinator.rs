@@ -326,7 +326,15 @@ pub fn explicit_target(
     request: &PreprocessedRequest,
     phase: RequestPhase,
 ) -> Result<Option<AffinityTarget>, Error> {
-    let Some(routing) = request.routing.as_ref() else {
+    explicit_target_from_hints(request.routing.as_ref(), phase)
+}
+
+/// The worker a caller named for `phase` in its routing hints, if any.
+pub fn explicit_target_from_hints(
+    routing: Option<&crate::protocols::common::preprocessor::RoutingHints>,
+    phase: RequestPhase,
+) -> Result<Option<AffinityTarget>, Error> {
+    let Some(routing) = routing else {
         return Ok(None);
     };
     let (worker_id, dp_rank) = match phase {
