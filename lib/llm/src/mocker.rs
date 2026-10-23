@@ -1242,7 +1242,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                native_timing.record_token();
                                 None
                             };
 
@@ -1318,7 +1318,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                native_timing.record_token();
                             } else {
                                 let mut final_output = LLMEngineOutput::length();
                                 if let Some(cached) = cached_prefix_tokens {
@@ -1339,7 +1339,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             if !send_response(&stream_tx, output, &async_context) {
                                 break;
                             }
-                            native_timing.record_tokens(1);
+                            native_timing.record_token();
                         }
                     }
 

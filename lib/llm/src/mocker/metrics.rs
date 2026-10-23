@@ -131,13 +131,12 @@ struct SglangSchedulerHandles {
 
 #[derive(Clone)]
 struct NativeRequestMetricHandles {
-    time_to_first_token_seconds: Histogram,
+    engine: EngineType,
+    /// SGLang prefill workers never record TTFT.
+    time_to_first_token_seconds: Option<Histogram>,
     /// TensorRT-LLM has no inter-token latency histogram.
     inter_token_latency_seconds: Option<Histogram>,
     time_per_output_token_seconds: Histogram,
-    /// vLLM records every TPOT, including 0 for single-token requests. SGLang and TensorRT-LLM
-    /// drop non-positive values.
-    record_zero_tpot: bool,
     e2e_request_latency_seconds: Histogram,
     /// Only SGLang counts completed requests.
     num_requests_total: Option<IntCounter>,
@@ -281,9 +280,12 @@ impl NativeMockerMetrics {
                                 .with_label_values(&values),
                             preemptions_seen: AtomicU64::new(0),
                             request_metrics: NativeRequestMetricHandles {
-                                time_to_first_token_seconds: collectors
-                                    .time_to_first_token_seconds
-                                    .with_label_values(&values),
+                                engine: EngineType::Vllm,
+                                time_to_first_token_seconds: Some(
+                                    collectors
+                                        .time_to_first_token_seconds
+                                        .with_label_values(&values),
+                                ),
                                 inter_token_latency_seconds: Some(
                                     collectors
                                         .inter_token_latency_seconds
@@ -292,7 +294,6 @@ impl NativeMockerMetrics {
                                 time_per_output_token_seconds: collectors
                                     .request_time_per_output_token_seconds
                                     .with_label_values(&values),
-                                record_zero_tpot: true,
                                 e2e_request_latency_seconds: collectors
                                     .e2e_request_latency_seconds
                                     .with_label_values(&values),
@@ -316,14 +317,16 @@ impl NativeMockerMetrics {
                         .kv_cache_utilization
                         .with_label_values(&values),
                     request_metrics: NativeRequestMetricHandles {
-                        time_to_first_token_seconds: collectors
-                            .time_to_first_token_seconds
-                            .with_label_values(&values),
+                        engine: EngineType::Trtllm,
+                        time_to_first_token_seconds: Some(
+                            collectors
+                                .time_to_first_token_seconds
+                                .with_label_values(&values),
+                        ),
                         inter_token_latency_seconds: None,
                         time_per_output_token_seconds: collectors
                             .time_per_output_token_seconds
                             .with_label_values(&values),
-                        record_zero_tpot: false,
                         e2e_request_latency_seconds: collectors
                             .e2e_request_latency_seconds
                             .with_label_values(&values),
@@ -360,9 +363,12 @@ impl NativeMockerMetrics {
                 NativeMetricHandles::Sglang(SglangHandles {
                     schedulers,
                     request_metrics: NativeRequestMetricHandles {
-                        time_to_first_token_seconds: collectors
-                            .time_to_first_token_seconds
-                            .with_label_values(&request_values),
+                        engine: EngineType::Sglang,
+                        time_to_first_token_seconds: (engine_type != "prefill").then(|| {
+                            collectors
+                                .time_to_first_token_seconds
+                                .with_label_values(&request_values)
+                        }),
                         inter_token_latency_seconds: Some(
                             collectors
                                 .inter_token_latency_seconds
@@ -371,7 +377,6 @@ impl NativeMockerMetrics {
                         time_per_output_token_seconds: collectors
                             .request_time_per_output_token_seconds
                             .with_label_values(&request_values),
-                        record_zero_tpot: false,
                         e2e_request_latency_seconds: collectors
                             .e2e_request_latency_seconds
                             .with_label_values(&request_values),
@@ -387,12 +392,10 @@ impl NativeMockerMetrics {
     }
 }
 
-/// Engine label names followed by [`DYNAMO_LABELS`].
 fn label_names(engine_labels: &[&'static str]) -> Vec<&'static str> {
     engine_labels.iter().chain(DYNAMO_LABELS).copied().collect()
 }
 
-/// Engine label values followed by the values for [`DYNAMO_LABELS`].
 fn label_values<'a>(engine_values: &[&'a str], dynamo_values: &[&'a str; 5]) -> Vec<&'a str> {
     engine_values.iter().chain(dynamo_values).copied().collect()
 }
@@ -639,31 +642,23 @@ impl NativeRequestTiming {
         }
     }
 
-    pub(crate) fn record_tokens(&mut self, token_count: usize) {
-        if token_count == 0 {
-            return;
-        }
+    pub(crate) fn record_token(&mut self) {
         let Some(handles) = &self.handles else {
             return;
         };
 
         let now = Instant::now();
-        self.output_tokens += token_count;
+        self.output_tokens += 1;
         let Some(last_token_at) = self.last_token_at.replace(now) else {
             self.first_token_at = Some(now);
-            handles
-                .time_to_first_token_seconds
-                .observe(now.duration_since(self.start).as_secs_f64());
+            if let Some(time_to_first_token_seconds) = &handles.time_to_first_token_seconds {
+                time_to_first_token_seconds.observe(now.duration_since(self.start).as_secs_f64());
+            }
             return;
         };
 
-        let Some(inter_token_latency_seconds) = &handles.inter_token_latency_seconds else {
-            return;
-        };
-        let per_token_interval =
-            now.duration_since(last_token_at).as_secs_f64() / token_count as f64;
-        for _ in 0..token_count {
-            inter_token_latency_seconds.observe(per_token_interval);
+        if let Some(inter_token_latency_seconds) = &handles.inter_token_latency_seconds {
+            inter_token_latency_seconds.observe(now.duration_since(last_token_at).as_secs_f64());
         }
     }
 
@@ -679,13 +674,21 @@ impl NativeRequestTiming {
             }
             _ => 0.0,
         };
-        if tpot > 0.0 || handles.record_zero_tpot {
+        // vLLM records every TPOT, including 0 for single-token requests; SGLang and TensorRT-LLM
+        // drop non-positive values.
+        if tpot > 0.0 || matches!(handles.engine, EngineType::Vllm) {
             handles.time_per_output_token_seconds.observe(tpot);
         }
 
+        // SGLang finishes a request after its KV handoff; vLLM and TensorRT-LLM end E2E at the
+        // last token, so a prefill worker's handoff delay is not included.
+        let end = match handles.engine {
+            EngineType::Sglang => Instant::now(),
+            _ => self.last_token_at.unwrap_or_else(Instant::now),
+        };
         handles
             .e2e_request_latency_seconds
-            .observe(self.start.elapsed().as_secs_f64());
+            .observe(end.duration_since(self.start).as_secs_f64());
         if let Some(num_requests_total) = &handles.num_requests_total {
             num_requests_total.inc();
         }
@@ -773,7 +776,6 @@ mod tests {
             .unwrap_or_else(|| panic!("missing metric family {name}"))
     }
 
-    /// Engine label names plus the labels a Dynamo worker adds on re-export.
     fn label_set(engine_labels: &[&str]) -> HashSet<String> {
         engine_labels
             .iter()
@@ -853,7 +855,7 @@ mod tests {
         metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 3, 10, 2, 4, 5, 0, 0));
         metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 4, 10, 7, 8, 1, 0, 0));
         let mut timing = metrics.request_timing(0, Instant::now());
-        timing.record_tokens(1);
+        timing.record_token();
         timing.record_normal_completion();
 
         let running = gather_family(&registry, "vllm:num_requests_running");
@@ -903,7 +905,7 @@ mod tests {
         metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 2, 10, 4, 5, 0, 1, 2));
 
         let mut timing = metrics.request_timing(0, Instant::now());
-        timing.record_tokens(1);
+        timing.record_token();
         timing.record_normal_completion();
 
         let running = gather_family(&registry, "sglang:num_running_reqs");
@@ -988,7 +990,7 @@ mod tests {
         let (registry, metrics) = register_for_test(EngineType::Sglang, 1, "decode");
 
         let mut timing = metrics.request_timing(0, Instant::now() - Duration::from_millis(10));
-        timing.record_tokens(1);
+        timing.record_token();
         assert_eq!(
             histogram_count(&registry, "sglang:time_to_first_token_seconds"),
             1
@@ -1008,7 +1010,7 @@ mod tests {
         assert_eq!(counter_value(&registry, "sglang:num_requests_total"), 0.0);
 
         std::thread::sleep(Duration::from_millis(1));
-        timing.record_tokens(1);
+        timing.record_token();
         timing.record_normal_completion();
         assert_eq!(
             histogram_count(&registry, "sglang:inter_token_latency_seconds"),
@@ -1026,7 +1028,7 @@ mod tests {
 
         // A one-token request, such as a prefill worker's, has no TPOT.
         let mut single_token = metrics.request_timing(0, Instant::now());
-        single_token.record_tokens(1);
+        single_token.record_token();
         single_token.record_normal_completion();
         assert_eq!(
             histogram_count(&registry, "sglang:time_to_first_token_seconds"),
@@ -1048,7 +1050,7 @@ mod tests {
         let (registry, metrics) = register_for_test(EngineType::Vllm, 1, "unified");
 
         let mut timing = metrics.request_timing(0, Instant::now());
-        timing.record_tokens(1);
+        timing.record_token();
         timing.record_normal_completion();
 
         let family = gather_family(&registry, "vllm:request_time_per_output_token_seconds");
@@ -1064,13 +1066,13 @@ mod tests {
         metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 4, 10, 7, 8, 0, 0, 0));
 
         let mut timing = metrics.request_timing(1, Instant::now());
-        timing.record_tokens(1);
+        timing.record_token();
         std::thread::sleep(Duration::from_millis(1));
-        timing.record_tokens(1);
+        timing.record_token();
         timing.record_normal_completion();
 
         let mut single_token = metrics.request_timing(0, Instant::now());
-        single_token.record_tokens(1);
+        single_token.record_token();
         single_token.record_normal_completion();
 
         let running = gather_family(&registry, "trtllm_num_requests_running");
@@ -1104,5 +1106,52 @@ mod tests {
         let text = registry.prometheus_expfmt_combined().unwrap();
         assert!(!text.contains("trtllm:"));
         assert!(!text.contains("inter_token_latency"));
+    }
+
+    #[test]
+    fn sglang_prefill_worker_skips_ttft() {
+        let (registry, metrics) = register_for_test(EngineType::Sglang, 1, "prefill");
+
+        let mut timing = metrics.request_timing(0, Instant::now());
+        timing.record_token();
+        timing.record_normal_completion();
+
+        assert_eq!(
+            histogram_count(&registry, "sglang:e2e_request_latency_seconds"),
+            1
+        );
+        assert_eq!(counter_value(&registry, "sglang:num_requests_total"), 1.0);
+        let text = registry.prometheus_expfmt_combined().unwrap();
+        assert!(!text.contains("sglang:time_to_first_token_seconds_count"));
+    }
+
+    #[test]
+    fn e2e_ends_at_last_token_except_sglang() {
+        let handoff = Duration::from_millis(50);
+        for (engine_type, family, ends_at_completion) in [
+            (
+                EngineType::Trtllm,
+                "trtllm_e2e_request_latency_seconds",
+                false,
+            ),
+            (
+                EngineType::Sglang,
+                "sglang:e2e_request_latency_seconds",
+                true,
+            ),
+        ] {
+            let (registry, metrics) = register_for_test(engine_type, 1, "prefill");
+            let mut timing = metrics.request_timing(0, Instant::now());
+            timing.record_token();
+            std::thread::sleep(handoff);
+            timing.record_normal_completion();
+
+            let e2e = gather_family(&registry, family).get_metric()[0]
+                .histogram
+                .as_ref()
+                .unwrap()
+                .sample_sum();
+            assert_eq!(e2e >= handoff.as_secs_f64(), ends_at_completion, "{family}");
+        }
     }
 }
