@@ -65,17 +65,22 @@ pub(crate) enum SelectedStructuralTagBuilder {
 
 impl SelectedStructuralTagBuilder {
     fn for_parser(parser_name: &str, reasoning_parser: Option<&str>) -> Option<Self> {
-        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            Some(parser_name),
-            reasoning_parser,
-        )
-        .is_some()
-            && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
-        {
-            return Some(Self::V2(builder));
+        if let Some((_, builder)) = Self::for_unified_parser(Some(parser_name), reasoning_parser) {
+            return Some(builder);
         }
 
         v1::StructuralTagBuilder::for_parser(parser_name).map(Self::V1)
+    }
+
+    pub(super) fn for_unified_parser(
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> Option<(&'static str, Self)> {
+        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            tool_call_parser,
+            reasoning_parser,
+        )?;
+        v2::StructuralTagBuilder::for_parser(family).map(|builder| (family, Self::V2(builder)))
     }
 
     fn build(
@@ -224,19 +229,6 @@ pub(crate) fn structural_tag_decision(
         return Ok(StructuralTagDecision::NotApplicable);
     }
 
-    // shortcut: v1 Harmony's <|call|> conflicts with XGrammar stop-token handling.
-    // Remove once v1 fixes https://github.com/mlc-ai/xgrammar/issues/701.
-    // The v2 grammar completes before the engine-owned stop token.
-    if matches!(parser_name, Some("harmony" | "gpt_oss"))
-        && crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            parser_name,
-            reasoning_parser,
-        )
-        .is_none()
-    {
-        return Ok(StructuralTagDecision::NotApplicable);
-    }
-
     if config.is_none() && !requires_intrinsic_structural_tag(parser_name, tool_choice) {
         return Ok(StructuralTagDecision::NotApplicable);
     }
@@ -305,8 +297,10 @@ pub(crate) fn structural_tag_decision(
 }
 
 impl OpenAIPreprocessor {
-    pub(super) fn apply_gpt_oss_json_tag(
+    pub(super) fn apply_structured_output_tag(
         &self,
+        parser_name: &str,
+        builder: SelectedStructuralTagBuilder,
         schema: &serde_json::Value,
         starts_in_reasoning: bool,
         request: &mut PreprocessedRequest,
@@ -316,13 +310,6 @@ impl OpenAIPreprocessor {
             .structural_tag
             .clone()
             .unwrap_or_default();
-        // The v2 GPT-OSS family gate also supports reasoning-parser-only deployments.
-        let parser_name = "gpt_oss";
-        let builder = SelectedStructuralTagBuilder::for_parser(
-            parser_name,
-            self.runtime_config.reasoning_parser.as_deref(),
-        )
-        .expect("GPT-OSS v2 structural tag builder is registered");
         let applied = apply_structural_tag(
             parser_name,
             builder.build(&StructuralTagBuildRequest {

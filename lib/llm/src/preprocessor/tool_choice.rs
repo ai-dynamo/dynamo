@@ -5,7 +5,9 @@
 
 use std::borrow::Cow;
 
-use crate::preprocessor::structural_tag::requires_native_tool_call_format;
+use crate::preprocessor::structural_tag::{
+    SelectedStructuralTagBuilder, requires_native_tool_call_format,
+};
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::{
@@ -125,10 +127,11 @@ impl OpenAIPreprocessor {
         // If the structural-tag layer did not compose this response format with
         // auto tool calls, it remains the sole assistant-output constraint.
         if !is_forced_tool_choice && has_response_format_constraint {
-            if crate::protocols::openai::chat_completions::unified_parser::selected_family(
-                self.tool_call_parser.as_deref(),
-                self.runtime_config.reasoning_parser.as_deref(),
-            ) == Some("gpt_oss")
+            if let Some((parser_name @ "gpt_oss", builder)) =
+                SelectedStructuralTagBuilder::for_unified_parser(
+                    self.tool_call_parser.as_deref(),
+                    self.runtime_config.reasoning_parser.as_deref(),
+                )
             {
                 let schema = match request.inner.response_format.as_ref() {
                     Some(ResponseFormat::JsonSchema { json_schema }) => {
@@ -141,7 +144,9 @@ impl OpenAIPreprocessor {
                 };
                 // GPT-OSS's engine reasoner does not defer a bare JSON grammar.
                 // The Harmony envelope owns reasoning even without tool-call tags.
-                if self.apply_gpt_oss_json_tag(
+                if self.apply_structured_output_tag(
+                    parser_name,
+                    builder,
                     &schema,
                     prompt_injected_reasoning,
                     common_request,
@@ -182,7 +187,14 @@ impl OpenAIPreprocessor {
                         &parser_tool_choice,
                         request.inner.parallel_tool_calls,
                     )
-                    && self.apply_gpt_oss_json_tag(
+                    && let Some((parser_name, builder)) =
+                        SelectedStructuralTagBuilder::for_unified_parser(
+                            self.tool_call_parser.as_deref(),
+                            self.runtime_config.reasoning_parser.as_deref(),
+                        )
+                    && self.apply_structured_output_tag(
+                        parser_name,
+                        builder,
                         schema,
                         prompt_injected_reasoning,
                         common_request,
