@@ -365,7 +365,6 @@ impl HicacheSharedKvCache {
             );
         }
 
-        // Verified-group state only feeds the legacy lookup; layouts check keys directly.
         let track_groups = self
             .last_layout
             .load()
@@ -685,7 +684,6 @@ fn mooncake_config_from_runtime(
             );
             // A malformed explicit layout must not disappear from the worker
             // set and let another worker's legacy guesses certify its objects.
-            // Any other unreadable config is skipped, as before layouts existed.
             let has_layout = runtime_config
                 .get_engine_specific::<serde_json::Value>(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY)
                 .ok()
@@ -1151,7 +1149,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_blocks_hits_deepseek_v4_pool_suffixed_keys() {
-        // Regression: the guessed `_k`/`_v` layout never matches DeepSeek V4's per-pool keys.
         let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72".to_string();
         let config = SglangHicacheMooncakeConfig {
             hicache_object_layout: object_layout(vec![
@@ -1233,7 +1230,6 @@ mod tests {
             ],
         );
 
-        // Regression: the flat `.all()` check dropped the leading page.
         let hits = cache
             .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
             .await
@@ -1256,7 +1252,6 @@ mod tests {
         store_pool_pages(&cache, &hashes, "__data", &[0, 1, 2, 3, 4, 5]);
         store_pool_pages(&cache, &hashes, "__swa", &[2, 3, 4]);
         // Prefixes 1..3 fail; 4 and 5 work; full request (6) fails.
-        // Do not stop at the first hole or credit all six data pages.
         let hits = cache.check_blocks(&tokens, 4, None).await.unwrap();
         assert_eq!(hits.ranges, vec![0..5]);
         assert_eq!(hits.total_hits, 5);
@@ -1529,7 +1524,6 @@ mod tests {
             group_id: None,
         };
 
-        // Another tenant's object with the same key must not count as a hit.
         cache.apply_batch(&"tenant-a".into(), 1, vec![stored("default")]);
         assert_eq!(hits(&cache).await, 0);
         cache.apply_batch(&"tenant-a".into(), 2, vec![stored("tenant-a")]);

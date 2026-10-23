@@ -36,7 +36,6 @@ use crate::protocol::{
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
-/// Same variable `register.py` reads; takes precedence over the extra config.
 const MOONCAKE_KV_EVENTS_ENDPOINT_ENV: &str = "DYN_MOONCAKE_KV_EVENTS_ENDPOINT";
 
 pub struct SglangSidecarEngine {
@@ -1102,8 +1101,6 @@ fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -
     }
 }
 
-/// Build only advertised L3 metadata; absent/disabled layouts never guess keys.
-///
 /// Unlike `register.py`, there is no static-metadata fallback: engines without a
 /// layout envelope, and layouts SGLang cannot describe (MHA, incomplete PP stages),
 /// publish nothing, so L3 lookup stays off for those workers.
@@ -1216,8 +1213,7 @@ fn mooncake_runtime_data(
                 .filter(|size| *size > 0)
                 .ok_or("server_info.tp_size")?,
         };
-        // Like register.py, an unreadable extra config (bad JSON, an `@file` reference,
-        // wrong type) is ignored: the layout carries everything the router needs.
+        // The layout already carries what the router needs, so a bad extra config is ignored.
         let extra = match server_info.get("hicache_storage_backend_extra_config") {
             None | Some(Value::Null) => serde_json::json!({}),
             Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)

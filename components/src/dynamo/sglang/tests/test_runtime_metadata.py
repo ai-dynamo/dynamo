@@ -706,7 +706,6 @@ def test_registration_accepts_uint32_trailing_pages_limit(
 def test_registration_ignores_invalid_tp_lcm_size_with_layout(
     mooncake_registration, hicache_layout_envelope, tp_lcm_size
 ):
-    # The layout never reads tp_lcm_size, so a bad value must not disable L3.
     args = mooncake_registration.server_args
     args.hicache_storage_backend_extra_config["tp_lcm_size"] = tp_lcm_size
     config = mooncake_registration.run()
