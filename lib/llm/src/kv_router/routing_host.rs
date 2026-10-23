@@ -43,8 +43,7 @@ use crate::{
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, explicit_target_from_hints, from_table, invalid_argument,
-        subagent_group_affinity_id,
+        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -702,14 +701,6 @@ impl RoutingHost {
     /// or when dispatching: a worker disappearing later is a service failure.
     fn validate_explicit_worker(
         &self,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-    ) -> Result<(), Error> {
-        self.validate_explicit_worker_hints(request.routing.as_ref(), phase)
-    }
-
-    fn validate_explicit_worker_hints(
-        &self,
         routing: Option<&RoutingHints>,
         phase: RequestPhase,
     ) -> Result<(), Error> {
@@ -817,7 +808,7 @@ impl RoutingHost {
         let Some(session_id) = request.session_affinity_id()? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target_from_hints(request.routing_hints(), phase)?;
+        let explicit = explicit_target(request.routing_hints(), phase)?;
         let session_id = self
             .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);

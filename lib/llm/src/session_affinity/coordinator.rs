@@ -322,15 +322,8 @@ pub fn affinity_id(
         .map_err(|message| invalid_argument(format!("invalid session affinity context: {message}")))
 }
 
-pub fn explicit_target(
-    request: &PreprocessedRequest,
-    phase: RequestPhase,
-) -> Result<Option<AffinityTarget>, Error> {
-    explicit_target_from_hints(request.routing.as_ref(), phase)
-}
-
 /// The worker a caller named for `phase` in its routing hints, if any.
-pub fn explicit_target_from_hints(
+pub fn explicit_target(
     routing: Option<&crate::protocols::common::preprocessor::RoutingHints>,
     phase: RequestPhase,
 ) -> Result<Option<AffinityTarget>, Error> {

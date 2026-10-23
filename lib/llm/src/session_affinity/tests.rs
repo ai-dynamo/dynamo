@@ -115,15 +115,15 @@ fn session_affinity_explicit_targets_are_phase_local_and_preserve_rank_zero() {
     });
 
     assert_eq!(
-        explicit_target(&request, RequestPhase::Prefill).unwrap(),
+        explicit_target(request.routing.as_ref(), RequestPhase::Prefill).unwrap(),
         Some(target(2, Some(4)))
     );
     assert_eq!(
-        explicit_target(&request, RequestPhase::Decode).unwrap(),
+        explicit_target(request.routing.as_ref(), RequestPhase::Decode).unwrap(),
         Some(target(3, Some(0)))
     );
     assert_eq!(
-        explicit_target(&request, RequestPhase::Aggregated).unwrap(),
+        explicit_target(request.routing.as_ref(), RequestPhase::Aggregated).unwrap(),
         Some(target(3, Some(0)))
     );
 
@@ -132,7 +132,7 @@ fn session_affinity_explicit_targets_are_phase_local_and_preserve_rank_zero() {
         ..Default::default()
     });
     assert_eq!(
-        explicit_target(&decode_only, RequestPhase::Aggregated).unwrap(),
+        explicit_target(decode_only.routing.as_ref(), RequestPhase::Aggregated).unwrap(),
         Some(target(3, None))
     );
 
@@ -140,7 +140,7 @@ fn session_affinity_explicit_targets_are_phase_local_and_preserve_rank_zero() {
         dp_rank: Some(0),
         ..Default::default()
     });
-    assert!(explicit_target(&rank_without_worker, RequestPhase::Decode).is_err());
+    assert!(explicit_target(rank_without_worker.routing.as_ref(), RequestPhase::Decode).is_err());
 }
 
 #[test]
