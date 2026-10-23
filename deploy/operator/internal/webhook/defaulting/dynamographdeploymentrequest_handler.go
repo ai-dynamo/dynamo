@@ -83,9 +83,14 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	}
 
 	// The original request version decides what spec.v1beta2 means. A native v1beta2 Request
-	// is defaulted from its carrier on CREATE and UPDATE; only CREATE reads the cluster.
+	// is defaulted from its carrier on CREATE and UPDATE; only CREATE
+	// and an UPDATE that changes spec.hardware read the cluster.
 	if internalwebhook.RequestUsesV1Beta2(req) && dgdr.Spec.V1Beta2 != nil {
-		return defaultDynamoGraphDeploymentRequestV1beta2(ctx, dgdr, req.Operation, d.v1beta2)
+		oldSpec, err := decodeOldSpecV1beta2(req.Operation, req.OldObject.Raw)
+		if err != nil {
+			return err
+		}
+		return defaultDynamoGraphDeploymentRequestV1beta2(ctx, dgdr, req.Operation, oldSpec, d.v1beta2)
 	}
 	// A foreign-version view (a carrier written or updated through the wrong API version, or
 	// a v1beta1 payload written through v1beta2) is read-only; validation enforces that.

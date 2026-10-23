@@ -25,6 +25,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	admissionv1 "k8s.io/api/admission/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -75,26 +76,32 @@ type DGDRV1beta2Options struct {
 func (o DGDRV1beta2Options) resolveDefaults(
 	ctx context.Context,
 	operation admissionv1.Operation,
-	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
+	oldSpec, spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 ) dynamoGraphDeploymentRequestV1beta2DefaultOptions {
 	return dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:        o.resolveHardware(ctx, operation, spec),
+		hardware:        o.resolveHardware(ctx, operation, oldSpec, spec),
 		aisimulateImage: o.AISimulateImage,
 	}
 }
 
-// resolveHardware returns the SKU and budget the typed spec omits on CREATE. It asks the cluster only
+// resolveHardware returns the SKU and budget the typed spec omits. It asks the cluster only
 // when something is missing, restricted to the typed SKU when there is one.
+//
+// Discovery runs on CREATE and on an UPDATE that changes spec.hardware. A Request stays
+// mutable and every Run snapshots it, so a caller may change or remove typed hardware before
+// the next Run. An UPDATE that leaves spec.hardware unchanged, metadata-only ones included,
+// never asks the cluster: a Request created while discovery had nothing to offer must not
+// pick hardware up once discovery recovers, which would change its spec and generation behind
+// the writer's back. oldSpec is the stored spec on UPDATE and nil otherwise. The decision reads
+// the typed hardware alone, never spec.aisimulate.parameters.
 func (o DGDRV1beta2Options) resolveHardware(
 	ctx context.Context,
 	operation admissionv1.Operation,
-	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
+	oldSpec, spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 ) hardwareDefaultsV1beta2 {
-	// Discovery is a CREATE-time decision. A Request that omitted its hardware and was
-	// created while discovery had nothing to offer must not pick hardware up on a later
-	// metadata-only update: that would change the spec, and its generation, behind the
-	// writer's back. Any other operation, known or not, leaves the hardware alone.
-	if operation != admissionv1.Create || o.Hardware == nil {
+	changed := operation == admissionv1.Update && oldSpec != nil &&
+		!apiequality.Semantic.DeepEqual(oldSpec.Hardware, spec.Hardware)
+	if o.Hardware == nil || (operation != admissionv1.Create && !changed) {
 		return hardwareDefaultsV1beta2{}
 	}
 	var sku string
