@@ -28,7 +28,6 @@ from gpu_memory_service.integrations.sglang.memory_saver import (
     get_gms_memory_saver_impl,
 )
 from gpu_memory_service.integrations.sglang.patches import (
-    patch_model_runner,
     patch_static_state_for_gms,
     patch_torch_memory_saver,
     patch_xpu_kv_cache_sizing_for_gms,
@@ -44,7 +43,6 @@ logger = logging.getLogger(__name__)
 #   child unpickles server_args.load_format -> imports GMSModelLoader -> here.
 patch_empty_cache()
 patch_torch_memory_saver()
-patch_model_runner()
 patch_xpu_kv_cache_sizing_for_gms()
 patch_static_state_for_gms()
 logger.info("[GMS] Applied patches")
@@ -59,8 +57,8 @@ class GMSModelLoader(BaseModelLoader):
     into ModelRunner.account_preloaded_weights() before allocating pools.
     """
 
-    # SGLang adds this to its memory baseline. Keep it 0 because
-    # patch_model_runner already adds the read-mode preloaded bytes.
+    # SGLang adds this to its memory baseline. 0 unless _load_import_only()
+    # sets it (CUDA readers only).
     preloaded_weights_bytes = 0
 
     def __init__(self, load_config):
@@ -132,10 +130,9 @@ class GMSModelLoader(BaseModelLoader):
         #   impl.preloaded_weights_bytes (GMSMemorySaverImpl)
         #       Bytes imported outside this engine's torch allocator (0 for a
         #       writer). The XPU probe patch subtracts these from reported free
-        #       memory; on SGLang < 0.5.19 the legacy patch_model_runner()
-        #       add-back also reads it.
+        #       memory.
         #   self.preloaded_weights_bytes (GMSModelLoader)
-        #       Bytes SGLang (>= 0.5.19) should add to its pre-load baseline
+        #       Bytes SGLang should add to its pre-load baseline
         #       when calculating headroom. Platform dependent; see below.
         impl.imported_weights_bytes = allocator.total_bytes
         impl.preloaded_weights_bytes = allocator.total_bytes
