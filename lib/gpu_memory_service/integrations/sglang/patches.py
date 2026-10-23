@@ -4,7 +4,6 @@
 """SGLang-specific patches for GPU Memory Service integration.
 
 - patch_torch_memory_saver: Routes weights and kv_cache to GMS
-- patch_model_runner: Fixes memory accounting with pre-loaded weights
 - patch_xpu_kv_cache_sizing_for_gms: Makes the XPU KV sizing probe see GMS weights
 - patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
 """
@@ -26,7 +25,6 @@ from gpu_memory_service.integrations.sglang.memory_saver import (
 logger = logging.getLogger(__name__)
 
 _torch_memory_saver_patched = False
-_model_runner_patched = False
 _xpu_kv_cache_sizing_patched = False
 _static_state_patched = False
 
@@ -154,74 +152,6 @@ def patch_torch_memory_saver() -> None:
 
     _torch_memory_saver_patched = True
     logger.debug("[GMS] Patched torch_memory_saver")
-
-
-def patch_model_runner() -> None:
-    """Patch SGLang's ModelRunner to size KV cache with GMS-resident weights.
-
-    SGLang's KV sizing formula reserves dynamic headroom from a free-memory
-    snapshot taken before its own model load. In GMS read mode, the committed
-    weight handles already exist in the GMS server before that snapshot, so the
-    snapshot is lower by those weights. Add just those preloaded weight bytes
-    back to the baseline. Do not adjust write mode: weights are loaded after
-    the snapshot there, so upstream's formula already subtracts them correctly.
-
-    Only needed on SGLang builds that predate native preloaded-weight
-    accounting. v0.5.19 and later ships ModelRunner.account_preloaded_weights(),
-    which Scheduler.init_target_memory_pool() calls with the value read from
-    GMSModelLoader.preloaded_weights_bytes. Applying both would add the weight
-    bytes to the baseline twice and oversize the KV cache, so skip the patch
-    whenever upstream owns the accounting.
-    """
-    global _model_runner_patched
-
-    if _model_runner_patched:
-        return
-
-    try:
-        from sglang.srt.model_executor.model_runner import ModelRunner
-    except ImportError:
-        logger.warning("[GMS] Could not import ModelRunner, skipping patch")
-        return
-
-    if hasattr(ModelRunner, "account_preloaded_weights"):
-        _model_runner_patched = True
-        logger.info(
-            "[GMS] SGLang accounts for preloaded weights natively; "
-            "skipping ModelRunner.alloc_memory_pool patch"
-        )
-        return
-
-    if hasattr(ModelRunner, "_gms_patched"):
-        return
-
-    original_alloc_memory_pool = ModelRunner.alloc_memory_pool
-
-    def patched_alloc_memory_pool(self, *args, **kwargs):
-        impl = get_gms_memory_saver_impl()
-        if (
-            impl is not None
-            and impl.preloaded_weights_bytes > 0
-            and not self.__dict__.get("_gms_memory_baseline_adjusted", False)
-        ):
-            preloaded_weights_gib = impl.preloaded_weights_bytes / (1 << 30)
-            old_value = self.pre_model_load_memory
-            self.pre_model_load_memory += preloaded_weights_gib
-            self._gms_memory_baseline_adjusted = True
-            logger.info(
-                "[GMS] Adjusted pre_model_load_memory for preloaded weights: "
-                "%.2f GiB + %.2f GiB = %.2f GiB",
-                old_value,
-                preloaded_weights_gib,
-                self.pre_model_load_memory,
-            )
-
-        return original_alloc_memory_pool(self, *args, **kwargs)
-
-    ModelRunner.alloc_memory_pool = patched_alloc_memory_pool
-    ModelRunner._gms_patched = True
-    _model_runner_patched = True
-    logger.info("[GMS] Patched ModelRunner.alloc_memory_pool")
 
 
 def patch_xpu_kv_cache_sizing_for_gms() -> None:

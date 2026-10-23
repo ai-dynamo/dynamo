@@ -3,9 +3,8 @@
 
 """CPU-only tests for the SGLang GMS patches.
 
-Covers ModelRunner memory accounting, the XPU KV sizing probe rebind, and
-the torch_memory_saver hook_mode claim that decides whether GMS installs its
-own impl.
+Covers the XPU KV sizing probe rebind and the torch_memory_saver hook_mode
+claim that decides whether GMS installs its own impl.
 """
 
 import sys
@@ -36,86 +35,6 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.gpu_0,
 ]
-
-
-def _patch_model_runner(monkeypatch, model_runner, preloaded_weights_bytes):
-    module_name = "sglang.srt.model_executor.model_runner"
-    module = ModuleType(module_name)
-    module.ModelRunner = model_runner
-    monkeypatch.setitem(sys.modules, module_name, module)
-    monkeypatch.setattr(patches, "_model_runner_patched", False)
-    monkeypatch.setattr(
-        patches,
-        "get_gms_memory_saver_impl",
-        lambda: SimpleNamespace(preloaded_weights_bytes=preloaded_weights_bytes),
-    )
-    patches.patch_model_runner()
-
-
-def test_patch_model_runner_adjusts_persistent_baseline_once(monkeypatch):
-    class ModelRunner:
-        def alloc_memory_pool(self, memory_pool_config=None):
-            self.calls.append((self.pre_model_load_memory, memory_pool_config))
-            return memory_pool_config
-
-    _patch_model_runner(monkeypatch, ModelRunner, 2 << 30)
-    patched_method = ModelRunner.alloc_memory_pool
-    patches.patch_model_runner()
-    monkeypatch.setattr(patches, "_model_runner_patched", False)
-    patches.patch_model_runner()
-
-    runner = ModelRunner()
-    runner.pre_model_load_memory = 10.0
-    runner.calls = []
-    positional_config = object()
-    keyword_config = object()
-
-    assert runner.alloc_memory_pool(positional_config) is positional_config
-    assert runner.alloc_memory_pool(memory_pool_config=keyword_config) is keyword_config
-    assert ModelRunner.alloc_memory_pool is patched_method
-    assert runner.pre_model_load_memory == 12.0
-    assert runner.calls == [(12.0, positional_config), (12.0, keyword_config)]
-
-
-def test_patch_model_runner_leaves_baseline_unchanged_without_preload(monkeypatch):
-    class ModelRunner:
-        def alloc_memory_pool(self):
-            return self.pre_model_load_memory
-
-    _patch_model_runner(monkeypatch, ModelRunner, 0)
-    runner = ModelRunner()
-    runner.pre_model_load_memory = 10.0
-
-    assert runner.alloc_memory_pool() == 10.0
-    assert runner.pre_model_load_memory == 10.0
-
-
-def test_patch_model_runner_skips_when_upstream_accounts(monkeypatch):
-    """SGLang >=0.5.21 accounts for preloaded weights itself.
-
-    Applying the legacy patch on top would add the weight bytes to
-    pre_model_load_memory twice and oversize the KV cache.
-    """
-
-    class ModelRunner:
-        def account_preloaded_weights(self, preloaded_weights_bytes):
-            self.pre_model_load_memory += preloaded_weights_bytes / (1 << 30)
-
-        def alloc_memory_pool(self, memory_pool_config=None):
-            return self.pre_model_load_memory
-
-    original_method = ModelRunner.alloc_memory_pool
-    _patch_model_runner(monkeypatch, ModelRunner, 2 << 30)
-
-    assert ModelRunner.alloc_memory_pool is original_method
-    assert not hasattr(ModelRunner, "_gms_patched")
-
-    runner = ModelRunner()
-    runner.pre_model_load_memory = 10.0
-    runner.account_preloaded_weights(2 << 30)
-
-    assert runner.alloc_memory_pool() == 12.0
-    assert runner.pre_model_load_memory == 12.0
 
 
 def _install_probe_modules(monkeypatch, free_gb):
