@@ -574,23 +574,14 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:         "v1beta2 failed discovery leaves the hardware unresolved and is admitted",
-			request:      v1beta2DGDRForAdmission(nil, nil),
-			gpuDiscovery: true,
-			discoveryErr: errors.New("no GPUs found"),
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				v1beta2Absent(t, result, "spec", "hardware")
-			},
-		},
-		{
 			name: "v1beta2 parameters are stored untouched and never decide hardware defaulting",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2SearchSpace(spec, map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": int64(4)})
 			}, nil),
 			gpuDiscovery: true,
-			discoveryErr: errors.New("no GPUs found"),
+			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				v1beta2Absent(t, result, "spec", "hardware")
+				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
 				if got := v1beta2String(t, result, "spec", "aisimulate", "parameters", "search_space", "hardware_sku"); got != "h100_sxm" {
 					t.Fatalf("parameters.search_space.hardware_sku = %q, want h100_sxm", got)
 				}
@@ -610,7 +601,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1beta2 metadata-only update does not rediscover hardware after discovery recovers",
+			name: "v1beta2 metadata-only update does not read the cluster again",
 			oldRequest: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2SearchSpace(spec, map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": int64(8)})
 			}, nil),
@@ -618,10 +609,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				setV1beta2SearchSpace(spec, map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": int64(8)})
 			}, map[string]any{"updated": "true"}),
 			gpuDiscovery: true,
-			discoveryErr: errors.New("no GPUs found"),
-			beforeUpdate: func(*testing.T) { admissionHardware.set(discoveredH200, nil) },
+			discovered:   discoveredH200,
+			beforeUpdate: func(*testing.T) {
+				admissionHardware.set(gpu.GPUInfo{}, errors.New("the cluster is unreadable"))
+			},
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				v1beta2Absent(t, result, "spec", "hardware")
+				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
 				if got := result.GetGeneration(); got != 1 {
 					t.Fatalf("generation = %d, want 1: the spec must not change", got)
 				}
@@ -754,6 +747,169 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name:         "v1beta2 model-only request stores the configured AISimulate image and its override",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2AdmissionDefaults(t, result)
+			},
+		},
+		{
+			name: "v1beta2 caller image does not receive the operator's version override",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["aisimulate"] = map[string]any{"image": "registry.example.com/aisimulate:1.4.0"}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "aisimulate", "image"); got != "registry.example.com/aisimulate:1.4.0" {
+					t.Fatalf("aisimulate.image = %q, want the caller's image", got)
+				}
+				if _, found, _ := unstructured.NestedString(result.Object, "spec", "aisimulate", "versionOverride"); found {
+					t.Fatalf("aisimulate.versionOverride was set next to a caller's image")
+				}
+			},
+		},
+		{
+			name: "v1beta2 caller override wins next to the configured image",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["aisimulate"] = map[string]any{"versionOverride": "2.0.0"}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "aisimulate", "image"); got != admissionAISimulateImage {
+					t.Fatalf("aisimulate.image = %q, want the configured image", got)
+				}
+				if got := v1beta2String(t, result, "spec", "aisimulate", "versionOverride"); got != "2.0.0" {
+					t.Fatalf("aisimulate.versionOverride = %q, want the caller's 2.0.0", got)
+				}
+			},
+		},
+
+		{
+			name:         "v1beta2 hardware omitted is discovered and the budget capped",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2GPUValues(t, result, "h200_sxm", 32)
+			},
+		},
+		{
+			name: "v1beta2 an empty hardware object is automatic discovery",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
+			},
+		},
+		{
+			name: "v1beta2 a SKU alone keeps the SKU and persists the capped budget",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm"}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 8},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2GPUValues(t, result, "h100_sxm", 32)
+			},
+		},
+		{
+			name: "v1beta2 a budget alone keeps the budget and discovers the SKU",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{"budget": int64(4)}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2GPUValues(t, result, "h200_sxm", 4)
+			},
+		},
+		{
+			name: "v1beta2 a SKU and a budget are kept without reading the cluster",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
+			}, nil),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("the cluster must not be read"),
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2GPUValues(t, result, "h100_sxm", 4)
+			},
+		},
+		{
+			name: "v1beta2 an explicit budget above the cap and the cluster size is kept",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{"budget": int64(64)}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2GPUValues(t, result, "h200_sxm", 64)
+			},
+		},
+		{
+			name:         "v1beta2 a failed discovery is rejected",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("no GPUs found"),
+			wantWebhook: []string{
+				"spec.hardware.gpu: Required value: the cluster's GPUs could not be discovered (no GPUs found); " +
+					"set spec.hardware.gpu.sku and spec.hardware.gpu.budget",
+			},
+		},
+		{
+			name:         "v1beta2 a GPU model the catalog does not know is rejected",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{Model: "Mystery GPU", GPUsPerNode: 8, NodesWithGPUs: 1},
+			wantWebhook: []string{
+				`spec.hardware.gpu.sku: Required value: the cluster's GPU model "Mystery GPU" maps to no AISimulate SKU; ` +
+					"set spec.hardware.gpu.sku",
+			},
+		},
+		{
+			name:         "v1beta2 a heterogeneous cluster does not pick a SKU",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discovered: gpu.GPUInfo{
+				System: "h200_sxm", Model: "H200", GPUsPerNode: 8, NodesWithGPUs: 1, OtherModels: []string{"H100"},
+			},
+			wantWebhook: []string{
+				"spec.hardware.gpu.sku: Required value: the cluster has several GPU types (H200, H100); " +
+					"set spec.hardware.gpu.sku",
+			},
+		},
+		{
+			name: "v1beta2 a pinned SKU is accepted in a heterogeneous cluster",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h200_sxm"}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
+			},
+		},
+
+		{
+			name: "v1beta2 a SKU without any matching GPU is rejected",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm"}}
+			}, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{System: "h100_sxm"},
+			wantWebhook: []string{
+				`spec.hardware.gpu.budget: Required value: no GPUs of SKU "h100_sxm" were found in the cluster; ` +
+					"set spec.hardware.gpu.budget",
+			},
+		},
+
+		{
 			name: "v1beta2 empty objective and recommendation receive their defaults",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{}
@@ -877,32 +1033,19 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:               "v1beta2 metadata-only update does not pick up hardware once discovery recovers",
-			oldRequest:         v1beta2DGDRForAdmission(nil, nil),
-			seedWithoutWebhook: true, // stored before hardware was validated
-			request:            v1beta2DGDRForAdmission(nil, map[string]any{"updated": "true"}),
-			gpuDiscovery:       true,
-			discoveryErr:       errors.New("no GPUs found"),
-			beforeUpdate:       func(*testing.T) { admissionHardware.set(discoveredH200, nil) },
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if result.GetGeneration() != 1 {
-					t.Fatalf("generation = %d, want 1: an update must not rewrite the spec", result.GetGeneration())
-				}
-				v1beta2Absent(t, result, "spec", "hardware")
-			},
-		},
-		{
-			name:         "v1beta2 native-only hardware survives a metadata-only update after discovery recovers",
+			name:         "v1beta2 native hardware survives a metadata-only update when the cluster is unreadable",
 			oldRequest:   v1beta2NativeHardwareDGDR(nil),
 			request:      v1beta2NativeHardwareDGDR(map[string]any{"updated": "true"}),
 			gpuDiscovery: true,
-			discoveryErr: errors.New("no GPUs found"),
-			beforeUpdate: func(*testing.T) { admissionHardware.set(discoveredH200, nil) },
+			discovered:   discoveredH200,
+			beforeUpdate: func(*testing.T) {
+				admissionHardware.set(gpu.GPUInfo{}, errors.New("the cluster is unreadable"))
+			},
 			check: func(t *testing.T, result *unstructured.Unstructured) {
 				if result.GetGeneration() != 1 {
 					t.Fatalf("generation = %d, want 1", result.GetGeneration())
 				}
-				v1beta2Absent(t, result, "spec", "hardware")
+				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
 				if got := v1beta2String(t, result, "spec", "aisimulate", "parameters", "search_space", "hardware_sku"); got != "h100_sxm" {
 					t.Fatalf("parameters.search_space.hardware_sku = %q, want h100_sxm", got)
 				}
@@ -1176,7 +1319,8 @@ const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
 func v1beta2NativeHardwareDGDR(labels map[string]any) *unstructured.Unstructured {
 	return v1beta2DGDRForAdmission(func(spec map[string]any) {
 		spec["aisimulate"] = map[string]any{
-			"image": admissionAISimulateImage,
+			"image":           admissionAISimulateImage,
+			"versionOverride": admissionAISimulateVersionOverride,
 			"parameters": map[string]any{
 				"search_space": map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": int64(8)},
 			},
@@ -1336,6 +1480,9 @@ func expectV1beta2AdmissionDefaults(t *testing.T, obj *unstructured.Unstructured
 	if got := v1beta2String(t, obj, "spec", "aisimulate", "image"); got != admissionAISimulateImage {
 		t.Fatalf("aisimulate.image = %q, want %q", got, admissionAISimulateImage)
 	}
+	if got := v1beta2String(t, obj, "spec", "aisimulate", "versionOverride"); got != admissionAISimulateVersionOverride {
+		t.Fatalf("aisimulate.versionOverride = %q, want %q", got, admissionAISimulateVersionOverride)
+	}
 	if got := v1beta2String(t, obj, "spec", "hardware", "gpu", "sku"); got != "h200_sxm" {
 		t.Fatalf("hardware.gpu.sku = %q, want h200_sxm", got)
 	}
@@ -1370,6 +1517,17 @@ func expectV1beta2GPU(t *testing.T, result *unstructured.Unstructured, sku strin
 		t.Fatalf("hardware.gpu.sku = %q, want %q", got, sku)
 	}
 	if got := v1beta2Number(t, result, "spec", "hardware", "gpu", "budget"); got != budget {
+		t.Fatalf("hardware.gpu.budget = %v, want %v", got, budget)
+	}
+}
+
+// expectV1beta2GPUValues checks the typed hardware a Request was stored with.
+func expectV1beta2GPUValues(t *testing.T, obj *unstructured.Unstructured, sku string, budget float64) {
+	t.Helper()
+	if got := v1beta2String(t, obj, "spec", "hardware", "gpu", "sku"); got != sku {
+		t.Fatalf("hardware.gpu.sku = %q, want %q", got, sku)
+	}
+	if got := v1beta2Number(t, obj, "spec", "hardware", "gpu", "budget"); got != budget {
 		t.Fatalf("hardware.gpu.budget = %v, want %v", got, budget)
 	}
 }
