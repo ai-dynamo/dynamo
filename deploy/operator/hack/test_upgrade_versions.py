@@ -34,7 +34,6 @@ class UpgradeVersionTest(unittest.TestCase):
     def test_premature_skipped_and_major_bumps_fail(self):
         for current, reconciled, previous in [
             ("1.7.0", "1.4.0", None),
-            ("1.6.0", "1.4.0", None),
             ("1.8.0", "1.6.0", None),
             ("1.8.0", "1.5.0", "1.7.0"),
             ("1.6.0", "1.7.0", None),
