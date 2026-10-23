@@ -5,18 +5,17 @@
 //! state, so a Relay opens one connection per replica.
 //!
 //! The operator deploys the Global Router, so each replica registers itself
-//! with the hub's Dynamo runtime discovery, like a worker, and the router
-//! reads that list back. It needs the list only for the `RegisterPool` reply.
+//! with the hub's Dynamo runtime discovery, like a worker. Relays get the
+//! list from the Global Discovery Service, as `GET /routers`.
 //!
 //! Runtime discovery lists only Ready pods, and Relays dial only listed
 //! replicas. So a replica's readiness must not wait for its pools, or no
 //! pool can ever reach it. Pool completeness is a separate signal
 //! ([`super::Completeness`]).
 //!
-//! The Relay reads a `ReplicaDirectory` in every mode. In gRPC and Hybrid
-//! modes it is filled from the `RegisterPool` and `Heartbeat` replies
-//! ([`super::Registration::replicas`]). In Kubernetes mode it reads the
-//! router's EndpointSlices that MCS imports into the Relay's cluster.
+//! The Relay reads a `ReplicaDirectory` in every mode, filled from
+//! `GET /routers`. In Kubernetes mode the service's own directory reads the
+//! router's EndpointSlices that MCS imports.
 
 use url::Url;
 

@@ -21,8 +21,8 @@ pub enum PoolDiscoveryMode {
     Grpc {
         lease: LeasePolicy,
     },
-    /// Pools call `RegisterPool`. The router writes records to the hub's
-    /// Kubernetes API.
+    /// Pools call `RegisterPool`. The Global Discovery Service writes records
+    /// to the hub's Kubernetes API.
     Hybrid {
         lease: LeasePolicy,
     },

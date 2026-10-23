@@ -15,10 +15,14 @@
 //! mode, so they are concrete code. The state connections in [`connection`]
 //! are shown for the full picture and are subject to change.
 //!
+//! In the Kubernetes modes, the Global Discovery Service serves these traits
+//! over HTTP: `POST /pools` registers a pool, and `GET /pools` and
+//! `GET /routers` list pools and router replicas.
+//!
 //! | Mode | Pool list stored in | Pools call |
 //! |---|---|---|
 //! | gRPC | Router memory | `RegisterPool` on the router |
-//! | Hybrid | Hub Kubernetes API, written by the router | `RegisterPool` on the router |
+//! | Hybrid | Hub Kubernetes API, written by the Global Discovery Service | `RegisterPool` on the service |
 //! | Kubernetes (SIG Multicluster) | Imported EndpointSlices, written by the MCS implementation | Nothing: the operator creates a `ServiceExport` |
 //! | File | Static file (tests, first deployments) | Nothing |
 
@@ -37,7 +41,7 @@ pub use identity::{
     PeerCredentials, RelayAuthenticator, RelayIdentity, VerifiedRelayIdentity, verify,
 };
 pub use mode::{BuildPoolDiscovery, PoolDiscovery, PoolDiscoveryMode};
-pub use record::{PoolDirectory, PoolEvent, PoolRecord, PoolRecordBuilder, Revision};
+pub use record::{Capacity, PoolDirectory, PoolEvent, PoolRecord, PoolRecordBuilder, Revision};
 pub use registrar::{LeasePolicy, PoolRegistrar, Registration};
 pub use replicas::{ReplicaDirectory, ReplicaEndpoint, ReplicaEvent, ReplicaId};
 pub use watch::{Completeness, Directory, Snapshot, WatchEvent, WatchStream};

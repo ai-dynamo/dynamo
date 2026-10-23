@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use derive_builder::Builder;
+use url::Url;
 
 use super::identity::RelayIdentity;
 use super::watch::{Directory, WatchEvent};
@@ -20,20 +21,37 @@ pub struct Revision(pub u64);
 pub struct PoolRecord {
     pub key: PoolKey,
     pub location: PoolLocation,
-    // The fields below are `None` until the Relay's catalog reports them, in
-    // modes where discovery only knows the pool's name (Kubernetes / MCS).
+    // The fields below are empty until the pool registers them or the Relay's
+    // catalog reports them. Kubernetes (MCS) mode knows only the pool's name.
     /// With `frontend_endpoint`, becomes `RelayPoolScope` in dynamo-llm.
     #[builder(default)]
     pub runtime_namespace: Option<String>,
+    /// Dynamo endpoint path of the pool's frontend, for example
+    /// `frontend.generate`.
     #[builder(default)]
     pub frontend_endpoint: Option<String>,
     #[builder(default)]
     pub model: Option<String>,
+    #[builder(default)]
+    pub capabilities: Vec<String>,
+    /// URLs of the pool's local frontends, which a Global Router sends
+    /// requests to.
+    #[builder(default)]
+    pub frontends: Vec<Url>,
+    #[builder(default)]
+    pub capacity: Vec<Capacity>,
     /// The only identity allowed to register this pool and stream its state.
     #[builder(default)]
     pub relay_identity: Option<RelayIdentity>,
     #[builder(default)]
     pub revision: Revision,
+}
+
+/// The workers of one hardware SKU.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capacity {
+    pub sku: String,
+    pub count: u32,
 }
 
 pub type PoolDirectory = dyn Directory<PoolRecord, PoolKey>;
