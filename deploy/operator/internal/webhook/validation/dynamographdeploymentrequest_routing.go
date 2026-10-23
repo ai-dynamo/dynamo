@@ -18,23 +18,10 @@
 package validation
 
 import (
-	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
-
-// requestIsNative reports whether the represented spec is native to the API version the
-// client used (see internalwebhook.RequestIsNative). hasV1Beta2Carrier is whether the
-// converted v1beta1 object carries spec.v1beta2. Without an admission request in the
-// context (direct calls from unit tests) there is no foreign view, so the request counts as
-// native.
-func (v *dynamoGraphDeploymentRequestValidation) requestIsNative(hasV1Beta2Carrier bool) bool {
-	req, err := admission.RequestFromContext(v.ctx)
-	if err != nil {
-		return true
-	}
-	return internalwebhook.RequestIsNative(req, hasV1Beta2Carrier)
-}
 
 // foreignCreateErrors rejects a spec that conversion alone may produce. The carrier is raw
 // JSON that bypasses structural pruning; it is safe only when conversion built it from a
@@ -50,6 +37,18 @@ func foreignCreateErrors(fldPath *field.Path, hasV1Beta2Carrier bool) field.Erro
 		fldPath,
 		"a v1beta1 representation cannot be written through the v1beta2 API; spec.v1beta1 is a conversion carrier that only conversion may write",
 	)}
+}
+
+// foreignUpdateVerdict decides an UPDATE whose spec is viewed through the API version that
+// does not own it: an unchanged spec round-trips, any other write is rejected.
+func foreignUpdateVerdict(
+	fldPath *field.Path,
+	newSpec, oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+) field.ErrorList {
+	if apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+		return nil
+	}
+	return foreignUpdateErrors(fldPath, newSpec.V1Beta2 != nil)
 }
 
 // foreignUpdateErrors rejects a change to a spec viewed through the API version that does

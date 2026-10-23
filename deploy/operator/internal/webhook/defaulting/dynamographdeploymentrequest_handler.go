@@ -98,14 +98,14 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		logger.Error(err, "failed to get admission request from context, skipping defaulting")
-		return nil
+		return fmt.Errorf("get admission request: %w", err)
 	}
+	requestVersion := internalwebhook.RequestedVersion(req)
 
 	// The original request version decides what spec.v1beta2 means. A native v1beta2 Request
 	// is defaulted from its carrier on CREATE and UPDATE; only CREATE
 	// and an UPDATE that changes spec.hardware read the cluster.
-	if internalwebhook.RequestUsesV1Beta2(req) && dgdr.Spec.V1Beta2 != nil {
+	if requestVersion == internalwebhook.VersionV1Beta2 && dgdr.Spec.V1Beta2 != nil {
 		oldSpec, err := decodeOldSpecV1beta2(req.Operation, req.OldObject.Raw)
 		if err != nil {
 			return err
@@ -114,7 +114,7 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	}
 	// A foreign-version view (a carrier written or updated through the wrong API version, or
 	// a v1beta1 payload written through v1beta2) is read-only; validation enforces that.
-	if !internalwebhook.RequestIsNative(req, dgdr.Spec.V1Beta2 != nil) {
+	if requestVersion == internalwebhook.VersionV1Beta2 || dgdr.Spec.V1Beta2 != nil {
 		return nil
 	}
 
