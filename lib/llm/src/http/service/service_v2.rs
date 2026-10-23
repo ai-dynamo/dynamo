@@ -860,9 +860,8 @@ pub struct HttpServiceConfig {
     enable_nvext: bool,
 
     /// Master switch for `/router_policy` (including its busy-threshold subresource)
-    /// and the legacy `/busy_threshold` API. Disabled by default; env-truthy
-    /// `DYN_ENABLE_FRONTEND_ADMIN_API` enables it. An explicit builder value
-    /// takes precedence; `DYN_DISABLE_FRONTEND_ADMIN_API` always disables it.
+    /// and the legacy `/busy_threshold` API. Defaults to env-truthy
+    /// `DYN_ENABLE_FRONTEND_ADMIN_API`.
     #[builder(default = "env_is_truthy(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API)")]
     enable_admin_api: bool,
 
@@ -1322,11 +1321,8 @@ impl HttpServiceConfigBuilder {
                 cancel_token.child_token(),
             )) as Arc<dyn Discovery>
         });
-        // The nvext surface is on by default; admin routes require opt-in.
         let nvext_enabled =
             config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
-        let admin_api_enabled =
-            config.enable_admin_api && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API);
         let state = Arc::new(State::new(
             model_manager,
             discovery_client,
@@ -1438,7 +1434,10 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
         // TODO: Revisit admin write exposure: listener separation and authentication.
-        if admin_api_enabled {
+        if config.enable_admin_api {
+            tracing::info!(
+                "frontend admin API enabled — admin routes registered on the inference port without authentication"
+            );
             system_routes.push(super::router_policy::router_policy_router(
                 state.manager_clone(),
             ));
@@ -1446,8 +1445,6 @@ impl HttpServiceConfigBuilder {
                 state.clone(),
                 None,
             ));
-        } else {
-            tracing::info!("frontend admin API disabled — admin routes not registered");
         }
         for extension in &config.frontend_route_extensions {
             let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
@@ -2589,18 +2586,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
     async fn test_admin_api_disabled_404s_router_management() {
         let cancel_token = Arc::new(CancellationToken::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let service = temp_env::with_vars(
-            [
-                (env_llm::DYN_ENABLE_FRONTEND_ADMIN_API, None::<&str>),
-                (env_llm::DYN_DISABLE_FRONTEND_ADMIN_API, None),
-            ],
-            || HttpService::builder().port(port).build().unwrap(),
-        );
+        let service = HttpService::builder()
+            .port(port)
+            .enable_admin_api(false)
+            .build()
+            .unwrap();
 
         let service_token = cancel_token.clone();
         let handle = tokio::spawn(async move {
@@ -2636,73 +2630,37 @@ mod tests {
             .expect("request failed");
         assert_eq!(live.status(), reqwest::StatusCode::OK);
 
-        let models = client
-            .get(format!("http://localhost:{port}/v1/models"))
-            .send()
-            .await
-            .expect("request failed");
-        assert_eq!(models.status(), reqwest::StatusCode::OK);
-
         cancel_token.cancel();
         handle.abort();
     }
 
     #[test]
     #[serial_test::serial]
-    fn test_admin_api_enable_and_disable_precedence() {
-        let admin_routes = [
-            "GET /busy_threshold",
-            "POST /busy_threshold",
-            "GET /router_policy/busy_threshold",
-            "POST /router_policy/busy_threshold",
-            "GET /router_policy",
-            "PATCH /router_policy",
-        ];
-        let check_routes = |service: HttpService, enabled: bool| {
-            let docs: Vec<_> = service
+    fn test_admin_api_is_opt_in() {
+        let admin_routes = |builder: HttpServiceConfigBuilder| {
+            builder
+                .build()
+                .unwrap()
                 .route_docs()
                 .iter()
-                .map(ToString::to_string)
-                .collect();
-            for route in admin_routes {
-                assert_eq!(docs.contains(&route.to_string()), enabled, "{route}");
-            }
+                .filter(|doc| {
+                    matches!(
+                        doc.to_string().as_str(),
+                        "GET /router_policy" | "GET /busy_threshold"
+                    )
+                })
+                .count()
         };
-
-        temp_env::with_vars(
-            [
-                (env_llm::DYN_ENABLE_FRONTEND_ADMIN_API, None::<&str>),
-                (env_llm::DYN_DISABLE_FRONTEND_ADMIN_API, None),
-            ],
-            || {
-                check_routes(
-                    HttpService::builder()
-                        .enable_admin_api(true)
-                        .build()
-                        .unwrap(),
-                    true,
-                );
-                temp_env::with_var(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API, Some("1"), || {
-                    check_routes(HttpService::builder().build().unwrap(), true);
-                    check_routes(
-                        HttpService::builder()
-                            .enable_admin_api(false)
-                            .build()
-                            .unwrap(),
-                        false,
-                    );
-                    temp_env::with_var(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API, Some("1"), || {
-                        check_routes(
-                            HttpService::builder()
-                                .enable_admin_api(true)
-                                .build()
-                                .unwrap(),
-                            false,
-                        );
-                    });
-                });
-            },
-        );
+        temp_env::with_var_unset(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API, || {
+            assert_eq!(admin_routes(HttpService::builder()), 0);
+        });
+        temp_env::with_var(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API, Some("1"), || {
+            assert_eq!(admin_routes(HttpService::builder()), 2);
+            assert_eq!(
+                admin_routes(HttpService::builder().enable_admin_api(false)),
+                0
+            );
+        });
     }
 
     /// Starts an `HttpService` on an ephemeral local port.
