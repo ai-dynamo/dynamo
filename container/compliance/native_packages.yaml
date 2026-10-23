@@ -118,7 +118,7 @@ packages:
   # etcd and nats-server are built from their release tags with patched Go.
   # The copied binaries have no apt metadata.
   - name: etcd
-    version: v3.5.34
+    version: v3.5.35
     license: Apache-2.0
     source: https://github.com/etcd-io/etcd
     images:
