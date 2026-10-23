@@ -244,14 +244,12 @@ else
   env "${safe_env[@]}" python -m pytest "${safe_args[@]}" || SAFE_EXIT_CODE=$?
   echo "🧪 Safe-subset phase completed with exit code ${SAFE_EXIT_CODE} in $((SECONDS - PHASE_START))s"
 
-  # Runs whatever the safe-subset phase returned.
   REMAINDER_EXIT_CODE=0
   echo "▶️ Executing remainder phase (cwd=${CONTAINER_WORKSPACE}): python -m pytest ${pytest_args[*]}"
   PHASE_START=${SECONDS}
   python -m pytest "${pytest_args[@]}" || REMAINDER_EXIT_CODE=$?
   echo "🧪 Remainder phase completed with exit code ${REMAINDER_EXIT_CODE} in $((SECONDS - PHASE_START))s"
 
-  # First non-zero phase code wins.
   TEST_EXIT_CODE=${SAFE_EXIT_CODE}
   if (( TEST_EXIT_CODE == 0 )); then
     TEST_EXIT_CODE=${REMAINDER_EXIT_CODE}
@@ -275,7 +273,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 out, *inputs = sys.argv[1:]
-merged = ET.Element("testsuites")
+merged = ET.Element("testsuites", name="pytest tests")
 for path in inputs:
     root = ET.parse(path).getroot()
     merged.extend([root] if root.tag == "testsuite" else root.findall("testsuite"))
