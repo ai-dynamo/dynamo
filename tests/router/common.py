@@ -1649,6 +1649,7 @@ def _test_router_threshold_none_disables_rejection(
         blocks_threshold="None",
         tokens_threshold="None",
         tokens_threshold_frac="None",
+        extra_env={"DYN_ENABLE_FRONTEND_ADMIN_API": "1"},
     ):
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
@@ -3290,6 +3291,7 @@ def _test_busy_threshold_endpoint(
         blocks_threshold=initial_active_decode_blocks_threshold,
         tokens_threshold=initial_active_prefill_tokens_threshold,
         request_plane=request_plane,
+        extra_env={"DYN_ENABLE_FRONTEND_ADMIN_API": "1"},
     ):
         # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
