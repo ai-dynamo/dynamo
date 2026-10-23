@@ -136,11 +136,10 @@ RUN apt-get update -y \
 {% endif %}
 
 {% if device == "cuda" %}
-# Use the refreshed base-stage bundle until manylinux's CA package catches up.
-COPY --from=dynamo_base /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/source/anchors/dynamo-ca-bundle.pem
-RUN test -s /usr/share/pki/ca-trust-source/ca-bundle.trust.p11-kit && \
-    rm /usr/share/pki/ca-trust-source/ca-bundle.trust.p11-kit && \
-    update-ca-trust extract
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
+# dnf fails when no package at or above the floor is available.
+RUN dnf -y --setopt=tsflags=nocontexts install 'ca-certificates >= 2026.2.92_v9.0.319-81.3.el8_10' && \
+    dnf clean all
 
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
