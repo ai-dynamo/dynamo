@@ -27,7 +27,7 @@ data:
       kv_cache_event_hash_algo: v1_block_key
       kv_events_config:
         enable_kv_cache_events: true
-        endpoint: tcp://*:5557
+        endpoint: tcp://127.0.0.1:5557
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
