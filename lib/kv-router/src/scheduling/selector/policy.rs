@@ -13,6 +13,7 @@ use super::{
 use crate::kv_hints::KvTransferTarget;
 use crate::protocols::{
     SelectionTrace, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerSelectionResult,
+    WorkerWithDpRank,
 };
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
@@ -54,8 +55,8 @@ pub(super) struct ComposedPolicyState {
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheData>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
-    /// Each unscored row's fetch target while its source waits for every row.
-    transfer_targets: Vec<Option<KvTransferTarget>>,
+    /// Each unscored row's fetch target and local prefix while its source waits for every row.
+    transfer_targets: Vec<Option<(KvTransferTarget, usize)>>,
 }
 
 /// Native scorer/picker composition for [`WorkerSelector`].
@@ -321,10 +322,13 @@ impl ComposedPolicyState {
 // Out of line so rows that need no fetch input keep the loop body small.
 #[inline(never)]
 fn push_transfer_target<C: WorkerConfigLike>(
-    targets: &mut Vec<Option<KvTransferTarget>>,
+    targets: &mut Vec<Option<(KvTransferTarget, usize)>>,
+    request: &SchedulingRequest,
+    worker: WorkerWithDpRank,
     config: &C,
 ) {
-    targets.push(config.kv_transfer_keys().target());
+    let target = config.kv_transfer_keys().target();
+    targets.push(target.map(|target| (target, request.transfer_local_prefix_blocks_for(worker))));
 }
 
 pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
@@ -365,7 +369,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             input.track_kept_candidate(worker);
             state.push_candidate(candidate);
             if defer_transfer {
-                push_transfer_target(&mut state.transfer_targets, config);
+                push_transfer_target(&mut state.transfer_targets, request, worker, config);
             }
             false
         });
@@ -431,7 +435,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         input.track_kept_candidate(worker);
         state.push_candidate(candidate);
         if defer_transfer {
-            push_transfer_target(&mut state.transfer_targets, config);
+            push_transfer_target(&mut state.transfer_targets, request, worker, config);
         }
         false
     });
@@ -805,7 +809,7 @@ mod tests {
             }
         }
 
-        type Seen = Arc<Mutex<Vec<(u64, Option<(u32, Option<u32>)>)>>>;
+        type Seen = Arc<Mutex<Vec<(u64, Option<Option<u32>>)>>>;
 
         struct TransferScorer {
             inputs: WorkerInputs,
@@ -824,12 +828,9 @@ mod tests {
                 costs: &mut [f64],
             ) -> Result<(), WorkerSelectionPolicyError> {
                 for (candidate, cost) in candidates.iter().zip(costs) {
-                    let transfer = candidate.kv_transfer().map(|transfer| {
-                        (
-                            transfer.local_prefix_blocks(),
-                            transfer.source_prefix_blocks(),
-                        )
-                    });
+                    let transfer = candidate
+                        .kv_transfer()
+                        .map(|transfer| transfer.source_prefix_blocks());
                     self.seen
                         .lock()
                         .unwrap()
@@ -903,10 +904,7 @@ mod tests {
             routing_snapshot: None,
         }));
         // The warm worker holds the whole fetchable prefix; the cold one can fetch it.
-        assert_eq!(
-            declared,
-            vec![(0, Some((3, None))), (1, Some((0, Some(3))))]
-        );
+        assert_eq!(declared, vec![(0, Some(None)), (1, Some(Some(3)))]);
         assert_eq!(undeclared, vec![(0, None), (1, None)]);
         // Without transfer candidates the host has nothing to report.
         let (declared, _) = select(None);

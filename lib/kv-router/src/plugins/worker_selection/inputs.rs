@@ -249,7 +249,6 @@ pub struct WorkerLoadInput {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerTransferInput {
-    pub(crate) local_prefix_blocks: u32,
     pub(crate) source_prefix_blocks: Option<u32>,
 }
 
@@ -378,15 +377,10 @@ impl WorkerLoadInput {
 }
 
 impl WorkerTransferInput {
-    /// Prefix blocks this worker holds on device or in host memory, from the
-    /// same lookup snapshot as the cache inputs. A fetch extends this prefix.
-    pub fn local_prefix_blocks(&self) -> u32 {
-        self.local_prefix_blocks
-    }
-
     /// Root-aligned prefix, in blocks, held by the source this worker would
-    /// fetch from, or None when no eligible source holds more than
-    /// [`Self::local_prefix_blocks`]. The fetch adds the difference.
+    /// fetch from, and so the prefix it holds after the fetch. None when no
+    /// eligible source holds more than this worker's device and host-pinned
+    /// prefix, the `CACHE` inputs' `device_overlap_blocks() + host_overlap_blocks()`.
     ///
     /// The host chooses the source by its router-hint rules: the same hint
     /// worker type, neither this worker nor a cache owner attached to it, and,

@@ -161,17 +161,17 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 let fetchable = if self.prepared.has_kv_transfer {
                     candidate
                         .kv_transfer()
-                        .and_then(|transfer| {
-                            let local = transfer
-                                .local_prefix_blocks()
-                                .saturating_add(cache.disk_overlap_blocks() as u32);
-                            Some(transfer.source_prefix_blocks()?.saturating_sub(local))
+                        .and_then(|transfer| transfer.source_prefix_blocks())
+                        .map_or(0.0, |source| {
+                            let local = cache.device_overlap_blocks()
+                                + cache.host_overlap_blocks()
+                                + cache.disk_overlap_blocks();
+                            (f64::from(source) - local).max(0.0)
                         })
-                        .unwrap_or(0)
                 } else {
-                    0
+                    0.0
                 };
-                self.shared_cache_multiplier * (shared + fetchable) as f64
+                self.shared_cache_multiplier * (shared as f64 + fetchable)
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier

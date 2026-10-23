@@ -561,11 +561,11 @@ impl SchedulingRequest {
 
     /// The prefix a KV fetch would extend on `worker`: its device and
     /// host-pinned overlap. Disk is not counted.
-    pub(crate) fn transfer_local_prefix_blocks_for(&self, worker: WorkerWithDpRank) -> u32 {
+    pub(crate) fn transfer_local_prefix_blocks_for(&self, worker: WorkerWithDpRank) -> usize {
         let tiers = &self.overlap.tier_overlap_blocks;
         let device = tiers.device.get(&worker).copied().unwrap_or(0);
         let host_pinned = tiers.host_pinned.get(&worker).copied().unwrap_or(0);
-        u32::try_from(device.saturating_add(host_pinned)).unwrap_or(u32::MAX)
+        device.saturating_add(host_pinned)
     }
 
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
