@@ -2620,6 +2620,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-global-view-receiver"
+version = "1.6.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.6.0"
 dependencies = [

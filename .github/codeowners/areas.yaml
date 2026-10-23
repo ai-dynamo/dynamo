@@ -73,6 +73,7 @@ areas:
   path_globs:
   - examples/global-router/cdk/
   - components/src/dynamo/kv_dc_relay/
+  - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
   - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
   - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
