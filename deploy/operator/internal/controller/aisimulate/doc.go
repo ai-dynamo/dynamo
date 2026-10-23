@@ -15,24 +15,23 @@
  * limitations under the License.
  */
 
-// Package aisimulate lowers a v1beta2 DynamoGraphDeploymentRequest spec into the native
-// AISimulate input that a Run executes.
+// Package aisimulate manipulates the native AISimulate input: the JSON document an AISimulate
+// run executes.
 //
-// Lowering sits below the Request reconciler. Admission does not call it: spec.aisimulate.parameters
-// is opaque there, and the validation of the lowered input belongs to the schema of the AISimulate
-// release the Request selects. The reconciler lowers the Request once and freezes the output into the
-// Run, which executes that object as it is.
+// The package knows only that contract, as a map or as raw JSON, and nothing of the Kubernetes API
+// that produces it. Lowering a DynamoGraphDeploymentRequest into an underlay is the Request
+// reconciler's job; this package then adds the derived defaults that no API field carries (the
+// request count, a bounded trial budget for a KV-load range search, and goal.strict_sla when an
+// SLA bound is set) and applies the caller's parameters last, as a JSON Merge Patch (RFC 7386):
+// native objects merge recursively, arrays and scalars replace the value, and null deletes it. The
+// parameters are authoritative: they win on every path they name, including the derived defaults,
+// and are applied once.
 //
-// Lower works in three steps. The typed spec (model, backends, hardware, workload, objective)
-// is first translated into the native input, the "underlay". The derived defaults that no API
-// field carries are then added to it: the request count, a bounded trial budget for a
-// KV-load range search, and goal.strict_sla when an SLA bound is set. Last,
-// spec.aisimulate.parameters is applied on top as a JSON Merge Patch (RFC 7386): native
-// objects merge recursively, arrays and scalars replace the value, and null deletes it. The
-// parameters are authoritative: they win on every path they name, including the derived
-// defaults, and are applied once, last.
+// Admission does not call this package: the parameters are opaque there, and the validation of the
+// resulting input belongs to the schema of the AISimulate release the Request selects. A stored
+// input is decoded with DecodeInput and never built again.
 //
-// The document stays unstructured (map[string]any) because its schema belongs to the
-// AISimulate release the Request selects, not to this package. Reads and writes go
-// through the helpers of k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.
+// The document stays unstructured (map[string]any) because its schema belongs to that release, not
+// to this package. Reads and writes go through the helpers of
+// k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.
 package aisimulate

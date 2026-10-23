@@ -201,7 +201,7 @@ func TestV1beta2RequestControllerCreatesTheRunOfTheCurrentGeneration(t *testing.
 	if got := run.Spec.AISimulate.VersionOverride; got != "0.13.0" {
 		t.Fatalf("run versionOverride = %q, want the resolved 0.13.0", got)
 	}
-	parameters, err := aisimulate.InputForRun(run)
+	parameters, err := frozenInputForTest(run)
 	if err != nil {
 		t.Fatalf("input of the run: %v", err)
 	}
@@ -405,27 +405,40 @@ func assertRetained(t *testing.T, f *dgdrV1beta2Fixture) {
 	}
 }
 
-func TestV1beta2RequestControllerRetentionIgnoresTheGenerationAnnotation(t *testing.T) {
+func TestV1beta2RequestControllerOrdersRetainedRunsByTheirGenerationAnnotation(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	request.Generation = 8
-	objects := dgdrV1beta2RunFixtures(request, 7)
-	for i, object := range objects[1:] {
-		if i%2 == 0 {
-			delete(object.GetAnnotations(), dgdrV1beta2GenerationAnnotation) // missing
-		} else {
-			object.GetAnnotations()[dgdrV1beta2GenerationAnnotation] = "garbage" // malformed
-		}
+	objects := []client.Object{request}
+	for generation := 1; generation <= 7; generation++ {
+		run := dgdrV1beta2OwnedRun(request, generation, true)
+		run.Name = fmt.Sprintf("arbitrary-%02d", 100-generation) // sorts opposite to the generation
+		objects = append(objects, run)
 	}
 	f := newDGDRV1beta2Fixture(t, objects...)
 	f.reconcile()
 
-	assertRetained(t, f)
+	refs := f.request().Status.RecentRunRefs
+	want := []string{"arbitrary-93", "arbitrary-94", "arbitrary-95", "arbitrary-96", "arbitrary-97"}
+	if len(refs) != len(want) {
+		t.Fatalf("recentRunRefs = %v, want %v", refs, want)
+	}
+	for i := range want {
+		if refs[i].Name != want[i] {
+			t.Fatalf("recentRunRefs = %v, want %v", refs, want)
+		}
+	}
+	for _, name := range f.runNames() {
+		if name == "arbitrary-98" || name == "arbitrary-99" {
+			t.Fatalf("run %q of generation %s was not retired", name, map[string]string{"arbitrary-98": "2", "arbitrary-99": "1"}[name])
+		}
+	}
 }
 
-func TestV1beta2RequestControllerRejectsAControlledRunWithoutAGenerationInItsName(t *testing.T) {
+func TestV1beta2RequestControllerRejectsAControlledRunWithoutAGenerationAnnotation(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	odd := dgdrV1beta2OwnedRun(request, 1, true)
 	odd.Name = "unrelated"
+	delete(odd.Annotations, dgdrV1beta2GenerationAnnotation)
 	f := newDGDRV1beta2Fixture(t, request, odd)
 
 	if err := f.tryReconcile(); err == nil || !strings.Contains(err.Error(), "unrelated") {
@@ -434,6 +447,35 @@ func TestV1beta2RequestControllerRejectsAControlledRunWithoutAGenerationInItsNam
 	if names := f.runNames(); len(names) != 1 {
 		t.Fatalf("runs = %v, want the odd run left alone and none created", names)
 	}
+}
+
+func TestV1beta2RequestControllerReusesAnOwnedRunWhateverItsName(t *testing.T) {
+	request := dgdrV1beta2Request(true)
+	existing := dgdrV1beta2OwnedRun(request, int(request.Generation), false)
+	existing.Name = "an-arbitrary-valid-name"
+	f := newDGDRV1beta2Fixture(t, request, existing)
+
+	f.reconcile()
+
+	if names := f.runNames(); len(names) != 1 || names[0] != existing.Name {
+		t.Fatalf("runs = %v, want only %q: an owned Run of the current generation is reused", names, existing.Name)
+	}
+	live := f.request()
+	if live.Status.ActiveRunRef == nil || live.Status.ActiveRunRef.Name != existing.Name ||
+		live.Status.ObservedGeneration != request.Generation {
+		t.Fatalf("status = %+v, want %q active for generation %d", live.Status, existing.Name, request.Generation)
+	}
+	if condition := dgdrV1beta2AcceptedCondition(t, live); condition.Status != metav1.ConditionTrue {
+		t.Fatalf("Accepted = %v, want True", condition)
+	}
+}
+
+// frozenInputForTest decodes the AISimulate input frozen into a Run.
+func frozenInputForTest(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) (map[string]any, error) {
+	if run.Spec.AISimulate == nil || run.Spec.AISimulate.Parameters == nil {
+		return nil, errors.New("run has no spec.aisimulate.parameters")
+	}
+	return aisimulate.DecodeInput(run.Spec.AISimulate.Parameters.Raw)
 }
 
 func TestV1beta2RequestControllerPublishesStatusBeforeDeletingRetiredRuns(t *testing.T) {
@@ -521,14 +563,6 @@ func TestV1beta2RequestControllerDerivesDistinctValidNamesForOverlengthRequests(
 		t.Fatalf("two different Request names produced the same Run name %q", nameA)
 	}
 
-	t.Log("The name maps back to its generation for its own Request only")
-	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{Name: nameA}}
-	if generation, err := dgdrV1beta2RunGeneration(a.Name, run); err != nil || generation != 1 {
-		t.Fatalf("generation = %d, err = %v, want 1", generation, err)
-	}
-	if _, err := dgdrV1beta2RunGeneration(b.Name, run); err == nil {
-		t.Fatal("a Run name derived from another Request was accepted")
-	}
 }
 
 func TestV1beta2RequestControllerReconcilesAnOverlengthRequestToOneRun(t *testing.T) {
@@ -608,7 +642,7 @@ func TestV1beta2RequestControllerKeepsNullDeletedKeysOutOfTheRunInput(t *testing
 	if err != nil {
 		t.Fatalf("build run: %v", err)
 	}
-	input, err := aisimulate.InputForRun(run)
+	input, err := frozenInputForTest(run)
 	if err != nil {
 		t.Fatalf("input of the run: %v", err)
 	}

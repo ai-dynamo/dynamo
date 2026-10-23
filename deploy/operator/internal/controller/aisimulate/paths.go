@@ -19,30 +19,23 @@ package aisimulate
 
 import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-// Native input paths, in the snake_case spelling of the upstream AISimulate contract. They
-// address the same native key when the underlay is built and when derived defaults are read,
-// and are passed to the unstructured helpers, which must not modify them.
+// Native input paths, in the snake_case spelling of the upstream AISimulate contract, for the
+// keys this package reads or derives. Where each API field lands in the native input is the
+// knowledge of whoever builds the underlay, not of this package. The paths are passed to the
+// unstructured helpers, which must not modify them.
 var (
-	searchSpaceModelName   = []string{"search_space", "model_name"}
-	searchSpaceBackend     = []string{"search_space", "backend"}
 	searchSpaceHardwareSKU = []string{"search_space", "hardware_sku"}
 	searchSpaceGPUBudget   = []string{"search_space", "gpu_budget"}
 
 	workloadPath            = []string{"workload"}
-	workloadISL             = []string{"workload", "isl"}
-	workloadOSL             = []string{"workload", "osl"}
 	workloadNumRequestRatio = []string{"workload", "num_request_ratio"}
-	workloadRequestRate     = []string{"workload", "request_rate"}
-	workloadConcurrency     = []string{"workload", "concurrency"}
 	workloadKVLoadRatio     = []string{"workload", "kv_load_ratio"}
 	workloadRequestCount    = []string{"workload", "request_count"}
 
-	goalTarget           = []string{"goal", "target"}
-	goalParetoObjectives = []string{"goal", "pareto_objectives"}
-	goalSLATTFTMs        = []string{"goal", "sla", "ttft_ms"}
-	goalSLAITLMs         = []string{"goal", "sla", "itl_ms"}
-	goalSLAE2EMs         = []string{"goal", "sla", "e2e_ms"}
-	goalStrictSLA        = []string{"goal", "strict_sla"}
+	goalSLATTFTMs = []string{"goal", "sla", "ttft_ms"}
+	goalSLAITLMs  = []string{"goal", "sla", "itl_ms"}
+	goalSLAE2EMs  = []string{"goal", "sla", "e2e_ms"}
+	goalStrictSLA = []string{"goal", "strict_sla"}
 
 	sweepMaxTrials = []string{"sweep", "max_trials"}
 )

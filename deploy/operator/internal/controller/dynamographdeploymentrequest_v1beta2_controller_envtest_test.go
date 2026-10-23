@@ -25,7 +25,6 @@ import (
 	"time"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,7 +95,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	g.Expect(first.Spec.Hardware).NotTo(BeNil())
 	g.Expect(first.Spec.AISimulate.Image).To(Equal(controllerAISimulateImage))
 	g.Expect(first.Spec.AISimulate.VersionOverride).To(Equal("1.2.0"))
-	input, err := aisimulate.InputForRun(first)
+	input, err := frozenInputForTest(first)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(input).To(HaveKey("search_space"))
 
