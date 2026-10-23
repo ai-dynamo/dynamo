@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared identities for routing partitions, logical KV indexers, and DC-local producer pools.
+//! Shared identities for routing partitions, logical KV indexers, and cluster-local producer pools.
 //!
 //! Hashed indexer identity material is resolved on control paths. Mutation and query paths carry
 //! only those fixed-size values or physical lane indices.
@@ -216,15 +216,15 @@ impl FromStr for IndexerDomainId {
     }
 }
 
-/// Control-plane-stable identity for one logical DC inside a routing federation.
+/// Control-plane-stable identity for one discovery cluster inside a routing federation.
 ///
 /// NOTE: This value survives process restarts, scaling, endpoint replacement, and producer
-/// generations. It is meaningful only as the DC dimension of [`PoolId`], not as a globally
+/// generations. It is meaningful only as the cluster dimension of [`PoolId`], not as a globally
 /// unique identifier. Do not derive it from endpoint identity or fold it into routing scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct DcId(u64);
+pub struct ClusterId(u64);
 
-impl DcId {
+impl ClusterId {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
@@ -234,13 +234,13 @@ impl DcId {
     }
 }
 
-impl fmt::Display for DcId {
+impl fmt::Display for ClusterId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{:016x}", self.0)
     }
 }
 
-impl FromStr for DcId {
+impl FromStr for ClusterId {
     type Err = IdentityParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -248,21 +248,21 @@ impl FromStr for DcId {
     }
 }
 
-/// One DC-local producer/publication stream within an indexer domain.
+/// One cluster-local producer/publication stream within an indexer domain.
 ///
-/// NOTE: A global indexer has one domain and distinct pool lanes whose `dc_id` values differ.
+/// NOTE: A global indexer has one domain and distinct pool lanes whose `cluster_id` values differ.
 /// Runtime endpoint resolution happens only after a query selects a pool lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PoolId {
     indexer_domain: IndexerDomainId,
-    dc_id: DcId,
+    cluster_id: ClusterId,
 }
 
 impl PoolId {
-    pub const fn new(indexer_domain: IndexerDomainId, dc_id: DcId) -> Self {
+    pub const fn new(indexer_domain: IndexerDomainId, cluster_id: ClusterId) -> Self {
         Self {
             indexer_domain,
-            dc_id,
+            cluster_id,
         }
     }
 
@@ -270,14 +270,14 @@ impl PoolId {
         self.indexer_domain
     }
 
-    pub const fn dc_id(self) -> DcId {
-        self.dc_id
+    pub const fn cluster_id(self) -> ClusterId {
+        self.cluster_id
     }
 }
 
 impl fmt::Display for PoolId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}/{}", self.indexer_domain, self.dc_id)
+        write!(formatter, "{}/{}", self.indexer_domain, self.cluster_id)
     }
 }
 
@@ -285,13 +285,13 @@ impl FromStr for PoolId {
     type Err = IdentityParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (indexer_domain, dc_id) = value
+        let (indexer_domain, cluster_id) = value
             .split_once('/')
             .ok_or(IdentityParseError::InvalidPool)?;
-        if dc_id.contains('/') {
+        if cluster_id.contains('/') {
             return Err(IdentityParseError::InvalidPool);
         }
-        Ok(Self::new(indexer_domain.parse()?, dc_id.parse()?))
+        Ok(Self::new(indexer_domain.parse()?, cluster_id.parse()?))
     }
 }
 
@@ -345,7 +345,7 @@ pub enum IdentityParseError {
     InvalidHex,
     #[error("indexer domain must be `<cache-semantics-id>:<routing-scope-id>`")]
     InvalidIndexerDomain,
-    #[error("pool ID must be `<indexer-domain-id>/<dc-id>`")]
+    #[error("pool ID must be `<indexer-domain-id>/<cluster-id>`")]
     InvalidPool,
     #[error("cache owner ID must be `<pool-id>/<stable-dp-slot-id>`")]
     InvalidCacheOwner,
@@ -712,7 +712,22 @@ mod tests {
         let routing = RoutingScopeId::new([0x01; 16], IdentitySource::DefaultDerived);
         assert_eq!(semantics.to_string(), "abababababababababababababababab");
         assert_eq!(routing.to_string(), "01010101010101010101010101010101");
-        assert_eq!(DcId::new(1).to_string(), "0000000000000001");
+        assert_eq!(ClusterId::new(1).to_string(), "0000000000000001");
+    }
+
+    #[test]
+    fn pool_id_json_uses_cluster_id() {
+        let pool = PoolId::new(
+            IndexerDomainId::new(
+                CacheSemanticsId::new([0xab; 16], IdentitySource::Explicit),
+                RoutingScopeId::new([0xcd; 16], IdentitySource::Explicit),
+            ),
+            ClusterId::new(7),
+        );
+        let json = serde_json::to_value(pool).unwrap();
+        assert_eq!(json["cluster_id"], 7);
+        assert!(json.get("dc_id").is_none());
+        assert_eq!(serde_json::from_value::<PoolId>(json).unwrap(), pool);
     }
 
     #[test]
@@ -723,7 +738,7 @@ mod tests {
                     CacheSemanticsId::new([0xab; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([0xcd; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(7),
+                ClusterId::new(7),
             ),
             StableDpSlotId::new([0xef; 16], IdentitySource::Explicit),
         );

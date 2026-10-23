@@ -63,7 +63,7 @@ its configuration even if the endpoint is unchanged.
 > over serving none. Different local winners are expected; discovery does not
 > withdraw service or run a shared election to force agreement.
 >
-> Frontend readiness reflects committed membership. The KV DC Relay
+> Frontend readiness reflects committed membership. The Pool Relay
 > evaluates discovery independently and may remain conservative while a Frontend
 > serves its incumbent. The shared readiness evaluator produces the same answer
 > only for equivalent input units.
