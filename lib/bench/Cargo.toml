@@ -78,6 +78,15 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
+select-service = [
+  "dynamo-kv-router/standalone-selection",
+  "dynamo-mocker/zmq-events",
+  "dep:dynamo-mocker",
+  "dep:futures-util",
+  "dep:rand",
+  "dep:reqwest",
+  "dep:uuid",
+]
 request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
 test-support = [
   "router-test-support",
@@ -137,6 +146,11 @@ required-features = ["mooncake"]
 name = "dc_ckf_consumer_bench"
 path = "kv_router/dc_ckf_consumer_bench.rs"
 required-features = ["dc-ckf-consumer"]
+
+[[bin]]
+name = "select_service_bench"
+path = "kv_router/select_service_bench.rs"
+required-features = ["select-service"]
 
 [[bench]]
 name = "active_sequences_bench"
