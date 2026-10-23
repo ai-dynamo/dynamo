@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import textwrap
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -319,6 +318,44 @@ def test_child_attaches_without_launching_engine(monkeypatch):
     assert attach.call_args.kwargs["output_address"] == "out1"
 
 
+def _run_listener_child():
+    """Child process of the listener test: adopt the inherited sockets and echo."""
+    from vllm.utils.network_utils import make_zmq_socket
+
+    with zmq.Context() as context:
+
+        def create_client(*, client_addresses, **_kwargs):
+            return tuple(
+                make_zmq_socket(
+                    context,
+                    client_addresses[f"{name}_address"],
+                    kind,
+                    listener=client_addresses[f"{name}_listener"],
+                )
+                for name, kind in (("input", zmq.ROUTER), ("output", zmq.PULL))
+            )
+
+        with patch.object(processes.AsyncLLM, "from_vllm_config", create_client):
+            sockets, _, group = processes.create_shared_embedding_engine_client(
+                vllm_config=SimpleNamespace(parallel_config=SimpleNamespace()),
+                process_count=2,
+                usage_context=None,
+                stat_loggers=[],
+                enable_log_requests=False,
+                disable_log_stats=True,
+            )
+        assert group is None
+        try:
+            for socket in sockets:
+                socket.setsockopt(zmq.RCVTIMEO, 30000)
+            assert sockets[1].recv() == b"output"
+            identity, payload = sockets[0].recv_multipart()
+            sockets[0].send_multipart([identity, payload])
+        finally:
+            for socket in sockets:
+                socket.close(linger=0)
+
+
 @pytest.mark.timeout(180)
 def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
     if not hasattr(engine_utils, "bind_engine_zmq_listeners"):
@@ -341,45 +378,10 @@ def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
         addresses = bound_addresses
         yield _core_engine_launch_object(Mock(), bound_addresses)
 
-    child_script = textwrap.dedent(
-        """
-        from types import SimpleNamespace
-        import zmq
-        from vllm.utils.network_utils import make_zmq_socket
-        from dynamo.vllm import embedding_worker_processes as processes
-
-        with zmq.Context() as context:
-            def create_client(*, client_addresses, **kwargs):
-                return tuple(
-                    make_zmq_socket(
-                        context, client_addresses[f"{name}_address"], kind,
-                        listener=client_addresses[f"{name}_listener"],
-                    )
-                    for name, kind in (("input", zmq.ROUTER), ("output", zmq.PULL))
-                )
-
-            processes.AsyncLLM.from_vllm_config = create_client
-            sockets, _, group = processes.create_shared_embedding_engine_client(
-                vllm_config=SimpleNamespace(parallel_config=SimpleNamespace()),
-                process_count=2, usage_context=None, stat_loggers=[],
-                enable_log_requests=False, disable_log_stats=True,
-            )
-            assert group is None
-            try:
-                for socket in sockets:
-                    socket.setsockopt(zmq.RCVTIMEO, 30000)
-                assert sockets[1].recv() == b"output"
-                identity, payload = sockets[0].recv_multipart()
-                sockets[0].send_multipart([identity, payload])
-            finally:
-                for socket in sockets:
-                    socket.close(linger=0)
-        """
-    )
     real_popen = subprocess.Popen
 
     def launch_child(_command, **kwargs):
-        return real_popen([sys.executable, "-c", child_script], **kwargs)
+        return real_popen([sys.executable, __file__], **kwargs)
 
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
@@ -414,3 +416,7 @@ def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
         assert group.children[0][1].wait(timeout=30) == 0
     finally:
         group.cleanup()
+
+
+if __name__ == "__main__":
+    _run_listener_child()
