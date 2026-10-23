@@ -74,6 +74,7 @@ from dynamo.aisimulate.output.dgdr_run.snapshot import (
     SnapshotCandidate,
     write_snapshot,
 )
+from dynamo.common.container_images import derive_backend_image
 
 logger = logging.getLogger(__name__)
 
@@ -177,14 +178,22 @@ class DGDRRunOutputConfig(BaseModel):
     namespace: str | None = None
     generator: Literal["aic", "direct"] = "aic"
     runtime_image: str = Field(min_length=1)
+    # A Run searches multiple backends from one planner image. Standalone callers keep
+    # the historical fixed-image behavior unless they opt into per-candidate derivation.
+    derive_runtime_images: bool = False
     runtime_version_override: str | None = None
     num_gpus_per_node: int = Field(gt=0)
     max_candidates: int = Field(default=5, ge=1)
     snapshot_interval_seconds: float = Field(default=5.0, ge=0)
 
-    def generation_options(self) -> DGDGenerationOptions:
+    def generation_options(self, backend: str) -> DGDGenerationOptions:
+        runtime_image = (
+            derive_backend_image(self.runtime_image, backend)
+            if self.derive_runtime_images
+            else self.runtime_image
+        )
         return DGDGenerationOptions(
-            runtime_image=self.runtime_image,
+            runtime_image=runtime_image,
             runtime_version_override=self.runtime_version_override,
             namespace=self.namespace,
             num_gpus_per_node=self.num_gpus_per_node,
@@ -222,7 +231,8 @@ class DGDRRunOutputAdapter:
             raise ValueError("a snapshot directory is required")
         self._directory = Path(directory)
         self._config = config
-        self._options = config.generation_options()
+        # Validate the source image and runtime version before the first callback.
+        config.generation_options("vllm")
         self._workload = workload
         self._max_candidates = config.max_candidates
         self._interval = config.snapshot_interval_seconds
@@ -504,7 +514,9 @@ class DGDRRunOutputAdapter:
             manifest = render_dgd(
                 _RenderInput(config=item.parameters, used_gpus=item.used_gpus),
                 self._workload,
-                self._options,
+                self._config.generation_options(
+                    str(item.parameters.get("backend", ""))
+                ),
                 dgd_name=f"{self._config.name}-{item.id.removeprefix(_ID_PREFIX)}",
                 renderer=self._config.generator,
             )
@@ -564,7 +576,7 @@ class DGDRRunOutputPlugin:
         snapshot is still produced by ``write()``.
         """
         resolved = DGDRRunOutputConfig.model_validate(dict(config))
-        resolved.generation_options()
+        resolved.generation_options("vllm")
         workload = getattr(context, "workload", None)
         if workload is None or resolved.snapshot_dir is None:
             return None
