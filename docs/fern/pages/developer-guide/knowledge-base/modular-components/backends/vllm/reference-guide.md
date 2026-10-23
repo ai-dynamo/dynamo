@@ -81,6 +81,80 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 - Embeddings are sent as base64-encoded PyTorch tensors via the `prompt_embeds` field in the Completions API
 - NATS must be configured with a 15MB max payload for large embeddings (already set in default deployments)
 
+### Custom JSON Content
+
+**Experimental, unreleased.** Aggregated Python vLLM token workers started with
+`--enable-multimodal` accept explicit custom parts in user and tool messages:
+
+The example combines projected chemistry soft tokens with a standard image URL.
+The model must support both the registered chemistry modality and image inputs.
+The payload names and encoding inside `fields` are application-defined:
+
+```json
+{
+  "model": "chemistry-vision-model",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "Does this structure "},
+      {"type": "custom", "kind": "chemistry", "fields": {
+        "projected_soft_tokens": {
+          "dtype": "float32", "shape": [2, 4096], "data_base64": "..."
+        },
+        "revision": 1
+      }},
+      {"type": "text", "text": " match the reaction diagram?"},
+      {"type": "image_url", "image_url": {"url": "https://example.org/reaction-diagram.png"}}
+    ]
+  }],
+  "max_tokens": 64
+}
+```
+
+The model name, tensor dimensions, encoded bytes, and image URL are illustrative.
+`kind` is a non-empty string. The built-in wire names `text`, `image_url`,
+`video_url`, `audio_url`, and `input_audio` are reserved and rejected as custom
+kinds, including when mixed with typed media. `fields` is a JSON object whose
+values may be any JSON, including arrays and null. Dynamo passes the **complete
+fields object** as `multi_modal_data[kind]`; the example processor receives both
+`projected_soft_tokens` and `revision` under the chemistry modality. Dynamo does
+**not** select `fields[kind]` or decode the base64 bytes. Repeated parts of one
+kind become an ordered list of fields objects. Built-in image, video and audio
+parts retain their existing typed schema and validation. They may share requests
+with custom parts when their engine modality names do not collide.
+
+The model plugin owns domain validation and interpretation. Install or mount it
+in the worker environment. For the existing model-specific chat template, Dynamo
+preserves each custom part in place as `{"type":"custom","kind":"chemistry"}`;
+`fields` is absent. The template handles that part and renders the marker its
+registered processor expects. Clients do not also insert a literal marker in a
+text part. Dynamo neither derives a universal marker from `kind` nor changes the
+model's template. Auxiliary messages retain the same payload-free custom parts,
+role metadata, and ordering; payloads travel only in `multi_modal_data`.
+
+For an already rendered prompt, `nvext.use_raw_prompt: true` still requires
+exactly one user message and concatenates its text parts without another template.
+`nvext.token_data` likewise supplies already rendered token IDs. Those bypass modes
+remain responsible for their complete model-specific prompt/token sequence.
+Engine token IDs/logprobs remain available through `nvext.engine_data`
+independently of parser-rewritten choice text.
+
+Custom fields remain opaque JSON, including any base64 strings, shape/dtype
+metadata, or plugin-defined reference objects. The model plugin owns their
+validation and decoding. Dynamo does not define an inline tensor format or
+resolve arbitrary tensor references from this HTTP envelope.
+
+Existing image/audio/video transfers keep their maintained SHM/NIXL paths.
+Processed vLLM `mm_kwargs` and embedding transfer descriptors are internal
+handoffs, not public HTTP inputs for arbitrary custom tensors. Their serialization,
+staging, copying, and buffer ownership remain unchanged; no zero-copy GPU claim
+is made for custom JSON.
+
+Selected workers must advertise `custom_json_v1`. Custom P/D, encoder
+disaggregation, speculative prefill, custom caching/KVBM, SGLang, TensorRT-LLM,
+and native vLLM sidecars are unsupported. Extending these paths requires a
+separate qualification of plugin payload identity and lifecycle.
+
 ## Hashing Consistency for KV Events
 
 When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches. Choose one of the following:

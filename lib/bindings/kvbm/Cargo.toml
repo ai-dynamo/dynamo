@@ -60,3 +60,11 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
+
+# Temporary source pins for the companion draft (frontend-crates PR #308).
+# Remove after its coordinated crate releases and regenerate registry locks.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "d5cd19b5ec78255064085d3542858345e42aa7b4" }
+dynamo-renderer = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "d5cd19b5ec78255064085d3542858345e42aa7b4" }
+dynamo-parsers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "d5cd19b5ec78255064085d3542858345e42aa7b4" }
+dynamo-tokenizers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "d5cd19b5ec78255064085d3542858345e42aa7b4" }

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
 import dynamo.common.multimodal.video_loader as video_loader_module
@@ -23,6 +24,18 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    "kind", ["text", "image_url", "video_url", "audio_url", "input_audio"]
+)
+@pytest.mark.parametrize("mixed", [False, True])
+def test_custom_wire_key_collisions_are_rejected(kind, mixed):
+    items = [{"Json": {"metadata": 1}}]
+    if mixed:
+        items.append({"Url": "https://example.com/media"})
+    with pytest.raises(mod.InvalidArgument, match="reserved for built-in"):
+        mod._split_multimodal_data({"multi_modal_data": {kind: items}})
 
 
 def _processor(
@@ -69,6 +82,7 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         prepared.request,
         prepared.multi_modal_data,
         prepared.mm_processor_kwargs,
+        backend_owned=prepared.backend_owned,
     )
     return SimpleNamespace(
         prompt=prompt,
@@ -76,6 +90,107 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         multi_modal_data=prepared.multi_modal_data,
         mm_processor_kwargs=prepared.mm_processor_kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_backend_multimodal_data_reaches_the_registered_processor():
+    processor = _processor()  # Qwen3-VL: the geometry gate is P/D-only
+    descriptor = {
+        "dtype": "float32-le",
+        "shape": [2, 4],
+        "data_base64": "AAAAAA==",
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"custom_input": [{"Json": descriptor}]},
+    }
+
+    prepared = await _prepare_prompt(
+        processor,
+        request,
+        "request-1",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert "multi_modal_data" not in prepared.request
+    assert prepared.multi_modal_data == {"custom_input": descriptor}
+    assert prepared.prompt["multi_modal_data"] == {"custom_input": descriptor}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model", ["Qwen/Qwen3-VL-2B-Instruct", "meta-llama/Llama-3.2-1B"]
+)
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.PREFILL, DisaggregationMode.DECODE]
+)
+async def test_custom_json_disaggregation_is_rejected(model, mode):
+    processor = _processor(model=model)
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"custom_input": [{"Json": {"payload": "x"}}]},
+    }
+    with pytest.raises(ValueError, match="supported only in aggregated"):
+        await processor.prepare_input(request, "request-1", None, mode)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "vision_chunk"])
+@pytest.mark.parametrize("mode", [DisaggregationMode.AGGREGATED])
+async def test_backend_multimodal_data_passes_frontend_modality_names_through(
+    modality, mode
+):
+    """Modality names belong to the engine's processor, not to Dynamo.
+
+    A backend payload never reaches frontend media handling, so a name the
+    frontend also uses for its own media must survive untouched rather than be
+    interpreted by UUID inference or structural pad expansion.
+    """
+    # A generic family, so the P/D leg is not refused for mRoPE geometry.
+    processor = _processor(model="meta-llama/Llama-3.2-1B")
+    payload = {
+        modality: {
+            "values": [None, False, 0],
+            "data_base64": "AA==",
+            "$dynamo_tensor": {"plugin_owned": True},
+        }
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {key: [{"Json": value}] for key, value in payload.items()},
+    }
+
+    prepared = await _prepare_prompt(processor, request, "request-1", None, mode)
+
+    assert prepared.multi_modal_data == payload
+    assert prepared.prompt["multi_modal_data"] == payload
+    assert "multi_modal_uuids" not in prepared.prompt
+    assert prepared.prompt["prompt_token_ids"] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_json_multimodal_data_merges_with_frontend_media():
+    processor = _processor()
+    image = Image.new("RGB", (2, 2))
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "chemistry": [{"Json": {"payload": [1, 2]}}],
+        },
+    }
+    processor.extract_multimodal_data = AsyncMock(return_value={"image": [image]})
+    prepared = await _prepare_prompt(
+        processor, request, "request-1", None, DisaggregationMode.AGGREGATED
+    )
+    assert prepared.prompt["multi_modal_data"] == {
+        "image": [image],
+        "chemistry": {"payload": [1, 2]},
+    }
+    assert processor.extract_multimodal_data.call_args.args[0]["multi_modal_data"] == {
+        "image_url": [{"Url": "https://image"}]
+    }
 
 
 @pytest.mark.asyncio
@@ -1776,7 +1891,6 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
 
 def _real_kwargs_item(key: str = "pixel_values"):
     """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
-    import torch
     from vllm.multimodal.inputs import (
         MultiModalBatchedField,
         MultiModalFieldElem,
@@ -2027,8 +2141,6 @@ def test_qwen_handoff_computes_grid_for_pil_images():
 
 
 def test_qwen_handoff_accepts_encoder_embeddings():
-    import torch
-
     processor = _processor()
     result = processor.build_prefill_handoff(
         multi_modal_data={
@@ -2407,3 +2519,35 @@ def test_video_derived_audio_respects_flag_and_limit(
     else:
         request.update(kwargs)
     processor.validate_multimodal_request(request)
+
+
+@pytest.mark.parametrize("value", [None, [1, 2], {"atoms": ["C", "O"]}])
+def test_json_payload_values_and_repeated_parts(value):
+    single, media = mod._split_multimodal_data(
+        {"multi_modal_data": {"custom": [{"Json": value}]}}
+    )
+    assert single == {"custom": value}
+    assert not media
+    repeated, _ = mod._split_multimodal_data(
+        {"multi_modal_data": {"custom": [{"Json": value}, {"Json": value}]}}
+    )
+    assert repeated == {"custom": [value, value]}
+
+
+@pytest.mark.asyncio
+async def test_json_and_media_engine_key_collision_is_rejected():
+    processor = _processor()
+    processor.extract_multimodal_data = AsyncMock(
+        return_value={"image": [Image.new("RGB", (1, 1))]}
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "image": [{"Json": {"data": "opaque"}}],
+        },
+    }
+    with pytest.raises(ValueError, match="same engine modality"):
+        await processor.prepare_input(
+            request, "request-1", None, DisaggregationMode.AGGREGATED
+        )

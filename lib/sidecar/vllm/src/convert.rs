@@ -965,6 +965,11 @@ fn build_media(
 
         for (index, item) in items.into_iter().enumerate() {
             let source = match item {
+                MultimodalData::Json(_) => {
+                    return Err(client::invalid_argument(
+                        "Custom JSON content requires a dynamo.vllm worker; the sidecar media transport does not support it",
+                    ));
+                }
                 MultimodalData::Url(url) => media_source(&key, url.into())?,
                 MultimodalData::RawUrl(source) => media_source(&key, source)?,
                 MultimodalData::Decoded(_) => {

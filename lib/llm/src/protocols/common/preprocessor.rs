@@ -286,6 +286,8 @@ pub enum MultimodalData {
     Decoded(RdmaMediaDataDescriptor),
     /// Payload-free media slot resolved by a backend processor cache.
     UuidOnly(String),
+    /// Opaque JSON for a backend-registered modality processor.
+    Json(serde_json::Value),
 }
 
 impl<'de> Deserialize<'de> for MultimodalData {
@@ -300,6 +302,7 @@ impl<'de> Deserialize<'de> for MultimodalData {
             RawUrl(String),
             Decoded(RdmaMediaDataDescriptor),
             UuidOnly(String),
+            Json(serde_json::Value),
         }
 
         match WireData::deserialize(deserializer)? {
@@ -312,6 +315,7 @@ impl<'de> Deserialize<'de> for MultimodalData {
             WireData::RawUrl(value) => Ok(Self::RawUrl(value)),
             WireData::Decoded(value) => Ok(Self::Decoded(value)),
             WireData::UuidOnly(value) => Ok(Self::UuidOnly(value)),
+            WireData::Json(value) => Ok(Self::Json(value)),
         }
     }
 }
@@ -884,6 +888,7 @@ mod tests {
                 MultimodalData::RawUrl(value) => OldData::RawUrl(value),
                 MultimodalData::Decoded(value) => OldData::Decoded(value),
                 MultimodalData::UuidOnly(value) => OldData::UuidOnly(value),
+                MultimodalData::Json(_) => panic!("URL fixture decoded as custom JSON"),
             };
             assert_eq!(
                 serde_json::to_value(legacy).unwrap(),

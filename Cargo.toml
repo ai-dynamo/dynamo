@@ -58,8 +58,8 @@ aisimulate-core = { version = "=0.13.0-dev.202610160000000073" }
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
 dynamo-llm = { path = "lib/llm", version = "1.6.0", default-features = false }
 dynamo-rl = { path = "lib/rl", version = "1.6.0" }
-dynamo-tokenizers = { version = "=3.1.1" }
-dynamo-renderer = { version = "=8.0.3" }
+dynamo-tokenizers = { version = "=3.1.2" }
+dynamo-renderer = { version = "=9.0.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.6.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.6.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.6.0" }
@@ -67,8 +67,8 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.6.0" }
 dynamo-memory = { path = "lib/memory", version = "1.6.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.6.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.6.0" }
-dynamo-protocols = { version = "=8.2.0" }
-dynamo-parsers = { version = "=10.0.7" }
+dynamo-protocols = { version = "=9.0.0" }
+dynamo-parsers = { version = "=11.0.0" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
@@ -217,3 +217,11 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Temporary source pins for the companion draft (frontend-crates PR #308).
+# Remove after its coordinated crate releases and regenerate registry locks.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "d5cd19b5ec78255064085d3542858345e42aa7b4" }
+dynamo-renderer = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "d5cd19b5ec78255064085d3542858345e42aa7b4" }
+dynamo-parsers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "d5cd19b5ec78255064085d3542858345e42aa7b4" }
+dynamo-tokenizers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "d5cd19b5ec78255064085d3542858345e42aa7b4" }

@@ -248,6 +248,9 @@ fn tool_content_part_as_user(
     part: &ChatCompletionRequestToolMessageContentPart,
 ) -> Cow<'_, ChatCompletionRequestUserMessageContentPart> {
     Cow::Owned(match part {
+        ChatCompletionRequestToolMessageContentPart::Custom(part) => {
+            ChatCompletionRequestUserMessageContentPart::Custom(part.clone())
+        }
         ChatCompletionRequestToolMessageContentPart::Text(part) => {
             ChatCompletionRequestUserMessageContentPart::Text(part.clone())
         }
@@ -273,6 +276,14 @@ impl<'a> MultimodalContentPart<'a> {
         match self {
             Self::User(part) => Cow::Borrowed(part),
             Self::Tool(part) => tool_content_part_as_user(part),
+        }
+    }
+
+    fn custom_part(&self) -> Option<&dynamo_protocols::types::CustomModalityPart> {
+        match self {
+            Self::User(ChatCompletionRequestUserMessageContentPart::Custom(part))
+            | Self::Tool(ChatCompletionRequestToolMessageContentPart::Custom(part)) => Some(part),
+            _ => None,
         }
     }
 
@@ -1600,11 +1611,87 @@ fn attach_request_context_metadata(
     attach_image_cache_scope_from_context(request, context);
 }
 
+fn validate_custom_kind(kind: &str) -> Result<()> {
+    if matches!(
+        kind,
+        "text" | "image_url" | "video_url" | "audio_url" | "input_audio"
+    ) {
+        return Err(custom_transport_error(
+            "Custom kind is reserved for built-in content",
+        ));
+    }
+    Ok(())
+}
+
+fn custom_transport_error(message: &'static str) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .public_details(PublicDetails::Message {
+            message: message.into(),
+        })
+        .build()
+        .into()
+}
+
+fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
+    request
+        .typed_messages()
+        .unwrap_or_default()
+        .iter()
+        .any(|message| {
+            multimodal_content_parts(message)
+                .is_some_and(|mut parts| parts.any(|part| part.custom_part().is_some()))
+        })
+}
+
+/// Project Custom parts without serializing their payloads. Templates own the
+/// marker syntax; the original position and modality name are all they need.
+fn template_content_part(part: MultimodalContentPart<'_>) -> Result<serde_json::Value> {
+    if let Some(custom) = part.custom_part() {
+        return Ok(serde_json::json!({"type": "custom", "kind": custom.kind}));
+    }
+    Ok(match part {
+        MultimodalContentPart::User(part) => serde_json::to_value(part)?,
+        MultimodalContentPart::Tool(part) => serde_json::to_value(part)?,
+    })
+}
+
+/// Project before serialization so bulk custom payloads are never copied into
+/// templates or auxiliary messages. Keep each role's established metadata.
+fn template_messages(request: &impl OAIChatLikeRequest) -> Result<serde_json::Value> {
+    let Some(messages) = request.typed_messages() else {
+        return Ok(serde_json::to_value(request.messages())?);
+    };
+    messages.iter().map(|message| {
+        match message {
+            ChatCompletionRequestMessage::User(user) => {
+                if let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content {
+                    let parts: Vec<_> = parts.iter().map(|part| template_content_part(MultimodalContentPart::User(part))).collect::<Result<_>>()?;
+                    let mut value = serde_json::json!({"role":"user", "content":parts});
+                    if let Some(name) = &user.name { value["name"] = name.clone().into(); }
+                    return Ok(value);
+                }
+            }
+            ChatCompletionRequestMessage::Tool(tool) => {
+                if let ChatCompletionRequestToolMessageContent::Array(parts) = &tool.content {
+                    let parts: Vec<_> = parts.iter().map(|part| template_content_part(MultimodalContentPart::Tool(part))).collect::<Result<_>>()?;
+                    return Ok(serde_json::json!({"role":"tool", "tool_call_id":tool.tool_call_id, "content":parts}));
+                }
+            }
+            _ => {}
+        }
+        Ok(serde_json::to_value(message)?)
+    }).collect::<Result<Vec<_>>>().map(serde_json::Value::Array)
+}
+
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
 /// Other trait methods delegate to the inner request, except typed_messages:
 /// rendering must use the transformed messages rather than the original slice.
+/// Backend JSON payloads stay out of templates; the original typed content
+/// remains available to multimodal preprocessing.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
@@ -1617,8 +1704,7 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
-            .unwrap_or_default();
+        let mut json = template_messages(self.inner).unwrap_or_default();
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -3502,15 +3588,16 @@ impl OpenAIPreprocessor {
                 "Cannot continue the final message because the prompt formatter moves it before other messages",
             ));
         }
-        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
-            self.apply_template_inner(&NormalizedArgsRequest {
-                inner: request,
-                normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
-            })?
-        } else {
-            self.apply_template_inner(request)?
-        };
+        let formatted_prompt =
+            if self.normalize_tool_call_args || continue_final || has_custom_content(request) {
+                self.apply_template_inner(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: self.normalize_tool_call_args,
+                    continue_final_message: continue_final,
+                })?
+            } else {
+                self.apply_template_inner(request)?
+            };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
         };
@@ -3650,11 +3737,26 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<&str>,
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<(Vec<MmRoutingEntry>, Option<usize>)> {
+        if has_custom_content(request)
+            && !self.runtime_config.runtime_flag_enabled(
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+            )
+        {
+            let message = "Selected workers do not support custom JSON multimodal content; use an aggregated Python vLLM worker with --enable-multimodal";
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(message)
+                .public_details(PublicDetails::Message {
+                    message: message.into(),
+                })
+                .build()
+                .into());
+        }
         // `token_ids` is only consumed by exact MM-routing construction below.
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
 
-        let mut media_map: MultimodalDataMap = HashMap::new();
+        let mut media_map = MultimodalDataMap::new();
         let mut uuid_map: MultimodalUuidMap = HashMap::new();
         let mut has_user_uuid = false;
         // Decoded results are written back into these reserved modality slots so
@@ -3710,6 +3812,18 @@ impl OpenAIPreprocessor {
             };
             for content_part in content_parts {
                 let Some((type_str, url, uuid)) = content_part.media_info() else {
+                    if let Some(part) = content_part.custom_part() {
+                        validate_custom_kind(&part.kind)?;
+                        let payload = serde_json::Value::Object(part.fields.clone());
+                        media_map
+                            .entry(part.kind.clone())
+                            .or_default()
+                            .push(MultimodalData::Json(payload));
+                        #[cfg(feature = "mm-routing")]
+                        {
+                            exact_mm_routing_eligible = false;
+                        }
+                    }
                     continue;
                 };
 
@@ -4053,7 +4167,7 @@ impl OpenAIPreprocessor {
             // Preserve original messages and formatted prompt in extra_args for multimodal
             // workers (e.g., TRT-LLM needs message structure and the template-rendered
             // prompt with <image> placeholders for embedding-path / NIXL flows).
-            let messages_json = serde_json::to_value(request.messages())?;
+            let messages_json = template_messages(request)?;
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
@@ -17260,5 +17374,147 @@ mod tests {
             image,
             video(2)
         ]));
+    }
+}
+
+#[cfg(test)]
+mod custom_content_template_tests {
+    use super::*;
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+    // Consumer-owned template; these marker spellings are confined to tests.
+    const CUSTOM_TEMPLATE: &str = include_str!("../tests/data/custom_modality_chat_template.jinja");
+
+    fn positional_preprocessor() -> OpenAIPreprocessor {
+        let mut card = crate::model_card::ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.runtime_config
+            .set_engine_specific(
+                crate::local_model::runtime_config::JSON_MULTIMODAL_CAPABILITY,
+                true,
+            )
+            .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(card).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        let dynamo_renderer::PromptFormatter::OAI(formatter) =
+            dynamo_renderer::PromptFormatter::from_parts(
+                serde_json::from_value(serde_json::json!({"chat_template":CUSTOM_TEMPLATE}))
+                    .unwrap(),
+                dynamo_renderer::ContextMixins::default(),
+                true,
+            )
+            .unwrap();
+        preprocessor.formatter = formatter;
+        preprocessor
+    }
+
+    #[tokio::test]
+    async fn custom_positions_match_rendered_markers_and_ordered_worker_payloads() {
+        let preprocessor = positional_preprocessor();
+        for role in ["user", "tool"] {
+            let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+            let first =
+                serde_json::json!({"data_base64":"SECRET_ONE", "metadata":[null, false, 0]});
+            let second = serde_json::json!({"data_base64":"SECRET_TWO", "other":{"preserve":true}});
+            let biology = serde_json::json!({"metadata":"SECRET_BIO"});
+            let mut message = serde_json::json!({"role":role, "content":[
+                {"type":"text", "text":"Does this structure "},
+                {"type":"custom", "kind":"chemistry", "fields":first},
+                {"type":"text", "text":" match the diagram?"},
+                {"type":"image_url", "image_url":{"url":image}},
+                {"type":"custom", "kind":"biology", "fields":biology},
+                {"type":"custom", "kind":"chemistry", "fields":second},
+                {"type":"audio_url", "audio_url":{"url":"https://example.org/audio.wav"}},
+                {"type":"video_url", "video_url":{"url":"https://example.org/video.mp4"}}
+            ]});
+            let metadata_key = if role == "user" {
+                "name"
+            } else {
+                "tool_call_id"
+            };
+            let metadata = if role == "user" { "alice" } else { "call_7" };
+            message[metadata_key] = metadata.into();
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model":"test", "messages":[message], "add_generation_prompt":false
+                }))
+                .unwrap();
+            let expected = format!(
+                "<|{role}|>[{metadata}]Does this structure <|chem_projected|> match the diagram?<|image_1|><|bio_projected|><|chem_projected|><|audio|><|video|><|end|>"
+            );
+            assert_eq!(
+                preprocessor
+                    .apply_template(&request)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+            let (result, _, _) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            let media = result.multi_modal_data.unwrap();
+            let chemistry: Vec<_> = media["chemistry"]
+                .iter()
+                .map(|part| match part {
+                    MultimodalData::Json(value) => value.clone(),
+                    other => panic!("expected custom JSON, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(chemistry, [first, second]);
+            assert!(
+                matches!(&media["biology"][0], MultimodalData::Json(value) if value == &biology)
+            );
+            assert!(
+                matches!(&media["image_url"][0], MultimodalData::Url(url) if url.as_str() == image)
+            );
+            assert_eq!(
+                expected.matches("<|chem_projected|>").count(),
+                chemistry.len()
+            );
+            let extra = result.extra_args.unwrap();
+            assert_eq!(extra["formatted_prompt"], expected);
+            assert_eq!(extra["messages"][0][metadata_key], metadata);
+            let parts = extra["messages"][0]["content"].as_array().unwrap();
+            assert_eq!(parts.len(), 8);
+            assert_eq!(
+                parts[1],
+                serde_json::json!({"type":"custom", "kind":"chemistry"})
+            );
+            assert_eq!(
+                parts[4],
+                serde_json::json!({"type":"custom", "kind":"biology"})
+            );
+            assert_eq!(parts[5], parts[1]);
+            for secret in ["SECRET_ONE", "SECRET_TWO", "SECRET_BIO", "data_base64"] {
+                assert!(!extra.to_string().contains(secret));
+                assert!(!expected.contains(secret));
+            }
+            // Preprocessing must not mutate the original payload-bearing HTTP input.
+            let original = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                original["messages"][0]["content"][1]["fields"],
+                chemistry[0]
+            );
+            assert_eq!(
+                original["messages"][0]["content"][5]["fields"],
+                chemistry[1]
+            );
+        }
+    }
+
+    #[test]
+    fn custom_kinds_reserve_builtin_wire_names() {
+        for kind in ["text", "image_url", "video_url", "audio_url", "input_audio"] {
+            assert!(validate_custom_kind(kind).is_err());
+        }
+        // Engine names are distinct from the wire tags and retain the existing
+        // downstream collision checks when mixed with built-in media.
+        assert!(validate_custom_kind("image").is_ok());
+        assert!(validate_custom_kind("chemistry").is_ok());
     }
 }
