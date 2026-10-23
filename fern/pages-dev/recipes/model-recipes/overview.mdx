@@ -331,12 +331,6 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <div className="dynamo-model-tags"><span>SGLang + vLLM + TensorRT-LLM</span><span>GB200 · GB300</span><span>Agentic</span></div>
   <a className="dynamo-card-link" href="Muse-Spark-Open.mdx" aria-label="Open the Muse-Spark-Open-816B-A42B recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="minimax" data-runtime="sglang trtllm vllm" data-hardware="b200 gb300" data-technique="aggregated expert-parallel kv-routing" data-workload="chat agentic-coding long-context-reuse" data-targets="vllm-agg-gb300 vllm-agg-b200 sglang-agg-gb300 sglang-agg-b200 trtllm-agg-gb300 trtllm-agg-b200">
-    <div className="dynamo-model-card-top"><div><h3>MiniMax M3.1</h3><p>MiniMax</p></div></div>
-    <p className="dynamo-model-summary">Experimental day-0 recipes for MiniMax-M3.1-Flash on four B200 or GB300 GPUs, with vLLM, SGLang, or TensorRT-LLM, TP4 plus expert parallelism, a 1M-token context with prefix caching, and text and image input.</p>
-    <div className="dynamo-model-tags"><span>vLLM · SGLang · TensorRT-LLM</span><span>4x B200 · 4x GB300</span><span>up to 1M context</span></div>
-    <a className="dynamo-card-link" href="minimax-m3-1.mdx" aria-label="Open the MiniMax M3.1 recipe">Open recipe</a>
-  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="minimax" data-runtime="vllm" data-hardware="gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="vllm-agg-gb200-agentic vllm-disagg-gb200-agentic">
     <div className="dynamo-model-card-top">
       <div><h3>MiniMax M3</h3><p>MiniMax / NVIDIA</p></div>
