@@ -1,9 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
+# Optional-dependency preflight must run before the retune imports.
 
 """Unit tests for retune search-domain expansion."""
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.sweeper",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import RetuneParams
