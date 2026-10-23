@@ -477,9 +477,9 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
-# codex exec (up to 180s) + Codex child process (up to 210s) + claude
-# exec (up to 180s) + optional Claude subagent probe (up to 45s) + opencode run
-# (up to 180s) + inter-suite health checks + teardown.
+# codex exec (up to 180s shared by all attempts) + Codex child process (up to
+# 210s) + claude exec (up to 180s) + optional Claude subagent probe (up to
+# 45s) + opencode run (up to 180s) + inter-suite health checks + teardown.
 @pytest.mark.timeout(1095)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
@@ -790,6 +790,76 @@ def test_parent_context_requires_observed_parent_session() -> None:
     assert _trace_contains_agent_parent_context(records, require_observed_parent=True)
 
 
+@pytest.mark.unit
+@pytest.mark.sglang
+@pytest.mark.core
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_codex_rejected_escalation_only_matches_policy_rejection() -> None:
+    def record(payload: dict) -> str:
+        return json.dumps({"type": "response_item", "payload": payload})
+
+    escalated_args = json.dumps(
+        {"cmd": "ls", "sandbox_permissions": "require_escalated"}
+    )
+    rejected = [
+        "not json",
+        record(
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": escalated_args,
+                "call_id": "call_1",
+            }
+        ),
+        record(
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "approval policy is Never; reject command — you cannot "
+                "ask for escalated permissions if the approval policy is Never",
+            }
+        ),
+    ]
+    assert _codex_rejected_escalation(rejected) == escalated_args
+
+    clean_ls = [
+        record(
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": '{"cmd":"ls"}',
+                "call_id": "call_2",
+            }
+        ),
+        record(
+            {
+                "type": "function_call_output",
+                "call_id": "call_2",
+                "output": "Process exited with code 0\nOutput:\nmarker_x.txt\n",
+            }
+        ),
+    ]
+    assert _codex_rejected_escalation(clean_ls) is None
+
+    text_only = [
+        record(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "The approval policy is set to `Never`, so I "
+                        "cannot ask for escalated permissions.",
+                    }
+                ],
+            }
+        )
+    ]
+    assert _codex_rejected_escalation(text_only) is None
+
+
 def _assert_agent_context_in_trace(
     trace_path: Path,
     source_label: str,
@@ -950,6 +1020,51 @@ def _run_bun_compliance(
         )
 
 
+# `codex exec` hard-codes approval policy `Never`, so Codex itself refuses any
+# exec_command call that asks for a sandbox override (`sandbox_permissions`)
+# and hands this text back to the model instead of running the command. The
+# compliance model sometimes adds that field despite the prompt. Only that
+# local refusal earns another attempt; every other miss stays fatal.
+_CODEX_EXEC_ATTEMPTS = 3
+_CODEX_EXEC_BUDGET_S = 180.0
+# Do not start a retry with less time than this left in the shared budget.
+_CODEX_EXEC_MIN_ATTEMPT_S = 30.0
+_CODEX_ESCALATION_REJECTION_MARKERS = ("reject command", "escalated permissions")
+
+
+def _codex_rejected_escalation(session_lines: list[str]) -> str | None:
+    """Return the arguments of an exec_command call Codex rejected locally for
+    requesting escalated permissions, or None if no such rejection happened.
+
+    `session_lines` are the lines of one Codex session record
+    (`$CODEX_HOME/sessions/**/rollout-*.jsonl`).
+    """
+    call_arguments: dict[str, str] = {}
+    for line in session_lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        item = record.get("payload")
+        if not isinstance(item, dict):
+            item = record
+        if item.get("type") == "function_call":
+            call_arguments[str(item.get("call_id"))] = str(item.get("arguments", ""))
+        elif item.get("type") == "function_call_output":
+            output = item.get("output")
+            if not isinstance(output, str):
+                output = json.dumps(output)
+            if all(m in output for m in _CODEX_ESCALATION_REJECTION_MARKERS):
+                return call_arguments.get(str(item.get("call_id")), "")
+    return None
+
+
+def _codex_session_records(codex_home: Path) -> set[Path]:
+    return set((Path(codex_home) / "sessions").rglob("rollout-*.jsonl"))
+
+
 def _run_codex_exec_smoke(
     codex_cli: Path, node_bin: Path, codex_home, cwd, marker_filename: str
 ) -> None:
@@ -961,6 +1076,11 @@ def _run_codex_exec_smoke(
     without invoking its shell tool, the marker won't appear in stdout and the
     assertion fails — which proves we're testing the full Responses API
     tool-calling chain, not just text generation.
+
+    An attempt is repeated (same server, marker, and CODEX_HOME) only when it
+    exited 0 without the marker and its session record shows Codex rejected
+    the tool call for asking for escalated permissions. All attempts share one
+    `_CODEX_EXEC_BUDGET_S` budget, so the test timeout budget is unchanged.
     """
     logger.info("Running codex exec smoke test against CODEX_HOME=%s", codex_home)
 
@@ -989,39 +1109,72 @@ def _run_codex_exec_smoke(
         CODEX_LIST_DIRECTORY_PROMPT,
         "--dangerously-bypass-approvals-and-sandbox",
     ]
-    result = subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-
-    _attach_subprocess_log(
-        name="codex_exec_smoke.log",
-        cmd=cmd,
-        result=result,
-        extra_env=extra_env,
-        cwd=str(cwd),
-    )
-    if result.stdout:
-        logger.info("codex stdout:\n%s", result.stdout)
-    if result.stderr:
-        logger.info("codex stderr:\n%s", result.stderr)
-
-    if result.returncode != 0:
-        pytest.fail(
-            f"codex exec failed (exit={result.returncode}).\n"
-            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+    deadline = time.monotonic() + _CODEX_EXEC_BUDGET_S
+    rejected_attempts = 0
+    for attempt in range(1, _CODEX_EXEC_ATTEMPTS + 1):
+        records_before = _codex_session_records(codex_home)
+        result = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=max(deadline - time.monotonic(), 1.0),
         )
 
-    if marker_filename not in result.stdout:
-        pytest.fail(
-            "codex exec did not report the marker file — expected stdout to "
-            f"contain {marker_filename!r} (implies the shell tool was invoked "
-            f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}"
+        _attach_subprocess_log(
+            name=f"codex_exec_smoke_attempt{attempt}.log",
+            cmd=cmd,
+            result=result,
+            extra_env=extra_env,
+            cwd=str(cwd),
         )
+        if result.stdout:
+            logger.info("codex stdout (attempt %d):\n%s", attempt, result.stdout)
+        if result.stderr:
+            logger.info("codex stderr (attempt %d):\n%s", attempt, result.stderr)
+
+        if result.returncode != 0:
+            pytest.fail(
+                f"codex exec failed (exit={result.returncode}).\n"
+                f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+            )
+
+        if marker_filename in result.stdout:
+            return
+
+        new_records = _codex_session_records(codex_home) - records_before
+        rejected_arguments = None
+        if new_records:
+            newest = max(new_records, key=lambda p: p.stat().st_mtime)
+            rejected_arguments = _codex_rejected_escalation(
+                newest.read_text(errors="replace").splitlines()
+            )
+        if rejected_arguments is None:
+            break
+        rejected_attempts += 1
+        logger.warning(
+            "codex exec attempt %d/%d: Codex rejected exec_command locally "
+            "because it asked for escalated permissions under approval policy "
+            "Never; arguments: %s",
+            attempt,
+            _CODEX_EXEC_ATTEMPTS,
+            rejected_arguments,
+        )
+        if deadline - time.monotonic() < _CODEX_EXEC_MIN_ATTEMPT_S:
+            break
+
+    note = ""
+    if rejected_attempts == attempt:
+        note = (
+            f"\n\nAll {attempt} attempt(s) asked for escalated permissions and "
+            "were rejected by Codex's approval policy before `ls` ran."
+        )
+    pytest.fail(
+        "codex exec did not report the marker file — expected stdout to "
+        f"contain {marker_filename!r} (implies the shell tool was invoked "
+        f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}{note}"
+    )
 
 
 def _run_codex_subagent_smoke(
