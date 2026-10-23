@@ -18,20 +18,22 @@ func applyRuntimeSelection(container *corev1.Container, projection *ModelProject
 	if err != nil {
 		return err
 	}
-	applyOwnedRuntimeEnv(container, []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: path}})
+	applyOwnedEnv(container, []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: path}})
 	if projection.pipeline == PipelineHybrid {
 		applyLocalPartitionIDs(container, projection)
 	}
 	return nil
 }
 
-// Prepend operator bindings so authored Kubernetes environment references see
-// authoritative values, including an explicitly empty local selection.
-func applyOwnedRuntimeEnv(container *corev1.Container, bindings []corev1.EnvVar) {
-	env := make([]corev1.EnvVar, 0, len(bindings)+len(container.Env))
-	env = append(env, bindings...)
+// applyOwnedEnv prepends operator-owned bindings to container's environment and
+// removes authored variables of the same names. Kubernetes expands references in
+// order, so authored values see the authoritative bindings, including an
+// explicitly empty local selection.
+func applyOwnedEnv(container *corev1.Container, owned []corev1.EnvVar) {
+	env := make([]corev1.EnvVar, 0, len(owned)+len(container.Env))
+	env = append(env, owned...)
 	for _, variable := range container.Env {
-		if !slices.ContainsFunc(bindings, func(binding corev1.EnvVar) bool { return binding.Name == variable.Name }) {
+		if !slices.ContainsFunc(owned, func(binding corev1.EnvVar) bool { return binding.Name == variable.Name }) {
 			env = append(env, variable)
 		}
 	}

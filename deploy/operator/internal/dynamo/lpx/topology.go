@@ -124,16 +124,3 @@ func bindTopology(podSpec *corev1.PodSpec, deployment string, mainEnv, runtimeEn
 	runtime.VolumeMounts = append(runtime.VolumeMounts, mount)
 	return nil
 }
-
-// applyOwnedEnv prepends owned to container's environment and removes authored
-// variables of the same names.
-func applyOwnedEnv(container *corev1.Container, owned []corev1.EnvVar) {
-	env := make([]corev1.EnvVar, 0, len(owned)+len(container.Env))
-	env = append(env, owned...)
-	for _, variable := range container.Env {
-		if !slices.ContainsFunc(owned, func(binding corev1.EnvVar) bool { return binding.Name == variable.Name }) {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
-}

@@ -246,7 +246,7 @@ func RenderNodeLocal(
 		if err := applyRuntimeSelection(container, projections[0], modelStoragePath); err != nil {
 			return nil, err
 		}
-		applyOwnedRuntimeEnv(container, []corev1.EnvVar{{
+		applyOwnedEnv(container, []corev1.EnvVar{{
 			Name:  allocationEnvVar,
 			Value: allocation,
 		}})
