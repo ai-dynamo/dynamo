@@ -125,8 +125,7 @@ runs:
           EXTRA_ARGS+=" --load"
         fi
 
-        # buildx merges --push into an existing type=image output, so this adds
-        # no second export. With --load it would, hence the push requirement.
+        # Push-only: buildx folds --push into this type=image output; --load would export twice.
         # force-compression stays unset so cached blobs are not recompressed.
         if [ -n "${IMAGE_COMPRESSION_LEVEL}" ]; then
           if [[ ! "${IMAGE_COMPRESSION_LEVEL}" =~ ^[0-9]$ ]]; then
