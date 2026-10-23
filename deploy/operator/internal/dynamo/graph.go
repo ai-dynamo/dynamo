@@ -2306,8 +2306,9 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	return componentContext, nil
 }
 
-// GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
-// deployerOverride, when non-nil, overrides the default MultinodeDeployer from the factory.
+// GeneratePodSpecForComponent creates a PodSpec for Grove deployments.
+// component and dynamoDeployment must not be nil.
+// deployerOverride may be nil to use the default multinode deployer from the factory.
 func GeneratePodSpecForComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
