@@ -61,7 +61,7 @@ def test_colocated_agents_start_with_occupied_telemetry_port(tmp_path, enable):
         env["NIXL_TELEMETRY_ENABLE"] = enable
     env["NIXL_TELEMETRY_EXPORTER"] = "" if enable == "y" else "prometheus"
     env["NIXL_TELEMETRY_DIR"] = str(telemetry_dir)
-    names = [f"rank-{rank}" for rank in range(4)]
+    names = [f"rank-{rank}" for rank in range(4 if enable == "y" else 1)]
 
     with reserved_ports(1, DynamoPortRange.NIXL) as ports, socket.socket() as occupied:
         occupied.bind(("0.0.0.0", ports[0]))
