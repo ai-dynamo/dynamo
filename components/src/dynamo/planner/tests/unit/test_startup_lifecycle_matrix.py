@@ -33,6 +33,7 @@ pytestmark = [
 
 _EXAMPLES = Path(__file__).resolve().parents[6] / "examples" / "backends"
 _RUNTIME_NAMESPACE = "test-ns"
+_READINESS_TIMEOUT = "deployment not ready after 1800 seconds"
 
 # One shipped DGD per distinct worker naming shape, plus a renamed disagg graph.
 _SHAPES = {
@@ -44,7 +45,9 @@ _SHAPES = {
 }
 
 # path -> (pending replica on the first worker, worker metadata published at
-# startup, readiness wait outcome, Pod list forbidden, startup must succeed)
+# startup, readiness wait outcome, Pod list forbidden, startup must succeed).
+# Metadata missing at startup arrives on the second read when the wait blocks,
+# and after startup otherwise.
 _PATHS = {
     "ready": (False, True, "ready", False, True),
     "pending": (True, True, "blocks", False, True),
@@ -76,6 +79,11 @@ def _role(component):
     return "prefill" if component["type"] == "prefill" else "decode"
 
 
+def _endpoint_name(runtime_component):
+    parts = (runtime_component or "").split(".")
+    return parts[1] if len(parts) > 1 else "generate"
+
+
 def _cluster(backend, manifest, renames, runtime_component, path):
     pending, metadata_at_start, readiness, pods_forbidden, _ = _PATHS[path]
     source = (_EXAMPLES / backend / "deploy" / manifest).read_text()
@@ -97,7 +105,7 @@ def _cluster(backend, manifest, renames, runtime_component, path):
         if component in workers:
             component["scalingAdapter"] = {}
             role = _role(component)
-            served = runtime_component or (
+            served = (runtime_component or "").split(".")[0] or (
                 "prefill" if role == "prefill" else "backend"
             )
             status = {
@@ -140,7 +148,7 @@ def _cluster(backend, manifest, renames, runtime_component, path):
 
     async def wait_for_ready(*_args, **_kwargs):
         if readiness == "timeout":
-            raise TimeoutError("deployment not ready after 1800 seconds")
+            raise TimeoutError(_READINESS_TIMEOUT)
         if readiness == "blocks":
             await asyncio.Event().wait()
 
@@ -157,7 +165,7 @@ def _cluster(backend, manifest, renames, runtime_component, path):
                             "test-model": {
                                 "type": "Model",
                                 "component": served,
-                                "endpoint": "generate",
+                                "endpoint": _endpoint_name(runtime_component),
                                 "card_json": {
                                     "worker_type": role,
                                     "display_name": "test-model",
@@ -175,10 +183,16 @@ def _cluster(backend, manifest, renames, runtime_component, path):
             for role, (cr_name, served) in cards.items()
         ]
 
+    reads = []
+
+    def list_metadata(**_):
+        if readiness == "blocks" and reads:
+            publish_metadata()
+        reads.append(len(published))
+        return {"items": deepcopy(published)}
+
     api.custom_api = Mock()
-    api.custom_api.list_namespaced_custom_object.side_effect = lambda **_: {
-        "items": deepcopy(published)
-    }
+    api.custom_api.list_namespaced_custom_object.side_effect = list_metadata
     if metadata_at_start:
         publish_metadata()
     expected = {
@@ -197,14 +211,12 @@ def _cluster(backend, manifest, renames, runtime_component, path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", list(_PATHS))
-@pytest.mark.parametrize("runtime_component", [None, "custom"])
+@pytest.mark.parametrize("runtime_component", [None, "custom", "custom.infer"])
 @pytest.mark.parametrize("shape", list(_SHAPES))
 async def test_startup_binds_metrics_to_registered_workers(
     shape, runtime_component, path, monkeypatch
 ):
-    monkeypatch.setattr(
-        environment_base, "STARTUP_PENDING_RECHECK_SECONDS", 0.01, raising=False
-    )
+    monkeypatch.setattr(environment_base, "STARTUP_PENDING_RECHECK_SECONDS", 0.01)
     monkeypatch.setattr(dynamo.llm, "FpmEventSubscriber", _FakeSubscriber)
     backend, manifest, renames = _SHAPES[shape]
     connector, publish_metadata, cards, expected, pending_by_name = _cluster(
@@ -236,10 +248,12 @@ async def test_startup_binds_metrics_to_registered_workers(
     must_start = _PATHS[path][4]
     try:
         await asyncio.wait_for(environment.initialize(), timeout=5)
-    except TimeoutError:
-        # Failing closed is acceptable only where startup is not required, and
-        # must not leave a subscriber bound to a guessed endpoint.
+    except TimeoutError as exc:
+        # Failing closed is acceptable only where startup is not required, only
+        # from the readiness timeout (not a hang), and must not leave a
+        # subscriber bound to a guessed endpoint.
         assert not must_start, "startup did not complete"
+        assert _READINESS_TIMEOUT in str(exc), "startup hung"
         runtime.endpoint.assert_not_called()
         return
 
@@ -257,5 +271,8 @@ async def test_startup_binds_metrics_to_registered_workers(
         "decode": provider._decode_fpm_sub,
     }
     for role, (_, served) in cards.items():
-        assert subscribers[role].endpoint == f"{_RUNTIME_NAMESPACE}.{served}.generate"
+        assert (
+            subscribers[role].endpoint
+            == f"{_RUNTIME_NAMESPACE}.{served}.{_endpoint_name(runtime_component)}"
+        )
         assert getattr(state, role).info.max_num_batched_tokens == 8192

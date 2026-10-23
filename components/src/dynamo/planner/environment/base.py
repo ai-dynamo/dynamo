@@ -49,6 +49,7 @@ _MDC_REFRESH_FIELDS = (
     "context_length",
     "speculative_nextn",
 )
+_MDC_IDENTITY_FIELDS = ("component_name", "endpoint")
 
 
 class NoopTrafficMetricsProvider:
@@ -248,8 +249,9 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         wait is exhausted, restart the Planner into the same wait. Startup
         proceeds as soon as every required role has a serving worker and the only
         shortfall is verified pending startup capacity. Otherwise the readiness
-        wait, including its timeout, applies unchanged: without serving workers
-        there is no worker metadata to bind FPM subscriptions to.
+        wait, including its timeout, applies unchanged. A serving worker may not
+        have published its worker metadata yet; refresh then rebinds the FPM
+        subscriber once that metadata names the worker's endpoint.
         """
         ready = asyncio.ensure_future(
             self.controller.wait_for_deployment_ready(include_planner=False)
@@ -359,7 +361,13 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             component_state.info = fresh
             return
 
-        for field_name in _MDC_REFRESH_FIELDS:
+        # Fallback WorkerInfo carries no capacity fields. Once worker metadata
+        # supplies them, its endpoint identity also replaces the fallback guess,
+        # and the FPM provider rebinds to it.
+        fields = _MDC_REFRESH_FIELDS
+        if any(getattr(fresh, name) is not None for name in _MDC_REFRESH_FIELDS):
+            fields += _MDC_IDENTITY_FIELDS
+        for field_name in fields:
             fresh_val = getattr(fresh, field_name)
             if (
                 fresh_val is not None

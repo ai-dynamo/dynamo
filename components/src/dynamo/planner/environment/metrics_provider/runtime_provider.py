@@ -48,6 +48,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
         self.namespace_source = namespace_source
         self._prefill_fpm_sub = None
         self._decode_fpm_sub = None
+        self._fpm_paths: dict[str, str] = {}
 
     def bind_sources(
         self,
@@ -64,7 +65,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
 
     async def refresh(self, state: DeploymentState) -> None:
         del state
-        await self._rebind_missing_subscribers()
+        await self._rebind_stale_subscribers()
 
     def collect_fpm(self) -> FpmObservations:
         prefill_stats = None
@@ -122,11 +123,44 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
         if self.require_decode:
             self._decode_fpm_sub = await self._init_fpm_subscriber("decode")
 
-    async def _rebind_missing_subscribers(self) -> None:
-        if self.require_prefill and self._prefill_fpm_sub is None:
+    async def _rebind_stale_subscribers(self) -> None:
+        # A subscriber bound before worker metadata existed follows fallback
+        # WorkerInfo; rebind it once WorkerInfo names a different endpoint.
+        if self.require_prefill and self._is_stale("prefill", self._prefill_fpm_sub):
+            if self._prefill_fpm_sub is not None:
+                self._prefill_fpm_sub.shutdown()
+                self._prefill_fpm_sub = None
             self._prefill_fpm_sub = await self._init_fpm_subscriber("prefill")
-        if self.require_decode and self._decode_fpm_sub is None:
+        if self.require_decode and self._is_stale("decode", self._decode_fpm_sub):
+            if self._decode_fpm_sub is not None:
+                self._decode_fpm_sub.shutdown()
+                self._decode_fpm_sub = None
             self._decode_fpm_sub = await self._init_fpm_subscriber("decode")
+
+    def _is_stale(self, component: str, subscriber) -> bool:
+        if subscriber is None:
+            return True
+        path = self._worker_path(component)
+        return path is not None and path != self._fpm_paths.get(component)
+
+    def _worker_path(self, component: str) -> Optional[str]:
+        """Return ``namespace.component.endpoint`` from the role's WorkerInfo, if complete."""
+        if self.state_source is None or self.namespace_source is None:
+            return None
+        state = self.state_source.deployment_state()
+        worker_info = (
+            state.prefill.info if component == "prefill" else state.decode.info
+        )
+        if (
+            worker_info is None
+            or not worker_info.component_name
+            or not worker_info.endpoint
+        ):
+            return None
+        runtime_namespace = self.namespace_source.runtime_namespace()
+        return (
+            f"{runtime_namespace}.{worker_info.component_name}.{worker_info.endpoint}"
+        )
 
     async def _init_fpm_subscriber(self, component: str):
         # Avoid loading binding-heavy dynamo.llm until runtime FPM is configured.
@@ -139,32 +173,17 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
                 component,
             )
             return None
-        state = self.state_source.deployment_state()
-        worker_info = (
-            state.prefill.info if component == "prefill" else state.decode.info
-        )
-        if (
-            worker_info is None
-            or not worker_info.component_name
-            or not worker_info.endpoint
-        ):
+        path = self._worker_path(component)
+        if path is None:
             logger.warning(
                 "WorkerInfo missing for %s, cannot create FPM subscriber", component
             )
             return None
 
-        runtime_namespace = self.namespace_source.runtime_namespace()
-        endpoint = self.runtime.endpoint(
-            f"{runtime_namespace}.{worker_info.component_name}.{worker_info.endpoint}"
-        )
-        sub = FpmEventSubscriber(endpoint)
+        sub = FpmEventSubscriber(self.runtime.endpoint(path))
         sub.start_tracking()
-        logger.info(
-            "FPM tracker started for %s.%s.%s",
-            runtime_namespace,
-            worker_info.component_name,
-            worker_info.endpoint,
-        )
+        self._fpm_paths[component] = path
+        logger.info("FPM tracker started for %s", path)
         return sub
 
     def _shutdown_subscribers(self) -> None:
@@ -174,6 +193,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
             self._decode_fpm_sub.shutdown()
         self._prefill_fpm_sub = None
         self._decode_fpm_sub = None
+        self._fpm_paths.clear()
 
     def _decode_fpm_bytes(
         self, subscriber

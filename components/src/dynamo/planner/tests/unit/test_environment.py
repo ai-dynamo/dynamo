@@ -167,9 +167,10 @@ async def test_initialize_proceeds_once_only_pending_capacity_remains(monkeypatc
     )
     environment = _agg_environment(controller)
 
-    await asyncio.wait_for(environment.initialize(), timeout=5)
+    await asyncio.wait_for(environment._wait_for_startup_ready(), timeout=5)
 
-    assert controller.get_worker_inventory.await_count >= 3
+    # Only the third inventory, the first with a serving worker, may start early.
+    assert controller.get_worker_inventory.await_count == 3
     await _assert_no_leftover_tasks()
 
 
@@ -296,6 +297,33 @@ async def test_replica_expected_count_tracks_only_stable_observations():
     assert environment.deployment_state().decode.replicas.active == 5
     assert environment.deployment_state().decode.replicas.expected is None
     assert environment.deployment_state().decode.replicas.scaling is True
+
+
+@pytest.mark.parametrize(
+    "fresh_capacity,expected_endpoint",
+    [({"total_kv_blocks": 1024}, "infer"), ({}, "generate")],
+)
+def test_worker_info_refresh_takes_endpoint_only_from_worker_metadata(
+    fresh_capacity, expected_endpoint
+):
+    controller = _controller()
+    controller.get_worker_info.side_effect = lambda sub_component_type, backend: (
+        WorkerInfo(
+            k8s_name="worker",
+            component_name="custom",
+            endpoint="infer",
+            **fresh_capacity,
+        )
+    )
+    environment = _agg_environment(controller)
+    state = environment.deployment_state()
+    state.decode.info = WorkerInfo(
+        k8s_name="worker", component_name="custom", endpoint="generate"
+    )
+
+    environment._refresh_worker_info()
+
+    assert state.decode.info.endpoint == expected_endpoint
 
 
 def test_gpu_discovery_validation_error_falls_back_without_mutating_config():
