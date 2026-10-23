@@ -436,10 +436,6 @@ pub mod llm {
     /// and the legacy `/busy_threshold` routes on the inference HTTP port.
     pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
 
-    /// Disable the frontend's HTTP admin routes, even when enabled explicitly.
-    /// Inference, metrics, models, health, and liveness routes are unaffected.
-    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
-
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
@@ -1176,7 +1172,6 @@ mod tests {
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_ENABLE_FRONTEND_ADMIN_API,
-            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
