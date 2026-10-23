@@ -311,7 +311,12 @@ pub struct RoutingHost {
 }
 
 /// An admitted KV route awaiting dispatch.
-pub(crate) struct RoutePlan {
+///
+/// The plan owns its booking. A host that dispatches sends it with
+/// `dispatch_kv_plan`; a host that only selects (the gateway endpoint picker)
+/// keeps the booking with [`RoutePlan::into_booking`] or
+/// [`RoutePlan::detach_booking`]. Dropping an unused plan releases the booking.
+pub struct RoutePlan {
     pub(crate) signals: RoutePlanSignals,
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
@@ -358,10 +363,48 @@ impl RoutePlanSignals {
     }
 }
 
+/// The booking of an admitted route that this host will not dispatch.
+///
+/// Dropping it releases the booking without waiting; [`RouteBooking::release`]
+/// waits for the scheduler to acknowledge the release.
+pub struct RouteBooking {
+    cleanup: KvRequestCleanup,
+}
+
+impl RouteBooking {
+    pub async fn release(self) {
+        self.cleanup.finish().await;
+    }
+}
+
 impl RoutePlan {
     /// The worker and DP rank this plan admitted.
+    pub fn worker(&self) -> WorkerWithDpRank {
+        self.selection.worker
+    }
+
     pub(crate) fn target(&self) -> AffinityTarget {
         route_target(self.selection.worker)
+    }
+
+    /// Keep the booking without dispatching. A classifier lifecycle, which only
+    /// a dispatching host can follow, is aborted.
+    pub fn into_booking(self) -> RouteBooking {
+        RouteBooking {
+            cleanup: self.cleanup,
+        }
+    }
+
+    /// Keep the booking under the plan's request id without dispatching. It is
+    /// released by `KvRouter::free` with that id, or when its lease expires. A
+    /// classifier lifecycle, which only a dispatching host can follow, is aborted.
+    pub fn detach_booking(self) {
+        self.cleanup.detach();
+    }
+
+    /// Release the booking and wait for the scheduler to acknowledge it.
+    pub async fn release(self) {
+        self.abort_with_error(None).await;
     }
 
     /// Release a plan that will not be dispatched: abort its classifier

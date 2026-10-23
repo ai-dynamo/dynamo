@@ -287,7 +287,7 @@ impl RoutingHost {
     /// handling as a dispatched route. The returned plan owns the booking: send
     /// it with [`Self::dispatch_kv_plan`] or release it with
     /// [`RoutePlan::abort_with_error`].
-    pub(crate) async fn plan_kv_route(
+    pub async fn plan_kv_route(
         &self,
         request: &dyn RouteRequest,
         phase: RequestPhase,

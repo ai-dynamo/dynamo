@@ -70,6 +70,36 @@ pub trait RouteRequest: Send + Sync {
     }
 }
 
+/// A route request made only of an id and prompt tokens, for tests.
+#[cfg(test)]
+pub(crate) struct TestRouteRequest {
+    context: Arc<dyn AsyncEngineContext>,
+    token_ids: Vec<TokenIdType>,
+}
+
+#[cfg(test)]
+impl TestRouteRequest {
+    pub(crate) fn new(id: &str, token_ids: &[TokenIdType]) -> Self {
+        Self {
+            context: Arc::new(dynamo_runtime::pipeline::context::Controller::new(
+                id.to_string(),
+            )),
+            token_ids: token_ids.to_vec(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl RouteRequest for TestRouteRequest {
+    fn engine_context(&self) -> Arc<dyn AsyncEngineContext> {
+        Arc::clone(&self.context)
+    }
+
+    fn routing_tokens(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
+        (&self.token_ids, None)
+    }
+}
+
 impl RouteRequest for SingleIn<PreprocessedRequest> {
     fn engine_context(&self) -> Arc<dyn AsyncEngineContext> {
         self.context()

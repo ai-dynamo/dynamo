@@ -16,20 +16,22 @@ use std::time::Duration;
 use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
-use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter, RoutePlan, RouteRequest, RoutingHost};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
+use dynamo_llm::protocols::common::preprocessor::RoutingHints;
+use dynamo_llm::protocols::common::timing::RequestPhase;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
 };
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
-use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::pipeline::{AsyncEngineContext, PushRouter, RouterMode, context::Controller};
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
@@ -107,6 +109,56 @@ fn cache_namespace_from_request<R: NvExtProvider>(
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
 const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 
+/// One stage of a picked request, as the router's worker selection reads it.
+struct EppRouteRequest<'a> {
+    /// Carries the booking's request id.
+    context: Arc<dyn AsyncEngineContext>,
+    tokens: &'a [u32],
+    hints: RoutingHints,
+    policy_class: Option<&'a str>,
+    router_config_override: Option<RouterConfigOverride>,
+}
+
+impl<'a> EppRouteRequest<'a> {
+    fn new(
+        request_id: String,
+        tokens: &'a [u32],
+        hints: RoutingHints,
+        policy_class: Option<&'a str>,
+        router_config_override: Option<RouterConfigOverride>,
+    ) -> Self {
+        Self {
+            context: Arc::new(Controller::new(request_id)),
+            tokens,
+            hints,
+            policy_class,
+            router_config_override,
+        }
+    }
+}
+
+impl RouteRequest for EppRouteRequest<'_> {
+    fn engine_context(&self) -> Arc<dyn AsyncEngineContext> {
+        Arc::clone(&self.context)
+    }
+
+    fn routing_tokens(&self) -> (&[u32], Option<&[Option<BlockExtraInfo>]>) {
+        (self.tokens, None)
+    }
+
+    fn routing_hints(&self) -> Option<&RoutingHints> {
+        Some(&self.hints)
+    }
+
+    fn router_config_override(&self) -> Option<&RouterConfigOverride> {
+        self.router_config_override.as_ref()
+    }
+
+    fn policy_class(&self) -> Option<&str> {
+        self.policy_class
+    }
+}
+
 /// Holds all router state needed for request routing.
 ///
 /// This is the async-native equivalent of `RouterHandles` from the C bindings,
@@ -115,6 +167,9 @@ pub struct Router {
     prefill_router: Arc<PrefillRouter>,
     prefill_bookings: DashMap<String, PrefillReservation>,
     decode_router: ManagedKvRouter,
+    /// Selects and books decode workers through the same path as the frontend.
+    /// The EPP never dispatches through it; the gateway sends the request.
+    decode_host: Arc<RoutingHost>,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
@@ -188,6 +243,17 @@ impl Router {
                 enable_eagle,
             )
             .await?;
+        let decode_host = Arc::new(RoutingHost::new_with_load_context(
+            PushRouter::from_client(
+                decode_router.load_context().client().clone(),
+                RouterMode::KV,
+            )
+            .await?,
+            decode_router.router().clone(),
+            decode_router.load_context().clone(),
+            None,
+            dynamo_llm::session_affinity::SessionAffinityMode::Hard,
+        )?);
 
         // Wait for runtime config watch to populate
         {
@@ -247,6 +313,7 @@ impl Router {
             prefill_router,
             prefill_bookings: DashMap::new(),
             decode_router,
+            decode_host,
             preprocessor: bootstrap.preprocessor,
             runtime,
             worker_index,
@@ -470,144 +537,27 @@ impl Router {
 
     /// Atomically select and reserve a prefill worker.
     ///
-    /// Queue priorities are forwarded to the prefill scheduler. `priority_jump`
-    /// adjusts the policy score, while `strict_priority` selects the primary
-    /// tier. `policy_class` names the scheduling policy class the reservation
-    /// queues under. `routing_constraints` carries the request's
-    /// required/preferred taints (lifted from `nvext.routing_constraints`); a
-    /// hard `required_taints` mismatch excludes a worker from selection.
-    #[expect(clippy::too_many_arguments)]
-    pub async fn route_prefill(
-        &self,
-        reservation_id: &str,
-        tokens: &[u32],
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        policy_class: Option<String>,
-        allowed_worker_ids: Option<HashSet<u64>>,
-        routing_constraints: RoutingConstraints,
-    ) -> Result<PrefillReservation> {
+    /// Selection reads the request's routing hints: queue priorities,
+    /// cache namespace, allowed workers and routing constraints (a hard
+    /// `required_taints` mismatch excludes a worker). The policy class names
+    /// the scheduling class the reservation queues under.
+    async fn route_prefill(&self, request: &EppRouteRequest<'_>) -> Result<PrefillReservation> {
         self.prefill_router
-            .reserve_prefill_worker(
-                reservation_id,
-                tokens,
-                None,
-                None,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                allowed_worker_ids,
-                routing_constraints,
-            )
+            .reserve_prefill_worker(request)
             .await
             .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
     }
 
-    /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
-    ///
-    /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
-    /// adjusts the policy score, while `strict_priority` selects the primary
-    /// tier. `policy_class` names the scheduling policy class the request queues
-    /// under. `routing_constraints` carries the request's required/preferred
-    /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
-    /// mismatch excludes a worker from selection.
+    /// Atomically select and book a decode worker through the decode host's
+    /// `plan_kv_route`, the same selection the frontend uses.
     ///
     /// A per-class queue limit rejection surfaces as an error here, the same as
     /// it does for the integrated frontend.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn route_decode(
-        &self,
-        tokens: &[u32],
-        is_disaggregated: bool,
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        policy_class: Option<String>,
-        allowed_worker_ids: Option<HashSet<u64>>,
-        routing_constraints: RoutingConstraints,
-    ) -> Result<(WorkerWithDpRank, u32)> {
-        let config_override = decode_router_config_override(is_disaggregated);
-
-        let outcome = self
-            .decode_router
-            .find_best_match_details_with_policy_class(
-                None,
-                tokens,
-                None,
-                config_override.as_ref(),
-                false,
-                false,
-                None,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                None,
-                None,
-                None,
-                allowed_worker_ids,
-                routing_constraints,
-            )
+    async fn route_decode(&self, request: &EppRouteRequest<'_>) -> Result<RoutePlan> {
+        self.decode_host
+            .plan_kv_route(request, RequestPhase::Decode)
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
-
-        match outcome {
-            FindBestMatchOutcome::Routed {
-                worker,
-                overlap_blocks,
-                ..
-            } => Ok((worker, overlap_blocks)),
-            FindBestMatchOutcome::QueueRejected { rejection } => {
-                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
-            }
-        }
-    }
-
-    /// Register a request with the decode router for bookkeeping.
-    pub async fn add_request(
-        &self,
-        request_id: &str,
-        tokens: &[u32],
-        worker_id: u64,
-        dp_rank: u32,
-        is_disaggregated: bool,
-        cache_namespace: Option<String>,
-    ) -> Result<()> {
-        let decode_router = self.decode_router.clone();
-        let request_id = request_id.to_owned();
-        let tokens = tokens.to_vec();
-
-        tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
-            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-            let router_config_override = decode_router_config_override(is_disaggregated);
-
-            let overlap_blocks = decode_router
-                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
-                .await
-                .map_err(|e| anyhow::anyhow!("get_overlap_blocks failed: {e:?}"))?;
-
-            let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
-
-            decode_router
-                .add_request(
-                    request_id,
-                    &tokens,
-                    None,
-                    cached_tokens,
-                    None,
-                    worker,
-                    None,
-                    cache_namespace,
-                    router_config_override.as_ref(),
-                )
-                .await;
-
-            Ok(())
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("add_request timed out"))?
+            .map_err(|e| anyhow::anyhow!("Decode admission failed: {e}"))
     }
 
     /// Mark prefill as completed for a request.
@@ -1463,23 +1413,27 @@ impl EndpointPicker for Router {
             .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
         let policy_class = requested_policy_class(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
+        let routing_hints = RoutingHints {
+            cache_namespace: cache_namespace.clone(),
+            priority_jump: Some(priority_jump),
+            strict_priority: Some(strict_priority),
+            allowed_worker_ids,
+            routing_constraints: Some(routing_constraints),
+            ..Default::default()
+        };
 
         // Try prefill routing first (disaggregated mode).
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
         // router has been deactivated), fall back to aggregated routing.
-        let prefill_booking = self
-            .route_prefill(
-                &format!("epp-prefill/{reservation_id}"),
-                &tokens,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                policy_class.clone(),
-                allowed_worker_ids.clone(),
-                routing_constraints.clone(),
-            )
-            .await;
+        let prefill_request = EppRouteRequest::new(
+            format!("epp-prefill/{reservation_id}"),
+            &tokens,
+            routing_hints.clone(),
+            policy_class.as_deref(),
+            None,
+        );
+        let prefill_booking = self.route_prefill(&prefill_request).await;
 
         let is_disaggregated = match &prefill_booking {
             Ok(_) => true,
@@ -1492,31 +1446,35 @@ impl EndpointPicker for Router {
             }
         };
 
-        let (decode_worker, _overlap) = self
-            .route_decode(
-                &tokens,
-                is_disaggregated,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                policy_class,
-                allowed_worker_ids,
-                routing_constraints,
-            )
+        // The decode booking is keyed by the reservation id, which the response
+        // callbacks later complete and free.
+        let decode_request = EppRouteRequest::new(
+            reservation_id.clone(),
+            &tokens,
+            routing_hints,
+            policy_class.as_deref(),
+            decode_router_config_override(is_disaggregated),
+        );
+        let decode_plan = self
+            .route_decode(&decode_request)
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+        let decode_worker = decode_plan.worker();
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
         let endpoint = if worker_map.is_empty() {
-            self.resolve_worker_endpoint(decode_worker.worker_id)
-                .ok_or_else(|| {
+            match self.resolve_worker_endpoint(decode_worker.worker_id) {
+                Some(endpoint) => endpoint,
+                None => {
                     tracing::warn!(
                         worker_id = decode_worker.worker_id,
                         "Selected worker has no resolved endpoint"
                     );
-                    PickError::NoEndpoints
-                })?
+                    decode_plan.release().await;
+                    return Err(PickError::NoEndpoints);
+                }
+            }
         } else {
             worker_map
                 .iter()
@@ -1531,24 +1489,9 @@ impl EndpointPicker for Router {
                 })
         };
 
-        // Register the request with the router for bookkeeping (load tracking).
-        if let Err(e) = self
-            .add_request(
-                &reservation_id,
-                &tokens,
-                decode_worker.worker_id,
-                decode_worker.dp_rank,
-                is_disaggregated,
-                cache_namespace.clone(),
-            )
-            .await
-        {
-            tracing::warn!(
-                request_id = %req.request_id,
-                error = %e,
-                "Failed to register request with router bookkeeping"
-            );
-        }
+        // Keep the decode booking under the reservation id; the response
+        // callbacks mark prefill complete and free it by that id.
+        decode_plan.detach_booking();
 
         let prefill_worker = prefill_booking
             .as_ref()

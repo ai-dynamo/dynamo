@@ -81,7 +81,7 @@ pub use plugins::{
 };
 pub use prefill_router::PrefillRouter;
 pub use route_request::RouteRequest;
-pub use routing_host::{KvPushRouter, RoutingHost};
+pub use routing_host::{KvPushRouter, RouteBooking, RoutePlan, RoutingHost};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
 };
