@@ -947,19 +947,32 @@ fn harvest_extra_files(
             continue;
         }
         // Every advertised file is required, so one the frontend refuses
-        // to fetch would block the whole model from loading.
+        // to fetch would block the whole model from loading. Checking the
+        // early stat avoids hashing a large file; the size `CheckedFile`
+        // records is checked again because it is the one advertised.
         if meta.len() > ABSOLUTE_MAX_METADATA_BYTES {
-            tracing::warn!(
-                file = %path.display(),
-                size = meta.len(),
-                cap = ABSOLUTE_MAX_METADATA_BYTES,
-                "Not advertising file larger than the metadata fetch cap",
-            );
+            warn_over_cap(&path, meta.len());
             continue;
         }
-        out.push(CheckedFile::from_disk(&path)?);
+        let checked = CheckedFile::from_disk(&path)?;
+        if let Some(size) = checked.size()
+            && size > ABSOLUTE_MAX_METADATA_BYTES
+        {
+            warn_over_cap(&path, size);
+            continue;
+        }
+        out.push(checked);
     }
     Ok(out)
+}
+
+fn warn_over_cap(path: &Path, size: u64) {
+    tracing::warn!(
+        file = %path.display(),
+        size,
+        cap = ABSOLUTE_MAX_METADATA_BYTES,
+        "Not advertising file larger than the metadata fetch cap",
+    );
 }
 
 #[cfg(test)]
