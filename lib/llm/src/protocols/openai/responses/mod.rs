@@ -40,6 +40,7 @@ use validator::Validate;
 
 use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
+use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
 /// Request body for `POST /v1/responses`.
@@ -831,6 +832,7 @@ fn convert_tools_and_choice(
     tools: Option<&[Tool]>,
     tool_choice: Option<&ToolChoiceParam>,
     names: &ToolNameMap,
+    skip_strict_schema_validation: bool,
 ) -> anyhow::Result<(
     Option<Vec<ChatCompletionTool>>,
     Option<ChatCompletionToolChoiceOption>,
@@ -840,8 +842,11 @@ fn convert_tools_and_choice(
         .transpose()?
         .unwrap_or_default();
     for tool in &converted_tools {
-        super::strict_schema::validate_strict_function(&tool.function)
-            .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
+        super::strict_schema::validate_strict_function(
+            &tool.function,
+            skip_strict_schema_validation,
+        )
+        .map_err(|error| ResponsesConversionError::InvalidArgument(error.to_string()))?;
     }
 
     let converted_choice = match tool_choice {
@@ -1003,6 +1008,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             resp.inner.tools.as_deref(),
             resp.inner.tool_choice.as_ref(),
             &names,
+            *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
         )?;
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
@@ -3126,7 +3132,8 @@ mod tests {
         }))
         .unwrap();
         let names = ToolNameMap::new(&tools, None);
-        let error = convert_tools_and_choice(Some(&tools), Some(&choice), &names).unwrap_err();
+        let error =
+            convert_tools_and_choice(Some(&tools), Some(&choice), &names, false).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<ResponsesConversionError>(),
             Some(ResponsesConversionError::InvalidArgument(_))
@@ -3162,7 +3169,7 @@ mod tests {
             }
             let names = ToolNameMap::new(&tools, None);
             let (converted, _) =
-                convert_tools_and_choice(Some(&tools), Some(&choice), &names).unwrap();
+                convert_tools_and_choice(Some(&tools), Some(&choice), &names, false).unwrap();
             let converted = converted.unwrap();
             assert_eq!(converted.len(), 1);
             assert_eq!(converted[0].function.name, "retained");

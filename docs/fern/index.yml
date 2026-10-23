@@ -953,6 +953,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: MiniMax M3.1
+                path: pages/recipes/model-recipes/minimax-m3-1.mdx
+                slug: minimax-m3-1
               - page: MiniMax M3
                 path: pages/recipes/model-recipes/minimax-m3.mdx
                 slug: minimax-m3
@@ -1086,6 +1089,9 @@ navigation:
         path: pages/reference/general/releases/release-history.mdx
         collapsed: true
         contents:
+          - page: Dynamo v1.6.0
+            path: pages/reference/general/releases/dynamo-v1-6-0.mdx
+            slug: v1-6-0
           - page: Dynamo v1.5.0
             path: pages/reference/general/releases/dynamo-v1-5-0.mdx
             slug: v1-5-0

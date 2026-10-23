@@ -818,6 +818,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_dispatch_preserves_native_json() {
+        let native = serde_json::json!({
+            "text": "Unicode: λ\nCR: \r",
+            "meta_info": {"routed_experts": "AQID".repeat(16384)},
+            "unknown_field": {"value": true}
+        });
+        let outputs = vec![crate::protocols::Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"sglang_response": native})),
+            ..Default::default()
+        })];
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let response = dispatch(
+            Arc::new(ReplayEngine(outputs)),
+            dispatch_test_context(),
+            "req-stream".to_string(),
+            "test-model".to_string(),
+            state,
+            ConnectionHandle::create_disabled(tx),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(body, format!("data: {native}\n\ndata: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
     async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
         let chunk = |ids: serde_json::Value| {
             crate::protocols::Annotated::from_data(LLMEngineOutput {

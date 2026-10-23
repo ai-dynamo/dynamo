@@ -473,7 +473,7 @@ func createTestClusterTopology(t *testing.T, env *operatorenv.TestEnv) {
 
 	t.Log("Create the DGD table's immutable cluster topology")
 	topology := &grovev1alpha1.ClusterTopologyBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
+		Name: "grove-topology",
 		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovev1alpha1.TopologyLevel{
 				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
