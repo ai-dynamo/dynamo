@@ -1,0 +1,270 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Builds the vLLM runtime on the NIM vLLM enterprise base (render.py --variant
+# enterprise) and runs the vLLM post-merge test and deploy suites against it.
+# Images carry an -enterprise tag suffix so they never collide with post-merge
+# or nightly images at the same SHA.
+
+name: Enterprise CI Pipeline
+
+on:
+  schedule:
+    - cron: '0 11 * * *'  # 11:00 UTC, after the 08:00 UTC nightly
+  workflow_dispatch:
+  push:
+    branches:
+      - 'pull-request/[0-9]+'
+
+permissions:
+  contents: read
+  # compliance-extract downloads the previous run's compliance artifact.
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ============================================================================
+  # BUILD JOBS
+  # ============================================================================
+
+  operator:
+    name: Operator
+    runs-on: prod-default-v2
+    outputs:
+      operator_default_tag: ${{ steps.build.outputs.image_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push operator
+        id: build
+        uses: $/.github/actions/build-deploy-component
+        with:
+          component: operator
+          image_tag: ${{ github.sha }}-operator-enterprise
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-operator-enterprise
+
+  vllm-build:
+    name: vllm-runtime-enterprise
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      runtime_variant: enterprise
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
+      build_timeout_minutes: 120
+      # OSRB CSV diff baseline: previous successful scheduled run of this workflow.
+      diff_event_context: nightly
+      image_tag_suffix: '-enterprise'
+      archive_sources: false
+      extra_build_args: |
+        RUNTIME_IMAGE=${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}
+        RUNTIME_IMAGE_TAG=nim-vllm-enterprise-base-1.7.0-cuda13
+    secrets: inherit
+
+  # ============================================================================
+  # TEST JOBS (same suites post-merge runs for vllm-runtime)
+  # ============================================================================
+
+  vllm-test:
+    name: vllm-runtime-enterprise
+    needs: [vllm-build]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: enterprise
+      test_suite_name: vllm
+      framework: vllm
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      image_tag_suffix: '-enterprise'
+      cuda_version: '["13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not sidecar'
+      gpu_test_timeout_minutes: 120
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
+    secrets: inherit
+
+  vllm-multi-gpu-test:
+    name: vllm-runtime-enterprise
+    needs: [vllm-build]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: enterprise
+      test_suite_name: vllm
+      framework: vllm
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      image_tag_suffix: '-enterprise'
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: (pre_merge or post_merge) and vllm and gpu_2 and not sidecar
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-4-gpu-test:
+    name: vllm-runtime-enterprise
+    needs: [vllm-build]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: enterprise
+      test_suite_name: vllm
+      framework: vllm
+      test_type: 4-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner_labels: '["gpu-4","amd64","v2","us-west-2"]'
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      image_tag_suffix: '-enterprise'
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: (pre_merge or post_merge) and vllm and gpu_4
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # IMAGE COPY JOBS
+  # ============================================================================
+
+  vllm-copy-to-acr:
+    name: vllm-runtime-enterprise
+    needs: [vllm-build]
+    uses: $/.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ format('{0}-enterprise', needs.vllm-build.outputs.target_tag_plain) }}
+      cuda_version: '["13.0"]'
+      copy_timeout_minutes: 20
+    secrets: inherit
+
+  # ============================================================================
+  # DEPLOYMENT JOBS
+  # ============================================================================
+
+  deploy-operator:
+    needs: [operator]
+    runs-on: prod-deploy-tester-v1
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Setup vCluster and operator
+      id: setup
+      uses: $/.github/actions/setup-dynamo-operator
+      with:
+        # Sole writer of this vCluster name; every other caller recovers into it.
+        reset_existing: 'true'
+        vcluster_name: enterprise-ci-${{ github.run_id }}
+        vcluster_namespace: enterprise-ci-${{ github.run_id }}
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        repository: ${{ vars.ACR_REPOSITORY }}
+        operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+        hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+        model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
+
+  deploy-test-vllm:
+    needs: [deploy-operator, vllm-copy-to-acr]
+    uses: $/.github/workflows/shared-deploy-test.yml
+    with:
+      dd_env: enterprise
+      framework: vllm
+      profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
+      image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-cleanup:
+    if: always()
+    needs: [deploy-operator, deploy-test-vllm]
+    runs-on: prod-deploy-tester-v1
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Teardown vCluster
+      if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+      uses: $/.github/actions/teardown-dynamo-operator
+      with:
+        vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+        vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+
+  deploy-status-check:
+    runs-on: ubuntu-latest
+    needs:
+      - deploy-operator
+      - deploy-test-vllm
+      - vllm-copy-to-acr
+      - deploy-cleanup
+    if: always() && !cancelled()
+    steps:
+      - name: "Check all deploy test jobs"
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+
+  # ============================================================================
+  # CLEANUP JOBS
+  # ============================================================================
+
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [operator, vllm-build]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Create K8s builders (skip bootstrap)
+      uses: $/.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+        buildkit_worker_addresses: '' # k8s builder
+        namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+        skip_bootstrap: true
+    - name: Builder Cleanup in case of k8s builder
+      shell: bash
+      run: |
+        docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
+
+  ############################## SLACK NOTIFICATION ##############################
+
+  notify-slack:
+    if: always() && github.event_name == 'schedule'
+    needs: [deploy-status-check, vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test]
+    permissions:
+      contents: read
+      actions: read   # grant the reusable notifier read access to list this run's jobs
+    uses: $/.github/workflows/notify-slack.yml
+    with:
+      pipeline_name: Enterprise
+      runs_on: ubuntu-slim
+    secrets: inherit
