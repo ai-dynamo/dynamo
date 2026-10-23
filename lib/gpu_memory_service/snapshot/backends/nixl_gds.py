@@ -29,6 +29,7 @@ from gpu_memory_service.snapshot.transfer import (
     TransferSession,
     group_sources_by_path,
     validate_transfer_targets,
+    verify_file_source_digests,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,27 @@ class _NixlGDSTransferSession:
 
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         validate_transfer_targets(self._sources, targets, device=self._device)
+        verification_t0 = time.monotonic()
+        verified_files, verified_bytes = verify_file_source_digests(
+            self._sources,
+            max_workers=self._max_workers,
+        )
+        if verified_files:
+            verification_elapsed = time.monotonic() - verification_t0
+            throughput = (
+                verified_bytes / verification_elapsed / (1024**3)
+                if verification_elapsed > 0
+                else 0.0
+            )
+            logger.info(
+                "NIXL GDS pre-transfer integrity verification succeeded: "
+                "%.2f GiB in %.3fs (%.2f GiB/s, files=%d, workers=%d)",
+                verified_bytes / (1024**3),
+                verification_elapsed,
+                throughput,
+                verified_files,
+                min(self._max_workers, verified_files),
+            )
         file_groups = list(group_sources_by_path(self._sources).items())
         total_bytes = sum(source.byte_count for source in self._sources)
         t0 = time.monotonic()
