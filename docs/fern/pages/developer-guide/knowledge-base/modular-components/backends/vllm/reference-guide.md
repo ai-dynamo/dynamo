@@ -86,34 +86,41 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 **Experimental, unreleased.** Aggregated Python vLLM token workers started with
 `--enable-multimodal` accept explicit custom parts in user and tool messages:
 
+The example combines projected chemistry soft tokens with a standard image URL.
+The model must support both the registered chemistry modality and image inputs.
+The payload names and encoding inside `fields` are application-defined:
+
 ```json
 {
-  "model": "your-model",
+  "model": "chemistry-vision-model",
   "messages": [{
     "role": "user",
     "content": [
-      {"type": "text", "text": "Predict this: <chemistry>"},
+      {"type": "text", "text": "Does this structure <chemistry> match the reaction diagram?"},
       {"type": "custom", "kind": "chemistry", "fields": {
-        "chemistry": {"data_base64": "..."}, "units": "angstrom"
-      }}
+        "projected_soft_tokens": {
+          "dtype": "float32", "shape": [2, 4096], "data_base64": "..."
+        },
+        "revision": 1
+      }},
+      {"type": "image_url", "image_url": {"url": "https://example.org/reaction-diagram.png"}}
     ]
   }],
   "max_tokens": 64
 }
 ```
 
+The model name, tensor dimensions, encoded bytes, and image URL are illustrative.
 `kind` is a non-empty string. The built-in wire names `text`, `image_url`,
 `video_url`, `audio_url`, and `input_audio` are reserved and rejected as custom
-kinds, including when mixed with typed media. `fields` is a JSON object whose values may be any
-JSON, including arrays and null. Dynamo passes the **complete fields object** as
-`multi_modal_data[kind]`: the example plugin receives
-`{"chemistry": {"data_base64": "..."}, "units": "angstrom"}` under the chemistry
-modality. It does **not** select `fields[kind]`. This deliberately revises the
-previous draft's matching-field forwarding contract; update draft clients to the
-explicit envelope. Repeated parts of one kind become an ordered list of fields
-objects. Built-in image, video and audio parts retain their existing typed schema
-and validation. They may share requests with custom parts when their engine
-modality names do not collide.
+kinds, including when mixed with typed media. `fields` is a JSON object whose
+values may be any JSON, including arrays and null. Dynamo passes the **complete
+fields object** as `multi_modal_data[kind]`; the example processor receives both
+`projected_soft_tokens` and `revision` under the chemistry modality. Dynamo does
+**not** select `fields[kind]` or decode the base64 bytes. Repeated parts of one
+kind become an ordered list of fields objects. Built-in image, video and audio
+parts retain their existing typed schema and validation. They may share requests
+with custom parts when their engine modality names do not collide.
 
 The model plugin owns domain validation and interpretation. Install or mount it
 in the worker environment. Dynamo excludes custom parts before serializing chat

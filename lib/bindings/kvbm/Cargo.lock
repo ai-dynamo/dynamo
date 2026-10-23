@@ -2280,7 +2280,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers"
 version = "11.0.0"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=5f818aae0df2db95d0b3c3e9dc9630d899b429a2#5f818aae0df2db95d0b3c3e9dc9630d899b429a2"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2321,7 +2321,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "9.0.0"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=5f818aae0df2db95d0b3c3e9dc9630d899b429a2#5f818aae0df2db95d0b3c3e9dc9630d899b429a2"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2339,7 +2339,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "9.0.0"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=5f818aae0df2db95d0b3c3e9dc9630d899b429a2#5f818aae0df2db95d0b3c3e9dc9630d899b429a2"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2449,7 +2449,7 @@ dependencies = [
 [[package]]
 name = "dynamo-structural-tag"
 version = "0.1.0"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=5f818aae0df2db95d0b3c3e9dc9630d899b429a2#5f818aae0df2db95d0b3c3e9dc9630d899b429a2"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
 dependencies = [
  "anyhow",
  "regex",
@@ -2460,7 +2460,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "3.1.2"
-source = "git+https://github.com/pstjohn/frontend-crates.git?rev=5f818aae0df2db95d0b3c3e9dc9630d899b429a2#5f818aae0df2db95d0b3c3e9dc9630d899b429a2"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=411af8b41df222fe00c8d3bcca81bb2e8e28bd48#411af8b41df222fe00c8d3bcca81bb2e8e28bd48"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3629,7 +3629,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -6375,7 +6375,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6413,7 +6413,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.60.2",
 ]

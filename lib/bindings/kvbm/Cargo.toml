@@ -64,7 +64,7 @@ cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "f
 # Temporary source pins for the companion draft (frontend-crates PR #308).
 # Remove after its coordinated crate releases and regenerate registry locks.
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "5f818aae0df2db95d0b3c3e9dc9630d899b429a2" }
-dynamo-renderer = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "5f818aae0df2db95d0b3c3e9dc9630d899b429a2" }
-dynamo-parsers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "5f818aae0df2db95d0b3c3e9dc9630d899b429a2" }
-dynamo-tokenizers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "5f818aae0df2db95d0b3c3e9dc9630d899b429a2" }
+dynamo-protocols = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "411af8b41df222fe00c8d3bcca81bb2e8e28bd48" }
+dynamo-renderer = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "411af8b41df222fe00c8d3bcca81bb2e8e28bd48" }
+dynamo-parsers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "411af8b41df222fe00c8d3bcca81bb2e8e28bd48" }
+dynamo-tokenizers = { git = "https://github.com/pstjohn/frontend-crates.git", rev = "411af8b41df222fe00c8d3bcca81bb2e8e28bd48" }
