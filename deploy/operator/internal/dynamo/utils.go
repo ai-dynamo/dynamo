@@ -3,12 +3,9 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	"mvdan.cc/sh/v3/expand"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 /*
@@ -121,100 +118,6 @@ func hasArg(args []string, flag, value string) bool {
 	return false
 }
 
-// launchArgument preserves whether a shell word can become multiple engine arguments.
-type launchArgument struct {
-	Value     string
-	MayExpand bool
-}
-
-// pythonModuleArgs reads a direct Python module launch or a single sh/bash -c command.
-// container must not be nil. Shell commands are parsed, never executed; dynamic words
-// remain opaque so the backend can decide whether they affect its topology.
-func pythonModuleArgs(container *corev1.Container, module string) ([]launchArgument, error) {
-	commandLine := append(slices.Clone(container.Command), container.Args...)
-	command := make([]launchArgument, 0, len(commandLine))
-	for _, arg := range commandLine {
-		command = append(command, launchArgument{Value: arg})
-	}
-
-	// Preserve argv boundaries for direct launches; only a shell script needs tokenization.
-	if len(command) >= 3 && isShellCommand(command[0].Value) && strings.HasPrefix(command[1].Value, "-") && strings.Contains(command[1].Value, "c") {
-		var err error
-		command, _, err = shellPythonCommand(command[2].Value)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Match the module itself rather than text in a wrapper argument or shell comment.
-	if len(command) < 3 || !isPythonCommand(command[0].Value) || command[1].Value != "-m" || command[2].Value != module {
-		return nil, fmt.Errorf("expected python -m %s", module)
-	}
-	return command[3:], nil
-}
-
-// shellPythonCommand reads one Python module invocation, optionally prefixed by exec.
-// It returns the call node so injection can insert flags without rewriting user text.
-func shellPythonCommand(script string) ([]launchArgument, *syntax.CallExpr, error) {
-	file, err := syntax.NewParser().Parse(strings.NewReader(script), "")
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid shell launch: %w", err)
-	}
-	if len(file.Stmts) != 1 || file.Stmts[0].Background || file.Stmts[0].Negated {
-		return nil, nil, fmt.Errorf("expected a single Python module launch in the shell command")
-	}
-	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !ok {
-		return nil, nil, fmt.Errorf("expected a Python module launch, not shell control flow")
-	}
-
-	// Preserve unresolved words; unquote only literals, without reading the host environment.
-	command := make([]launchArgument, 0, len(call.Args))
-	for _, word := range call.Args {
-		dynamic := false
-		mayExpand := false
-		for _, part := range word.Parts {
-			switch part := part.(type) {
-			case *syntax.SglQuoted, *syntax.DblQuoted:
-			case *syntax.Lit:
-				mayExpand = mayExpand || strings.ContainsAny(part.Value, "*?[")
-			default:
-				mayExpand = true
-			}
-		}
-		syntax.Walk(word, func(node syntax.Node) bool {
-			// Quoted arrays can still produce multiple arguments (for example "$@").
-			if param, ok := node.(*syntax.ParamExp); ok && (param.Index != nil || param.Param.Value == "@" || param.Param.Value == "*" || param.Names != 0) {
-				mayExpand = true
-			}
-			switch node.(type) {
-			case nil, *syntax.Word, *syntax.Lit, *syntax.SglQuoted, *syntax.DblQuoted:
-				return true
-			default:
-				dynamic = true
-				return false
-			}
-		})
-		value := script[word.Pos().Offset():word.End().Offset()]
-		if !dynamic {
-			value, err = expand.Literal(&expand.Config{Env: expand.ListEnviron()}, word)
-			if err != nil {
-				return nil, nil, err
-			}
-		}
-		command = append(command, launchArgument{Value: value, MayExpand: mayExpand})
-	}
-
-	// A wrapper argument mentioning Python is not an engine invocation.
-	if len(command) > 0 && command[0].Value == "exec" {
-		command = command[1:]
-	}
-	if len(command) < 3 || !isPythonCommand(command[0].Value) || command[1].Value != "-m" {
-		return nil, nil, fmt.Errorf("expected a Python module launch")
-	}
-	return command, call, nil
-}
-
 func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, needsShell bool, framework string) {
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct python command case
@@ -245,29 +148,12 @@ func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, 
 			container.Args = append(container.Args, flagsSlice...)
 		}
 	} else {
-		// Shell scripts can be authored in Args or Command; keep the existing Args-first behavior.
-		tokenLists := [][]string{container.Args}
-		if framework == "sglang" {
-			tokenLists = append(tokenLists, container.Command)
-		}
-		for _, tokens := range tokenLists {
-			for i, arg := range tokens {
-				// Native SGLang placement and injection must read the same shell invocation.
-				if framework == "sglang" {
-					command, call, err := shellPythonCommand(arg)
-					if err == nil && command[2].Value == "sglang.launch_server" {
-						// Preserve existing shell precedence: authored flags follow injected flags.
-						moduleIndex := len(call.Args) - len(command) + 2
-						end := call.Args[moduleIndex].End().Offset()
-						tokens[i] = arg[:end] + " " + flags + arg[end:]
-						return
-					}
-				}
-				modifiedArg := injectFlagsIntoPythonCommand(arg, flags, framework)
-				if modifiedArg != arg {
-					tokens[i] = modifiedArg
-					return
-				}
+		// Non-python command case - try injection on each arg individually
+		for i, arg := range container.Args {
+			modifiedArg := injectFlagsIntoPythonCommand(arg, flags, framework)
+			if modifiedArg != arg { // flags were successfully injected
+				container.Args[i] = modifiedArg
+				break // stop after first successful injection
 			}
 		}
 	}

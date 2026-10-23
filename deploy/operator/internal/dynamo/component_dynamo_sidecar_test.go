@@ -538,6 +538,15 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 							}
 							component.PodTemplate = nil
 						}
+						if !roleTemplates {
+							t.Log("Reject shared native-sidecar templates before rendering either role")
+							for _, role := range []Role{RoleLeader, RoleWorker} {
+								pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(1))
+								require.ErrorContains(t, err, "spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates")
+								require.Nil(t, pod)
+							}
+							return
+						}
 						if provider == commonconsts.MultinodeDeploymentTypeGrove {
 							t.Log("Render the complete Grove group and retain concurrent startup")
 							dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "ns"}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "sglang", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{*component.DeepCopy()}}}
@@ -571,13 +580,8 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 								require.NotContains(t, envVarsToMap(engine.Env), "NATS_SERVER")
 								require.Contains(t, envVarsToMap(engine.Env), commonconsts.DynamoRankEnvVar)
 								require.Contains(t, envVarsToMap(engine.Env), commonconsts.DynamoLeaderAddressEnvVar)
-								if roleTemplates {
-									require.Equal(t, []string{"/custom-launcher"}, engine.Command)
-									require.Equal(t, []string{"--rank", "$(DYNAMO_RANK)", "--leader", "$(DYNAMO_LEADER_ADDRESS)"}, engine.Args)
-								} else {
-									require.Equal(t, []string{"python3", "-m", "sglang.launch_server"}, engine.Command)
-									require.Contains(t, strings.Join(engine.Args, " "), "--dist-init-addr $(DYNAMO_LEADER_ADDRESS):29500 --nnodes 2 --node-rank $(DYNAMO_RANK)")
-								}
+								require.Equal(t, []string{"/custom-launcher"}, engine.Command)
+								require.Equal(t, []string{"--rank", "$(DYNAMO_RANK)", "--leader", "$(DYNAMO_LEADER_ADDRESS)"}, engine.Args)
 								if role == RoleWorker {
 									require.Nil(t, engine.ReadinessProbe)
 								}
@@ -602,84 +606,63 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 	}
 }
 
-func TestSGLangMultinodeSidecarLaunchForms(t *testing.T) {
-	tests := []struct {
-		name        string
-		command     []string
-		args        []string
-		dpAttention bool
-		wantError   string
+func TestSGLangComponentTemplateCompatibility(t *testing.T) {
+	cases := []struct {
+		name    string
+		sidecar bool
+		origin  string
 	}{
-		{name: "TP model expansion", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--model-path", "$(MODEL_PATH)"}},
-		{name: "TP value expansion", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--mem-fraction-static=$(MEM_FRACTION)"}},
-		{name: "DP model expansion", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--model-path", "$(MODEL_PATH)", "--tp-size", "2", "--dp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`, "--enable-dp-attention"}, dpAttention: true},
-		{name: "DP config", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--config", "/engine.yaml", "--enable-dp-attention"}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "DP config equals", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--enable-dp-attention", "--config=/engine.yaml"}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "split Python command", command: []string{"/usr/bin/python3.12"}, args: []string{"-m", "sglang.launch_server", "--tp-size", "2", "--dp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`, "--enable-dp-attention"}, dpAttention: true},
-		{name: "shell DP", command: []string{"bash", "-ec"}, args: []string{`exec python3 -m sglang.launch_server --model-path "$MODEL_PATH" --enable-dp-attention --tp-size 2 --dp-size 2 --kv-events-config '{"publisher":"zmq"}'`}, dpAttention: true},
-		{name: "shell TP quoted model", command: []string{"sh", "-c"}, args: []string{`exec python3 -m sglang.launch_server --model-path "$MODEL_PATH"`}},
-		{name: "shell script in Command", command: []string{"sh", "-c", `python3 -m sglang.launch_server --tp-size 2 --dp-size 2 --kv-events-config '{"publisher":"zmq"}' --enable-dp-attention`}, dpAttention: true},
-		{name: "shell quoted module and flag", command: []string{"sh", "-c"}, args: []string{`exec python3 -m 'sglang.launch_server' '--enable-dp-attention' --tp-size 2 --dp-size 2 --kv-events-config '{"publisher":"zmq"}'`}, dpAttention: true},
-		{name: "shell comment is not a flag", command: []string{"sh", "-c"}, args: []string{"python3 -m sglang.launch_server # --enable-dp-attention"}},
-		{name: "shell value is not a flag", command: []string{"sh", "-c"}, args: []string{`python3 -m sglang.launch_server --served-model-name='model --enable-dp-attention'`}},
-		{name: "hidden config mode", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--config", "/engine.yaml"}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "expanded flags", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"$(EXTRA_ARGS)"}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "expanded flag name", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--enable-$(MODE)"}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "shell expanded flags", command: []string{"sh", "-c"}, args: []string{"python3 -m sglang.launch_server $EXTRA_ARGS"}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "shell unquoted model can add flags", command: []string{"sh", "-c"}, args: []string{"python3 -m sglang.launch_server --model-path $MODEL_PATH"}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "shell unquoted equals value can add flags", command: []string{"sh", "-c"}, args: []string{"python3 -m sglang.launch_server --model-path=$MODEL_PATH"}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "shell partially quoted expansion", command: []string{"sh", "-c"}, args: []string{`python3 -m sglang.launch_server --model-path "$MODEL_PATH"$EXTRA_ARGS""`}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "shell quoted argument array", command: []string{"sh", "-c"}, args: []string{`python3 -m sglang.launch_server --model-path "$@"`}, wantError: "cannot determine SGLang publisher topology"},
-		{name: "invalid boolean assignment", command: []string{"python3", "-m", "sglang.launch_server"}, args: []string{"--enable-dp-attention=false"}, wantError: "--enable-dp-attention takes no value"},
-		{name: "opaque launcher", command: []string{"/launch.sh"}, wantError: "expected python -m sglang.launch_server"},
-		{name: "shell wrapper argument", command: []string{"sh", "-c"}, args: []string{`echo 'python3 -m sglang.launch_server --enable-dp-attention'`}, wantError: "expected a Python module launch"},
-		{name: "shell conditional", command: []string{"sh", "-c"}, args: []string{"if test -f /dp; then python3 -m sglang.launch_server --enable-dp-attention; else python3 -m sglang.launch_server; fi"}, wantError: "not shell control flow"},
+		{name: "combined runtime with topology aliases", origin: "1.6.0"},
+		{name: "combined runtime with legacy topology", origin: "1.5.0"},
+		{name: "single-node native sidecar", sidecar: true, origin: "1.6.0"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Author one component template and preserve it across both role renders")
-			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeWorker,
-				Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
-				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "main", Image: "engine:custom", Command: tt.command, Args: tt.args}},
-						InitContainers: []corev1.Container{
-							{Name: "setup", Image: "setup:latest"},
-							{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
-						},
-					}},
-			}
-			original := component.DeepCopy()
+	for _, tc := range cases {
+		for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
+			t.Run(fmt.Sprintf("%s/%s", tc.name, provider), func(t *testing.T) {
+				t.Log("Author a shared template for the existing combined or single-node runtime mode")
+				component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "engine", ComponentType: v1beta1.ComponentTypeWorker,
+					Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tc.origin}},
+						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime:1.6.0", Command: []string{"python3", "-m", "dynamo.sglang"}, Args: []string{"--model-path", "model"}}}},
+					},
+				}
+				roles := []Role{RoleLeader, RoleWorker}
+				nodes := int32(2)
+				if tc.sidecar {
+					component.Multinode = nil
+					component.PodTemplate.Spec.Containers[0].Image = "engine:custom"
+					component.PodTemplate.Spec.Containers[0].Command[2] = "sglang.launch_server"
+					component.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}}
+					roles, nodes = []Role{RoleMain}, 1
+				}
+				original := component.DeepCopy()
 
-			t.Log("Check placement and multinode flag injection agree for both providers")
-			for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
-				for _, role := range []Role{RoleLeader, RoleWorker} {
-					pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(1))
-					if tt.wantError != "" {
-						require.ErrorContains(t, err, tt.wantError)
+				t.Log("Render without requiring role templates and preserve the existing launch contract")
+				for _, role := range roles {
+					pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, nodes, &configv1alpha1.OperatorConfiguration{}, provider, "engine", &MockSimpleDeployer{}, staticContainerGPUCount(1))
+					require.NoError(t, err)
+					main := pod.Containers[0]
+					require.Equal(t, original.PodTemplate.Spec.Containers[0].Command, main.Command)
+					if tc.sidecar {
+						require.Equal(t, original.PodTemplate.Spec.Containers[0].Args, main.Args)
+						require.NotContains(t, envVarsToMap(main.Env), "DYN_SYSTEM_ENABLED")
+						require.Equal(t, "true", envVarsToMap(pod.InitContainers[0].Env)["DYN_SYSTEM_ENABLED"])
 						continue
 					}
-					require.NoError(t, err)
-					wantInitContainers := 1
-					if role == RoleLeader || tt.dpAttention {
-						wantInitContainers = 2
+					address, rank := "$(DYNAMO_LEADER_ADDRESS):29500", "$(DYNAMO_RANK)"
+					if tc.origin == "1.5.0" {
+						address, rank = "leader.example.com:29500", "1"
+						if role == RoleLeader {
+							rank = "0"
+						}
 					}
-					require.Len(t, pod.InitContainers, wantInitContainers)
-					require.Equal(t, "setup", pod.InitContainers[0].Name)
-					launchArgs, err := pythonModuleArgs(&pod.Containers[0], "sglang.launch_server")
-					require.NoError(t, err)
-					var args []string
-					for _, arg := range launchArgs {
-						args = append(args, arg.Value)
-					}
-					require.True(t, hasArg(args, "--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500"))
-					require.True(t, hasArg(args, "--nnodes", "2"))
-					require.True(t, hasArg(args, "--node-rank", "$(DYNAMO_RANK)"))
+					require.Equal(t, []string{"--model-path", "model", "--dist-init-addr", address, "--nnodes", "2", "--node-rank", rank}, main.Args)
+					require.Empty(t, pod.InitContainers)
 				}
-			}
-			require.Equal(t, original, component)
-		})
+				require.Equal(t, original, component)
+			})
+		}
 	}
 }

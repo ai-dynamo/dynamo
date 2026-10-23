@@ -1236,7 +1236,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 
 			initialInitCount := len(tt.initialPodSpec.InitContainers)
 			initialVolCount := len(tt.initialPodSpec.Volumes)
-			require.NoError(t, backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer))
+			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
 
 			if tt.expectInitContainer {
 				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount + 1))

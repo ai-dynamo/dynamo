@@ -312,90 +312,40 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].roles: Required value: the leader template must declare runtime to select sidecar mode`, `spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		{
-			name: "sglang sidecar multinode rejects hidden topology",
+			name: "sglang sidecar role templates own opaque engine configuration",
+			deployment: func() runtime.Object {
+				dgd := sglangMultinodeDGDForAdmission(t, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				for i := range betaWorkerComponent(dgd).Roles {
+					main := &betaWorkerComponent(dgd).Roles[i].PodTemplate.Spec.Containers[0]
+					main.Command = []string{"/launch.sh"}
+					main.Args = []string{"--config", "/engine.yaml", "--attn-dp-size", "$(DP)"}
+				}
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang combined runtime still accepts a multinode component template",
 			deployment: func() runtime.Object {
 				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
-				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Command = []string{"/launch.sh"}
-				return dgd
-			}(),
-			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine SGLang topology: expected python -m sglang.launch_server; use complete leader and worker podTemplates`},
-		},
-		{
-			name: "sglang sidecar multinode rejects config hiding publisher placement",
-			deployment: func() runtime.Object {
-				dgd := sglangMultinodeDGDForAdmission(t, false, false, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
-				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Args = []string{"--config", "/engine.yaml", "--enable-dp-attention"}
-				return dgd
-			}(),
-			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine SGLang publisher topology from config files or expanded flags; use complete leader and worker podTemplates`},
-		},
-		{
-			name: "sglang sidecar multinode accepts TP model expansion",
-			deployment: func() runtime.Object {
-				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
-				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Args = []string{"--model-path", "$(MODEL_PATH)", "--tp-size", "2"}
-				return dgd
-			}(),
-		},
-		{
-			name: "sglang sidecar multinode accepts shell launch",
-			deployment: func() runtime.Object {
-				dgd := sglangMultinodeDGDForAdmission(t, false, false, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
-				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
-				main.Command = []string{"sh", "-c"}
-				main.Args = []string{`exec python3 -m sglang.launch_server --model-path "$MODEL_PATH" --tp-size 2 --attn-dp-size 2 --kv-events-config '{"publisher":"zmq"}'`}
-				return dgd
-			}(),
-		},
-		{
-			name: "sglang sidecar multinode rejects unresolved config topology",
-			deployment: func() runtime.Object {
-				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
-				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Args = []string{"--config", "/engine.yaml"}
-				return dgd
-			}(),
-			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: cannot determine SGLang publisher topology from config files or expanded flags; use complete leader and worker podTemplates`},
-		},
-
-		{
-			name: "sglang sidecar canonical attention DP",
-			deployment: func() runtime.Object {
-				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
-				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
-				main.Args = append(main.Args, "--attn-dp-size", "2")
-				return dgd
-			}(),
-		},
-		{
-			name: "sglang sidecar canonical attention DP long equals alias",
-			deployment: func() runtime.Object {
-				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
-				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
-				main.Args = append(main.Args, "--attention-data-parallel-size=2")
-				return dgd
-			}(),
-		},
-		{
-			name: "sglang sidecar rejects mixed follower publishers",
-			deployment: func() runtime.Object {
-				dgd := sglangMultinodeDGDForAdmission(t, false, false, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				component := betaWorkerComponent(dgd)
-				component.Multinode.NodeCount = 4
-				main := &component.PodTemplate.Spec.Containers[0]
-				main.Args = append(main.Args, "--tp-size", "16")
+				component.PodTemplate.Spec.InitContainers = nil
+				component.PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
+				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
 				return dgd
 			}(),
-			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: SGLang topology has mixed publisher and non-publisher followers (2 of 4 nodes publish KV events); a shared worker template cannot place runtime selectively; use a topology where every follower publishes or only the leader publishes`},
 		},
 		{
-			name: "sglang sidecar rejects expanded canonical attention DP",
-			deployment: func() runtime.Object {
+			name: "sglang sidecar rejects switching combined component template to native sidecar",
+			oldDeployment: func() runtime.Object {
 				dgd := sglangMultinodeDGDForAdmission(t, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
-				main := &betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0]
-				main.Args = append(main.Args, "--attn-dp-size=$(DP)")
+				component := betaWorkerComponent(dgd)
+				component.PodTemplate.Spec.InitContainers = nil
+				component.PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
+				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
 				return dgd
 			}(),
-			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Forbidden: --attn-dp-size must be a literal positive integer; use complete leader and worker podTemplates for dynamic topology`},
+			deployment:      sglangMultinodeDGDForAdmission(t, false, false, false),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`},
 		},
 
 		{
@@ -408,12 +358,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		// SGLang multinode sidecars resolve runtime compatibility independently of engine images.
-		{name: "sglang sidecar multinode alpha=False roles=False dp=False", deployment: sglangMultinodeDGDForAdmission(t, false, false, false)},
-		{name: "sglang sidecar multinode alpha=False roles=False dp=True", deployment: sglangMultinodeDGDForAdmission(t, false, false, true)},
+		{name: "sglang sidecar multinode alpha=False roles=False dp=False", deployment: sglangMultinodeDGDForAdmission(t, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=False roles=False dp=True", deployment: sglangMultinodeDGDForAdmission(t, false, false, true), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "sglang sidecar multinode alpha=False roles=True dp=False", deployment: sglangMultinodeDGDForAdmission(t, false, true, false)},
 		{name: "sglang sidecar multinode alpha=False roles=True dp=True", deployment: sglangMultinodeDGDForAdmission(t, false, true, true)},
-		{name: "sglang sidecar multinode alpha=True roles=False dp=False", deployment: sglangMultinodeDGDForAdmission(t, true, false, false)},
-		{name: "sglang sidecar multinode alpha=True roles=False dp=True", deployment: sglangMultinodeDGDForAdmission(t, true, false, true)},
+		{name: "sglang sidecar multinode alpha=True roles=False dp=False", deployment: sglangMultinodeDGDForAdmission(t, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=True roles=False dp=True", deployment: sglangMultinodeDGDForAdmission(t, true, false, true), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "sglang sidecar multinode alpha=True roles=True dp=False", deployment: sglangMultinodeDGDForAdmission(t, true, true, false)},
 		{name: "sglang sidecar multinode alpha=True roles=True dp=True", deployment: sglangMultinodeDGDForAdmission(t, true, true, true)},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.

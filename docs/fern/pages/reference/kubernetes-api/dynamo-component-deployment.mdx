@@ -298,16 +298,11 @@ podTemplate:
         restartPolicy: Always
 ```
 
-For SGLang multinode deployments, set `backendFramework: sglang` and choose one template form:
+For SGLang multinode sidecar deployments, set `backendFramework: sglang` and supply complete leader and worker role `podTemplate` definitions. A component-level `podTemplate` is rejected for this mode. Define the engine commands, topology arguments, and sidecar placement in each role. The operator does not parse engine flags to infer sidecar placement.
 
-- **Component `podTemplate`:** use `python3 -m sglang.launch_server` directly or as a single `sh -c` or `bash -c` command, optionally prefixed by `exec`. The operator adds `--nnodes`, `--node-rank`, and `--dist-init-addr`. It keeps `runtime` on the leader and derives follower placement from TP, PP, attention-DP, attention-CP, and the local KV publisher configuration. Both `--attn-dp-size` (alias `--attention-data-parallel-size`) and legacy `--dp-size N --enable-dp-attention` are supported, including `--option=value` forms for sizes. It retains `runtime` on every follower when all followers publish, and removes it when none do. Mixed follower layouts are rejected because Grove and LeaderWorkerSet share one worker Pod template. Model-path values can use Kubernetes variable references such as `$(MODEL_PATH)`; quote shell variable values such as `"$MODEL_PATH"`. Config files, expanded topology values, and custom launchers require role templates because the operator cannot resolve publisher placement from them.
-- **Complete role templates:** define both launches and sidecar placement yourself. For DGDs with an operator origin version of 1.6.0 or later, the operator injects `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` for use in commands and arguments. Dynamo defaults apply only to declared `runtime` containers; engine images are not interpreted as Dynamo runtime versions.
+For DGDs with an operator origin version of 1.6.0 or later, the operator injects `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` for use in authored commands and arguments. Dynamo defaults apply only to declared `runtime` containers; engine images are not interpreted as Dynamo runtime versions. Combined-runtime deployments continue to support component templates and operator-generated multinode arguments, with the existing origin-version gate.
 
-Topology aliases use the same origin-version gate in sidecar and integrated runtime modes. Component templates with an older or missing origin version retain provider-specific multinode arguments.
-
-Shared memory, compilation cache, provider startup ordering, and group management follow the existing multinode behavior. Worker `main` probes are removed; a worker's `runtime` keeps its independent sidecar probes. Prefill and decode components each render their own engine group.
-
-See the [TP component-template example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and [DP-attention component-template example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). DP-attention requires an engine with follower gRPC metadata and a sidecar that understands that engine's attention-DP rank metadata.
+Shared memory, compilation cache, provider startup ordering, and group management follow the existing multinode behavior. Worker `main` probes are removed; a worker's `runtime` keeps its independent sidecar probes. Prefill and decode components each render their own engine group. DP-attention requires an engine with follower gRPC metadata and a sidecar that understands that engine's attention-DP rank metadata.
 
 Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
 
