@@ -163,6 +163,7 @@ func main() {
 	var dgdrDefaultImage string
 	var dgdrAISimulateDefaultImage string
 	var dgdrV1beta2Enabled bool
+	var dgdrAISimulateDefaultVersionOverride string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -181,12 +182,22 @@ func main() {
 			"empty derives dynamo-planner:<operator-version>")
 	flag.BoolVar(&dgdrV1beta2Enabled, "dgdr-v1beta2-enabled", false,
 		"Reconcile native v1beta2 DGDRs; requires the v1beta2 Request and Run CRDs to be installed")
+	flag.StringVar(&dgdrAISimulateDefaultVersionOverride, "dgdr-aisimulate-default-version-override", "",
+		"Compatibility version of the AISimulate default image, put into v1beta2 DGDR "+
+			"spec.aisimulate.versionOverride together with that image; required when its tag is not a semantic version")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if err := webhookdefaulting.ValidateAISimulateDefault(
+		dgdrAISimulateDefaultImage, dgdrAISimulateDefaultVersionOverride,
+	); err != nil {
+		setupLog.Error(err, "invalid AISimulate default")
+		os.Exit(1)
+	}
 
 	if configFile == "" {
 		setupLog.Error(nil, "--config flag is required")
@@ -514,7 +525,8 @@ func main() {
 	}
 
 	if err := registerWebhookHandlers(
-		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, dgdrAISimulateDefaultImage, gates,
+		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, dgdrAISimulateDefaultImage,
+		dgdrAISimulateDefaultVersionOverride, gates,
 	); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
@@ -661,6 +673,7 @@ func registerWebhookHandlers(
 	operatorVersion string,
 	dgdrDefaultImage string,
 	dgdrAISimulateDefaultImage string,
+	dgdrAISimulateDefaultVersionOverride string,
 	gate features.Gate,
 ) error {
 	var operatorPrincipal string
@@ -679,7 +692,8 @@ func registerWebhookHandlers(
 			DefaultImage: dgdrDefaultImage,
 		},
 		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
-			AISimulateImage: dgdrAISimulateDefaultImage,
+			AISimulateImage:           dgdrAISimulateDefaultImage,
+			AISimulateVersionOverride: dgdrAISimulateDefaultVersionOverride,
 			// The same discovery order as the DGDR reconciler: DCGM first, then node labels when
 			// the GPUDiscovery gate is on. The webhook keeps its own short-lived cache.
 			Hardware: &gpu.Discoverer{

@@ -96,6 +96,9 @@ spec:
         - {{ printf "--dgdr-aisimulate-default-image=%s" . | quote }}
         {{- end }}
         - --dgdr-v1beta2-enabled={{ .Values.dgdrV1Beta2.enabled }}
+        {{- with .Values.controllerManager.manager.dgdrAISimulateDefaultVersionOverride }}
+        - {{ printf "--dgdr-aisimulate-default-version-override=%s" . | quote }}
+        {{- end }}
         command:
         - /manager
         env:
