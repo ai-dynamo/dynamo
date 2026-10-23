@@ -35,6 +35,7 @@ use dynamo_kv_router::plugins::{
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
     WorkerSelectionPolicyRegistryError,
 };
+use dynamo_kv_router::protocols::WorkerId;
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-uncached-pool-split";
@@ -75,6 +76,12 @@ struct Parameters {
     /// Single-tier pool size for the no-taint convenience mode: the first N candidates.
     /// Mutually exclusive with `pools`.
     compute_workers: Option<usize>,
+    /// When `true`, a warm request with no cache affinity may spill onto idle cold-pool
+    /// workers once every warm worker has been removed from eligibility (overload
+    /// draining). When `false` (the default), cold workers serve only cold requests and
+    /// warm requests whose cache overlap lives there; a fully-drained warm pool rejects
+    /// with the overload status instead.
+    allow_warm_spillover: bool,
 }
 
 impl Default for Parameters {
@@ -83,6 +90,7 @@ impl Default for Parameters {
             uncached_threshold_tokens: DEFAULT_UNCACHED_THRESHOLD_TOKENS,
             pools: None,
             compute_workers: None,
+            allow_warm_spillover: false,
         }
     }
 }
@@ -168,6 +176,64 @@ struct UncachedPoolSplitPicker {
 }
 
 impl UncachedPoolSplitPicker {
+    /// Worker ids belonging to any cold tier (taint-declared in pools mode, the first N
+    /// by identity in convenience mode).
+    fn cold_member_ids(
+        &self,
+        candidates: &[dynamo_kv_router::plugins::worker_selection::ScoredWorkerCandidate],
+    ) -> HashSet<WorkerId> {
+        let pools = self.parameters.pools.as_ref();
+        if pools.is_some() {
+            candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.taints().is_some_and(|taints| {
+                        pools.is_some_and(|pools| {
+                            pools.iter().any(|tier| taints.contains(&tier.taint))
+                        })
+                    })
+                })
+                .map(|candidate| candidate.worker().worker_id)
+                .collect()
+        } else {
+            let n = self
+                .parameters
+                .compute_workers
+                .unwrap_or(1)
+                .min(candidates.len().saturating_sub(1).max(1));
+            let mut ids: Vec<WorkerId> = candidates.iter().map(|c| c.worker().worker_id).collect();
+            ids.sort_unstable();
+            ids.truncate(n);
+            ids.into_iter().collect()
+        }
+    }
+
+    /// Rows a warm request may select from: every non-cold worker, plus cold workers
+    /// holding the largest cache overlap (the affinity exemption that keeps a cold
+    /// request's follow-up turns on the worker that warmed their prefix). With
+    /// `allow_warm_spillover`, an empty warm set — every warm worker was drained from
+    /// eligibility — falls back to all candidates so idle cold capacity absorbs the
+    /// overflow; without it the picker fails and the host answers with the overload
+    /// status code.
+    fn warm_candidate_rows(
+        &self,
+        candidates: &[dynamo_kv_router::plugins::worker_selection::ScoredWorkerCandidate],
+        cached: &[usize],
+        cold_ids: &HashSet<WorkerId>,
+    ) -> Vec<usize> {
+        let max_cached = cached.iter().copied().max().unwrap_or(0);
+        let mut rows: Vec<usize> = (0..candidates.len())
+            .filter(|&row| {
+                let id = candidates[row].worker().worker_id;
+                !cold_ids.contains(&id) || (max_cached > 0 && cached[row] == max_cached)
+            })
+            .collect();
+        if rows.is_empty() && self.parameters.allow_warm_spillover {
+            rows = (0..candidates.len()).collect();
+        }
+        rows
+    }
+
     fn classify(&self, isl_tokens: usize, best_effective_prefill: usize) -> Lane {
         let effective = best_effective_prefill.min(isl_tokens);
         if let Some(pools) = &self.parameters.pools {
@@ -223,8 +289,12 @@ impl WorkerPicker for UncachedPoolSplitPicker {
         let best_effective = isl - best_cached.min(isl);
 
         match self.classify(isl, best_effective) {
-            Lane::Warm => select_affine(load, &cached, 0..candidates.len())
-                .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker")),
+            Lane::Warm => {
+                let cold_ids = self.cold_member_ids(candidates);
+                let rows = self.warm_candidate_rows(candidates, &cached, &cold_ids);
+                select_affine(load, &cached, rows.into_iter())
+                    .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+            }
             Lane::Cold { taint } => {
                 let member_rows: Vec<usize> = match taint.as_deref() {
                     Some(taint) => candidates
@@ -384,6 +454,18 @@ mod tests {
         workers: &[(u64, usize, usize)],
         pool_taints: &HashMap<u64, Arc<HashSet<String>>>,
     ) -> Result<WorkerWithDpRank, dynamo_kv_router::scheduling::KvSchedulerError> {
+        select_result_allowed(parameters, isl_tokens, workers, pool_taints, None)
+    }
+
+    /// Like [`select_result`] but with `allowed` restricting the eligible worker ids,
+    /// simulating overload draining of everything outside that set.
+    fn select_result_allowed(
+        parameters: &Parameters,
+        isl_tokens: usize,
+        workers: &[(u64, usize, usize)],
+        pool_taints: &HashMap<u64, Arc<HashSet<String>>>,
+        allowed: Option<Vec<u64>>,
+    ) -> Result<WorkerWithDpRank, dynamo_kv_router::scheduling::KvSchedulerError> {
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
@@ -392,7 +474,7 @@ mod tests {
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: None,
-            allowed_worker_ids: None,
+            allowed_worker_ids: allowed.map(|ids| ids.into_iter().collect()),
             routing_constraints: RoutingConstraints::default(),
             router_config_override: None,
             track_prefill_tokens: true,
@@ -469,6 +551,7 @@ mod tests {
                 },
             ]),
             compute_workers: None,
+            allow_warm_spillover: false,
         }
     }
 
@@ -477,6 +560,7 @@ mod tests {
             uncached_threshold_tokens: threshold,
             pools: None,
             compute_workers: Some(compute_workers),
+            allow_warm_spillover: false,
         }
     }
 
@@ -597,6 +681,7 @@ mod tests {
                 },
             ]),
             compute_workers: None,
+            allow_warm_spillover: false,
         };
         let pool_taints = HashMap::new();
         let selected =
@@ -620,6 +705,78 @@ mod tests {
         let params = single_tier_params(100, 1);
         let pool_taints = HashMap::new();
         let selected = select_result(&params, 80, &[(A, 0, 5), (B, 0, 0)], &pool_taints).unwrap();
+        assert_eq!(selected, worker(B));
+    }
+
+    #[test]
+    fn warm_without_affinity_avoids_cold_workers_by_default() {
+        // A carries the cold-1 taint and is idle; B is warm but busy. A warm request with
+        // no overlap must stay on the warm worker even though A is idle.
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-1"]))]);
+        let selected = select_result(
+            &two_tier_params(),
+            80,
+            &[(A, 0, 0), (B, 0, 6)],
+            &pool_taints,
+        )
+        .unwrap();
+        assert_eq!(selected, worker(B));
+    }
+
+    #[test]
+    fn spillover_disabled_rejects_when_warm_pool_drained() {
+        // Only the cold worker survives eligibility: without spillover the warm request
+        // must fail as overload rather than touch the cold pool.
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-1"]))]);
+        let result = select_result_allowed(
+            &two_tier_params(),
+            80,
+            &[(A, 0, 0), (B, 0, 6)],
+            &pool_taints,
+            Some(vec![A]),
+        );
+        let Err(error) = result else {
+            panic!("drained warm pool must fail without spillover");
+        };
+        assert!(
+            matches!(
+                error,
+                dynamo_kv_router::scheduling::KvSchedulerError::AllEligibleWorkersOverloaded
+            ),
+            "expected AllEligibleWorkersOverloaded, got: {error}"
+        );
+    }
+
+    #[test]
+    fn spillover_enabled_escapes_to_idle_cold_worker() {
+        // Same drained-warm-pool scenario with the spillover switch on: the request may
+        // now use the idle cold worker.
+        let params = Parameters {
+            allow_warm_spillover: true,
+            ..two_tier_params()
+        };
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-1"]))]);
+        let selected = select_result_allowed(
+            &params,
+            80,
+            &[(A, 0, 0), (B, 0, 6)],
+            &pool_taints,
+            Some(vec![A]),
+        )
+        .unwrap();
+        assert_eq!(selected, worker(A));
+    }
+
+    #[test]
+    fn spillover_enabled_keeps_warm_traffic_on_warm_workers() {
+        // Spillover only escapes once the warm pool is drained: with a warm worker still
+        // eligible, warm traffic stays on it even though the cold worker is idle.
+        let params = Parameters {
+            allow_warm_spillover: true,
+            ..two_tier_params()
+        };
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-1"]))]);
+        let selected = select_result(&params, 80, &[(A, 0, 0), (B, 0, 6)], &pool_taints).unwrap();
         assert_eq!(selected, worker(B));
     }
 

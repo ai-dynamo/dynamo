@@ -174,6 +174,24 @@ via `DYN_HTTP_OVERLOAD_STATUS_CODE`) with `ServiceOverloaded` semantics; it neve
 falls back to warm workers. Queue-side admission (`uncached_token_queue_limit_per_worker`)
 bounds waiting independently. Warm and cache-affine traffic is unaffected by the pools.
 
+By default the split is strict: a warm request without cache affinity selects only non-pool
+workers, so an idle cold pool stays idle until cold traffic arrives (dedicated capacity). Set
+`allow_warm_spillover: true` to let warm traffic escape onto idle cold workers once every
+warm worker has been drained from eligibility by overload detection:
+
+```yaml
+      parameters:
+        allow_warm_spillover: true
+        pools:
+          - min_uncached_tokens: 131072
+            taint: dynamo.topology/worker_pool=cold-1
+```
+
+Spillover is one-directional and last-resort: warm requests still prefer warm workers while
+any remains eligible, cache affinity to a pool worker is exempt in both modes (a cold
+request's follow-up turns must return to the worker that warmed their prefix), and cold
+requests never spill into the warm pool.
+
 #### Configure the Default Policy
 
 Set the default policy’s scoring parameters in the YAML passed to `--router-policy-config`:
