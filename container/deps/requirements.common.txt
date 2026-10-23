@@ -29,7 +29,7 @@ opentelemetry-exporter-otlp<=1.38.0
 opentelemetry-sdk<=1.38.0
 # Transitive via imageio/matplotlib; floor keeps images on the current release line.
 # aiperf caps pillow below this floor; overrides.{frontend,planner}.txt lift the cap.
-pillow>=13.0.0
+pillow>=13.0.0,<14
 prometheus_client==0.23.1
 protobuf==6.33.6
 pydantic>=2.11.4,<=2.13.5
