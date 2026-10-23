@@ -99,3 +99,50 @@ def test_install_test_only_packages_removes_failed_target(monkeypatch, tmp_path)
 
     assert not Path(target).exists()
     assert not common._test_only_pip_targets
+
+
+class _MarkerNode:
+    def __init__(self, marker_names: set[str]):
+        self._marker_names = marker_names
+
+    def get_closest_marker(self, name: str):
+        if name in self._marker_names:
+            return getattr(pytest.mark, name).mark
+        return None
+
+
+class _MarkerRequest:
+    def __init__(self, marker_names: set[str]):
+        self.node = _MarkerNode(marker_names)
+
+
+@pytest.mark.parametrize(
+    ("worker_id", "marker_names", "expected_sleeps"),
+    [
+        pytest.param("gw3", {"gpu_0"}, [], id="cpu-only-gpu0-skips-stagger"),
+        pytest.param("gw3", {"gpu_1"}, [45], id="gpu-deployment-keeps-stagger"),
+        pytest.param("gw3", set(), [45], id="unmarked-deployment-keeps-stagger"),
+        pytest.param("gw0", set(), [], id="first-worker-never-staggers"),
+    ],
+)
+def test_prepare_deployment_xdist_stagger(
+    monkeypatch, worker_id, marker_names, expected_sleeps
+):
+    sleeps: list[float] = []
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", worker_id)
+    monkeypatch.setattr(common.time, "sleep", sleeps.append)
+    config = EngineConfig(
+        name="test",
+        directory=".",
+        script_name="agg.sh",
+        marks=[],
+        request_payloads=[],
+        model="test",
+    )
+
+    prep = common._prepare_deployment(
+        config, _MarkerRequest(marker_names), ports=None, extra_env=None
+    )
+    common._cleanup_prepared_deployment(prep)
+
+    assert sleeps == expected_sleeps
