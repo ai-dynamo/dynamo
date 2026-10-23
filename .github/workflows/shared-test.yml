@@ -83,6 +83,16 @@ on:
         required: false
         type: string
         default: 'auto'
+      cpu_safe_subset_marker:
+        description: 'Optional marker for an xdist-safe subset of the CPU-only tests. When set, that subset runs first on 2 workers with --dist=load, then the rest runs with cpu_parallel_mode'
+        required: false
+        type: string
+        default: ''
+      cpu_safe_subset_paths:
+        description: 'Space-separated paths that limit collection for the cpu_safe_subset_marker phase. Every test carrying the marker must live under them'
+        required: false
+        type: string
+        default: ''
       run_cpu_e2e_tests:
         description: 'Whether to run CPU end-to-end tests in a separate, non-retrying stage'
         required: false
@@ -371,6 +381,8 @@ jobs:
           DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
           ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
           PARALLEL_MODE: ${{ inputs.cpu_parallel_mode }}
+          SAFE_SUBSET_MARKER: ${{ inputs.cpu_safe_subset_marker }}
+          SAFE_SUBSET_PATHS: ${{ inputs.cpu_safe_subset_paths }}
           GPU_TESTS: 'false'
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           JOB_CHECK_RUN_ID: ${{ job.check_run_id }}

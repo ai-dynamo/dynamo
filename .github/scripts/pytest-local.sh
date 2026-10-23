@@ -13,7 +13,15 @@
 #             PLATFORM_ARCH, PARALLEL_MODE (auto | none | 0 | <workers>),
 #             JOB_CHECK_RUN_ID
 #   Optional: ENABLE_COVERAGE=true, GPU_TESTS=true, VERIFY_GPU=false (skips the
-#             MinIO and GPU checks), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED
+#             MinIO and GPU checks), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED,
+#             SAFE_SUBSET_MARKER, SAFE_SUBSET_PATHS (space-separated)
+#
+# With SAFE_SUBSET_MARKER set, the stage runs in two phases: tests matching
+# both PYTEST_MARKS and the marker, collected only from SAFE_SUBSET_PATHS, on
+# 2 xdist workers; then the rest of PYTEST_MARKS with PARALLEL_MODE. The
+# phases share one JUnit report, one Allure directory and one status file.
+# This path also needs python for the JUnit merge, so only images that ship
+# it may opt in.
 #
 # The distroless planner test image ships only the tools listed in
 # container/Dockerfile.test, so stay on bash builtins and those tools.
@@ -156,6 +164,16 @@ else
 fi
 
 JUNIT_FILE="${TEST_RESULTS_DIR}/pytest_test_report.xml"
+REMAINDER_MARKS="${PYTEST_MARKS}"
+if [[ -n "${SAFE_SUBSET_MARKER:-}" ]]; then
+  # Phase reports stay out of the test-results/pytest_test_report_*.xml upload
+  # glob; only the merged report below matches it.
+  PHASE_DIR="${TEST_RESULTS_DIR}/phases"
+  mkdir -p "${PHASE_DIR}"
+  rm -f "${PHASE_DIR}/safe_subset.xml" "${PHASE_DIR}/remainder.xml"
+  JUNIT_FILE="${PHASE_DIR}/remainder.xml"
+  REMAINDER_MARKS="(${PYTEST_MARKS}) and not (${SAFE_SUBSET_MARKER})"
+fi
 pytest_args+=(
   --continue-on-collection-errors -v --tb=short
   "--basetemp=${WORK_DIR}/pytest_temp"
@@ -167,7 +185,8 @@ pytest_args+=(
 
 if [[ "${ENABLE_COVERAGE:-}" == "true" ]]; then
   echo "📊 Coverage collection enabled"
-  pytest_args+=(--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report=)
+  cov_args=(--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report=)
+  pytest_args+=("${cov_args[@]}")
   # Suffix the data file per stage: the job uploads test-results/ once
   # at the end, so stages must not overwrite each other. The nightly
   # merge globs `.coverage*` and combines whatever it finds.
@@ -175,25 +194,109 @@ if [[ "${ENABLE_COVERAGE:-}" == "true" ]]; then
   export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
-pytest_args+=(-m "${PYTEST_MARKS}")
+pytest_args+=(-m "${REMAINDER_MARKS}")
 
-echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): python -m pytest ${pytest_args[*]}"
 umask 0022
 cd "${CONTAINER_WORKSPACE}"
 # Record pytest's exit code rather than failing here, so results are still
 # renamed and the status file is written.
 TEST_EXIT_CODE=0
-python -m pytest "${pytest_args[@]}" || TEST_EXIT_CODE=$?
-echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+JUNIT_NAME="pytest_test_report_${TEST_SUITE_NAME}_${TEST_TYPE}_${PLATFORM_ARCH}_${GITHUB_RUN_ID}_${JOB_CHECK_RUN_ID}.xml"
 
-# Unique per-stage name so several stages can share one test-results/
-# directory and one upload.
-if [[ -f "${JUNIT_FILE}" ]]; then
-  JUNIT_NAME="pytest_test_report_${TEST_SUITE_NAME}_${TEST_TYPE}_${PLATFORM_ARCH}_${GITHUB_RUN_ID}_${JOB_CHECK_RUN_ID}.xml"
-  mv "${JUNIT_FILE}" "${TEST_RESULTS_DIR}/${JUNIT_NAME}"
-  echo "📝 Renamed JUnit XML to: ${JUNIT_NAME}"
+if [[ -z "${SAFE_SUBSET_MARKER:-}" ]]; then
+  echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): python -m pytest ${pytest_args[*]}"
+  python -m pytest "${pytest_args[@]}" || TEST_EXIT_CODE=$?
+  echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+  # Unique per-stage name so several stages can share one test-results/
+  # directory and one upload.
+  if [[ -f "${JUNIT_FILE}" ]]; then
+    mv "${JUNIT_FILE}" "${TEST_RESULTS_DIR}/${JUNIT_NAME}"
+    echo "📝 Renamed JUnit XML to: ${JUNIT_NAME}"
+  else
+    echo "⚠️  JUnit XML file not found - test results may not be available for upload"
+  fi
 else
-  echo "⚠️  JUnit XML file not found - test results may not be available for upload"
+  # The partition is exact only while every test carrying SAFE_SUBSET_MARKER
+  # lives under SAFE_SUBSET_PATHS; one elsewhere would run in neither phase.
+  # Limiting the paths avoids a second full-repository collection.
+  read -ra safe_paths <<< "${SAFE_SUBSET_PATHS:-}"
+  # --dist=load, not loadscope: loadscope would keep the whole module on one
+  # worker. 2 workers is the fixed cap for this subset.
+  safe_args=(
+    -n 2 --dist=load
+    --continue-on-collection-errors -v --tb=short
+    "--basetemp=${WORK_DIR}/pytest_temp_safe_subset"
+    -o "cache_dir=${WORK_DIR}/.pytest_cache_safe_subset"
+    "--junitxml=${PHASE_DIR}/safe_subset.xml"
+    "--alluredir=${TEST_RESULTS_DIR}/allure-results"
+    --durations=10
+  )
+  safe_env=()
+  if [[ "${ENABLE_COVERAGE:-}" == "true" ]]; then
+    safe_args+=("${cov_args[@]}")
+    # Must not start with "${COVERAGE_FILE}.": pytest-cov combines (and
+    # deletes) files matching <data_file>.* at the end of the remainder phase.
+    safe_env=("COVERAGE_FILE=${TEST_RESULTS_DIR}/.coverage.${TEST_TYPE}-safe_subset")
+  fi
+  safe_args+=(-m "(${PYTEST_MARKS}) and (${SAFE_SUBSET_MARKER})" "${safe_paths[@]}")
+
+  # Exit code 5 (nothing collected) is deliberately not special-cased: an
+  # empty safe subset fails the stage, as an empty single phase does.
+  SAFE_EXIT_CODE=0
+  echo "▶️ Executing safe-subset phase (cwd=${CONTAINER_WORKSPACE}): ${safe_env[*]:+${safe_env[*]} }python -m pytest ${safe_args[*]}"
+  PHASE_START=${SECONDS}
+  env "${safe_env[@]}" python -m pytest "${safe_args[@]}" || SAFE_EXIT_CODE=$?
+  echo "🧪 Safe-subset phase completed with exit code ${SAFE_EXIT_CODE} in $((SECONDS - PHASE_START))s"
+
+  # Runs whatever the safe-subset phase returned.
+  REMAINDER_EXIT_CODE=0
+  echo "▶️ Executing remainder phase (cwd=${CONTAINER_WORKSPACE}): python -m pytest ${pytest_args[*]}"
+  PHASE_START=${SECONDS}
+  python -m pytest "${pytest_args[@]}" || REMAINDER_EXIT_CODE=$?
+  echo "🧪 Remainder phase completed with exit code ${REMAINDER_EXIT_CODE} in $((SECONDS - PHASE_START))s"
+
+  # First non-zero phase code wins.
+  TEST_EXIT_CODE=${SAFE_EXIT_CODE}
+  if (( TEST_EXIT_CODE == 0 )); then
+    TEST_EXIT_CODE=${REMAINDER_EXIT_CODE}
+  fi
+  echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+  phase_reports=()
+  for report in "${PHASE_DIR}/safe_subset.xml" "${PHASE_DIR}/remainder.xml"; do
+    if [[ -f "${report}" ]]; then
+      phase_reports+=("${report}")
+    else
+      echo "⚠️  JUnit XML ${report} not found"
+    fi
+  done
+  if (( ${#phase_reports[@]} > 0 )); then
+    # One report per stage: the metrics uploader and test-results consumers
+    # expect one file, and read every <testsuite> under the root.
+    MERGE_EXIT_CODE=0
+    python - "${TEST_RESULTS_DIR}/${JUNIT_NAME}" "${phase_reports[@]}" <<'PY' || MERGE_EXIT_CODE=$?
+import sys
+import xml.etree.ElementTree as ET
+
+out, *inputs = sys.argv[1:]
+merged = ET.Element("testsuites")
+for path in inputs:
+    root = ET.parse(path).getroot()
+    merged.extend([root] if root.tag == "testsuite" else root.findall("testsuite"))
+ET.ElementTree(merged).write(out, encoding="utf-8", xml_declaration=True)
+PY
+    if (( MERGE_EXIT_CODE == 0 )); then
+      echo "📝 Merged ${#phase_reports[@]} phase JUnit XML file(s) into: ${JUNIT_NAME}"
+    else
+      echo "❌ Merging phase JUnit XML failed with exit code ${MERGE_EXIT_CODE}"
+      if (( TEST_EXIT_CODE == 0 )); then
+        TEST_EXIT_CODE=${MERGE_EXIT_CODE}
+      fi
+    fi
+  else
+    echo "⚠️  JUnit XML file not found - test results may not be available for upload"
+  fi
 fi
 
 # Checked by "Verify test stages completed" in shared-test.yml, which

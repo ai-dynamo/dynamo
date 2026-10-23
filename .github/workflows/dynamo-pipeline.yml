@@ -132,6 +132,7 @@ jobs:
 
   # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # below runs -n 0, so this job is NOT actually parallel right now.
+  # Only the wheel_smoke subset runs on 2 xdist workers (cpu_safe_subset_*).
   parallel:
     name: test
     needs: image
@@ -149,6 +150,8 @@ jobs:
       cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
+      cpu_safe_subset_marker: wheel_smoke
+      cpu_safe_subset_paths: tests/wheels/test_dynamo_wheel_smoke.py
       run_gpu_tests: false
       source_ref: ${{ inputs.source_ref }}
       image_tag_suffix: ${{ inputs.image_tag_suffix }}
