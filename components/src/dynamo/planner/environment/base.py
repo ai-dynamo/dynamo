@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from typing import Optional
@@ -35,6 +36,10 @@ from dynamo.planner.monitoring.dgd_services import (
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 
 logger = logging.getLogger(__name__)
+
+# How often the power-disabled startup wait re-checks whether only pending
+# startup capacity is keeping the deployment unstable.
+STARTUP_PENDING_RECHECK_SECONDS = 10.0
 
 _MDC_REFRESH_FIELDS = (
     "total_kv_blocks",
@@ -208,7 +213,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
 
         The settled wait (observedGeneration + pod annotation convergence) is
         only required to permanently cache DGD-owned power caps. Power-disabled
-        planners keep the standard ``wait_for_deployment_ready`` path.
+        planners use ``_wait_for_startup_ready``, which does not block on
+        replicas that are pending startup capacity.
         """
         if self.config.enable_power_awareness:
             if not is_power_aware_connector(self.controller):
@@ -230,8 +236,72 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
             )
-        await self.controller.wait_for_deployment_ready(include_planner=False)
+        await self._wait_for_startup_ready()
         return self._shared_dgd_deployment()
+
+    async def _wait_for_startup_ready(self) -> None:
+        """Power-disabled startup wait that tolerates pending startup capacity.
+
+        A worker replica that cannot be scheduled (no free accelerator, or a
+        preempted replica) keeps the deployment unstable for as long as capacity
+        is short, so requiring full stability would block startup and, once the
+        wait is exhausted, restart the Planner into the same wait. Startup
+        proceeds as soon as every required role has a serving worker and the only
+        shortfall is verified pending startup capacity. An exhausted wait is
+        logged instead of raised: the tick loop already handles an unstable
+        deployment.
+        """
+        ready = asyncio.ensure_future(
+            self.controller.wait_for_deployment_ready(include_planner=False)
+        )
+        try:
+            while not ready.done():
+                pending_only = await self._startup_blocked_only_by_pending()
+                if ready.done():
+                    break
+                if pending_only:
+                    logger.info(
+                        "Starting with serving workers while additional replicas "
+                        "are pending startup capacity"
+                    )
+                    return
+                await asyncio.wait({ready}, timeout=STARTUP_PENDING_RECHECK_SECONDS)
+            ready.result()
+        except TimeoutError as exc:
+            logger.warning(
+                "Deployment did not become ready during startup (%s); "
+                "starting with the current deployment state",
+                exc,
+            )
+        finally:
+            if not ready.done():
+                ready.cancel()
+
+    async def _startup_blocked_only_by_pending(self) -> bool:
+        """True when every required role serves and only pending startup capacity remains."""
+        if not is_startup_aware_connector(self.controller):
+            return False
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+        if defaults is None:
+            return False
+        inventory = await self.controller.get_worker_inventory(
+            prefill_component_name=(
+                defaults.prefill_worker_k8s_name if self.require_prefill else None
+            ),
+            decode_component_name=(
+                defaults.decode_worker_k8s_name if self.require_decode else None
+            ),
+        )
+        if inventory is None or not inventory.startup_in_progress:
+            return False
+        return all(
+            (serving or 0) > 0
+            for required, serving in (
+                (self.require_prefill, inventory.ready_num_prefill),
+                (self.require_decode, inventory.ready_num_decode),
+            )
+            if required
+        )
 
     @staticmethod
     def _call_with_optional_deployment(method, *, deployment=None, **kwargs):
