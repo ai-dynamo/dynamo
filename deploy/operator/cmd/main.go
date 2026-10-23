@@ -618,6 +618,13 @@ func registerControllers(
 		if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
 			return err
 		}
+		if err := controller.SetupDynamoGraphDeploymentRunV1beta2(mgr, controller.DynamoGraphDeploymentRunSetupOptions{
+			SetupOptions:            setupOptions,
+			OperatorImage:           operatorImage,
+			OperatorImagePullPolicy: operatorPullPolicy,
+		}); err != nil {
+			return err
+		}
 	}
 	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
 		SetupOptions: setupOptions,

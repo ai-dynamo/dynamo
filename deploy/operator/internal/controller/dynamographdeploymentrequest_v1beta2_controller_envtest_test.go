@@ -96,7 +96,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	g.Expect(first.Spec.Hardware).NotTo(BeNil())
 	g.Expect(first.Spec.AISimulate.Image).To(Equal(controllerAISimulateImage))
 	g.Expect(first.Spec.AISimulate.VersionOverride).To(Equal("1.2.0"))
-	input, err := aisimulate.InputForRun(first)
+	input, err := aisimulate.DecodeParameters(first.Spec.AISimulate.Parameters)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(input).To(HaveKey("search_space"))
 

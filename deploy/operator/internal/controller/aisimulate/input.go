@@ -25,6 +25,7 @@ import (
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // Lower returns the effective native input: the typed underlay, merged with
@@ -46,11 +47,18 @@ func Lower(spec *v1beta2.DynamoGraphDeploymentRequestSpec) (map[string]any, erro
 	if err := applyDefaults(underlay); err != nil {
 		return nil, err
 	}
+	return MergeParameters(underlay, parameters), nil
+}
+
+// MergeParameters applies parameters as an RFC 7386 merge patch over underlay. Native
+// AISimulate parameters are always the final overlay: they may override or delete values
+// supplied by a typed API or by controller-owned execution defaults.
+func MergeParameters(underlay, parameters map[string]any) map[string]any {
 	input, _ := mergePatch(underlay, parameters).(map[string]any)
 	if input == nil {
-		input = map[string]any{}
+		return map[string]any{}
 	}
-	return input, nil
+	return input
 }
 
 // Parameters returns spec.aisimulate.parameters as a JSON object, or nil when absent.
@@ -58,10 +66,20 @@ func Parameters(spec *v1beta2.DynamoGraphDeploymentRequestSpec) (map[string]any,
 	if spec.AISimulate == nil || spec.AISimulate.Parameters == nil {
 		return nil, nil
 	}
-	raw := spec.AISimulate.Parameters.Raw
-	if len(raw) == 0 && spec.AISimulate.Parameters.Object != nil {
+	return DecodeParameters(spec.AISimulate.Parameters)
+}
+
+// DecodeParameters returns a native AISimulate parameters object without applying typed
+// API fields or defaults. A Run controller uses this after the Request controller has frozen
+// the complete effective input into spec.aisimulate.parameters.
+func DecodeParameters(parameters *runtime.RawExtension) (map[string]any, error) {
+	if parameters == nil {
+		return nil, nil
+	}
+	raw := parameters.Raw
+	if len(raw) == 0 && parameters.Object != nil {
 		var err error
-		if raw, err = json.Marshal(spec.AISimulate.Parameters.Object); err != nil {
+		if raw, err = json.Marshal(parameters.Object); err != nil {
 			return nil, fmt.Errorf("spec.aisimulate.parameters: %w", err)
 		}
 	}
