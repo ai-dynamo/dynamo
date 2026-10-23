@@ -121,26 +121,24 @@ build_trtllm_override_args_with_mem() {
         esac
     done
 
-    local gpu_mem_json=""
-
-    # Token-based (preferred, simpler to reason about)
+    local memory_key="" memory_limit=""
     if [[ -n "${_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS:-}" ]]; then
-        gpu_mem_json='"kv_cache_config": {"max_tokens": '"${_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS}"'}'
-    # Byte-based (alternative, more precise)
+        memory_key=max_tokens
+        memory_limit="$_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS"
     elif [[ -n "${_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES:-}" ]]; then
-        gpu_mem_json='"kv_cache_config": {"max_gpu_total_bytes": '"${_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES}"'}'
+        memory_key=max_gpu_total_bytes
+        memory_limit="$_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES"
     fi
 
-    if [[ -n "$gpu_mem_json" ]]; then
-        # Merge the nested KV settings instead of emitting duplicate JSON keys.
-        # An explicit profiling budget overrides the same key in the input.
-        python3 - "$gpu_mem_json" "$merge_json" <<'PYTHON'
+    if [[ -n "$memory_key" ]]; then
+        python3 - "$merge_json" "$memory_key" "$memory_limit" <<'PYTHON'
 import json
 import sys
 
+existing_json, memory_key, memory_limit = sys.argv[1:]
 config = {"kv_cache_config": {}}
-config.update(json.loads(sys.argv[2] or "{}"))
-config["kv_cache_config"].update(json.loads("{" + sys.argv[1] + "}")["kv_cache_config"])
+config.update(json.loads(existing_json or "{}"))
+config["kv_cache_config"][memory_key] = int(memory_limit)
 print(json.dumps(config))
 PYTHON
     elif [[ -n "$merge_json" ]]; then
