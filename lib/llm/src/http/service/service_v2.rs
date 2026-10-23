@@ -785,6 +785,11 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_chat_endpoints: bool,
 
+    /// Override chat inference while retaining the standard HTTP API and schema.
+    /// Other APIs and model-listing routes continue to use the local model manager.
+    #[builder(setter(strip_option), default = "None")]
+    chat_controller: Option<Arc<dyn crate::controller::chat::ChatController>>,
+
     #[builder(default = "false")]
     enable_cmpl_endpoints: bool,
 
@@ -1458,6 +1463,7 @@ impl HttpServiceConfigBuilder {
         let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
             state.clone(),
             &config.request_template,
+            config.chat_controller,
             anthropic_endpoints_enabled,
             vllm_generate_enabled,
             sglang_generate_enabled,
@@ -1618,6 +1624,7 @@ impl HttpServiceConfigBuilder {
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
+        chat_controller: Option<Arc<dyn crate::controller::chat::ChatController>>,
         enable_anthropic_endpoints: bool,
         vllm_generate_enabled: bool,
         sglang_generate_enabled: bool,
@@ -1625,11 +1632,19 @@ impl HttpServiceConfigBuilder {
     ) -> Result<Vec<(Vec<RouteDoc>, axum::Router)>> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
-        let (chat_docs, chat_route) = super::openai::chat_completions_router(
-            state.clone(),
-            request_template.clone(),
-            var(HTTP_SVC_CHAT_PATH_ENV).ok(),
-        );
+        let (chat_docs, chat_route) = match chat_controller {
+            Some(controller) => super::openai::chat_completions_router_with_controller(
+                state.clone(),
+                request_template.clone(),
+                var(HTTP_SVC_CHAT_PATH_ENV).ok(),
+                controller,
+            ),
+            None => super::openai::chat_completions_router(
+                state.clone(),
+                request_template.clone(),
+                var(HTTP_SVC_CHAT_PATH_ENV).ok(),
+            ),
+        };
         let (cmpl_docs, cmpl_route) =
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =

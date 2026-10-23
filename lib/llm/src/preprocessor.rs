@@ -15,6 +15,8 @@ pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
 pub mod prompt;
+mod request_options;
+pub(crate) use request_options::apply_request_tool_call_parsing_options;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
 pub(crate) mod tool_choice;

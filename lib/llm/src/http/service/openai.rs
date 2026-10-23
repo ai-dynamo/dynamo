@@ -105,6 +105,8 @@ use dynamo_protocols::types::responses::{
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
+use crate::controller::chat::{ChatController, ChatError, ChatOutput, DynamoChatController};
+
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
 /// Dynamo Annotation for the request ID
@@ -2484,7 +2486,7 @@ async fn pooling(
 }
 
 async fn handler_chat_completions(
-    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, template, controller)): State<ChatHttpState>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ErrorResponse> {
@@ -2527,8 +2529,9 @@ async fn handler_chat_completions(
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     if !resolved_model.is_empty()
-        && let Err(error) = check_model_serving_ready(&state, resolved_model)
+        && let Err(error) = controller.check_model_ready(resolved_model)
     {
+        let error = chat_controller_error_response(error);
         lifecycle_request.record_session(&request_id, None);
         terminal.finish(terminal_outcome_for_error_response(&error));
         return Err(error);
@@ -2551,12 +2554,9 @@ async fn handler_chat_completions(
     let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     // Canonicalize alias → primary for the metric label.
-    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
+    let model = controller.resolve_model(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state
-            .manager()
-            .metric_model_for(&canonical_model)
-            .to_string(),
+        model: model.metric_name,
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -2609,6 +2609,7 @@ async fn handler_chat_completions(
             chat_completions(
                 state,
                 template,
+                controller,
                 request,
                 stream_handle,
                 lifecycle,
@@ -3490,17 +3491,27 @@ fn apply_chat_completions_request_template(
     }
 }
 
-/// OpenAI Chat Completions Request Handler
-///
-/// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
-/// for an [`super::OpenAIChatCompletionsStreamingEngine`] and will return a stream of responses which will be
-/// forward to the client.
-///
-/// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
-/// non-streaming requests, we will fold the stream into a single response as part of this handler.
+/// Map controller failures into the existing HTTP status, body and metric policy.
+fn chat_controller_error_response(error: ChatError) -> ErrorResponse {
+    match error {
+        ChatError::ModelNotFound => ErrorMessage::model_not_found(),
+        ChatError::ModelUnavailable(model) => {
+            ErrorMessage::service_unavailable_with_body(model_not_ready_message(&model))
+        }
+        ChatError::InvalidRequest(error) => {
+            ErrorMessage::from_anyhow(error.into(), "Invalid tool_choice")
+        }
+        ChatError::Generation(error) => {
+            ErrorMessage::from_anyhow(error, "Failed to generate completions")
+        }
+    }
+}
+
+/// Validate the API request and deliver typed controller output as JSON or SSE.
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
+    controller: Arc<dyn ChatController>,
     mut request: Context<NvCreateChatCompletionRequest>,
     stream_handle: ConnectionHandle,
     lifecycle: LifecycleTrace,
@@ -3526,12 +3537,12 @@ async fn chat_completions(
     // engine routing, metrics, and the OpenAI response.model all use the
     // canonical primary (matching vLLM/SGLang). Non-aliases pass through so
     // metric_model_for still applies its unknown-model cardinality guard.
-    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
-    if canonical != request.inner.model {
-        request.inner.model = canonical;
+    let resolved = controller.resolve_model(&request.inner.model);
+    if resolved.name != request.inner.model {
+        request.inner.model = resolved.name;
     }
     let model = request.inner.model.clone();
-    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let metric_model = resolved.metric_name;
 
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
@@ -3578,65 +3589,28 @@ async fn chat_completions(
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    // Let backend adapters apply their own generation default (e.g. --override-generation-config).
-    if request.inner.max_completion_tokens.is_none() {
-        request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
-    }
-
-    tracing::trace!("Getting chat completions engine for model: {}", model);
-
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
-
-    // Request policy controls whether parser-produced tool calls may be exposed.
-    // Assistant response/guided constraints are handled separately during
-    // preprocessing and do not revoke an auto request's tool-call permission.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
-
     // When parallel_tool_calls is false, limit the response to a single tool call.
-    let parsing_options =
-        parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
     let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
-
-    // Any force_nonempty_content=true request: surface reasoning as content when
-    // the turn produced none. See `wants_reasoning_as_content_when_empty`.
-    let move_reasoning_to_content_when_empty =
-        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
-            request.chat_template_args.as_ref(),
-        );
-    let parsing_options = parsing_options
-        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
-    request.insert(REQUEST_PARSING_OPTIONS_CONTEXT_KEY, parsing_options.clone());
-
-    // Computed before `request` moves into `generate`. Only a stream that can
-    // withhold every data frame needs forced keep-alive frames.
-    let stream_can_defer_all_output =
-        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = inflight_guard.response_collector();
     inflight_guard.request_metrics().attach_to(&mut request);
 
     let annotations = request.annotations();
 
-    // issue the generate call on the engine
-    let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+    // The controller returns typed output; HTTP retains delivery and metrics.
+    let ChatOutput {
+        stream,
+        parsing_options,
+        can_defer_all_output: stream_can_defer_all_output,
+    } = controller.generate(request).await.map_err(|error| {
+        if let ChatError::Generation(error) = &error
+            && super::metrics::request_was_rejected(error.as_ref())
+        {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
         }
-        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        let err_response = chat_controller_error_response(error);
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
@@ -4827,6 +4801,23 @@ pub fn chat_completions_router(
     template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
+    let controller = Arc::new(DynamoChatController::new(state.manager_clone()));
+    chat_completions_router_with_controller(state, template, path, controller)
+}
+
+type ChatHttpState = (
+    Arc<service_v2::State>,
+    Option<RequestTemplate>,
+    Arc<dyn ChatController>,
+);
+
+/// Reuse the same routes, schemas and HTTP behavior with a different controller.
+pub(super) fn chat_completions_router_with_controller(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    path: Option<String>,
+    controller: Arc<dyn ChatController>,
+) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/chat/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path)
         .with_openapi_kind(super::OpenApiRouteKind::ChatCompletions);
@@ -4834,7 +4825,7 @@ pub fn chat_completions_router(
         .route(&path, post(handler_chat_completions))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
-        .with_state((state, template));
+        .with_state((state, template, controller));
     (vec![doc], router)
 }
 
