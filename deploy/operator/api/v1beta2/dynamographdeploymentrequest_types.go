@@ -28,6 +28,7 @@ import (
 type ModelSpec struct {
 	// Name identifies the model in the syntax accepted by the selected backend.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Name string `json:"name"`
 }
 
@@ -320,10 +321,13 @@ type DynamoGraphDeploymentRequestStatus struct {
 
 // DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
 type DynamoGraphDeploymentRequest struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoGraphDeploymentRequestSpec   `json:"spec"`
+	// +required
+	Spec DynamoGraphDeploymentRequestSpec `json:"spec"`
+	// +optional
 	Status DynamoGraphDeploymentRequestStatus `json:"status,omitempty"`
 }
 

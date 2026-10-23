@@ -61,8 +61,10 @@ func IsDynamoGraphDeploymentConversionAnnotation(key string) bool {
 // that component converters cannot derive from their local inputs.
 // +kubebuilder:object:generate=false
 type DynamoGraphDeploymentConversionContext struct {
+	// +required
 	IncludeOriginSplits bool
-	SaveHubOrigin       bool
+	// +required
+	SaveHubOrigin bool
 }
 
 // ConvertTo converts this DynamoGraphDeployment (v1alpha1) into the hub

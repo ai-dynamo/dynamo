@@ -22,8 +22,11 @@ import (
 )
 
 type BaseStatus struct {
-	Version    string             `json:"version,omitempty"`
-	State      string             `json:"state,omitempty"`
+	// +optional
+	Version string `json:"version,omitempty"`
+	// +optional
+	State string `json:"state,omitempty"`
+	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
 
@@ -36,6 +39,7 @@ func (b *BaseStatus) SetConditions(conditions []metav1.Condition) {
 }
 
 type BaseCRD struct {
+	// +optional
 	Status *BaseStatus `json:"status,omitempty"`
 }
 

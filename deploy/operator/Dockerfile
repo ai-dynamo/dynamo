@@ -29,8 +29,20 @@ COPY . .
 # Lint stage
 FROM base AS linter
 
-# Install golangci-lint using go install (builds with current Go version)
-RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+# Build the kube-api-linter plugin expected at bin/kube-api-linter.so by
+# .golangci.yml. Go plugins require the plugin and the golangci-lint host
+# binary to share one source tree, toolchain, and dependency graph (adding KAL
+# upgrades golangci-lint's own deps), so build BOTH from one shallow clone of
+# golangci-lint instead of `go install golangci-lint@tag`. Keep the versions in
+# sync with the Makefile's GOLANGCI_LINT_VERSION and KAL_VERSION.
+ARG KAL_VERSION=v0.0.0-20261012124120-79b557aa8c8d
+RUN mkdir -p /workspace/bin \
+    && git clone --depth 1 --branch v2.15.0 --quiet https://github.com/golangci/golangci-lint.git /tmp/golangci-lint-src \
+    && cd /tmp/golangci-lint-src \
+    && go get sigs.k8s.io/kube-api-linter@${KAL_VERSION} \
+    && GOFLAGS=-mod=mod go build -buildmode=plugin -o /workspace/bin/kube-api-linter.so sigs.k8s.io/kube-api-linter/pkg/plugin \
+    && GOFLAGS=-mod=mod go build -o /go/bin/golangci-lint ./cmd/golangci-lint \
+    && rm -rf /tmp/golangci-lint-src
 
 # Run linting
 RUN golangci-lint run --timeout=5m

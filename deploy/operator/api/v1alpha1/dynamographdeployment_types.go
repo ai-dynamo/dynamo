@@ -107,23 +107,24 @@ type DynamoGraphDeploymentSpec struct {
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
-	// +kubebuilder:validation:Optional
+	// +optional
 	// +kubebuilder:validation:MaxItems=100
 	PVCs []PVC `json:"pvcs,omitempty"`
 	// Services are the services to deploy as part of this deployment.
-	// +kubebuilder:validation:Optional
+	// +optional
 	// +kubebuilder:validation:MaxProperties=25
 	Services map[string]*DynamoComponentDeploymentSharedSpec `json:"services,omitempty"`
 	// Envs are environment variables applied to all services in the deployment unless
 	// overridden by service-specific configuration.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm").
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
+	// +optional
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// Restart specifies the restart policy for the graph deployment.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Restart *Restart `json:"restart,omitempty"`
 
 	// TopologyConstraint is the deployment-level topology constraint.
@@ -152,12 +153,12 @@ type DynamoGraphDeploymentExperimentalSpec struct {
 type Restart struct {
 	// ID is an arbitrary string that triggers a restart when changed.
 	// Any modification to this value will initiate a restart of the graph deployment according to the strategy.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	ID string `json:"id"`
 
 	// Strategy specifies the restart strategy for the graph deployment.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Strategy *RestartStrategy `json:"strategy,omitempty"`
 }
 
@@ -165,10 +166,11 @@ type RestartStrategy struct {
 	// Type specifies the restart strategy type.
 	// +kubebuilder:validation:Enum=Sequential;Parallel
 	// +kubebuilder:default=Sequential
+	// +optional
 	Type RestartStrategyType `json:"type,omitempty"`
 
 	// Order specifies the order in which the services should be restarted.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Order []string `json:"order,omitempty"`
 }
 
@@ -186,9 +188,11 @@ type DynamoGraphDeploymentStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// State is a high-level textual status of the graph deployment lifecycle.
 	// +kubebuilder:default=initializing
+	// +required
 	State DGDState `json:"state"`
 	// Conditions contains the latest observed conditions of the graph deployment.
 	// The slice is merged by type on patch updates.
+	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 	// Services contains per-service replica status information.
 	// The map key is the service name from spec.services.
@@ -233,8 +237,10 @@ type ServiceCheckpointStatus struct {
 type RestartStatus struct {
 	// ObservedID is the restart ID that has been observed and is being processed.
 	// Matches the Restart.ID field in the spec.
+	// +optional
 	ObservedID string `json:"observedID,omitempty"`
 	// Phase is the phase of the restart.
+	// +optional
 	Phase RestartPhase `json:"phase,omitempty"`
 	// InProgress contains the names of the services that are currently being restarted.
 	// +optional
@@ -286,12 +292,14 @@ type RollingUpdateStatus struct {
 // ServiceReplicaStatus contains replica information for a single service.
 type ServiceReplicaStatus struct {
 	// ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
+	// +required
 	ComponentKind ComponentKind `json:"componentKind"`
 
 	// ComponentName is the name of the primary underlying resource.
 	// DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.
 	// During rolling updates, this reflects the new (target) component name.
 	// +kubebuilder:deprecatedversion:warning="ComponentName is deprecated, view ComponentNames instead"
+	// +required
 	ComponentName string `json:"componentName"`
 
 	// ComponentNames is the list of underlying resource names for this service.
@@ -349,11 +357,13 @@ type ServiceReplicaStatus struct {
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.
 	// +kubebuilder:validation:Minimum=0
+	// +required
 	Replicas int32 `json:"replicas"`
 
 	// UpdatedReplicas is the number of replicas at the current/desired revision.
 	// Required for all component kinds.
 	// +kubebuilder:validation:Minimum=0
+	// +required
 	UpdatedReplicas int32 `json:"updatedReplicas"`
 
 	// ReadyReplicas is the number of ready replicas.
@@ -391,12 +401,15 @@ type ServiceReplicaStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 type DynamoGraphDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// Spec defines the desired state for this graph deployment.
+	// +optional
 	Spec DynamoGraphDeploymentSpec `json:"spec,omitempty"`
 	// Status reflects the current observed state of this graph deployment.
+	// +optional
 	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 

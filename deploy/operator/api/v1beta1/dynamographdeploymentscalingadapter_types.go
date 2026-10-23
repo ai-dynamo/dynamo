@@ -29,12 +29,12 @@ type DynamoGraphDeploymentScalingAdapterSpec struct {
 	// replicas is the desired number of replicas for the target component.
 	// This field is modified by external autoscalers (HPA/KEDA/Planner) or
 	// manually by users.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 
 	// dgdRef references the DynamoGraphDeployment and the specific component to scale.
-	// +kubebuilder:validation:Required
+	// +required
 	DGDRef DynamoGraphDeploymentComponentRef `json:"dgdRef"`
 }
 
@@ -44,13 +44,13 @@ type DynamoGraphDeploymentScalingAdapterSpec struct {
 // `serviceName -> componentName` renames.
 type DynamoGraphDeploymentComponentRef struct {
 	// name is the `metadata.name` of the target DynamoGraphDeployment.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// componentName is the `componentName` of the entry within the target
 	// DGD's `spec.components` list to scale.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	ComponentName string `json:"componentName"`
 }
@@ -61,6 +61,7 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 	// replicas is the current number of replicas for the target component.
 	// This is synced from the DGD's component replicas and is required for
 	// the scale subresource.
+	// +required
 	Replicas int32 `json:"replicas"`
 
 	// selector is a label selector string for the pods managed by this
@@ -95,10 +96,13 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 // version is handled by the operator's conversion webhook
 // (see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 type DynamoGraphDeploymentScalingAdapter struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoGraphDeploymentScalingAdapterSpec   `json:"spec,omitempty"`
+	// +optional
+	Spec DynamoGraphDeploymentScalingAdapterSpec `json:"spec,omitempty"`
+	// +optional
 	Status DynamoGraphDeploymentScalingAdapterStatus `json:"status,omitempty"`
 }
 
