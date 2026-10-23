@@ -1559,6 +1559,12 @@ test_selection:
       markers: [frontend]
       paths:
       - components/src/dynamo/frontend/**
+      - lib/llm/src/http.rs
+      - lib/llm/src/http/**
+      - lib/llm/src/protocols.rs
+      - lib/llm/src/protocols/**
+      - lib/llm/src/preprocessor.rs
+      - lib/llm/src/preprocessor/**
       - tests/frontend/**
     multimodal:
       markers: [multimodal]
@@ -1572,6 +1578,12 @@ test_selection:
       - components/src/dynamo/trtllm/multimodal/**
       - components/src/dynamo/trtllm/multimodal_processor.py
       - components/src/dynamo/vllm/multimodal_handlers/**
+      - lib/llm/src/http.rs
+      - lib/llm/src/http/**
+      - lib/llm/src/protocols.rs
+      - lib/llm/src/protocols/**
+      - lib/llm/src/preprocessor.rs
+      - lib/llm/src/preprocessor/**
       - tests/**/multimodal/**
       - tests/serve/multimodal_profiles/**
       - tests/utils/multimodal.py
@@ -1579,6 +1591,8 @@ test_selection:
       markers: [router]
       areas: [router]
       paths:
+      - lib/llm/src/kv_dc_relay.rs
+      - lib/llm/src/kv_dc_relay/**
       - lib/llm/src/kv_router/**
       - tests/router/**
     kvbm:
@@ -1602,6 +1616,19 @@ test_selection:
   - lib/bench/**
   - lib/data-gen/**
   - lib/gpu_memory_service/**
+  - lib/llm/tests/**
+  - lib/llm/examples/**
+  - lib/llm/benches/**
+  - lib/llm/docs/**
+  - deploy/operator/**
+  - deploy/helm/**
+  - .github/**
+  # CI files that change the contents of the GPU test image; full suite
+  image_build:
+  - .github/workflows/shared-build-image.yml
+  - .github/actions/docker-build/**
+  - .github/actions/docker-remote-build/**
+  - .github/scripts/apply_dev_version.py
   shared_full:
   - lib/**
   - components/src/dynamo/common/**
@@ -1616,4 +1643,3 @@ test_selection:
   - tests/serve/conftest.py
   - tests/utils/**
   - tests/serve/common.py
-  - .github/**

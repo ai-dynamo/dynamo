@@ -122,7 +122,7 @@ def validate_selection_config(
             if marker not in registered_markers:
                 errors.append(f"feature {name} uses unregistered marker {marker}")
 
-    for key in ("smoke_only", "shared_full"):
+    for key in ("image_build", "smoke_only", "shared_full"):
         patterns = selection.get(key, [])
         if not isinstance(patterns, list):
             errors.append(f"{key} must be a list")
@@ -186,6 +186,11 @@ def classify_paths(
                 for framework in scope:
                     markers[framework].update(feature_markers)
                     reasons[framework].add(f"feature:{name}:{path}")
+            continue
+
+        if _matches_any(path, selection.get("image_build", [])):
+            classifications[path] = "shared_full"
+            globally_full.add(f"shared_full:{path}")
             continue
 
         if _matches_any(path, smoke_only):
