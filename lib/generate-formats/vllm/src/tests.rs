@@ -18,14 +18,77 @@ fn routing_metadata(
 }
 
 fn project(raw: &Value, worker: &Worker<'_>) -> PreprocessedRequest {
-    preprocessed_from_generate(
+    preprocessed_from_generate_with_priority(
         serde_json::from_value(raw.clone()).unwrap(),
         worker.model,
+        None,
         None,
         "resolved-request",
         worker,
     )
     .unwrap()
+}
+
+fn open_with_priority_header(priority_header: &str) -> PreprocessedRequest {
+    let body = br#"{"token_ids":[1],"sampling_params":{},"priority":7}"#;
+    let headers = axum::http::HeaderMap::from_iter([
+        (
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        ),
+        (
+            HEADER_REQUEST_PRIORITY.parse().unwrap(),
+            axum::http::HeaderValue::from_str(priority_header).unwrap(),
+        ),
+    ]);
+    let opened = VllmFormat
+        .open(ClientRequest {
+            body,
+            headers: &headers,
+            default_request_id: "request",
+        })
+        .unwrap();
+    (opened.bind)(&routing_metadata(16, false, None))
+        .unwrap()
+        .request
+}
+
+#[test]
+fn dynamo_priority_header_overrides_vllm_body_in_both_routing_and_payload() {
+    let request = open_with_priority_header("5");
+    assert_eq!(request.routing.as_ref().unwrap().priority, Some(5));
+    assert_eq!(
+        request.extra_args.as_ref().unwrap()["vllm_tito"]["priority"],
+        json!(-5),
+        "the header is translated to vLLM's lower-is-higher body convention"
+    );
+
+    let zero = open_with_priority_header("0");
+    assert_eq!(zero.routing.as_ref().unwrap().priority, Some(0));
+    assert_eq!(
+        zero.extra_args.as_ref().unwrap()["vllm_tito"]["priority"],
+        json!(0),
+        "zero is a valid header override"
+    );
+
+    let malformed = open_with_priority_header("not-an-int");
+    assert_eq!(malformed.routing.as_ref().unwrap().priority, Some(-7));
+    assert_eq!(
+        malformed.extra_args.as_ref().unwrap()["vllm_tito"]["priority"],
+        json!(7),
+        "malformed headers fall back to the body value"
+    );
+}
+
+#[test]
+fn dynamo_priority_header_preserves_minimum_routing_value() {
+    let request = open_with_priority_header(&i32::MIN.to_string());
+    assert_eq!(request.routing.as_ref().unwrap().priority, Some(i32::MIN));
+    assert_eq!(
+        request.extra_args.as_ref().unwrap()["vllm_tito"]["priority"],
+        json!(i32::MAX),
+        "the translated engine field saturates while Dynamo retains the exact header"
+    );
 }
 
 #[test]
@@ -187,9 +250,10 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         }
     }))
     .expect("deserialize request");
-    let preprocessed = preprocessed_from_generate(
+    let preprocessed = preprocessed_from_generate_with_priority(
         request,
         "test-model",
+        None,
         None,
         "resolved-request",
         &routing_metadata(4, false, None),
@@ -420,9 +484,10 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
         }
         let expected_token_ids = request.token_ids.clone();
 
-        let preprocessed = preprocessed_from_generate(
+        let preprocessed = preprocessed_from_generate_with_priority(
             request,
             "test-model",
+            None,
             None,
             "resolved-request",
             &routing_metadata(4, false, None),
@@ -465,9 +530,10 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
     });
     let base_request: GenerateRequest =
         serde_json::from_value(raw.clone()).expect("deserialize base request");
-    let base = preprocessed_from_generate(
+    let base = preprocessed_from_generate_with_priority(
         base_request,
         "test-model",
+        None,
         None,
         "resolved-request",
         &routing_metadata(4, true, None),
@@ -481,9 +547,10 @@ fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
     for tower_connector_lora_enabled in [false, true] {
         let adapter_request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize adapter request");
-        let adapter = preprocessed_from_generate(
+        let adapter = preprocessed_from_generate_with_priority(
             adapter_request,
             "adapter-a",
+            None,
             None,
             "resolved-request",
             &routing_metadata(4, tower_connector_lora_enabled, Some("adapter-a")),
@@ -525,10 +592,11 @@ fn routing_preserves_bounds_rank_and_priority() {
                 "token_ids": [1, 2], "sampling_params": sampling, "priority": priority,
             }))
             .unwrap();
-            let request = preprocessed_from_generate(
+            let request = preprocessed_from_generate_with_priority(
                 request,
                 "test-model",
                 Some(3),
+                None,
                 "req",
                 &routing_metadata(16, false, None),
             )
@@ -573,9 +641,10 @@ fn generate_projects_training_text_controls() {
     }))
     .expect("deserialize request");
 
-    let preprocessed = preprocessed_from_generate(
+    let preprocessed = preprocessed_from_generate_with_priority(
         request,
         "test-model",
+        None,
         None,
         "resolved-request",
         &routing_metadata(16, false, None),
