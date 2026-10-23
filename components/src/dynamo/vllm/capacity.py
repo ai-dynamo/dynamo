@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 def has_vllm_output_clamping() -> bool:
-    """vLLM 0.32 caps oversized output budgets instead of rejecting them."""
+    """vLLM 0.32 caps oversized output budgets instead of rejecting them.
+
+    Remove when the CPU and XPU images reach vLLM 0.32.
+    """
     from vllm.version import __version_tuple__
 
     return __version_tuple__[:2] >= (0, 32)
