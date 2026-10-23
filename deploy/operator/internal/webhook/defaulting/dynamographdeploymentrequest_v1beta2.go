@@ -78,7 +78,11 @@ func defaultDynamoGraphDeploymentRequestV1beta2(
 		return fmt.Errorf("encode spec.v1beta2: %w", err)
 	}
 
-	defaultDynamoGraphDeploymentRequestSpecV1beta2(&spec, options.resolveDefaults(ctx, operation, oldSpec, &spec))
+	defaults, err := options.resolveDefaults(ctx, operation, oldSpec, &spec)
+	if err != nil {
+		return admissionVerdictV1beta2(dgdr, err)
+	}
+	defaultDynamoGraphDeploymentRequestSpecV1beta2(&spec, defaults)
 
 	after, err := json.Marshal(&spec)
 	if err != nil {

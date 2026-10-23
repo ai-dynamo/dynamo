@@ -19,14 +19,19 @@ package defaulting
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	admissionv1 "k8s.io/api/admission/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -66,18 +71,23 @@ type DGDRV1beta2Options struct {
 }
 
 // resolveDefaults reads the environment for the values a v1beta2 spec omits. It does not
-// mutate spec, and it never fails: a value the environment cannot supply stays unset and
-// validating admission reports the exact field.
+// mutate spec. It fails when the typed hardware cannot be completed: the error is the
+// admission verdict, so a Request is never stored with hardware that depends on AISimulate's
+// implicit defaults or on a cluster that could not be read.
 func (o DGDRV1beta2Options) resolveDefaults(
 	ctx context.Context,
 	operation admissionv1.Operation,
 	oldSpec, spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
-) dynamoGraphDeploymentRequestV1beta2DefaultOptions {
+) (dynamoGraphDeploymentRequestV1beta2DefaultOptions, error) {
+	hardware, err := o.resolveHardware(ctx, operation, oldSpec, spec)
+	if err != nil {
+		return dynamoGraphDeploymentRequestV1beta2DefaultOptions{}, err
+	}
 	return dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:                  o.resolveHardware(ctx, operation, oldSpec, spec),
+		hardware:                  hardware,
 		aisimulateImage:           o.AISimulateImage,
 		aisimulateVersionOverride: o.AISimulateVersionOverride,
-	}
+	}, nil
 }
 
 // resolveHardware returns the SKU and budget the typed spec omits. It asks the cluster only
@@ -90,15 +100,21 @@ func (o DGDRV1beta2Options) resolveDefaults(
 // pick hardware up once discovery recovers, which would change its spec and generation behind
 // the writer's back. oldSpec is the stored spec on UPDATE and nil otherwise. The decision reads
 // the typed hardware alone, never spec.aisimulate.parameters.
+//
+// After a successful return the typed hardware is complete. An omitted SKU becomes the
+// cluster's AISimulate SKU, and an omitted budget becomes min(matching GPUs, cap). An explicit
+// budget is authoritative: it is never capped, whatever the cluster holds. What the cluster
+// cannot supply is rejected on the field that fixes it: a failed discovery, a GPU model the
+// AISimulate catalog does not know, and a SKU without any matching GPU.
 func (o DGDRV1beta2Options) resolveHardware(
 	ctx context.Context,
 	operation admissionv1.Operation,
 	oldSpec, spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
-) hardwareDefaultsV1beta2 {
+) (hardwareDefaultsV1beta2, error) {
 	changed := operation == admissionv1.Update && oldSpec != nil &&
 		!apiequality.Semantic.DeepEqual(oldSpec.Hardware, spec.Hardware)
 	if o.Hardware == nil || (operation != admissionv1.Create && !changed) {
-		return hardwareDefaultsV1beta2{}
+		return hardwareDefaultsV1beta2{}, nil
 	}
 	var sku string
 	var hasBudget bool
@@ -109,7 +125,7 @@ func (o DGDRV1beta2Options) resolveHardware(
 		hasBudget = spec.Hardware.GPU.Budget != nil
 	}
 	if sku != "" && hasBudget {
-		return hardwareDefaultsV1beta2{}
+		return hardwareDefaultsV1beta2{}, nil
 	}
 
 	timeout := o.HardwareDiscoveryTimeout
@@ -119,28 +135,64 @@ func (o DGDRV1beta2Options) resolveHardware(
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	gpuPath := field.NewPath("spec", "hardware", "gpu")
 	found, err := o.Hardware.Discover(ctx, nvidiacomv1beta1.GPUSKUType(sku))
 	if err != nil {
-		log.FromContext(ctx).Info("hardware discovery failed; leaving hardware unresolved", "error", err.Error())
-		return hardwareDefaultsV1beta2{}
+		return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Required(gpuPath, fmt.Sprintf(
+			"the cluster's GPUs could not be discovered (%v); set spec.hardware.gpu.sku and spec.hardware.gpu.budget", err)))
 	}
 
 	// The cluster facts are mapped into the v1beta2 API here: the AISimulate catalog name of
 	// the GPU model (empty when the catalog does not know it) and the total GPU count.
-	var gpus int
-	if found != nil {
-		gpus = found.GPUsPerNode * found.NodesWithGPUs
-	}
 	var defaults hardwareDefaultsV1beta2
 	if sku == "" {
-		defaults.sku = string(gpu.KnownSKU(found))
+		if found != nil && len(found.OtherModels) > 0 {
+			return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Required(gpuPath.Child("sku"), fmt.Sprintf(
+				"the cluster has several GPU types (%s); set spec.hardware.gpu.sku",
+				strings.Join(append([]string{found.Model}, found.OtherModels...), ", "))))
+		}
+		sku = string(gpu.KnownSKU(found))
+		if sku == "" {
+			detail := "the cluster's GPUs map to no AISimulate SKU; set spec.hardware.gpu.sku"
+			if found != nil && found.Model != "" {
+				detail = fmt.Sprintf("the cluster's GPU model %q maps to no AISimulate SKU; set spec.hardware.gpu.sku", found.Model)
+			}
+			return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Required(gpuPath.Child("sku"), detail))
+		}
+		defaults.sku = sku
 	}
-	if !hasBudget && gpus > 0 {
+	if !hasBudget {
+		var gpus int
+		if found != nil {
+			gpus = found.GPUsPerNode * found.NodesWithGPUs
+		}
+		if gpus <= 0 {
+			return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Required(gpuPath.Child("budget"), fmt.Sprintf(
+				"no GPUs of SKU %q were found in the cluster; set spec.hardware.gpu.budget", sku)))
+		}
 		maxBudget := o.MaxHardwareBudget
 		if maxBudget <= 0 {
 			maxBudget = defaultMaxHardwareBudget
 		}
 		defaults.budget = int32(min(gpus, int(maxBudget)))
 	}
-	return defaults
+	return defaults, nil
+}
+
+// hardwareRejectionV1beta2 is hardware the cluster cannot complete, with the field that fixes it.
+type hardwareRejectionV1beta2 struct{ err *field.Error }
+
+func (e *hardwareRejectionV1beta2) Error() string { return e.err.Error() }
+
+func rejectHardwareV1beta2(err *field.Error) error { return &hardwareRejectionV1beta2{err: err} }
+
+// admissionVerdictV1beta2 turns a rejection into the invalid-object verdict validation uses, so a
+// client sees the field and its cause. Any other error is returned as it is.
+func admissionVerdictV1beta2(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, err error) error {
+	var rejection *hardwareRejectionV1beta2
+	if errors.As(err, &rejection) {
+		return apierrors.NewInvalid(nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.GroupKind(), dgdr.Name,
+			field.ErrorList{rejection.err})
+	}
+	return err
 }
