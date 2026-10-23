@@ -299,16 +299,14 @@ fn kv_transfer_input<C: WorkerConfigLike>(
     if !input.has_kv_transfer_candidates {
         return None;
     }
-    let local_prefix_blocks = input.request.transfer_local_prefix_blocks_for(worker);
     let source = input.kv_transfer_sources.get().and_then(|sources| {
         sources.source_for(
             worker,
             config.kv_transfer_keys().target()?,
-            local_prefix_blocks as usize,
+            input.request.transfer_local_prefix_blocks_for(worker),
         )
     });
     Some(WorkerTransferInput {
-        local_prefix_blocks,
         source_prefix_blocks: source.map(source_prefix_blocks),
     })
 }
@@ -336,15 +334,17 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                 hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
             });
         // Blocks a fetch would add beyond everything this worker already holds.
+        // Raw device overlap: `cache.device_overlap_blocks` may be the effective estimate.
         let fetchable_blocks = row
             .transfer
-            .and_then(|transfer| {
-                let local_blocks = transfer
-                    .local_prefix_blocks
-                    .saturating_add(cache.disk_overlap_blocks as u32);
-                Some(transfer.source_prefix_blocks?.saturating_sub(local_blocks))
-            })
-            .unwrap_or(0);
+            .and_then(|transfer| transfer.source_prefix_blocks)
+            .map_or(0, |source_blocks| {
+                let local_blocks = context
+                    .request
+                    .transfer_local_prefix_blocks_for(worker)
+                    .saturating_add(cache.disk_overlap_blocks as usize);
+                source_blocks.saturating_sub(u32::try_from(local_blocks).unwrap_or(u32::MAX))
+            });
         let remote_blocks = shared_beyond_device_blocks + fetchable_blocks;
         let shared_overlap_blocks = weights.shared_cache_multiplier * remote_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's

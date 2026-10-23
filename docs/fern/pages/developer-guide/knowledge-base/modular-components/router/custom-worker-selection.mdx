@@ -447,8 +447,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 | `KV_TRANSFER` | `kv_transfer()` | `None` if the host has no transfer data for this request: no worker in the partition consumes router hints, or the indexer cannot retain the matched block chain |
-| `KV_TRANSFER` | `local_prefix_blocks()` | Device-resident plus host-pinned prefix blocks; a fetch extends this prefix |
-| `KV_TRANSFER` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would fetch from, or `None` when no eligible source holds more than the local prefix |
+| `KV_TRANSFER` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would fetch from, and so held by the worker after the fetch; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 

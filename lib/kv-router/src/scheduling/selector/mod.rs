@@ -222,37 +222,24 @@ impl<'a> MaterializedSelectionInput<'a> {
 
     /// Fill every row's fetch input once all rows are built, so the sources
     /// skip anything shorter than the shortest local prefix. `targets` is
-    /// index-aligned with `rows`.
+    /// index-aligned with `rows`: each hint-capable row's target and local prefix.
     fn fill_kv_transfer_sources<C: WorkerConfigLike>(
         &self,
         workers: &HashMap<WorkerId, C>,
         rows: &mut [CandidateData],
-        targets: &[Option<KvTransferTarget>],
+        targets: &[Option<(KvTransferTarget, usize)>],
     ) {
         debug_assert_eq!(rows.len(), targets.len());
-        for row in rows.iter_mut() {
-            row.transfer = Some(WorkerTransferInput {
-                local_prefix_blocks: self.request.transfer_local_prefix_blocks_for(row.worker),
-                source_prefix_blocks: None,
-            });
-        }
-        let scope = || {
-            KvTransferScope::of(rows.iter().zip(targets).filter_map(|(row, target)| {
-                Some((
-                    *target.as_ref()?,
-                    row.transfer?.local_prefix_blocks as usize,
-                ))
-            }))
-        };
+        let scope = || KvTransferScope::of(targets.iter().flatten().copied());
         let Some(sources) = self.kv_transfer_sources(workers, scope) else {
             return;
         };
-        for (row, target) in rows.iter_mut().zip(targets) {
-            if let (Some(transfer), Some(target)) = (&mut row.transfer, *target) {
-                transfer.source_prefix_blocks = sources
-                    .source_for(row.worker, target, transfer.local_prefix_blocks as usize)
-                    .map(source_prefix_blocks);
-            }
+        for (row, &target) in rows.iter_mut().zip(targets) {
+            row.transfer = Some(WorkerTransferInput {
+                source_prefix_blocks: target
+                    .and_then(|(target, local)| sources.source_for(row.worker, target, local))
+                    .map(source_prefix_blocks),
+            });
         }
     }
 
@@ -270,12 +257,9 @@ impl<'a> MaterializedSelectionInput<'a> {
             .kv_transfer_keys()
             .target()?;
         let local_prefix_blocks = self.request.transfer_local_prefix_blocks_for(worker);
-        let scope = || KvTransferScope::of([(target, local_prefix_blocks as usize)]);
-        self.kv_transfer_sources(workers, scope)?.source_for(
-            worker,
-            target,
-            local_prefix_blocks as usize,
-        )
+        let scope = || KvTransferScope::of([(target, local_prefix_blocks)]);
+        self.kv_transfer_sources(workers, scope)?
+            .source_for(worker, target, local_prefix_blocks)
     }
 
     fn max_raw_cached_tokens(&self) -> Option<usize> {
