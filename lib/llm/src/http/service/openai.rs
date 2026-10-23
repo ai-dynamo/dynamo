@@ -5366,8 +5366,9 @@ async fn videos(
     let mut http_queue_guard = Some(http_queue_guard);
 
     if streaming {
-        // Wait for the first backend event before committing SSE 200 so a
-        // material-fetch 403 answers HTTP 403 instead of 200/internal.
+        // Same pre-commit policy as chat completions. Holding the response
+        // until the first video event would also hold SSE headers, so
+        // configured keep-alives could not run during generation.
         let ctx = stream.context();
         let (mut connection_handle, stream_handle) = create_connection_monitor(
             ctx.clone(),
@@ -5380,7 +5381,7 @@ async fn videos(
         )
         .await;
         let stream = match until_client_disconnects(
-            check_for_backend_error_info(stream, BackendErrorCheck::UntilFirstEvent),
+            check_for_backend_error_info(stream, state.streaming_backend_error_check()),
             &ctx,
         )
         .await

@@ -216,8 +216,8 @@ fn effective_sse_keep_alive(
 ///
 /// Non-streaming handlers always wait for the first event because they need it
 /// to build the response, as does audio speech. The streaming chat, completions,
-/// responses, and Anthropic messages handlers use the service-wide policy from
-/// [`State::streaming_backend_error_check`].
+/// responses, Anthropic messages, and videos generation handlers use the service-wide
+/// policy from [`State::streaming_backend_error_check`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendErrorCheck {
     /// Commit the status immediately and hand the stream to the client
@@ -679,9 +679,9 @@ impl State {
         effective_sse_keep_alive(self.sse_keep_alive, response_can_defer_all_output)
     }
 
-    /// How the streaming chat, completions, responses, and Anthropic messages
-    /// handlers wait for the first backend event before committing the HTTP
-    /// status.
+    /// How the streaming chat, completions, responses, Anthropic messages, and
+    /// videos generation handlers wait for the first backend event before committing the
+    /// HTTP status.
     pub fn streaming_backend_error_check(&self) -> BackendErrorCheck {
         self.streaming_backend_error_check
     }
@@ -869,9 +869,9 @@ pub struct HttpServiceConfig {
     #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
     sse_keep_alive: Option<Duration>,
 
-    /// How the streaming chat, completions, responses, and Anthropic messages
-    /// handlers wait for the first backend event before committing the HTTP
-    /// status. Defaults to `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` when not set
+    /// How the streaming chat, completions, responses, Anthropic messages, and
+    /// videos generation handlers wait for the first backend event before committing the
+    /// HTTP status. Defaults to `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` when not set
     /// explicitly.
     #[builder(default = "BackendErrorCheck::from_env()")]
     streaming_backend_error_check: BackendErrorCheck,
