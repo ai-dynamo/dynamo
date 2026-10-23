@@ -130,6 +130,7 @@ COPY --from=licenses /legal /legal
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA} \
+    GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
     LD_LIBRARY_PATH="/opt/dynamo/lib" \

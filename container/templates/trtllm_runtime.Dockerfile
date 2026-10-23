@@ -751,6 +751,9 @@ CMD ["/bin/bash"]
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+# The filesystem overlay does not carry runtime_full's image environment.
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
 # Remove the upstream runtime's Git LFS package without pruning shared dependencies.
 RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 
