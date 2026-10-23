@@ -3,6 +3,12 @@
 
 [workspace]
 
+# This separate workspace builds dynamo-llm, so it needs the same draft protocol
+# candidate as the root. Replace all three patches (root, Python, KVBM) with the
+# containing release before merge.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ce9116bee5eed600d6a0073b7442d07de04eb232" }
+
 [package]
 name = "kvbm-py3"
 version = "1.6.0"
