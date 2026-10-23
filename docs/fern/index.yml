@@ -204,6 +204,8 @@ navigation:
             path: pages/kubernetes/fault-tolerance/request-migration.md
           - page: Request Rejection
             path: pages/kubernetes/fault-tolerance/request-rejection.md
+          - page: Admission Control
+            path: pages/kubernetes/fault-tolerance/admission-control.md
           - page: Graceful Shutdown
             path: pages/kubernetes/fault-tolerance/graceful-shutdown.md
 
@@ -401,6 +403,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md
                   - page: Request Rejection Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md
+                  - page: Admission Control Architecture
+                    path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md
                   - page: Graceful Shutdown Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md
                   - page: Fault Tolerance Testing

@@ -139,6 +139,14 @@ jobs:
           no_load: true
           use_sccache: false
 
+      - name: Refresh BuildKit builder
+        uses: $/.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: general
+          arch: linux/amd64,linux/arm64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+
       # No derived per-backend test image: shared-test.yml pulls the backend's
       # own -test image unmodified and installs the sidecar binary from this
       # artifact via DYNAMO_SIDECAR_BIN (see shared-test.yml's sidecar_binary_artifact

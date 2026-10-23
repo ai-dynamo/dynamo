@@ -99,12 +99,14 @@ jobs:
       contents: read
     outputs:
       dev_suffix: ${{ steps.compute.outputs.dev_suffix }}
+      date_utc: ${{ steps.compute.outputs.date_utc }}
     steps:
       - id: compute
         shell: bash
         run: |
           DATE=$(date -u +%Y%m%d)
           echo "dev_suffix=.dev${DATE}" >> $GITHUB_OUTPUT
+          echo "date_utc=${DATE}" >> $GITHUB_OUTPUT
 
   # ============================================================================
   # COMPUTE RELEASE MODE
@@ -251,7 +253,7 @@ jobs:
   sidecar-build:
     name: dynamo-sidecar
     needs: [create-fresh-builder, compute-release-mode]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' || needs.compute-release-mode.outputs.release == 'true' }}
     uses: $/.github/workflows/shared-build-sidecar.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
@@ -1153,6 +1155,7 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: vllm and (gpu_1 or gpu_2) and not sidecar
       gpu_test_timeout_minutes: 240
+      job_timeout_minutes: 180
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '80'
@@ -1256,6 +1259,7 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: sglang and (gpu_1 or gpu_2) and not sidecar
       gpu_test_timeout_minutes: 240
+      job_timeout_minutes: 180
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '80'
@@ -1335,6 +1339,7 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: trtllm and (gpu_1 or gpu_2) and not sidecar
       gpu_test_timeout_minutes: 240
+      job_timeout_minutes: 180
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '80'
@@ -1470,6 +1475,7 @@ jobs:
     needs:
       - resolve-source-sha
       - compute-release-mode
+      - compute-dev-version
       - notify-slack-start
       - manual-release-approval
       - vllm-build
@@ -1479,6 +1485,7 @@ jobs:
       - operator-build
       - planner-build
       - frontend-build
+      - sidecar-build
       - vllm-efa-build
       - sglang-efa-build
       - trtllm-efa-build
@@ -1488,7 +1495,7 @@ jobs:
     # strictly: release.yml copies their -nightly ECR images to NGC and extracts
     # wheels from the dynamo-pipeline image, so a failed build must not publish a
     # partial release. manual-release-approval is `skipped` on cron, `success` on dispatch.
-    # The optional-image builds (operator, planner, frontend, EFA variants)
+    # The optional-image builds (operator, planner, frontend, sidecar, EFA variants)
     # are ORDERING-ONLY needs (deliberately absent from the
     # gate below): release.yml copies them fail-soft, so a flake in any of
     # them must not block the runtime nightly — but the copy step has to run
@@ -1507,6 +1514,7 @@ jobs:
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
       slack_thread_ts:  ${{ needs.notify-slack-start.outputs.thread_ts }}
+      dev_date_utc: ${{ needs.compute-dev-version.outputs.date_utc }}
       # THIS run's build results — release.yml's copy step skips either image
       # when its build here did not succeed, so a failed build can never
       # republish a previous run's image at an unchanged SHA. (A direct
@@ -1515,6 +1523,7 @@ jobs:
       operator_build_result: ${{ needs.operator-build.result }}
       planner_build_result: ${{ needs.planner-build.result }}
       frontend_build_result: ${{ needs.frontend-build.result }}
+      sidecar_build_result: ${{ needs.sidecar-build.result }}
       vllm_efa_build_result: ${{ needs.vllm-efa-build.result }}
       sglang_efa_build_result: ${{ needs.sglang-efa-build.result }}
       trtllm_efa_build_result: ${{ needs.trtllm-efa-build.result }}
