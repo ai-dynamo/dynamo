@@ -1122,6 +1122,7 @@ impl State {
                 (
                     self.buffered_program_tokens(session),
                     self.waiting_pin(session),
+                    session.clone(),
                 )
             })
             .collect();
@@ -1154,27 +1155,28 @@ impl State {
             let Some(candidates) = idle.get_mut(&worker) else {
                 continue;
             };
-            // A hard-pinned call cannot benefit from reclaiming another
-            // worker, or fit if its own worker's resume limit is too small.
-            let (smallest, demand) = pending
-                .iter()
-                .filter(|(required, pin)| *required <= limit && pin.is_none_or(|pin| pin == worker))
-                .fold((usize::MAX, 0usize), |(smallest, total), (required, _)| {
-                    (smallest.min(*required), total.saturating_add(*required))
-                });
-            if demand == 0 {
-                continue;
-            }
             candidates.sort_unstable();
             let idle_tokens = candidates.iter().fold(0usize, |total, (_, session)| {
                 total.saturating_add(self.program_charge(&self.programs[session]).unwrap().1)
             });
             let used_before = usage.get(&worker).map_or(0, |u| u.used);
             let possible = limit.saturating_sub(used_before.saturating_sub(idle_tokens));
-            if possible < smallest {
+            // Plan concrete placements before reclaiming. Aggregate demand can
+            // exceed what fits, and a later global resume pass may select a
+            // different set that cannot fit on any individual worker.
+            let mut target = 0usize;
+            let mut selected = Vec::new();
+            for (required, pin, session) in &pending {
+                if pin.is_none_or(|pin| pin == worker)
+                    && *required <= possible.saturating_sub(target)
+                {
+                    target += *required;
+                    selected.push(session.clone());
+                }
+            }
+            if selected.is_empty() {
                 continue;
             }
-            let target = demand.min(possible);
             let mut reclaimed = 0usize;
             for (_, session) in candidates.iter() {
                 if limit.saturating_sub(usage.get(&worker).map_or(0, |u| u.used)) >= target {
@@ -1194,16 +1196,20 @@ impl State {
                     changed = true;
                 }
             }
-            let used_after = usage.get(&worker).map_or(0, |u| u.used);
-            let mut available = limit.saturating_sub(used_after);
-            pending.retain(|(required, pin)| {
-                if *required <= available && pin.is_none_or(|pin| pin == worker) {
-                    available -= *required;
-                    false
-                } else {
-                    true
+            for session in selected {
+                if self.resume_program(&session, Some(worker)) {
+                    let program = &self.programs[&session];
+                    usage.entry(worker).or_default().add_program(
+                        self.program_tokens(program, false, now),
+                        self.program_tokens(program, true, now),
+                        self.config.buffer_per_program,
+                    );
+                    usage.entry(worker).or_default().used = self.worker_used(worker);
+                    changed = true;
                 }
-            });
+            }
+            pending.retain(|(_, _, session)| self.paused_programs.contains(session));
+            let used_after = usage.get(&worker).map_or(0, |u| u.used);
             if reclaimed > 0 {
                 tracing::debug!(
                     target: "thunderagent_admission",
@@ -1920,6 +1926,98 @@ mod tests {
             WaitStatus::Released(Some(worker))
         );
         assert!(state.normal_usage[&worker] <= 85_000);
+    }
+
+    #[test]
+    fn idle_reclamation_only_reserves_capacity_for_selected_waiters() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(1, 100_000)]);
+        let worker = WorkerWithDpRank::new(1, 0);
+        for i in 0..3 {
+            let id = format!("parent-{i}");
+            register_request(&mut state, &id, &id, 29_900, &capacities, now);
+            complete_request(&mut state, &id, 29_900, &capacities, now);
+        }
+        register_request(&mut state, "small", "small", 14_900, &capacities, now);
+        register_request(&mut state, "large", "large", 79_900, &capacities, now);
+
+        state.reconcile(&capacities, now + state.config.scheduler_interval());
+
+        assert_eq!(
+            state.wait_status("small", &state.requests["small"].notify),
+            WaitStatus::Released(Some(worker))
+        );
+        assert_eq!(
+            state.wait_status("large", &state.requests["large"].notify),
+            WaitStatus::Waiting
+        );
+        assert_eq!(state.normal_usage[&worker], 75_000);
+        assert_eq!(
+            state.programs["parent-0"].lifecycle,
+            ProgramLifecycle::Paused
+        );
+        for id in ["parent-1", "parent-2"] {
+            assert_eq!(state.programs[id].lifecycle, ProgramLifecycle::Active);
+        }
+    }
+
+    #[test]
+    fn idle_reclamation_releases_a_fitting_waiter_despite_fragmentation() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(0, 100_000), (1, 100_000)]);
+        let worker = |id| WorkerWithDpRank::new(id, 0);
+        state.insert_program("returning".into(), paused_program(79_900, now));
+        for (id, tokens, pinned, complete) in [
+            ("running-a", 39_900, worker(0), false),
+            ("idle", 44_900, worker(0), true),
+            ("running-b", 45_900, worker(1), false),
+        ] {
+            state
+                .register(
+                    RequestRegistration::new(
+                        id.into(),
+                        id.into(),
+                        tokens,
+                        RequestProgress::new(tokens).0,
+                        false,
+                    )
+                    .with_pinned_worker(Some(pinned)),
+                    &capacities,
+                    now,
+                )
+                .unwrap();
+            if complete {
+                complete_request(&mut state, id, tokens, &capacities, now);
+            }
+        }
+        register_request(
+            &mut state,
+            "returning-next",
+            "returning",
+            79_900,
+            &capacities,
+            now,
+        );
+        register_request(&mut state, "new", "new", 39_900, &capacities, now);
+
+        state.reconcile(&capacities, now + state.config.scheduler_interval());
+
+        assert_eq!(
+            state.wait_status("new", &state.requests["new"].notify),
+            WaitStatus::Released(Some(worker(0)))
+        );
+        assert_eq!(
+            state.wait_status("returning-next", &state.requests["returning-next"].notify),
+            WaitStatus::Waiting
+        );
+        assert_eq!(state.programs["idle"].lifecycle, ProgramLifecycle::Paused);
+        assert_eq!(state.normal_usage[&worker(0)], 80_000);
+        assert_eq!(state.normal_usage[&worker(1)], 46_000);
+        for id in ["running-a", "running-b"] {
+            assert_eq!(state.programs[id].lifecycle, ProgramLifecycle::Active);
+        }
     }
 
     #[test]
