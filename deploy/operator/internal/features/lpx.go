@@ -8,7 +8,6 @@ import (
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"k8s.io/client-go/rest"
-	"k8s.io/utils/ptr"
 )
 
 // LPX enables LPX scheduler integration.
@@ -34,6 +33,6 @@ func resolveLPX(ctx context.Context, config *rest.Config) (bool, error) {
 		return false, err
 	}
 
-	return resolve(ptr.To(true), available,
+	return resolve(new(true), available,
 		"LPX is explicitly enabled in config but the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API was not detected in the cluster")
 }

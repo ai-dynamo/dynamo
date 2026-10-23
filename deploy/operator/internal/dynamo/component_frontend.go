@@ -42,11 +42,9 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 
 	// Add frontend-specific defaults
 	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/live",
-				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/live",
+			Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 		},
 		InitialDelaySeconds: 15, // Frontend ready to serve requests in ~5-10 seconds
 		PeriodSeconds:       10,
@@ -55,11 +53,9 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	}
 
 	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/health",
-				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/health",
+			Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 		},
 		InitialDelaySeconds: 10, // Frontend ready to serve requests in ~5-10 seconds
 		PeriodSeconds:       10,
@@ -70,11 +66,9 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	// Allow dependency connections to finish before liveness can restart the frontend.
 	if runtimefeatures.FrontendStartupProbe.Enabled(context.RuntimeVersion) {
 		container.StartupProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/live",
-					Port: intstr.FromString(commonconsts.DynamoContainerPortName),
-				},
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/live",
+				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 			},
 			PeriodSeconds:    10,
 			TimeoutSeconds:   1,
