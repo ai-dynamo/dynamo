@@ -17,7 +17,7 @@ dependencies = [
     "aisimulate==0.13.0.dev202610160000000073 ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     # Set the CA bundle floor for transitive HTTP clients outside containers too.
-    "certifi>=2026.10.19",
+    "certifi>=2026.10.23",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
@@ -323,7 +323,7 @@ filterwarnings = [
     # pandas 2.3 emits this from the bundled compatibility report path on fillna.
     "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aisimulate.legacy_cli.report_and_save",
     # pandas 3.1 deprecates DataFrame.drop(inplace=...) with Pandas4Warning, a DeprecationWarning
-    # subclass; AISimulate's picking and result processing still pass it.
+    # subclass; AISimulate still passes it in aisimulate.sdk.pareto_analysis, which picking calls.
     "ignore:The inplace keyword in DataFrame.drop is deprecated.*:DeprecationWarning:aisimulate",
 ]
 
