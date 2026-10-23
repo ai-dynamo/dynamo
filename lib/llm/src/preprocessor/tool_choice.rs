@@ -30,66 +30,6 @@ fn invalid_argument(message: impl Into<String>, public_message: Option<&str>) ->
 }
 
 impl OpenAIPreprocessor {
-    /// Align GPT-OSS's prompt with the JSON-array fallback installed below.
-    /// Its native template describes separate Harmony messages, which otherwise
-    /// encourages a handoff after the first of several independent calls.
-    /// Required parallel calls keep this format even with reasoning-aware tags.
-    pub(super) fn apply_gpt_oss_json_tool_prompt(
-        &self,
-        request: &mut NvCreateChatCompletionRequest,
-    ) {
-        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        ) != Some("gpt_oss")
-            || !matches!(
-                request.inner.tool_choice,
-                Some(ChatCompletionToolChoiceOption::Required)
-            )
-        {
-            return;
-        }
-        if crate::protocols::openai::chat_completions::tool_parser_v2::enabled()
-            && self.runtime_config.structural_tag.is_some()
-            && request.inner.parallel_tool_calls == Some(false)
-        {
-            return;
-        }
-        use dynamo_protocols::types::{
-            ChatCompletionRequestMessage as Message,
-            ChatCompletionRequestSystemMessageContent as Content,
-        };
-        let mut instruction = "After reasoning, emit tool calls as a JSON array of objects with name and parameters fields. ".to_string();
-        if request.inner.parallel_tool_calls == Some(false) {
-            instruction.push_str("Emit exactly one tool call. ");
-        } else {
-            instruction.push_str("If multiple independent calls are requested, include all of them in this one response before waiting for any tool results. Preserve the requested call order. ");
-        }
-        instruction.push_str("The JSON output replaces Harmony tool-call headers.");
-        if let Some(Message::System(system)) = request.inner.messages.first_mut() {
-            match &mut system.content {
-                Content::Text(text) => {
-                    text.push_str("\n\n");
-                    text.push_str(&instruction);
-                }
-                Content::Array(parts) => parts.push(
-                    serde_json::from_value(serde_json::json!({"type":"text","text":instruction}))
-                        .expect("valid text content part"),
-                ),
-            }
-        } else {
-            request.inner.messages.insert(
-                0,
-                Message::System(
-                    dynamo_protocols::types::ChatCompletionRequestSystemMessage {
-                        content: Content::Text(instruction),
-                        ..Default::default()
-                    },
-                ),
-            );
-        }
-    }
-
     /// Whether this request permits model output to be interpreted as tool calls.
     ///
     /// A configured parser describes the model's wire format; it does not grant
@@ -245,6 +185,7 @@ impl OpenAIPreprocessor {
                         common_request,
                     )?
                 {
+                    // TODO: Consider GPT-OSS renderer guidance for required parallel calls.
                     // The envelope uses structural guidance, but its payload is
                     // the required-call JSON array rather than native Harmony calls.
                     return Ok(GuidedToolConstraint::GuidedJsonRequired);
@@ -629,11 +570,11 @@ mod tests {
     }
 
     #[test]
-    fn gpt_oss_json_prompt_matches_the_required_fallback_only() {
+    fn gpt_oss_required_guidance_matches_the_selected_format() {
         if crate::test_utils::run_isolated(
             concat!(
                 module_path!(),
-                "::gpt_oss_json_prompt_matches_the_required_fallback_only"
+                "::gpt_oss_required_guidance_matches_the_selected_format"
             ),
             &[(
                 dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
@@ -642,64 +583,47 @@ mod tests {
         ) {
             return;
         }
-        for (parser, mode, choice, parallel, changes) in [
-            ("harmony", StructuralTagMode::Off, "required", true, true),
-            ("harmony", StructuralTagMode::Off, "required", false, true),
-            ("harmony", StructuralTagMode::On, "required", true, true),
-            ("gpt_oss", StructuralTagMode::On, "required", true, true),
-            ("harmony", StructuralTagMode::On, "required", false, false),
-            ("harmony", StructuralTagMode::Off, "auto", true, false),
-            ("qwen3", StructuralTagMode::Off, "required", true, false),
+        for (parser, mode, parallel) in [
+            ("harmony", StructuralTagMode::Off, true),
+            ("harmony", StructuralTagMode::Off, false),
+            ("harmony", StructuralTagMode::On, true),
+            ("gpt_oss", StructuralTagMode::On, true),
+            ("harmony", StructuralTagMode::On, false),
         ] {
             let preprocessor = preprocessor(parser, mode);
-            let mut request = request(
-                json!({"tools":tools(),"tool_choice":choice,"parallel_tool_calls":parallel,"messages":[{"role":"system","content":"Original system"},{"role":"user","content":"Original user"}]}),
+            let request = request(
+                json!({"tools":tools(),"tool_choice":"required","parallel_tool_calls":parallel}),
             );
-            let original = request.inner.messages.clone();
-            preprocessor.apply_gpt_oss_json_tool_prompt(&mut request);
-            if matches!(parser, "harmony" | "gpt_oss") && choice == "required" {
-                let mut common = preprocessed_request();
-                let constraint = preprocessor
-                    .apply_tool_choice_guided_decoding(&request, &mut common, false)
-                    .unwrap();
-                let guided = common.sampling_options.guided_decoding.unwrap();
-                if mode == StructuralTagMode::On {
-                    assert_eq!(
-                        constraint,
-                        if parallel {
-                            GuidedToolConstraint::GuidedJsonRequired
-                        } else {
-                            GuidedToolConstraint::StructuralTag
-                        }
-                    );
-                    assert!(guided.structural_tag.is_some());
-                    assert!(guided.json.is_none());
+            let mut common = preprocessed_request();
+            let constraint = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                .unwrap();
+            let guided = common.sampling_options.guided_decoding.unwrap();
+            if mode == StructuralTagMode::On {
+                assert_eq!(
+                    constraint,
                     if parallel {
-                        let encoded = guided.structural_tag.unwrap().to_string();
-                        assert!(encoded.contains("analysis"));
-                        assert!(encoded.contains("final"));
-                        assert!(encoded.contains("parameters"));
-                        assert_eq!(
-                            guided_tool_constraint(&request, Some(parser), None, false,).unwrap(),
-                            constraint
-                        );
+                        GuidedToolConstraint::GuidedJsonRequired
+                    } else {
+                        GuidedToolConstraint::StructuralTag
                     }
-                } else {
-                    assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
-                    assert!(guided.json.is_some() || guided.regex.is_some());
-                    assert!(guided.structural_tag.is_none());
+                );
+                assert!(guided.structural_tag.is_some());
+                assert!(guided.json.is_none());
+                if parallel {
+                    let encoded = guided.structural_tag.unwrap().to_string();
+                    assert!(encoded.contains("analysis"));
+                    assert!(encoded.contains("final"));
+                    assert!(encoded.contains("parameters"));
+                    assert_eq!(
+                        guided_tool_constraint(&request, Some(parser), None, false,).unwrap(),
+                        constraint
+                    );
                 }
-            }
-            assert_eq!(request.inner.messages[1], original[1]);
-            if changes {
-                let rendered = serde_json::to_value(&request.inner.messages).unwrap();
-                let system = rendered[0]["content"].as_str().unwrap();
-                assert!(system.starts_with("Original system\n\nAfter reasoning"));
-                assert!(system.contains("name and parameters"));
-                assert_eq!(system.contains("all of them"), parallel);
-                assert_eq!(system.contains("exactly one"), !parallel);
             } else {
-                assert_eq!(request.inner.messages, original);
+                assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
+                assert!(guided.json.is_some() || guided.regex.is_some());
+                assert!(guided.structural_tag.is_none());
             }
         }
     }

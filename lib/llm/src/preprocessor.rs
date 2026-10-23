@@ -7865,7 +7865,6 @@ impl
             thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
-        self.apply_gpt_oss_json_tool_prompt(&mut request);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
