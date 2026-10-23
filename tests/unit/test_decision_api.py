@@ -16,6 +16,40 @@ from tests.utils import decision_api as client
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 
+@pytest.mark.parametrize("question", ["route", "severity"])
+def test_systemone_contract_rejects_wrong_choice_and_score_type_tags(question):
+    body = {
+        "model": "model",
+        "answers": {
+            "route": {
+                "type": "choice",
+                "choice": "billing",
+                "confidence": 0.5,
+                "probabilities": {"billing": 0.6, "technical": 0.4},
+            },
+            "urgent": {"type": "noul", "noul": 0.6},
+            "severity": {
+                "type": "score",
+                "score": 0.8,
+                "confidence": 0.5,
+                "probabilities": {"0": 0.4, "1": 0.4, "2": 0.2},
+                "legend": {"0": "Low", "1": "Moderate", "2": "High"},
+            },
+        },
+        "usage": {"input_tokens": 21, "output_tokens": 0},
+    }
+    client.assert_decision_body(body, "model", "systemone")
+    invalid = {
+        **body,
+        "answers": {
+            **body["answers"],
+            question: {**body["answers"][question], "type": "noul"},
+        },
+    }
+    with pytest.raises(AssertionError):
+        client.assert_decision_body(invalid, "model", "systemone")
+
+
 @pytest.mark.parametrize("finish_reason", ["stop", "length"])
 def test_chat_decode_accepts_generated_tokens_and_normal_completion(finish_reason):
     client.assert_chat_decode(
