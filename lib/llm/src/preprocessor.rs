@@ -6370,6 +6370,7 @@ impl OpenAIPreprocessor {
                     prompt_logprobs,
                     llm_metrics,
                     tool_call_completion: Vec::new(),
+                    model_eos: Vec::new(),
                 }),
                 id: a.id,
                 event: a.event,
@@ -6504,6 +6505,7 @@ impl OpenAIPreprocessor {
                             prompt_logprobs,
                             llm_metrics,
                             tool_call_completion: Vec::new(),
+                            model_eos: Vec::new(),
                         }),
                         id: None,
                         event: None,
@@ -7898,6 +7900,10 @@ impl
         let mm_counts = MultimodalCounts::from_preprocessed(&common_request);
 
         let mut response_generator = Box::new(response_generator);
+        response_generator.enable_tool_call_eos(matches!(
+            guided_tool_constraint,
+            crate::protocols::openai::GuidedToolConstraint::BeamTurnGrammar { .. }
+        ));
 
         // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
         if common_request.prompt_embeds.is_none() {
@@ -10383,6 +10389,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         })
     }
 

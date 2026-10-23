@@ -104,6 +104,7 @@ async fn apply_jail_transformation(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
