@@ -16,12 +16,8 @@
 #             MinIO and GPU checks), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED,
 #             SAFE_SUBSET_MARKER, SAFE_SUBSET_PATHS (space-separated)
 #
-# With SAFE_SUBSET_MARKER set, the stage runs in two phases: tests matching
-# both PYTEST_MARKS and the marker, collected only from SAFE_SUBSET_PATHS, on
-# 2 xdist workers; then the rest of PYTEST_MARKS with PARALLEL_MODE. The
-# phases share one JUnit report, one Allure directory and one status file.
-# This path also needs python for the JUnit merge, so only images that ship
-# it may opt in.
+# SAFE_SUBSET_MARKER tests under SAFE_SUBSET_PATHS run first on 2 xdist workers,
+# then the rest; merging their JUnit reports needs python in the image.
 #
 # The distroless planner test image ships only the tools listed in
 # container/Dockerfile.test, so stay on bash builtins and those tools.
@@ -217,9 +213,8 @@ if [[ -z "${SAFE_SUBSET_MARKER:-}" ]]; then
     echo "⚠️  JUnit XML file not found - test results may not be available for upload"
   fi
 else
-  # The partition is exact only while every test carrying SAFE_SUBSET_MARKER
-  # lives under SAFE_SUBSET_PATHS; one elsewhere would run in neither phase.
-  # Limiting the paths avoids a second full-repository collection.
+  # Every SAFE_SUBSET_MARKER test must live under SAFE_SUBSET_PATHS, or it runs
+  # in neither phase; the paths avoid a second full-repository collection.
   read -ra safe_paths <<< "${SAFE_SUBSET_PATHS:-}"
   # --dist=load, not loadscope: loadscope would keep the whole module on one
   # worker. 2 workers is the fixed cap for this subset.
