@@ -12,6 +12,7 @@ loader reports in each lock mode is load-bearing for startup correctness.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -103,11 +104,15 @@ class _FakeModel:
 
 
 def _real_sglang_loader_module():
-    """SGLang's real loader module, or None in images without SGLang."""
-    try:
-        from sglang.srt.model_loader import loader
-    except Exception:
+    """SGLang's real loader module, or None in images without SGLang.
+
+    Only a missing ``sglang`` package selects the stub; import errors from an
+    installed SGLang or its dependencies propagate.
+    """
+    if importlib.util.find_spec("sglang") is None:
         return None
+    from sglang.srt.model_loader import loader
+
     return loader
 
 
