@@ -189,6 +189,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
     let driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
     let spec = ReplaySpec {
         version: CURRENT_REPLAY_SPEC_VERSION,
+        encoder: None,
         topology: ReplayTopology::Aggregated {
             workers: WorkerPoolSpec::default(),
         },

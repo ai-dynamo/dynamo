@@ -128,6 +128,7 @@ fn replay_spec(
 ) -> Result<ReplaySpec> {
     Ok(ReplaySpec {
         version: CURRENT_REPLAY_SPEC_VERSION,
+        encoder: None,
         topology,
         engine: serde_json::to_value(engine)?,
         adapters: ReplayAdapters {
