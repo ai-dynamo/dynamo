@@ -703,7 +703,6 @@ requirements.txt                                                                
 /deploy/operator/internal/observability/                                                                @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners
 /lib/runtime/src/system_status_server.rs                                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /recipes/nemotron-3-nano-omni/Dockerfile                                                                @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
-/tests/dependencies/test_kvbm_imports.py                                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/sglang/protocol.py                                                               @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/sglang/snapshot.py                                                               @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/trtllm/multimodal/                                                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners

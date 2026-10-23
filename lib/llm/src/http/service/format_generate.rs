@@ -149,14 +149,14 @@ struct GenerateMetricCollector {
 
 impl GenerateMetricCollector {
     fn new(
-        metrics: Arc<super::metrics::Metrics>,
-        model: &str,
+        response: ResponseMetricCollector,
+        http_queue: HttpQueueGuard,
         tracker: Arc<RequestTracker>,
         input_tokens: usize,
     ) -> Self {
         Self {
-            response: metrics.clone().create_response_collector(model),
-            http_queue: Some(metrics.create_http_queue_guard(model)),
+            response,
+            http_queue: Some(http_queue),
             tracker,
             input_tokens,
             output_tokens: 0,
@@ -290,20 +290,21 @@ async fn handler(
         prefill_worker_id = tracing::field::Empty, decode_worker_id = tracing::field::Empty,
     );
     let (mut inflight_guard, collector) = dispatch_span.in_scope(|| {
-        (
-            state.metrics_clone().create_inflight_guard(
-                metric_model,
-                super::metrics::Endpoint::Generate,
-                streaming,
-                &request_id,
-            ),
-            GenerateMetricCollector::new(
-                state.metrics_clone(),
-                metric_model,
-                tracker.clone(),
-                input_tokens,
-            ),
-        )
+        let inflight = state.metrics_clone().create_inflight_guard(
+            metric_model,
+            super::metrics::Endpoint::Generate,
+            streaming,
+            &request_id,
+        );
+        // Generate prompts are already tokenized; count them before any output.
+        inflight.request_metrics().add_input_tokens(input_tokens);
+        let collector = GenerateMetricCollector::new(
+            inflight.response_collector(),
+            state.metrics_clone().create_http_queue_guard(metric_model),
+            tracker.clone(),
+            input_tokens,
+        );
+        (inflight, collector)
     });
     let mut reject = |response: Response| {
         inflight_guard.mark_error(match response.status() {

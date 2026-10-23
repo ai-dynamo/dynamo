@@ -1449,10 +1449,6 @@ shared:
   owners:
   - runtime
   - ops
-- glob: tests/dependencies/test_kvbm_imports.py
-  owners:
-  - runtime
-  - kv-memory
 - glob: .github/workflows/pr-xpu.yaml
   owners:
   - xpu

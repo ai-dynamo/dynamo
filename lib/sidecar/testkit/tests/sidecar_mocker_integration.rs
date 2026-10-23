@@ -1232,3 +1232,46 @@ async fn vllm_visible_stop_tokens_preserve_tool_delimiters() {
     })
     .await;
 }
+
+// SGLang text trims the matched stop token, so the delimiter must arrive as an ID.
+#[tokio::test]
+async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
+    bounded("visible tool delimiter", async {
+        use dynamo_sglang_sidecar::proto as pb;
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let mut fixture =
+            sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![pb::GenerateResponse {
+                output_ids: vec![42],
+                meta_info: [(
+                    "finish_reason".to_string(),
+                    json!({"type": "stop", "matched": 42}).to_string(),
+                )]
+                .into(),
+                finished: true,
+                ..Default::default()
+            }],
+        );
+        let mut req = request("mocker-model", vec![11, 22, 33], 1);
+        req.stop_conditions.stop_token_ids_visible = Some(vec![42]);
+        req.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
+        let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+        assert!(
+            outputs
+                .iter()
+                .all(|output| output.as_ref().unwrap().text.is_none())
+        );
+        terminal(outputs, &[42], 3, FinishReason::Stop);
+        let wire = handle.native_request().unwrap();
+        assert_eq!(wire.sampling_params.unwrap().stop_token_ids, [2, 42]);
+        assert_eq!(wire.return_text, None);
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}

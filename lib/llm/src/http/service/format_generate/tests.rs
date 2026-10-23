@@ -21,8 +21,18 @@ fn forwarded_router_metadata_reaches_the_tracker_and_leaves_the_payload() {
         .unwrap()
         .state_clone();
     let tracker = Arc::new(RequestTracker::new());
-    let mut collector =
-        GenerateMetricCollector::new(state.metrics_clone(), "model", tracker.clone(), 1);
+    let inflight = state.metrics_clone().create_inflight_guard(
+        "model",
+        super::super::metrics::Endpoint::Generate,
+        false,
+        "router-metadata-test",
+    );
+    let mut collector = GenerateMetricCollector::new(
+        inflight.response_collector(),
+        state.metrics_clone().create_http_queue_guard("model"),
+        tracker.clone(),
+        1,
+    );
     let mut output = Annotated::from_data(LLMEngineOutput {
         routing_data: Some(
             serde_json::from_value(serde_json::json!({
