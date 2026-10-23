@@ -6,7 +6,7 @@
 use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value};
 
 use super::RESPONSE_KEY;
 /// A native SGLang response and the transport signals derived from it.
@@ -120,7 +120,9 @@ pub fn inspect(response: Value, is_prefill: bool) -> Result<Inspected, DynamoErr
         });
     }
     output.token_ids = token_ids;
-    output.engine_data = Some(json!({ RESPONSE_KEY: response }));
+    let mut engine_data = Map::new();
+    engine_data.insert(RESPONSE_KEY.to_string(), response);
+    output.engine_data = Some(Value::Object(engine_data));
     Ok(Inspected {
         output,
         terminal,
@@ -132,6 +134,28 @@ pub fn inspect(response: Value, is_prefill: bool) -> Result<Inspected, DynamoErr
 mod tests {
     use super::*;
     use dynamo_llm::protocols::common::FinishReason;
+    use serde_json::json;
+
+    #[test]
+    fn native_output_moves_expert_payload_into_envelope() {
+        let response = json!({
+            "meta_info": {"routed_experts": "A".repeat(65536)},
+            "unknown_field": [1, 2, 3]
+        });
+        let experts = response["meta_info"]["routed_experts"].as_str().unwrap();
+        let original_ptr = experts.as_ptr();
+        let inspected = inspect(response, false).unwrap();
+        assert!(!inspected.terminal);
+        let response = &inspected.output.engine_data.unwrap()[RESPONSE_KEY];
+        assert_eq!(
+            response["meta_info"]["routed_experts"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            original_ptr
+        );
+        assert_eq!(response["unknown_field"], json!([1, 2, 3]));
+    }
 
     #[test]
     fn decode_terminals_report_typed_finish_and_usage() {

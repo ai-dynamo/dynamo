@@ -10,6 +10,7 @@ use dynamo_parsers_v2::structural_tag::{
     StructuralTagToolChoice as StructuralTagToolChoiceV2,
 };
 
+#[cfg(test)]
 use crate::protocols::openai::chat_completions::tool_parser_v2;
 
 use super::StructuralTagBuildRequest;
@@ -19,10 +20,10 @@ pub(crate) struct StructuralTagBuilder(&'static InnerBuilder);
 
 impl StructuralTagBuilder {
     pub(super) fn for_parser(parser_name: &str) -> Option<Self> {
-        dynamo_parsers_v2::structural_tag_builder_for_family(tool_parser_v2::canonical_family(
+        let family = crate::protocols::openai::chat_completions::unified_parser::canonical_family(
             parser_name,
-        ))
-        .map(Self)
+        )?;
+        dynamo_parsers_v2::structural_tag_builder_for_family(family).map(Self)
     }
 
     pub(super) fn build(
@@ -77,6 +78,7 @@ fn to_v2_tool(tool: &ToolDefinition) -> Tool {
     }
 }
 
+#[cfg(test)]
 pub(super) fn enabled() -> bool {
     tool_parser_v2::enabled()
 }

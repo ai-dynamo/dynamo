@@ -50,3 +50,38 @@ fn forwarded_router_metadata_reaches_the_tracker_and_leaves_the_payload() {
     assert_eq!(tracker.get_worker_info().unwrap().decode_worker_id, Some(7));
     assert_eq!(tracker.query_token_ids(), Some([11].as_slice()));
 }
+
+#[tokio::test]
+async fn streaming_events_preserve_native_json() {
+    struct Passthrough;
+    impl GenerateExchange for Passthrough {
+        fn chunk(
+            &mut self,
+            output: LLMEngineOutput,
+            _: bool,
+            emit: &mut dyn FnMut(&Value),
+        ) -> Result<(), DynamoError> {
+            emit(&output.engine_data.unwrap());
+            Ok(())
+        }
+
+        fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
+            Ok(None)
+        }
+    }
+    let native = serde_json::json!({
+        "text": "Unicode: λ\nCR: \r",
+        "meta_info": {"routed_experts": "AQID".repeat(16384)},
+        "unknown_field": {"value": true}
+    });
+    let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+        engine_data: Some(native.clone()),
+        ..Default::default()
+    })]);
+    let exchange: SharedExchange = Arc::new(Mutex::new(Box::new(Passthrough)));
+    let response = Sse::new(events(stream, exchange)).into_response();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), format!("data: {native}\n\n").as_bytes());
+}
