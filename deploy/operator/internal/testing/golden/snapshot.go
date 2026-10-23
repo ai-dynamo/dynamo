@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -200,19 +201,29 @@ func ApplySnapshot(ctx context.Context, c client.Client, namespace string, objec
 		for j := range refs {
 			refs[j].UID = created[byUID[refs[j].UID]].GetUID()
 		}
-		if len(refs) > 0 {
-			object.SetOwnerReferences(refs)
-			if err := c.Update(ctx, object); err != nil {
-				return fmt.Errorf("restore owners of %s: %w", object.GetName(), err)
-			}
-		}
-		if status, found, err := unstructured.NestedMap(objects[i].Object, "status"); err != nil {
+		status, found, err := unstructured.NestedMap(objects[i].Object, "status")
+		if err != nil {
 			return err
-		} else if found {
-			object.Object["status"] = status
-			if err := c.Status().Update(ctx, object); err != nil {
-				return fmt.Errorf("restore status of %s: %w", object.GetName(), err)
+		}
+		// Native workload controllers can update status during snapshot reconstruction.
+		// Retry against the latest RV without changing the historical owners or status.
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := c.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+				return err
 			}
+			if len(refs) > 0 {
+				object.SetOwnerReferences(refs)
+				if err := c.Update(ctx, object); err != nil {
+					return err
+				}
+			}
+			if found {
+				object.Object["status"] = status
+				return c.Status().Update(ctx, object)
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("restore owners/status of %s %s: %w", object.GetKind(), object.GetName(), err)
 		}
 	}
 	return nil

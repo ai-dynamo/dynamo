@@ -323,20 +323,19 @@ func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.
 		if slices.ContainsFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == identityVolume }) {
 			return fmt.Errorf("LPX agent template %s already defines volume %q, which the operator adds", clique.Name, identityVolume)
 		}
-		spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, VolumeSource: corev1.VolumeSource{
-			Projected: &corev1.ProjectedVolumeSource{DefaultMode: ptr.To(int32(0o440)), Sources: []corev1.VolumeProjection{
+		spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume,
+			Projected: &corev1.ProjectedVolumeSource{DefaultMode: new(int32(0o440)), Sources: []corev1.VolumeProjection{
 				{Secret: &corev1.SecretProjection{
-					LocalObjectReference: corev1.LocalObjectReference{Name: name},
-					Items:                []corev1.KeyToPath{{Key: "client.pem", Path: "client.pem"}, {Key: "client.key", Path: "client.key"}},
+					Name:  name,
+					Items: []corev1.KeyToPath{{Key: "client.pem", Path: "client.pem"}, {Key: "client.key", Path: "client.key"}},
 				}},
 				// Optional, so Pods start where the platform has not published it.
 				{Secret: &corev1.SecretProjection{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "lpx-server-ca"},
-					Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.pem"}},
-					Optional:             ptr.To(true),
+					Name:     "lpx-server-ca",
+					Items:    []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.pem"}},
+					Optional: new(true),
 				}},
-			}},
-		}})
+			}}})
 		// Only the agent's main runtime authenticates to LPUD; a missing main must fail, never mount nowhere.
 		container := common.FindContainerByName(spec.Containers, consts.MainContainerName)
 		if container == nil {
@@ -385,10 +384,10 @@ func newClientIdentitySecret(namespace, name string) (*corev1.Secret, error) {
 		return nil, err
 	}
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Type:       corev1.SecretTypeOpaque,
+		Name: name, Namespace: namespace,
+		Type: corev1.SecretTypeOpaque,
 		// The key is never rewritten, so nobody may swap it in place either.
-		Immutable: ptr.To(true),
+		Immutable: new(true),
 		Data: map[string][]byte{
 			"client.pem": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}),
 			"client.key": pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),

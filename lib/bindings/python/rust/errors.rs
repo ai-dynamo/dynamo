@@ -44,10 +44,13 @@ pub fn queue_rejection_to_pyerr(rejection: dynamo_kv_router::scheduling::QueueRe
 pyo3::create_exception!(dynamo._core, WorkerUnavailable, DynamoException);
 
 /// Convert a routed-pipeline error to a Python exception, keeping the
-/// `WorkerUnavailable` class that the generic [`crate::to_pyerr`] would drop.
+/// `WorkerUnavailable` and `InvalidArgument` class that the generic [`crate::to_pyerr`] would drop.
 pub fn routed_error_to_pyerr(err: anyhow::Error) -> PyErr {
     if is_worker_unavailable(err.as_ref()) {
         return WorkerUnavailable::new_err(err.to_string());
+    }
+    if let Some(message) = public_invalid_argument_message(err.as_ref()) {
+        return InvalidArgument::new_err(message);
     }
     crate::to_pyerr(err)
 }
@@ -186,17 +189,32 @@ define_dynamo_exceptions!(
     (WorkerOverloaded, BackendError::WorkerOverloaded),
 );
 
-/// Preserve explicitly public validation errors across Rust-to-Python streams.
-/// Other errors retain the iterator's existing `ValueError` behavior; diagnostic
-/// text must never be promoted into a public `InvalidArgument` message.
+/// Generic label for an InvalidRequest that carries no explicit
+/// public message.
+const GENERIC_INVALID_REQUEST_MESSAGE: &str = "Invalid request";
+
+fn invalid_request_client_message(error: &DynamoError) -> Option<String> {
+    (error.class() == ErrorClass::InvalidRequest).then(|| {
+        error
+            .public_message()
+            .unwrap_or(GENERIC_INVALID_REQUEST_MESSAGE)
+            .to_owned()
+    })
+}
+
+/// Preserve validation errors across Rust-to-Python streams: a classified
+/// InvalidRequest raises a typed `InvalidArgument`, carrying the producer's
+/// public message or the generic label when there is none. Other errors
+/// retain the iterator's existing `ValueError` behavior; diagnostic text must
+/// never be promoted into a public `InvalidArgument` message.
 pub(crate) fn check_response_error<R>(response: Annotated<R>) -> PyResult<Annotated<R>> {
     if response.is_error()
         && let Some(message) = response
             .error
             .as_ref()
-            .and_then(public_invalid_request_message)
+            .and_then(invalid_request_client_message)
     {
-        return Err(InvalidArgument::new_err(message.to_owned()));
+        return Err(InvalidArgument::new_err(message));
     }
 
     response
@@ -204,12 +222,15 @@ pub(crate) fn check_response_error<R>(response: Annotated<R>) -> PyResult<Annota
         .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
-fn public_invalid_request_message(error: &DynamoError) -> Option<&str> {
-    if error.class() == ErrorClass::InvalidRequest {
-        error.public_message()
-    } else {
-        None
+fn public_invalid_argument_message(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(dynamo_err) = error.downcast_ref::<DynamoError>() {
+            return invalid_request_client_message(dynamo_err);
+        }
+        current = error.source();
     }
+    None
 }
 
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
@@ -317,22 +338,71 @@ mod tests {
     }
 
     #[test]
-    fn invalid_request_conversion_uses_only_public_message() {
+    fn invalid_request_uses_public_message_or_generic_fallback() {
         let error = DynamoError::builder()
             .class(ErrorClass::InvalidRequest)
             .diagnostic("private backend detail")
             .public_message("Invalid JSON schema")
             .build();
         assert_eq!(
-            public_invalid_request_message(&error),
-            Some("Invalid JSON schema")
+            invalid_request_client_message(&error),
+            Some("Invalid JSON schema".to_string())
         );
 
         let error = DynamoError::builder()
             .class(ErrorClass::InvalidRequest)
             .diagnostic("private validation detail")
             .build();
-        assert_eq!(public_invalid_request_message(&error), None);
+        assert_eq!(
+            invalid_request_client_message(&error),
+            Some(GENERIC_INVALID_REQUEST_MESSAGE.to_string())
+        );
+    }
+
+    #[derive(Debug)]
+    struct RouterWrapped(DynamoError);
+
+    impl std::fmt::Display for RouterWrapped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Prefill execution failed: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for RouterWrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn error_chain_yields_public_invalid_argument_message() {
+        let worker_error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("private backend detail")
+            .public_message("use --enable-multimodal")
+            .build();
+        let wrapped = anyhow::Error::new(RouterWrapped(worker_error));
+        assert_eq!(
+            public_invalid_argument_message(wrapped.as_ref()),
+            Some("use --enable-multimodal".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_worker_rejection_without_public_message_yields_generic_message() {
+        let wire = serde_json::json!({
+            "error_type": {"Backend": "InvalidArgument"},
+            "message": "private backend detail",
+        });
+        let error: DynamoError = serde_json::from_value(wire).expect("legacy wire error");
+        assert_eq!(error.class(), ErrorClass::InvalidRequest);
+        assert_eq!(error.public_message(), None);
+
+        let wrapped = anyhow::Error::new(RouterWrapped(error));
+        assert_eq!(
+            public_invalid_argument_message(wrapped.as_ref()),
+            Some(GENERIC_INVALID_REQUEST_MESSAGE.to_string())
+        );
     }
 
     #[test]
@@ -347,7 +417,7 @@ mod tests {
                 .diagnostic("private backend detail")
                 .public_message("Public error message")
                 .build();
-            assert_eq!(public_invalid_request_message(&error), None);
+            assert_eq!(invalid_request_client_message(&error), None);
         }
     }
 
