@@ -199,8 +199,9 @@ impl KvEventSource {
 ///
 /// The engine-side publisher lifetime is coupled to this Dynamo publisher and its advertised
 /// publisher ID. Restarting the engine publisher independently while this value survives is not
-/// supported. Future independent restart support must either emit an ordered rank-scoped
-/// `Cleared` event before the new stream or create a new Dynamo publisher ID.
+/// supported. Future independent restart support must either explicitly revoke
+/// every affected tier before the new stream or create a new Dynamo publisher ID.
+/// A native Device `Cleared` alone does not revoke independent retained GPU memory.
 pub struct KvEventPublisher {
     /// The size of the KV block.
     kv_block_size: u32,

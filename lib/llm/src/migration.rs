@@ -3553,6 +3553,19 @@ mod tests {
     /// struct state is exactly what does *not* catch the off-by-one.
     #[tokio::test]
     async fn test_migration_exhausted_reports_the_attempt_that_failed() {
+        // The emitted-field observer needs a fresh tracing registry/callsite
+        // configuration, independent of sibling tests' global logging setup.
+        // Reuse the strict child helper: it must execute this exact test once
+        // and pass every assertion below; an unmatched filter cannot pass.
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_migration_exhausted_reports_the_attempt_that_failed"
+            ),
+            &[],
+        ) {
+            return;
+        }
         use std::sync::Mutex;
         use tracing::field::{Field, Visit};
         use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt};

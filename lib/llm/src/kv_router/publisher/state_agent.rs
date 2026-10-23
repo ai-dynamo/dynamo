@@ -581,6 +581,19 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             .as_ref()
             .context("KV state agent has no framework attachment")?
             .worker;
+        if placement_events
+            .iter()
+            .any(|event| event.placement.tier == StorageTier::GpuDirect)
+        {
+            self.fail_source(
+                self.attachment
+                    .as_ref()
+                    .expect("attachment checked above")
+                    .generation,
+                "retained GPU inventory is unsupported on the versioned state-agent ingress",
+            );
+            anyhow::bail!("GpuDirect inventory requires the native worker publisher");
+        }
         let mut coalescer = PlacementEventCoalescer::new(DEFAULT_MAX_BATCH_BLOCKS);
         let mut coalesced = Vec::with_capacity(placement_events.len());
         for placement_event in placement_events {
@@ -652,7 +665,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 }
                 KvCacheEventData::Cleared => {
                     self.dedup
-                        .clear_rank_domain(event.dp_rank, domain, dedup_policy);
+                        .clear_rank_domain(event.dp_rank, domain, dedup_policy, tier);
                     KvCacheEventData::Cleared
                 }
             };
@@ -1763,6 +1776,20 @@ fn normalize_raw_batch(
                 continue;
             }
         };
+        if raw_event.medium().and_then(StorageTier::from_kv_medium) == Some(StorageTier::GpuDirect)
+        {
+            match ownership {
+                KvEventOwnership::Framework => {
+                    source_fault
+                        .get_or_insert("retained GPU inventory requires native worker ingress");
+                }
+                KvEventOwnership::Kvcr => {
+                    cache_owner_fault
+                        .get_or_insert("KVCR ownership has an unsupported storage medium");
+                }
+            }
+            continue;
+        }
         if ownership == KvEventOwnership::Kvcr
             && ingress_protocol != KvStateIngressProtocol::VllmResidencyV1
         {
@@ -2109,6 +2136,32 @@ mod tests {
             &mut cache_owner,
         );
         assert_eq!(normalized.source_fault, Some("unknown raw event ownership"));
+    }
+
+    #[test]
+    fn versioned_state_agent_rejects_retained_gpu_worker_and_cache_owner_ingress() {
+        let mut framework = ZmqEventNormalizer::new(4);
+        let mut owner = ZmqEventNormalizer::new(4);
+        let normalized = normalize_raw_batch(
+            vec![
+                raw_store(Some("gpu_direct"), None, 1),
+                raw_store(Some("gpu_direct"), Some("kvcr"), 2),
+            ],
+            WorkerWithDpRank::new(17, 3),
+            4,
+            KvStateIngressProtocol::VllmResidencyV1,
+            &mut framework,
+            &mut owner,
+        );
+        assert!(normalized.events.is_empty());
+        assert_eq!(
+            normalized.source_fault,
+            Some("retained GPU inventory requires native worker ingress")
+        );
+        assert_eq!(
+            normalized.cache_owner_fault,
+            Some("KVCR ownership has an unsupported storage medium")
+        );
     }
 
     #[tokio::test]

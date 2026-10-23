@@ -643,9 +643,9 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     slot.rank.commit_live_admission(event_id);
                 }
                 LiveEventAction::Clear { event_id, event } => {
-                    // NOTE: A clear is ordered only in this publisher's rank stream. It may
-                    // supersede this rank's gap recovery, but it has no causal cutoff for sibling
-                    // ranks and must never scan, lock, cancel, or mutate their slots.
+                    // This branch is admitted only for a contiguous clear with
+                    // no recovery in flight. A tier-specific clear cannot
+                    // supersede missing independent retained-GPU history.
                     self.cancel_recovery(key).await;
                     slot.rank.discard_recovery_before_clear();
                     if let Err(error) = self

@@ -17,6 +17,43 @@ pub(super) fn hint_capable_partition(configs: &HashMap<WorkerId, SelectionWorker
     })
 }
 
+/// Shared island policy for same-role hints and cross-role donor lookups.
+/// Compatibility and source capability must be checked separately before ranking.
+pub(super) fn transfer_source_topology_rank(
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    target_domains: Option<&HashMap<String, String>>,
+    transfer_domain: Option<&str>,
+    enforcement: Option<KvTransferEnforcement>,
+    candidates: &KvTransferCandidates,
+    source: KvTransferCandidateSource,
+) -> Option<bool> {
+    let Some(domain) = transfer_domain else {
+        return Some(false);
+    };
+    let target_island = target_domains.and_then(|domains| domains.get(domain));
+    let source_island = match source {
+        KvTransferCandidateSource::Worker(worker) => configs
+            .get(&worker.worker_id)
+            .and_then(|config| config.topology_domains.get(domain)),
+        KvTransferCandidateSource::CacheOwner(owner) => candidates
+            .routing_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.router_hint_source(owner))
+            .and_then(|source| {
+                let topology = if source.metadata.topology_domains.is_empty() {
+                    &configs
+                        .get(&source.attached_worker?.worker_id)?
+                        .topology_domains
+                } else {
+                    &source.metadata.topology_domains
+                };
+                topology.get(domain)
+            }),
+    };
+    let same_island = target_island.is_some() && source_island == target_island;
+    (same_island || enforcement == Some(KvTransferEnforcement::Preferred)).then_some(same_island)
+}
+
 /// Pick the best router-hint source for `target`: a same-role worker (or
 /// cache owner) holding a longer root-aligned prefix than the target's own
 /// `target_cached_prefix_blocks`, with a non-empty control endpoint.
@@ -64,40 +101,19 @@ pub(super) fn transfer_hint_for_selection(
     };
 
     let prefix_blocks_to_beat = usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
-    let selected = match target_config.kv_transfer_domain.as_deref() {
-        None => candidates.best_source(prefix_blocks_to_beat, is_eligible),
-        Some(domain) => {
-            let target_island = target_config.topology_domains.get(domain);
-            let source_island = |source| match source {
-                KvTransferCandidateSource::Worker(worker) => {
-                    configs.get(&worker.worker_id)?.topology_domains.get(domain)
-                }
-                KvTransferCandidateSource::CacheOwner(owner) => {
-                    let source = candidates
-                        .routing_snapshot
-                        .as_ref()?
-                        .router_hint_source(owner)?;
-                    let topology = if source.metadata.topology_domains.is_empty() {
-                        &configs
-                            .get(&source.attached_worker?.worker_id)?
-                            .topology_domains
-                    } else {
-                        &source.metadata.topology_domains
-                    };
-                    topology.get(domain)
-                }
-            };
-            let preferred =
-                target_config.kv_transfer_enforcement == Some(KvTransferEnforcement::Preferred);
-            candidates.best_ranked_source(prefix_blocks_to_beat, |source| {
-                if !is_eligible(source) {
-                    return None;
-                }
-                let same_island = target_island.is_some() && source_island(source) == target_island;
-                (same_island || preferred).then_some(same_island)
-            })
+    let selected = candidates.best_ranked_source(prefix_blocks_to_beat, |source| {
+        if !is_eligible(source) {
+            return None;
         }
-    };
+        transfer_source_topology_rank(
+            configs,
+            Some(&target_config.topology_domains),
+            target_config.kv_transfer_domain.as_deref(),
+            target_config.kv_transfer_enforcement,
+            candidates,
+            source,
+        )
+    });
     let (source, block_hashes) = selected?;
     let source_control_endpoint = match source {
         KvTransferCandidateSource::Worker(worker) => configs

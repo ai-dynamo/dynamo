@@ -51,6 +51,7 @@ mod kv;
 mod kv_selection;
 mod occupancy;
 mod request_guard;
+mod transfer;
 
 use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
@@ -795,13 +796,17 @@ impl RoutingHost {
     pub(crate) async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
+        transfer_source: Option<&RoutingHost>,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         match &self.policy {
-            RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
+            RoutingPolicy::Kv(_) => {
+                self.select_and_dispatch_kv_prefill(request, transfer_source, prepare)
+                    .await
+            }
             RoutingPolicy::Builtin(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {

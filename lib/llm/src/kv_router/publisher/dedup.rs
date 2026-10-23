@@ -23,7 +23,7 @@ pub(super) enum EventDedupPolicy {
 /// `RefCounted` Stores increment a refcount and Removes pass only when it
 /// reaches zero. `SetLike` events bypass bookkeeping when their producer
 /// guarantees at most one logical residency per owner, tier, and block hash.
-/// Clears reset refcounts for the emitting rank across storage tiers.
+/// Clears reset only the emitting rank/domain and affected storage lifetime.
 pub(super) struct EventDedupFilter {
     /// Per-(dp_rank, storage_tier, residency_domain) refcounts.
     per_rank_tier:
@@ -101,19 +101,22 @@ impl EventDedupFilter {
         }
     }
 
-    /// Clear refcounts for one DP rank and residency domain across storage tiers.
+    /// Clear one rank/domain only in tiers sharing the source clear lifetime.
     pub(super) fn clear_rank_domain(
         &mut self,
         dp_rank: u32,
         domain: ResidencyDomain,
         policy: EventDedupPolicy,
+        source_tier: StorageTier,
     ) {
         if policy == EventDedupPolicy::SetLike {
             return;
         }
         self.per_rank_tier
-            .retain(|(tracked_dp_rank, _, tracked_domain), _| {
-                *tracked_dp_rank != dp_rank || *tracked_domain != domain
+            .retain(|(tracked_dp_rank, tracked_tier, tracked_domain), _| {
+                *tracked_dp_rank != dp_rank
+                    || *tracked_domain != domain
+                    || !source_tier.clear_affects_tier(*tracked_tier)
             });
     }
 

@@ -211,6 +211,29 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   Environment variable: `DYN_ROUTER_TEMPERATURE`
 </ParamField>
 
+### Decode-to-Prefill Reuse
+
+Experimental transfer selection requires event-driven KV routing with a local
+indexer, certified worker domains and calibrated costs. Remote indexer mode and
+approximate routing are rejected when either transfer path is enabled. CPU and GPU paths are enabled separately.
+CLI values override the corresponding environment variables.
+
+| Flag | Environment Variable | Default | Contract |
+| --- | --- | --- | --- |
+| `--router-decode-to-prefill-reuse` | `DYN_ROUTER_DECODE_TO_PREFILL_REUSE` | `false` | Enable eligible CPU-retained decode sources. Disable with `--no-router-decode-to-prefill-reuse`. |
+| `--router-decode-to-prefill-gpu-reuse` | `DYN_ROUTER_DECODE_TO_PREFILL_GPU_REUSE` | `false` | Enable eligible retained-GPU sources. Disable with `--no-router-decode-to-prefill-gpu-reuse`. Requires `gpu_direct` inventory and explicit GPU capability. |
+| `--router-transfer-source-lookup-budget-ms` | `DYN_ROUTER_TRANSFER_SOURCE_LOOKUP_BUDGET_MS` | `5` | Cumulative lookup budget in milliseconds, from `1` through `60000`. |
+| `--router-minimum-transfer-prefix-blocks` | `DYN_ROUTER_MINIMUM_TRANSFER_PREFIX_BLOCKS` | `1` | Positive minimum additional reusable block count. |
+| `--router-minimum-estimated-ttft-saving-ms` | `DYN_ROUTER_MINIMUM_ESTIMATED_TTFT_SAVING_MS` | `0.0` | Finite nonnegative minimum estimated time-to-first-token saving in milliseconds. |
+| `--router-transfer-source-estimated-block-us` | `DYN_ROUTER_TRANSFER_SOURCE_ESTIMATED_BLOCK_US` | `null` | Finite positive CPU acquisition/transfer/onboarding cost per missing block; required when CPU reuse is enabled. |
+| `--router-transfer-source-gpu-estimated-block-us` | `DYN_ROUTER_TRANSFER_SOURCE_GPU_ESTIMATED_BLOCK_US` | `null` | Independently measured finite positive GPU acquisition/transfer/onboarding cost per missing block; required when GPU reuse is enabled. |
+| `--router-transfer-source-prefill-token-us` | `DYN_ROUTER_TRANSFER_SOURCE_PREFILL_TOKEN_US` | `null` | Conservative finite positive prefill saving per reused token; required when either path is enabled. |
+
+GPU reuse requires same-host, identical raw layouts with one worker per role and
+tensor parallel size one. Native Device overlap and CPU cost estimates cannot
+qualify it. See [Decode-to-Prefill Reuse](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#decode-to-prefill-reuse)
+for selection and cost semantics.
+
 ### KV state and indexers
 
 <ParamField path="--router-kv-events / --no-router-kv-events" type="boolean" default="true">

@@ -37,6 +37,7 @@ pub use core::{
     HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
     SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
     SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig, SessionBinding,
+    TransferSourceMemoryKind, TransferSourceQuery, TransferSourceResult,
 };
 pub use error::SelectionError;
 pub use ingress::KvEventIngress;

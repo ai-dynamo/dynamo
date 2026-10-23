@@ -85,7 +85,7 @@ impl LowerTierIndexers {
         &self,
         storage_tier: StorageTier,
     ) -> Arc<ThreadPoolIndexer<LowerTierIndexer>> {
-        debug_assert!(!storage_tier.is_gpu());
+        debug_assert_ne!(storage_tier, StorageTier::Device);
         if let Some(indexer) = self.indexers.read().unwrap().get(&storage_tier).cloned() {
             return indexer;
         }
@@ -107,6 +107,20 @@ impl LowerTierIndexers {
     /// All currently allocated lower-tier indexers, in unspecified order.
     pub fn all(&self) -> Vec<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
         self.indexers.read().unwrap().values().cloned().collect()
+    }
+
+    /// Physical lower tiers affected by this clear's independent lifetime.
+    pub fn for_clear(
+        &self,
+        source_tier: StorageTier,
+    ) -> Vec<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
+        self.indexers
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(tier, _)| source_tier.clear_affects_tier(**tier))
+            .map(|(_, indexer)| indexer.clone())
+            .collect()
     }
 
     /// All currently allocated lower-tier indexers paired with the
@@ -131,6 +145,51 @@ impl LowerTierIndexers {
         storage_tier: StorageTier,
     ) -> Option<Arc<ThreadPoolIndexer<LowerTierIndexer>>> {
         self.indexers.read().unwrap().get(&storage_tier).cloned()
+    }
+
+    /// Root-aligned prefixes backed entirely by host inventory. Starting at
+    /// the root, rather than extending the device match, prevents GPU-only or
+    /// disk-only blocks from being advertised to the CPU KVCR adapter.
+    pub(crate) fn host_transfer_candidates(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        self.transfer_candidates_for_tier(StorageTier::HostPinned, sequence)
+    }
+
+    /// GPU-only retained-cache inventory, independently published after its
+    /// producer copy completes. Native Device, host and disk blocks cannot
+    /// satisfy this lookup, and it is not part of ordinary cache-hit scoring.
+    pub(crate) fn gpu_direct_transfer_candidates(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        self.transfer_candidates_for_tier(StorageTier::GpuDirect, sequence)
+    }
+
+    fn transfer_candidates_for_tier(
+        &self,
+        tier: StorageTier,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        let indexer = self.get(tier)?;
+        let snapshot = self.routing_snapshot.load_full();
+        let first_hash = *sequence.first()?;
+        let continuations: FxHashMap<_, _> = indexer
+            .backend()
+            .root_workers(first_hash, snapshot.projection())
+            .into_iter()
+            .map(|worker| (worker, crate::indexer::LowerTierContinuation::from_root(0)))
+            .collect();
+        let matches = indexer
+            .backend()
+            .query_match_details_with_options_and_snapshot(
+                sequence,
+                &continuations,
+                true,
+                &snapshot,
+            );
+        merge_kv_transfer_tier_candidates(None, &matches, snapshot)
     }
 
     pub fn record_unsupported_residency_event(&self, event: &RouterEvent) {
