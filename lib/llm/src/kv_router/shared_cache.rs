@@ -149,8 +149,8 @@ impl SglangHicacheMooncakeConfig {
         }
         match (&self.hicache_object_layout, &other.hicache_object_layout) {
             (Some(layout), Some(other_layout)) => {
-                // Physical layout is authoritative, including is_mla_backend:
-                // older model-name checks misclassify e.g. DeepSeek V4 as MHA.
+                // The layout is authoritative, so top-level is_mla_model is not compared:
+                // model-name checks misclassify e.g. DeepSeek V4 as MHA.
                 layout.pools == other_layout.pools
             }
             (None, None) => {
@@ -304,7 +304,8 @@ impl HicacheSharedKvCache {
                 return true;
             }
             // N-2: legacy workers without hicache_object_layout may coexist; use the
-            // explicit layout, never a guess. Remove once they leave the N-2 window.
+            // explicit layout, never a guess.
+            // TODO(vX.Y): Remove when workers without hicache_object_layout leave the N-2 window.
             if first.hicache_object_layout.is_some() && config.hicache_object_layout.is_none() {
                 return config.backend != first.backend
                     || config.page_size != first.page_size
@@ -1770,7 +1771,7 @@ mod tests {
             };
             let mut value = serde_json::to_value(&config).unwrap();
             if prefix.is_none() {
-                // Main treats both an absent and null top-level prefix as legacy.
+                // An absent and a null top-level key_prefix are both legacy.
                 let absent = {
                     let mut absent = value.clone();
                     absent.as_object_mut().unwrap().remove("key_prefix");
