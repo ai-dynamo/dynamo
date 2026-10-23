@@ -1135,7 +1135,9 @@ fn apply_argument_framing(
 ) -> anyhow::Result<()> {
     if family == BEAM_UNIFIED_FAMILY || argument_framing != ArgumentFraming::default() {
         parser.set_tool_call_policy(ToolCallPolicy {
-            malformed: if family == BEAM_UNIFIED_FAMILY {
+            malformed: if family == BEAM_UNIFIED_FAMILY
+                && argument_framing == ArgumentFraming::SchemaConstrained
+            {
                 MalformedToolCallPolicy::Reject
             } else {
                 Default::default()
@@ -12502,7 +12504,7 @@ mod beam_routing_tests {
     use dynamo_runtime::config::ParserVersion;
 
     #[tokio::test]
-    async fn beam_finalization_requires_installed_grammar_and_confirmed_eos() {
+    async fn beam_finalization_respects_grammar_and_confirmed_eos() {
         let tools = vec![ToolDefinition {
             name: "weather".into(),
             parameters: Some(
@@ -12515,7 +12517,8 @@ mod beam_routing_tests {
             ("", Some(FinishReason::Stop), true, true, true),
             ("<|return|>", Some(FinishReason::Stop), true, true, true),
             ("", Some(FinishReason::Stop), false, true, false),
-            ("", Some(FinishReason::Stop), true, false, false),
+            ("", Some(FinishReason::Stop), true, false, true),
+            ("", Some(FinishReason::Stop), false, false, true),
             ("", Some(FinishReason::Length), true, true, false),
             ("", None, false, true, false),
             ("<|call|>", Some(FinishReason::Stop), false, false, true),
@@ -12642,17 +12645,21 @@ mod beam_routing_tests {
                 .unwrap(),
             expected
         );
-        // Without the installed grammar, the embedded closer makes this body
-        // malformed. Serving must report the error instead of dropping the call.
+        // Without the grammar a value runs to the first closing tag.
+        let lenient = parse_complete_with_policy(
+            BEAM_UNIFIED_FAMILY,
+            content,
+            &GuidedToolConstraint::None,
+            &tools,
+            UnifiedRequestPolicy::default(),
+        )
+        .unwrap();
         assert!(
-            parse_complete_with_policy(
-                BEAM_UNIFIED_FAMILY,
-                content,
-                &GuidedToolConstraint::None,
-                &tools,
-                UnifiedRequestPolicy::default(),
-            )
-            .is_err()
+            lenient.tool_calls.first().is_none_or(|call| {
+                serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok()
+                    != Some(expected.clone())
+            }),
+            "{lenient:?}"
         );
 
         // Streaming frames the same way at every split.
