@@ -40,6 +40,7 @@ type DynamoGraphDeploymentCandidateSpec struct {
 	// Parameters are the resolved evaluation parameters for this point.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
+	// +required
 	Parameters runtime.RawExtension `json:"parameters"`
 }
 
@@ -52,10 +53,13 @@ type DynamoGraphDeploymentCandidateSpec struct {
 
 // DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
 type DynamoGraphDeploymentCandidate struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoGraphDeploymentCandidateSpec   `json:"spec"`
+	// +required
+	Spec DynamoGraphDeploymentCandidateSpec `json:"spec"`
+	// +optional
 	Status DynamoGraphDeploymentCandidateStatus `json:"status,omitempty"`
 }
 

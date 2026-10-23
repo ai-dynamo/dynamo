@@ -27,24 +27,24 @@ import (
 type DynamoGraphDeploymentScalingAdapterSpec struct {
 	// Replicas is the desired number of replicas for the target service.
 	// This field is modified by external autoscalers (HPA/KEDA/Planner) or manually by users.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 
 	// DGDRef references the DynamoGraphDeployment and the specific service to scale.
-	// +kubebuilder:validation:Required
+	// +required
 	DGDRef DynamoGraphDeploymentServiceRef `json:"dgdRef"`
 }
 
 // DynamoGraphDeploymentServiceRef identifies a specific service within a DynamoGraphDeployment
 type DynamoGraphDeploymentServiceRef struct {
 	// Name of the DynamoGraphDeployment
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// ServiceName is the key name of the service within the DGD's spec.services map to scale
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	ServiceName string `json:"serviceName"`
 }
@@ -84,10 +84,13 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 // ensuring that only the adapter controller modifies the DGD's service replicas.
 // This prevents conflicts when multiple autoscaling mechanisms are in play.
 type DynamoGraphDeploymentScalingAdapter struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoGraphDeploymentScalingAdapterSpec   `json:"spec,omitempty"`
+	// +optional
+	Spec DynamoGraphDeploymentScalingAdapterSpec `json:"spec,omitempty"`
+	// +optional
 	Status DynamoGraphDeploymentScalingAdapterStatus `json:"status,omitempty"`
 }
 

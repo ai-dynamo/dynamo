@@ -50,11 +50,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Deprecated: This field is ignored. |  |  |
-| `minReplicas` _integer_ | Deprecated: This field is ignored. |  |  |
-| `maxReplicas` _integer_ | Deprecated: This field is ignored. |  |  |
-| `behavior` _[HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling)_ | Deprecated: This field is ignored. |  |  |
-| `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array_ | Deprecated: This field is ignored. |  |  |
+| `enabled` _boolean_ | Deprecated: This field is ignored. |  | Optional: \{\} <br /> |
+| `minReplicas` _integer_ | Deprecated: This field is ignored. |  | Optional: \{\} <br /> |
+| `maxReplicas` _integer_ | Deprecated: This field is ignored. |  | Optional: \{\} <br /> |
+| `behavior` _[HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling)_ | Deprecated: This field is ignored. |  | Optional: \{\} <br /> |
+| `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array_ | Deprecated: This field is ignored. |  | Optional: \{\} <br /> |
 
 
 
@@ -171,7 +171,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name of the ConfigMap containing the desired data. |  | Required: \{\} <br /> |
-| `key` _string_ | Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml". | disagg.yaml |  |
+| `key` _string_ | Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml". | disagg.yaml | Optional: \{\} <br /> |
 
 
 #### DGDRState
@@ -256,10 +256,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the name of the created DynamoGraphDeployment. |  |  |
-| `namespace` _string_ | Namespace is the namespace of the created DynamoGraphDeployment. |  |  |
-| `state` _[DGDState](#dgdstate)_ | State is the current state of the DynamoGraphDeployment.<br />This value is mirrored from the DGD's status.state field. | initializing | Enum: [initializing pending successful failed] <br /> |
-| `created` _boolean_ | Created indicates whether the DGD has been successfully created.<br />Used to prevent recreation if the DGD is manually deleted by users. |  |  |
+| `name` _string_ | Name is the name of the created DynamoGraphDeployment. |  | Optional: \{\} <br /> |
+| `namespace` _string_ | Namespace is the namespace of the created DynamoGraphDeployment. |  | Optional: \{\} <br /> |
+| `state` _[DGDState](#dgdstate)_ | State is the current state of the DynamoGraphDeployment.<br />This value is mirrored from the DGD's status.state field. | initializing | Enum: [initializing pending successful failed] <br />Required: \{\} <br /> |
+| `created` _boolean_ | Created indicates whether the DGD has been successfully created.<br />Used to prevent recreation if the DGD is manually deleted by users. |  | Optional: \{\} <br /> |
 
 
 
@@ -302,8 +302,8 @@ DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoComponentDeployment` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | Spec defines the desired state for this Dynamo component deployment. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | Spec defines the desired state for this Dynamo component deployment. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSharedSpec
@@ -320,28 +320,28 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `providerOverride` _[ProviderOverride](#provideroverride)_ | ProviderOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />`topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD<br />OpenAPI omits this field. |  | Optional: \{\} <br /> |
-| `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
-| `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
-| `serviceName` _string_ | The name of the component |  |  |
-| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  |  |
-| `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
+| `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  | Optional: \{\} <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  | Optional: \{\} <br /> |
+| `serviceName` _string_ | The name of the component |  | Optional: \{\} <br /> |
+| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Optional: \{\} <br /> |
+| `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />runtime image. Paths below are relative to the component spec.<br />Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar<br />is present, otherwise extraPodSpec.mainContainer.image, or the main image in each<br />selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
-| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
-| `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
-| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
-| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
-| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
-| `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
-| `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  | Optional: \{\} <br /> |
+| `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  | Optional: \{\} <br /> |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  | Optional: \{\} <br /> |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  | Optional: \{\} <br /> |
+| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  | Optional: \{\} <br /> |
+| `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  | Optional: \{\} <br /> |
+| `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  | Optional: \{\} <br /> |
-| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
+| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  | Optional: \{\} <br /> |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  | Optional: \{\} <br /> |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. New components must set<br />extraPodSpec and provide a non-empty mainContainer image. Existing components created<br />without extraPodSpec may remain unchanged. |  | Optional: \{\} <br /> |
-| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
-| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
-| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
+| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  | Optional: \{\} <br /> |
+| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  | Optional: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />Deprecated: use providerOverride.value.spec.minAvailable for a standalone<br />Grove PodClique, or providerOverride.value.minAvailable for a scaling group.<br />The effective minimum is immutable after creation; moving the same value<br />to the new form is supported without changing the update strategy.<br />Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.<br />New Grove deployments default the provider-native form to 1. Scale-to-zero<br />preserves the minimum until replicas becomes positive again.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  |  |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
 | `roles` _[ComponentRoleSpec](#componentrolespec) array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
@@ -366,29 +366,29 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm") |  | Enum: [sglang vllm trtllm] <br /> |
-| `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
-| `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
-| `serviceName` _string_ | The name of the component |  |  |
-| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  |  |
-| `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
+| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm") |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
+| `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  | Optional: \{\} <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  | Optional: \{\} <br /> |
+| `serviceName` _string_ | The name of the component |  | Optional: \{\} <br /> |
+| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Optional: \{\} <br /> |
+| `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />runtime image. Paths below are relative to the component spec.<br />Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar<br />is present, otherwise extraPodSpec.mainContainer.image, or the main image in each<br />selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
-| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
-| `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
-| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
-| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
-| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
-| `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
-| `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  | Optional: \{\} <br /> |
+| `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  | Optional: \{\} <br /> |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  | Optional: \{\} <br /> |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  | Optional: \{\} <br /> |
+| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  | Optional: \{\} <br /> |
+| `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  | Optional: \{\} <br /> |
+| `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  | Optional: \{\} <br /> |
-| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
+| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  | Optional: \{\} <br /> |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  | Optional: \{\} <br /> |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. New components must set<br />extraPodSpec and provide a non-empty mainContainer image. Existing components created<br />without extraPodSpec may remain unchanged. |  | Optional: \{\} <br /> |
-| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
-| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
-| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
+| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  | Optional: \{\} <br /> |
+| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  | Optional: \{\} <br /> |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />Deprecated: use providerOverride.value.spec.minAvailable for a standalone<br />Grove PodClique, or providerOverride.value.minAvailable for a scaling group.<br />The effective minimum is immutable after creation; moving the same value<br />to the new form is supported without changing the update strategy.<br />Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.<br />New Grove deployments default the provider-native form to 1. Scale-to-zero<br />preserves the minimum until replicas becomes positive again.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  |  |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
 | `roles` _object array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
@@ -413,9 +413,9 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoGraphDeployment` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentSpec](#dynamographdeploymentspec)_ | Spec defines the desired state for this graph deployment. |  |  |
-| `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | Status reflects the current observed state of this graph deployment. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentSpec](#dynamographdeploymentspec)_ | Spec defines the desired state for this graph deployment. |  | Optional: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | Status reflects the current observed state of this graph deployment. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentExperimentalSpec
@@ -467,9 +467,9 @@ v1alpha1 will be removed in a future release.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  |  |
-| `status` _[DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)_ | Status reflects the current observed state of this deployment request. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  | Optional: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)_ | Status reflects the current observed state of this deployment request. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequestNativeSpec
@@ -487,11 +487,11 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs.<br />The controller automatically sets this value in profilingConfig.config.deployment.model. |  | Optional: \{\} <br /> |
 | `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [auto vllm sglang trtllm] <br />Optional: \{\} <br /> |
-| `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. |  |  |
+| `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. |  | Optional: \{\} <br /> |
 | `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes<br />cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted),<br />discovered GPU configuration is used as defaults when hardware configuration is not manually<br />specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values<br />always take precedence over auto-discovered values. If GPU discovery fails (e.g.,<br />namespace-restricted operator without node permissions), manual hardware config is required.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride explicitly sets the Dynamo runtime version for every<br />component in the generated DynamoGraphDeployment. Set this when<br />profilingConfig.profilerImage uses a non-semantic-version tag or digest, or<br />when its tag does not identify the Dynamo runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `enableGpuDiscovery` _boolean_ | EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.<br />DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always<br />attempted automatically. Setting this field has no effect - the operator will always try to discover<br />GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped<br />operator without permissions), manual hardware configuration is required regardless of this setting. |  | Optional: \{\} <br /> |
-| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. |  |  |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. |  | Optional: \{\} <br /> |
 | `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows customizing metadata for the auto-created DGD.<br />Only applicable when AutoApply is true. |  | Optional: \{\} <br /> |
 
 
@@ -510,8 +510,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `state` _[DGDRState](#dgdrstate)_ | State is a high-level textual status of the deployment request lifecycle. |  | Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed] <br />Optional: \{\} <br /> |
 | `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: \{\} <br /> |
-| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
+| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  | Optional: \{\} <br /> |
 | `profilingResults` _string_ | ProfilingResults contains a reference to the ConfigMap holding profiling data.<br />Format: "configmap/\<name\>" |  | Optional: \{\} <br /> |
 | `generatedDeployment` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata.<br />For mocker backends, this contains the mocker DGD spec. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 | `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD when AutoApply is true.<br />Contains name, namespace, state, and creation status of the managed DGD. |  | Optional: \{\} <br /> |
@@ -535,11 +535,11 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs.<br />The controller automatically sets this value in profilingConfig.config.deployment.model. |  | Optional: \{\} <br /> |
 | `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [auto vllm sglang trtllm] <br />Optional: \{\} <br /> |
-| `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. |  |  |
+| `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. |  | Optional: \{\} <br /> |
 | `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes<br />cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted),<br />discovered GPU configuration is used as defaults when hardware configuration is not manually<br />specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values<br />always take precedence over auto-discovered values. If GPU discovery fails (e.g.,<br />namespace-restricted operator without node permissions), manual hardware config is required.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride explicitly sets the Dynamo runtime version for every<br />component in the generated DynamoGraphDeployment. Set this when<br />profilingConfig.profilerImage uses a non-semantic-version tag or digest, or<br />when its tag does not identify the Dynamo runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `enableGpuDiscovery` _boolean_ | EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.<br />DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always<br />attempted automatically. Setting this field has no effect - the operator will always try to discover<br />GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped<br />operator without permissions), manual hardware configuration is required regardless of this setting. |  | Optional: \{\} <br /> |
-| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. |  |  |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. |  | Optional: \{\} <br /> |
 | `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows customizing metadata for the auto-created DGD.<br />Only applicable when AutoApply is true. |  | Optional: \{\} <br /> |
 | `v1beta2` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta2 losslessly preserves a native v1beta2 spec while this object is<br />represented through v1alpha1. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta2 API. |  | Type: object <br />Optional: \{\} <br /> |
 
@@ -560,8 +560,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `state` _[DGDRState](#dgdrstate)_ | State is a high-level textual status of the deployment request lifecycle. |  | Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed] <br />Optional: \{\} <br /> |
 | `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: \{\} <br /> |
-| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
+| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  | Optional: \{\} <br /> |
 | `profilingResults` _string_ | ProfilingResults contains a reference to the ConfigMap holding profiling data.<br />Format: "configmap/\<name\>" |  | Optional: \{\} <br /> |
 | `generatedDeployment` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata.<br />For mocker backends, this contains the mocker DGD spec. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 | `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD when AutoApply is true.<br />Contains name, namespace, state, and creation status of the managed DGD. |  | Optional: \{\} <br /> |
@@ -588,9 +588,9 @@ This prevents conflicts when multiple autoscaling mechanisms are in play.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoGraphDeploymentScalingAdapter` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentScalingAdapterSpec](#dynamographdeploymentscalingadapterspec)_ |  |  |  |
-| `status` _[DynamoGraphDeploymentScalingAdapterStatus](#dynamographdeploymentscalingadapterstatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentScalingAdapterSpec](#dynamographdeploymentscalingadapterspec)_ |  |  | Optional: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentScalingAdapterStatus](#dynamographdeploymentscalingadapterstatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentScalingAdapterSpec
@@ -665,7 +665,7 @@ _Appears in:_
 | `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | MaxItems: 100 <br />Optional: \{\} <br /> |
 | `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
-| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
+| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | TopologyConstraint is the deployment-level topology constraint.<br />When set, topologyProfile is required and names the ClusterTopology CR to use.<br />packDomain is optional here — it can be omitted when only services carry constraints.<br />Services without their own topologyConstraint inherit from this value. |  | Optional: \{\} <br /> |
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | Experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between releases. |  | Optional: \{\} <br /> |
@@ -685,8 +685,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
-| `state` _[DGDState](#dgdstate)_ | State is a high-level textual status of the graph deployment lifecycle. | initializing | Enum: [initializing pending successful failed] <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
+| `state` _[DGDState](#dgdstate)_ | State is a high-level textual status of the graph deployment lifecycle. | initializing | Enum: [initializing pending successful failed] <br />Required: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  | Optional: \{\} <br /> |
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
@@ -708,9 +708,9 @@ DynamoModel is the Schema for the dynamo models API
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `DynamoModel` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoModelSpec](#dynamomodelspec)_ |  |  |  |
-| `status` _[DynamoModelStatus](#dynamomodelstatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoModelSpec](#dynamomodelspec)_ |  |  | Optional: \{\} <br /> |
+| `status` _[DynamoModelStatus](#dynamomodelstatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### DynamoModelSpec
@@ -746,9 +746,9 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  | Optional: \{\} <br /> |
-| `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
+| `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  | Required: \{\} <br /> |
 | `loraFallbackCoveredEndpoints` _integer_ | LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints<br />covered by a capable prefill during a rolling upgrade. These endpoints are<br />excluded from ReadyEndpoints because they cannot serve the adapter directly. |  | Optional: \{\} <br /> |
-| `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
+| `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  | Required: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
 
 
@@ -786,9 +786,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
+| `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  | Required: \{\} <br /> |
 | `podName` _string_ | PodName is the name of the pod serving this endpoint |  | Optional: \{\} <br /> |
-| `ready` _boolean_ | Ready indicates whether this endpoint is ready to serve traffic.<br />For LoRA models: true only if this endpoint's lifecycle request succeeded.<br />For base models: always false (no probing performed). |  |  |
+| `ready` _boolean_ | Ready indicates whether this endpoint is ready to serve traffic.<br />For LoRA models: true only if this endpoint's lifecycle request succeeded.<br />For base models: always false (no probing performed). |  | Required: \{\} <br /> |
 | `loraFallbackCovered` _boolean_ | LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage<br />LoRAs itself is covered by a capable prefill in the same topology during a<br />rolling upgrade. It does not make this endpoint ready to serve the adapter. |  | Optional: \{\} <br /> |
 
 
@@ -806,8 +806,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `annotations` _object (keys:string, values:string)_ |  |  |  |
-| `labels` _object (keys:string, values:string)_ |  |  |  |
+| `annotations` _object (keys:string, values:string)_ |  |  | Optional: \{\} <br /> |
+| `labels` _object (keys:string, values:string)_ |  |  | Optional: \{\} <br /> |
 
 
 #### ExtraPodSpec
@@ -824,7 +824,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `mainContainer` _[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)_ |  |  |  |
+| `mainContainer` _[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)_ |  |  | Optional: \{\} <br /> |
 
 
 #### FailoverSpec
@@ -845,7 +845,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled activates failover mode. |  |  |
+| `enabled` _boolean_ | Enabled activates failover mode. |  | Required: \{\} <br /> |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology.<br />intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).<br />interPod: a dedicated GMS weight server pod + engine pods per rank (requires Grove). | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
 | `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine pods per rank.<br />Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).<br />NumShadows is only meaningful for mode=interPod; intraPod uses a fixed<br />1 primary + 1 shadow sidecar layout and any value other than 1 is<br />rejected at admission time. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
 
@@ -885,7 +885,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name identifies this client pod. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `name` _string_ | Name identifies this client pod. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures the pod to run as a GMS client. |  | Schemaless: \{\} <br />Type: object <br /> |
 
 
@@ -921,7 +921,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled activates GMS wiring. GPU resources on client containers are<br />replaced with a DRA ResourceClaim for shared GPU access. |  |  |
+| `enabled` _boolean_ | Enabled activates GMS wiring. GPU resources on client containers are<br />replaced with a DRA ResourceClaim for shared GPU access. |  | Required: \{\} <br /> |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the GMS deployment topology. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
 | `deviceClassName` _string_ | DeviceClassName is the DRA DeviceClass to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
 | `extraClientContainers` _string array_ | ExtraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in pods rendered from the enclosing spec.<br />DGD/DCD services apply this to service pods. Automatic captures apply<br />SnapshotJob capture Pod clients before creating the SnapshotJob.<br />Every name must match a user-declared container in the enclosing pod spec. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
@@ -942,16 +942,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled exposes the component through an ingress or virtual service when true. |  |  |
-| `host` _string_ | Host is the base host name to route external traffic to this component. |  |  |
-| `useVirtualService` _boolean_ | UseVirtualService indicates whether to configure a service-mesh VirtualService instead of a standard Ingress. |  |  |
-| `virtualServiceGateway` _string_ | VirtualServiceGateway optionally specifies the gateway name to attach the VirtualService to. |  |  |
-| `hostPrefix` _string_ | HostPrefix is an optional prefix added before the host. |  |  |
-| `annotations` _object (keys:string, values:string)_ | Annotations to set on the generated Ingress/VirtualService resources. |  |  |
-| `labels` _object (keys:string, values:string)_ | Labels to set on the generated Ingress/VirtualService resources. |  |  |
-| `tls` _[IngressTLSSpec](#ingresstlsspec)_ | TLS holds the TLS configuration used by the Ingress/VirtualService. |  |  |
-| `hostSuffix` _string_ | HostSuffix is an optional suffix appended after the host. |  |  |
-| `ingressControllerClassName` _string_ | IngressControllerClassName selects the ingress controller class (e.g., "nginx"). |  |  |
+| `enabled` _boolean_ | Enabled exposes the component through an ingress or virtual service when true. |  | Optional: \{\} <br /> |
+| `host` _string_ | Host is the base host name to route external traffic to this component. |  | Optional: \{\} <br /> |
+| `useVirtualService` _boolean_ | UseVirtualService indicates whether to configure a service-mesh VirtualService instead of a standard Ingress. |  | Optional: \{\} <br /> |
+| `virtualServiceGateway` _string_ | VirtualServiceGateway optionally specifies the gateway name to attach the VirtualService to. |  | Optional: \{\} <br /> |
+| `hostPrefix` _string_ | HostPrefix is an optional prefix added before the host. |  | Optional: \{\} <br /> |
+| `annotations` _object (keys:string, values:string)_ | Annotations to set on the generated Ingress/VirtualService resources. |  | Optional: \{\} <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels to set on the generated Ingress/VirtualService resources. |  | Optional: \{\} <br /> |
+| `tls` _[IngressTLSSpec](#ingresstlsspec)_ | TLS holds the TLS configuration used by the Ingress/VirtualService. |  | Optional: \{\} <br /> |
+| `hostSuffix` _string_ | HostSuffix is an optional suffix appended after the host. |  | Optional: \{\} <br /> |
+| `ingressControllerClassName` _string_ | IngressControllerClassName selects the ingress controller class (e.g., "nginx"). |  | Optional: \{\} <br /> |
 
 
 #### IngressTLSSpec
@@ -967,7 +967,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  |  |
+| `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  | Optional: \{\} <br /> |
 
 
 #### KvTransferEnforcement
@@ -1006,7 +1006,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `clusterTopologyName` _string_ | ClusterTopologyName references a Grove ClusterTopology CR. The operator<br />reads the CR's topology levels and projects them through Dynamo-owned pod<br />labels for worker topology metadata. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 | `labelKey` _string_ | LabelKey is a Kubernetes node label key (e.g.<br />"topology.kubernetes.io/zone") whose value identifies the topology<br />domain for each worker. The operator copies the node label onto worker<br />pods so the runtime can publish it as worker metadata. The label<br />should correspond to the topology level named in `domain`. |  | MaxLength: 317 <br />MinLength: 1 <br />Pattern: `^(([a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]\{0,61\}[A-Za-z0-9])?)$` <br />Optional: \{\} <br /> |
-| `domain` _[TopologyDomain](#topologydomain)_ | Domain is the logical name for the topology level to enforce<br />(e.g. "zone", "rack"). The router uses this to match workers that<br />share the same value for the label identified by `labelKey`. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+| `domain` _[TopologyDomain](#topologydomain)_ | Domain is the logical name for the topology level to enforce<br />(e.g. "zone", "rack"). The router uses this to match workers that<br />share the same value for the label identified by `labelKey`. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 | `enforcement` _[KvTransferEnforcement](#kvtransferenforcement)_ | Enforcement controls how the selected prefill worker's topology is<br />applied to decode routing. "required" only allows decode workers in the<br />same topology domain as the selected prefill worker. "preferred" keeps<br />all decode workers eligible, but biases selection toward workers in the<br />same topology domain. Defaults to "required". | required | Enum: [required preferred] <br />Optional: \{\} <br /> |
 | `preferredWeight` _float_ | PreferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
@@ -1063,7 +1063,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `nodeCount` _integer_ | Indicates the number of nodes to deploy for multinode components.<br />Total number of GPUs is NumberOfNodes * GPU limit.<br />Must be greater than 1 and is immutable after creation. | 2 | Minimum: 2 <br /> |
+| `nodeCount` _integer_ | Indicates the number of nodes to deploy for multinode components.<br />Total number of GPUs is NumberOfNodes * GPU limit.<br />Must be greater than 1 and is immutable after creation. | 2 | Minimum: 2 <br />Optional: \{\} <br /> |
 
 
 #### PVC
@@ -1079,11 +1079,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `create` _boolean_ | Create indicates to create a new PVC |  |  |
+| `create` _boolean_ | Create indicates to create a new PVC |  | Optional: \{\} <br /> |
 | `name` _string_ | Name is the name of the PVC |  | Required: \{\} <br /> |
-| `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  |  |
-| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
-| `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
+| `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  | Optional: \{\} <br /> |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  | Optional: \{\} <br /> |
+| `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  | Optional: \{\} <br /> |
 
 
 #### PlacementScoreState
@@ -1143,7 +1143,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
+| `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Type: object <br />Optional: \{\} <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
 | `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0" |  | Required: \{\} <br /> |
 | `outputPVC` _string_ | OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.<br />If specified, all profiling artifacts (logs, plots, configs, raw data) will be written<br />to this PVC instead of an ephemeral emptyDir volume. This allows users to access<br />complete profiling results after the job completes by mounting the PVC.<br />The PVC must exist in the same namespace as the DGDR.<br />If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.<br />Note: ConfigMaps are still created regardless of this setting for planner integration. |  | Optional: \{\} <br /> |
@@ -1179,7 +1179,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | apiVersion is the Kubernetes API group and version of the provider schema.<br />Grove requires `grove.io/v1alpha1`. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `target` _string_ | target identifies the provider resource kind or embedded provider schema.<br />It may be omitted on input when the DGD location has one unambiguous target;<br />admission resolves and persists it. |  | Optional: \{\} <br /> |
-| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />targets accept `topologyConstraint`. Component contexts also accept<br />`spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on<br />PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the<br />deprecated component field preserves its value and leaves the update strategy unchanged.<br />Component contexts also accept rollingUpdate.maxUnavailable. |  | Required: \{\} <br />Type: object <br /> |
+| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />targets accept `topologyConstraint`. Component contexts also accept<br />`spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on<br />PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the<br />deprecated component field preserves its value and leaves the update strategy unchanged.<br />Component contexts also accept rollingUpdate.maxUnavailable. |  | Type: object <br />Required: \{\} <br /> |
 
 
 #### ResourceItem
@@ -1195,11 +1195,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `cpu` _string_ | CPU specifies the CPU resource request/limit (e.g., "1000m", "2") |  |  |
-| `memory` _string_ | Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi") |  |  |
-| `gpu` _string_ | GPU indicates the number of GPUs to request.<br />Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment. |  |  |
-| `gpuType` _string_ | GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"<br />By default if not specified, the GPU type is "nvidia.com/gpu" |  |  |
-| `custom` _object (keys:string, values:string)_ | Custom specifies additional custom resource requests/limits |  |  |
+| `cpu` _string_ | CPU specifies the CPU resource request/limit (e.g., "1000m", "2") |  | Optional: \{\} <br /> |
+| `memory` _string_ | Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi") |  | Optional: \{\} <br /> |
+| `gpu` _string_ | GPU indicates the number of GPUs to request.<br />Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment. |  | Optional: \{\} <br /> |
+| `gpuType` _string_ | GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"<br />By default if not specified, the GPU type is "nvidia.com/gpu" |  | Optional: \{\} <br /> |
+| `custom` _object (keys:string, values:string)_ | Custom specifies additional custom resource requests/limits |  | Optional: \{\} <br /> |
 
 
 #### Resources
@@ -1217,9 +1217,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `requests` _[ResourceItem](#resourceitem)_ | Requests specifies the minimum resources required by the component |  |  |
-| `limits` _[ResourceItem](#resourceitem)_ | Limits specifies the maximum resources allowed for the component |  |  |
-| `claims` _[ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core) array_ | Claims specifies resource claims for dynamic resource allocation |  |  |
+| `requests` _[ResourceItem](#resourceitem)_ | Requests specifies the minimum resources required by the component |  | Optional: \{\} <br /> |
+| `limits` _[ResourceItem](#resourceitem)_ | Limits specifies the maximum resources allowed for the component |  | Optional: \{\} <br /> |
+| `claims` _[ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core) array_ | Claims specifies resource claims for dynamic resource allocation |  | Optional: \{\} <br /> |
 
 
 #### Restart
@@ -1272,8 +1272,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `observedID` _string_ | ObservedID is the restart ID that has been observed and is being processed.<br />Matches the Restart.ID field in the spec. |  |  |
-| `phase` _[RestartPhase](#restartphase)_ | Phase is the phase of the restart. |  |  |
+| `observedID` _string_ | ObservedID is the restart ID that has been observed and is being processed.<br />Matches the Restart.ID field in the spec. |  | Optional: \{\} <br /> |
+| `phase` _[RestartPhase](#restartphase)_ | Phase is the phase of the restart. |  | Optional: \{\} <br /> |
 | `inProgress` _string array_ | InProgress contains the names of the services that are currently being restarted. |  | Optional: \{\} <br /> |
 
 
@@ -1290,7 +1290,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _[RestartStrategyType](#restartstrategytype)_ | Type specifies the restart strategy type. | Sequential | Enum: [Sequential Parallel] <br /> |
+| `type` _[RestartStrategyType](#restartstrategytype)_ | Type specifies the restart strategy type. | Sequential | Enum: [Sequential Parallel] <br />Optional: \{\} <br /> |
 | `order` _string array_ | Order specifies the order in which the services should be restarted. |  | Optional: \{\} <br /> |
 
 
@@ -1445,8 +1445,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
-| `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  |  |
+| `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br />Required: \{\} <br /> |
+| `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  | Required: \{\} <br /> |
 | `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | RuntimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers and<br />Grove-backed workers use the base namespace. During rolling updates, worker<br />status keeps the old active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
 | `servedModelName` _string_ | ServedModelName is the effective primary model identity exposed by this<br />component's serving role in combined mode. Native sidecars omit this field;<br />Kubernetes Planner reads their registered model identity. During rolling<br />updates, worker status keeps the old active revision until cutover completes. |  | Optional: \{\} <br /> |
@@ -1454,8 +1454,8 @@ _Appears in:_
 | `gpuPowerLimitWatts` _integer_ | GPUPowerLimitWatts is the effective per-GPU power limit propagated to the<br />component's Pods. Omission means no power limit is configured. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `gpusPerEngine` _integer_ | GPUsPerEngine is the number of GPUs assigned to one inference engine in a<br />service replica, across all of its nodes. Independent auxiliary GPU<br />allocations are excluded. A present zero means the engine itself has no<br />GPUs; consult GPUsPerReplica for auxiliary allocations. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `gpusPerReplica` _integer_ | GPUsPerReplica is the unique GPU allocation added when this service scales<br />by one replica, across all nodes, application and initialization phases,<br />and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod<br />scheduling footprint; shared DRA claims are counted once. A present zero<br />records a successful non-GPU resolution; omission means no current shape<br />is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
-| `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
+| `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br />Required: \{\} <br /> |
+| `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br />Required: \{\} <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas.<br />For Deployment: replicas ready for >= minReadySeconds.<br />For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.<br />Not available for PodClique or LeaderWorkerSet.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `scheduledReplicas` _integer_ | ScheduledReplicas is the number of replicas the backend scheduler has<br />scheduled, in Dynamo component-replica units. Optional; omitted (nil)<br />when the backend cannot derive it reliably. A nil value means "not<br />reported", never "zero scheduled". |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -1475,8 +1475,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `disabled` _boolean_ | Disabled, when true, opts out of mounting a shared-memory medium for the<br />component. When false (or unset), shared memory is enabled and Size is<br />required (enforced by the validating webhook). Size is ignored when<br />Disabled is true. |  |  |
-| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
+| `disabled` _boolean_ | Disabled, when true, opts out of mounting a shared-memory medium for the<br />component. When false (or unset), shared memory is enabled and Size is<br />required (enforced by the validating webhook). Size is ignored when<br />Disabled is true. |  | Optional: \{\} <br /> |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  | Optional: \{\} <br /> |
 
 
 #### SpecTopologyConstraint
@@ -1494,7 +1494,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `topologyProfile` _string_ | TopologyProfile is the name of the ClusterTopology CR that defines the<br />topology hierarchy for this deployment. |  | MinLength: 1 <br /> |
+| `topologyProfile` _string_ | TopologyProfile is the name of the ClusterTopology CR that defines the<br />topology hierarchy for this deployment. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `packDomain` _[TopologyDomain](#topologydomain)_ | PackDomain is the default topology domain to pack pods within.<br />Optional — omit when only services carry constraints. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 
 
@@ -1514,7 +1514,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `packDomain` _[TopologyDomain](#topologydomain)_ | PackDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | PackDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 
 
 #### TopologyDomain
@@ -1554,8 +1554,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: \{\} <br /> |
-| `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  |  |
-| `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false |  |
+| `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  | Optional: \{\} <br /> |
+| `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false | Optional: \{\} <br /> |
 
 
 
@@ -1761,7 +1761,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
+| `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br />Required: \{\} <br /> |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers<br />use the base namespace. During rolling updates, worker status keeps the old<br />active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
 | `servedModelName` _string_ | servedModelName is the effective primary model identity exposed by this<br />component's serving role in combined mode. Native sidecars omit this field;<br />Kubernetes Planner reads their registered model identity. During rolling<br />updates, worker status keeps the old active revision until cutover completes. |  | Optional: \{\} <br /> |
@@ -1769,8 +1769,8 @@ _Appears in:_
 | `gpuPowerLimitWatts` _integer_ | gpuPowerLimitWatts is the effective per-GPU power limit propagated to the<br />component's Pods. Omission means no power limit is configured. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `gpusPerEngine` _integer_ | gpusPerEngine is the number of GPUs assigned to one inference engine in a<br />component replica, across all of its nodes. Independent auxiliary GPU<br />allocations are excluded. A present zero means the engine itself has no<br />GPUs; consult gpusPerReplica for auxiliary allocations. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `gpusPerReplica` _integer_ | gpusPerReplica is the unique GPU allocation added when this component<br />scales by one replica, across all nodes, application and initialization<br />phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective<br />Pod scheduling footprint; shared DRA claims are counted once. A present<br />zero records a successful non-GPU resolution; omission means no current<br />shape is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `replicas` _integer_ | replicas is the total number of non-terminated replicas. |  | Minimum: 0 <br /> |
-| `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
+| `replicas` _integer_ | replicas is the total number of non-terminated replicas. |  | Minimum: 0 <br />Required: \{\} <br /> |
+| `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br />Required: \{\} <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the number of ready replicas. Populated for<br />`PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for<br />`PodCliqueScalingGroup`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | availableReplicas is the number of available replicas. Populated for<br />`Deployment` and `PodCliqueScalingGroup`; not available for<br />`PodClique` or `LeaderWorkerSet`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `scheduledReplicas` _integer_ | scheduledReplicas is the number of replicas the backend scheduler has<br />scheduled, expressed strictly in Dynamo component-replica units (not<br />raw backend pod counts). It is a diagnostic aid for distinguishing<br />capacity/scheduling shortfalls from runtime readiness.<br />It is optional and omitted (nil) when the active backend cannot derive<br />it reliably in component-replica units — for example before the backing<br />resource's status has been observed, or for backends that do not report<br />a scheduling count. A nil value therefore means "not reported", never<br />"zero scheduled"; consumers must not treat absence as a scheduling<br />failure. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -1928,8 +1928,8 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
 | `kind` _string_ | `DynamoComponentDeployment` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | spec defines the desired state for this Dynamo component deployment. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | spec defines the desired state for this Dynamo component deployment. |  | Optional: \{\} <br /> |
 
 
 #### v1beta1 DynamoComponentDeploymentSharedSpec
@@ -1992,7 +1992,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br /> |
+| `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in<br />podTemplate.spec.containers[name=main].image by default, or<br />podTemplate.spec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present.<br />With role PodTemplates, it applies to the main image in every selected template.<br />DGD admission requires it when any selected runtime image has no parseable semantic-version tag;<br />controller-generated DCDs may omit it.<br />Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical<br />MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
@@ -2030,9 +2030,9 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
 | `kind` _string_ | `DynamoGraphDeployment` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)_ | spec defines the desired state for this graph deployment. |  |  |
-| `status` _[DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)_ | status reflects the current observed state of this graph deployment. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)_ | spec defines the desired state for this graph deployment. |  | Optional: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)_ | status reflects the current observed state of this graph deployment. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentComponentRef
@@ -2100,9 +2100,9 @@ Lifecycle:
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  |  |
-| `status` _[DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)_ | Status reflects the current observed state of this deployment request. |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)_ | Spec defines the desired state for this deployment request. |  | Optional: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)_ | Status reflects the current observed state of this deployment request. |  | Optional: \{\} <br /> |
 
 
 #### v1beta1 DynamoGraphDeploymentRequestNativeSpec
@@ -2232,9 +2232,9 @@ version is handled by the operator's conversion webhook
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
 | `kind` _string_ | `DynamoGraphDeploymentScalingAdapter` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentScalingAdapterSpec](#dynamographdeploymentscalingadapterspec)_ |  |  |  |
-| `status` _[DynamoGraphDeploymentScalingAdapterStatus](#dynamographdeploymentscalingadapterstatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentScalingAdapterSpec](#dynamographdeploymentscalingadapterspec)_ |  |  | Optional: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentScalingAdapterStatus](#dynamographdeploymentscalingadapterstatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentScalingAdapterSpec
@@ -2269,7 +2269,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | replicas is the current number of replicas for the target component.<br />This is synced from the DGD's component replicas and is required for<br />the scale subresource. |  |  |
+| `replicas` _integer_ | replicas is the current number of replicas for the target component.<br />This is synced from the DGD's component replicas and is required for<br />the scale subresource. |  | Required: \{\} <br /> |
 | `selector` _string_ | selector is a label selector string for the pods managed by this<br />adapter. Required for HPA compatibility via the scale subresource. |  | Optional: \{\} <br /> |
 | `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | lastScaleTime is the last time the adapter scaled the target component. |  | Optional: \{\} <br /> |
 
@@ -2294,7 +2294,7 @@ _Appears in:_
 | `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
 | `components` _[DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env is prepended to every component's environment. Component-specific<br />env entries with the same name take precedence and may reference values<br />from this list. |  | Optional: \{\} <br /> |
-| `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
+| `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | topologyConstraint is the deployment-level topology constraint. When<br />set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology<br />CR to use. `spec.topologyConstraint.packDomain` is optional at this<br />level and can be omitted when only components carry constraints.<br />Components without their own `topologyConstraint` inherit from this value. |  | Optional: \{\} <br /> |
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
@@ -2315,7 +2315,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | observedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
-| `state` _[DGDState](#dgdstate)_ | state is a high-level textual status of the graph deployment lifecycle. | initializing | Enum: [initializing pending successful failed] <br /> |
+| `state` _[DGDState](#dgdstate)_ | state is a high-level textual status of the graph deployment lifecycle. | initializing | Enum: [initializing pending successful failed] <br />Required: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | conditions contains the latest observed conditions of the graph deployment.<br />Merged by type on patch updates. |  | Optional: \{\} <br /> |
 | `components` _object (keys:string, values:[ComponentReplicaStatus](#componentreplicastatus))_ | components contains per-component replica status information, keyed by component name. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | restart contains the status of a graph-level restart. |  | Optional: \{\} <br /> |
@@ -2428,7 +2428,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | name identifies this client pod. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `name` _string_ | name identifies this client pod. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate configures the pod to run as a GMS client. |  | Schemaless: \{\} <br />Type: object <br /> |
 
 
@@ -2603,7 +2603,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `clusterTopologyName` _string_ | clusterTopologyName references a Grove ClusterTopology CR. The operator<br />reads the CR's topology levels and projects them through Dynamo-owned pod<br />labels for worker topology metadata. |  | MinLength: 1 <br />Optional: \{\} <br /> |
 | `labelKey` _string_ | labelKey is a Kubernetes node label key (e.g.<br />"topology.kubernetes.io/zone") whose value identifies the topology<br />domain for each worker. The operator copies the node label onto worker<br />pods so the runtime can publish it as worker metadata. The label<br />should correspond to the topology level named in `domain`. |  | MaxLength: 317 <br />MinLength: 1 <br />Pattern: `^(([a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]\{0,61\}[A-Za-z0-9])?)$` <br />Optional: \{\} <br /> |
-| `domain` _[TopologyDomain](#topologydomain)_ | domain is the logical name for the topology level to enforce<br />(e.g. "zone", "rack"). The router uses this to match workers that<br />share the same value for the label identified by `labelKey`. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+| `domain` _[TopologyDomain](#topologydomain)_ | domain is the logical name for the topology level to enforce<br />(e.g. "zone", "rack"). The router uses this to match workers that<br />share the same value for the label identified by `labelKey`. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 | `enforcement` _[KvTransferEnforcement](#kvtransferenforcement)_ | enforcement controls how the selected prefill worker's topology is<br />applied to decode routing. "required" only allows decode workers in the<br />same topology domain as the selected prefill worker. "preferred" keeps<br />all decode workers eligible, but biases selection toward workers in the<br />same topology domain. Defaults to "required". | required | Enum: [required preferred] <br />Optional: \{\} <br /> |
 | `preferredWeight` _float_ | preferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
@@ -2622,7 +2622,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
+| `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
 | `experimental` _[LPXExperimentalSpec](#lpxexperimentalspec)_ | experimental groups opt-in LPX options whose API shape may change in<br />breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
@@ -2803,7 +2803,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `config` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Config is the full deployment configuration for this Pareto point. |  | Type: object <br /> |
+| `config` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Config is the full deployment configuration for this Pareto point. |  | Type: object <br />Required: \{\} <br /> |
 
 
 #### PlacementScoreState
@@ -2931,7 +2931,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | apiVersion is the Kubernetes API group and version of the provider schema.<br />Grove requires `grove.io/v1alpha1`. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `target` _string_ | target identifies the provider resource kind or embedded provider schema.<br />It may be omitted on input when the DGD location has one unambiguous target;<br />admission resolves and persists it. |  | Optional: \{\} <br /> |
-| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />targets accept `topologyConstraint`. Component contexts also accept<br />`spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on<br />PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the<br />deprecated component field preserves its value and leaves the update strategy unchanged.<br />Component contexts also accept rollingUpdate.maxUnavailable. |  | Required: \{\} <br />Type: object <br /> |
+| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />targets accept `topologyConstraint`. Component contexts also accept<br />`spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on<br />PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the<br />deprecated component field preserves its value and leaves the update strategy unchanged.<br />Component contexts also accept rollingUpdate.maxUnavailable. |  | Type: object <br />Required: \{\} <br /> |
 
 
 #### Restart
@@ -2985,8 +2985,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `observedID` _string_ | observedID is the restart ID currently being processed. Matches `Restart.id` in the spec. |  |  |
-| `phase` _[RestartPhase](#restartphase)_ | phase is the phase of the restart. |  |  |
+| `observedID` _string_ | observedID is the restart ID currently being processed. Matches `Restart.id` in the spec. |  | Optional: \{\} <br /> |
+| `phase` _[RestartPhase](#restartphase)_ | phase is the phase of the restart. |  | Optional: \{\} <br /> |
 | `inProgress` _string array_ | inProgress contains the names of the components currently being restarted. |  | Optional: \{\} <br /> |
 
 
@@ -3151,7 +3151,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `clusterTopologyName` _string_ | clusterTopologyName is the name of the ClusterTopology resource that<br />defines the topology hierarchy for this deployment. |  | MinLength: 1 <br /> |
+| `clusterTopologyName` _string_ | clusterTopologyName is the name of the ClusterTopology resource that<br />defines the topology hierarchy for this deployment. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the default topology domain to pack pods within.<br />Optional; omit when only components carry constraints. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 
 
@@ -3171,7 +3171,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 
 
 #### TopologyDomain
@@ -3282,8 +3282,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the executor-defined stable branch identifier. |  |  |
-| `rounds` _[RoundProgress](#roundprogress)_ | Rounds reports optimizer progress for this branch. |  |  |
+| `name` _string_ | Name is the executor-defined stable branch identifier. |  | Required: \{\} <br /> |
+| `rounds` _[RoundProgress](#roundprogress)_ | Rounds reports optimizer progress for this branch. |  | Required: \{\} <br /> |
 
 
 #### CandidateProgress
@@ -3299,8 +3299,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `paretoFront` _integer_ | ParetoFront is the number of feasible points on the current Pareto front. |  |  |
-| `published` _integer_ | Published is the number of Candidate resources currently referenced by this run. |  |  |
+| `paretoFront` _integer_ | ParetoFront is the number of feasible points on the current Pareto front. |  | Optional: \{\} <br /> |
+| `published` _integer_ | Published is the number of Candidate resources currently referenced by this run. |  | Optional: \{\} <br /> |
 
 
 #### DGDRRunPhase
@@ -3355,9 +3355,9 @@ DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta2` | | |
 | `kind` _string_ | `DynamoGraphDeploymentCandidate` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)_ |  |  |  |
-| `status` _[DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)_ |  |  | Required: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentCandidateSpec
@@ -3380,11 +3380,11 @@ _Appears in:_
 | `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
 | `components` _[DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env is prepended to every component's environment. Component-specific<br />env entries with the same name take precedence and may reference values<br />from this list. |  | Optional: \{\} <br /> |
-| `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
+| `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br />Optional: \{\} <br /> |
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | topologyConstraint is the deployment-level topology constraint. When<br />set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology<br />CR to use. `spec.topologyConstraint.packDomain` is optional at this<br />level and can be omitted when only components carry constraints.<br />Components without their own `topologyConstraint` inherit from this value. |  | Optional: \{\} <br /> |
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
-| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters are the resolved evaluation parameters for this point. |  | Type: object <br /> |
+| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters are the resolved evaluation parameters for this point. |  | Type: object <br />Required: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentCandidateStatus
@@ -3417,9 +3417,9 @@ DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment sear
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta2` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)_ |  |  |  |
-| `status` _[DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### v1beta2 DynamoGraphDeploymentRequestNativeSpec
@@ -3521,9 +3521,9 @@ DynamoGraphDeploymentRun is one immutable accepted DGDR request and its executio
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta2` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRun` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)_ |  |  |  |
-| `status` _[DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRunSpec
@@ -3585,13 +3585,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `scheduled` _integer_ | Scheduled is the number of unique evaluations accepted for execution. |  |  |
-| `running` _integer_ | Running is the number of evaluations currently executing. |  |  |
-| `feasible` _integer_ | Feasible is the number of completed evaluations that satisfy all constraints. |  |  |
-| `infeasible` _integer_ | Infeasible is the number of completed evaluations that violate at least one constraint. |  |  |
-| `failed` _integer_ | Failed is the number of evaluations that ended in an execution error. |  |  |
-| `unsupported` _integer_ | Unsupported is the number of configurations rejected as unsupported before evaluation. |  |  |
-| `cacheHits` _integer_ | CacheHits is the number of evaluations satisfied from a prior result. |  |  |
+| `scheduled` _integer_ | Scheduled is the number of unique evaluations accepted for execution. |  | Optional: \{\} <br /> |
+| `running` _integer_ | Running is the number of evaluations currently executing. |  | Optional: \{\} <br /> |
+| `feasible` _integer_ | Feasible is the number of completed evaluations that satisfy all constraints. |  | Optional: \{\} <br /> |
+| `infeasible` _integer_ | Infeasible is the number of completed evaluations that violate at least one constraint. |  | Optional: \{\} <br /> |
+| `failed` _integer_ | Failed is the number of evaluations that ended in an execution error. |  | Optional: \{\} <br /> |
+| `unsupported` _integer_ | Unsupported is the number of configurations rejected as unsupported before evaluation. |  | Optional: \{\} <br /> |
+| `cacheHits` _integer_ | CacheHits is the number of evaluations satisfied from a prior result. |  | Optional: \{\} <br /> |
 
 
 #### GPUHardwareSpec
@@ -3664,7 +3664,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name identifies the model in the syntax accepted by the selected backend. |  | MinLength: 1 <br /> |
+| `name` _string_ | Name identifies the model in the syntax accepted by the selected backend. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
 #### NativeSearchInput
@@ -3797,7 +3797,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the resource name. |  |  |
+| `name` _string_ | Name is the resource name. |  | Required: \{\} <br /> |
 | `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | UID is the resource UID. |  | Optional: \{\} <br /> |
 
 
@@ -3814,8 +3814,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `completed` _integer_ | Completed is the number of finished rounds. |  |  |
-| `total` _integer_ | Total is the number of planned rounds. |  |  |
+| `completed` _integer_ | Completed is the number of finished rounds. |  | Required: \{\} <br /> |
+| `total` _integer_ | Total is the number of planned rounds. |  | Required: \{\} <br /> |
 
 
 #### StaticWorkloadSpec
@@ -3897,8 +3897,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
-| `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  |  |
+| `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  | Required: \{\} <br /> |
+| `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  | Optional: \{\} <br /> |
 
 
 #### CheckpointSeccompConfiguration
@@ -3919,8 +3919,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `disabled` _boolean_ | Disabled, when true, suppresses seccomp profile injection entirely.<br />Use this for clusters where custom localhost profiles are not allowed<br />(e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle<br />io_uring natively. |  |  |
-| `profile` _string_ | Profile is the localhost seccomp profile path. Empty falls back to<br />DefaultSeccompProfile. Ignored when Disabled is true. |  |  |
+| `disabled` _boolean_ | Disabled, when true, suppresses seccomp profile injection entirely.<br />Use this for clusters where custom localhost profiles are not allowed<br />(e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle<br />io_uring natively. |  | Optional: \{\} <br /> |
+| `profile` _string_ | Profile is the localhost seccomp profile path. Empty falls back to<br />DefaultSeccompProfile. Ignored when Disabled is true. |  | Optional: \{\} <br /> |
 
 
 #### DRAConfiguration
@@ -3946,7 +3946,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled overrides auto-detection of the resource.k8s.io/v1 API.<br />nil = auto-detect. Setting true requires detection to also succeed (the<br />operator will exit at startup otherwise). |  |  |
+| `enabled` _boolean_ | Enabled overrides auto-detection of the resource.k8s.io/v1 API.<br />nil = auto-detect. Setting true requires detection to also succeed (the<br />operator will exit at startup otherwise). |  | Optional: \{\} <br /> |
 
 
 #### DiscoveryBackend
@@ -3979,7 +3979,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `backend` _[DiscoveryBackend](#discoverybackend)_ | Backend is the discovery backend: "kubernetes" or "etcd" | kubernetes |  |
+| `backend` _[DiscoveryBackend](#discoverybackend)_ | Backend is the discovery backend: "kubernetes" or "etcd" | kubernetes | Optional: \{\} <br /> |
 
 
 #### GPUConfiguration
@@ -3995,7 +3995,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `discoveryEnabled` _boolean_ | DiscoveryEnabled indicates whether GPU discovery is enabled | true |  |
+| `discoveryEnabled` _boolean_ | DiscoveryEnabled indicates whether GPU discovery is enabled | true | Optional: \{\} <br /> |
 
 
 #### GroveConfiguration
@@ -4011,8 +4011,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  |  |
-| `terminationDelay` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | TerminationDelay configures the termination delay for Grove PodCliqueSets | 15m |  |
+| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  | Optional: \{\} <br /> |
+| `terminationDelay` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | TerminationDelay configures the termination delay for Grove PodCliqueSets | 15m | Optional: \{\} <br /> |
 
 
 #### InfrastructureConfiguration
@@ -4028,20 +4028,20 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `natsAddress` _string_ | NATSAddress is the address of the NATS server |  |  |
-| `etcdAddress` _string_ | ETCDAddress is the address of the etcd server |  |  |
-| `modelExpressURL` _string_ | ModelExpressURL is the URL of the Model Express server to inject into all pods |  |  |
-| `prometheusEndpoint` _string_ | PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics |  |  |
-| `natsTLSCAPath` _string_ | NATSTLSCAPath is the CA certificate path for verifying the NATS server |  |  |
-| `natsTLSClientCertPath` _string_ | NATSTLSClientCertPath is the client certificate path for NATS mTLS |  |  |
-| `natsTLSClientKeyPath` _string_ | NATSTLSClientKeyPath is the client private key path for NATS mTLS |  |  |
-| `tcpTLSCertPath` _string_ | TCPTLSCertPath is the server certificate path for TCP TLS |  |  |
-| `tcpTLSKeyPath` _string_ | TCPTLSKeyPath is the server private key path for TCP TLS |  |  |
-| `tcpTLSCAPath` _string_ | TCPTLSCAPath is the CA certificate path for verifying TCP peers |  |  |
-| `tcpTLSClientCertPath` _string_ | TCPTLSClientCertPath is the client certificate path for TCP mTLS |  |  |
-| `tcpTLSClientKeyPath` _string_ | TCPTLSClientKeyPath is the client private key path for TCP mTLS |  |  |
-| `tcpTLSClientCAPath` _string_ | TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS) |  |  |
-| `tcpTLSServerName` _string_ | TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when<br />verifying the server certificate. Useful when dialing by IP (pod address)<br />to a server whose certificate has a DNS SAN. |  |  |
+| `natsAddress` _string_ | NATSAddress is the address of the NATS server |  | Required: \{\} <br /> |
+| `etcdAddress` _string_ | ETCDAddress is the address of the etcd server |  | Required: \{\} <br /> |
+| `modelExpressURL` _string_ | ModelExpressURL is the URL of the Model Express server to inject into all pods |  | Required: \{\} <br /> |
+| `prometheusEndpoint` _string_ | PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics |  | Required: \{\} <br /> |
+| `natsTLSCAPath` _string_ | NATSTLSCAPath is the CA certificate path for verifying the NATS server |  | Optional: \{\} <br /> |
+| `natsTLSClientCertPath` _string_ | NATSTLSClientCertPath is the client certificate path for NATS mTLS |  | Optional: \{\} <br /> |
+| `natsTLSClientKeyPath` _string_ | NATSTLSClientKeyPath is the client private key path for NATS mTLS |  | Optional: \{\} <br /> |
+| `tcpTLSCertPath` _string_ | TCPTLSCertPath is the server certificate path for TCP TLS |  | Optional: \{\} <br /> |
+| `tcpTLSKeyPath` _string_ | TCPTLSKeyPath is the server private key path for TCP TLS |  | Optional: \{\} <br /> |
+| `tcpTLSCAPath` _string_ | TCPTLSCAPath is the CA certificate path for verifying TCP peers |  | Optional: \{\} <br /> |
+| `tcpTLSClientCertPath` _string_ | TCPTLSClientCertPath is the client certificate path for TCP mTLS |  | Optional: \{\} <br /> |
+| `tcpTLSClientKeyPath` _string_ | TCPTLSClientKeyPath is the client private key path for TCP mTLS |  | Optional: \{\} <br /> |
+| `tcpTLSClientCAPath` _string_ | TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS) |  | Optional: \{\} <br /> |
+| `tcpTLSServerName` _string_ | TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when<br />verifying the server certificate. Useful when dialing by IP (pod address)<br />to a server whose certificate has a DNS SAN. |  | Optional: \{\} <br /> |
 
 
 #### IngressConfiguration
@@ -4057,10 +4057,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `virtualServiceGateway` _string_ | VirtualServiceGateway is the name of the Istio virtual service gateway |  |  |
-| `controllerClassName` _string_ | ControllerClassName is the ingress controller class name |  |  |
-| `controllerTLSSecretName` _string_ | ControllerTLSSecretName is the TLS secret for the ingress controller |  |  |
-| `hostSuffix` _string_ | HostSuffix is the suffix for ingress hostnames |  |  |
+| `virtualServiceGateway` _string_ | VirtualServiceGateway is the name of the Istio virtual service gateway |  | Required: \{\} <br /> |
+| `controllerClassName` _string_ | ControllerClassName is the ingress controller class name |  | Required: \{\} <br /> |
+| `controllerTLSSecretName` _string_ | ControllerTLSSecretName is the TLS secret for the ingress controller |  | Required: \{\} <br /> |
+| `hostSuffix` _string_ | HostSuffix is the suffix for ingress hostnames |  | Required: \{\} <br /> |
 
 
 #### IstioMeshConfiguration
@@ -4076,11 +4076,11 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `tlsMode` _string_ | TLSMode is the Istio TLS mode for DestinationRules.<br />Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL".<br />Defaults to "SIMPLE". |  |  |
-| `insecureSkipVerify` _boolean_ | InsecureSkipVerify skips TLS certificate verification in DestinationRules.<br />Defaults to true (matching upstream GAIE behavior with self-signed certs). |  |  |
-| `clientCertificate` _string_ | ClientCertificate is the path (in the istio-proxy sidecar's filesystem)<br />to the file holding the client-side TLS certificate used for mTLS.<br />REQUIRED when TLSMode is "MUTUAL"; ignored for other modes. |  |  |
-| `privateKey` _string_ | PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the<br />file holding the client-side TLS private key used for mTLS.<br />REQUIRED when TLSMode is "MUTUAL"; ignored for other modes. |  |  |
-| `caCertificates` _string_ | CaCertificates is the optional path (in the istio-proxy sidecar's<br />filesystem) to the file holding CA certificates used to verify the<br />server certificate. Used only when TLSMode is "MUTUAL"; for other modes<br />the field is ignored. |  |  |
+| `tlsMode` _string_ | TLSMode is the Istio TLS mode for DestinationRules.<br />Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL".<br />Defaults to "SIMPLE". |  | Required: \{\} <br /> |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify skips TLS certificate verification in DestinationRules.<br />Defaults to true (matching upstream GAIE behavior with self-signed certs). |  | Optional: \{\} <br /> |
+| `clientCertificate` _string_ | ClientCertificate is the path (in the istio-proxy sidecar's filesystem)<br />to the file holding the client-side TLS certificate used for mTLS.<br />REQUIRED when TLSMode is "MUTUAL"; ignored for other modes. |  | Optional: \{\} <br /> |
+| `privateKey` _string_ | PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the<br />file holding the client-side TLS private key used for mTLS.<br />REQUIRED when TLSMode is "MUTUAL"; ignored for other modes. |  | Optional: \{\} <br /> |
+| `caCertificates` _string_ | CaCertificates is the optional path (in the istio-proxy sidecar's<br />filesystem) to the file holding CA certificates used to verify the<br />server certificate. Used only when TLSMode is "MUTUAL"; for other modes<br />the field is ignored. |  | Optional: \{\} <br /> |
 
 
 #### KaiSchedulerConfiguration
@@ -4096,7 +4096,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  |  |
+| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  | Optional: \{\} <br /> |
 
 
 
@@ -4114,8 +4114,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled opts the operator into LPX request production. When true, startup<br />requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to<br />be installed separately. | false |  |
-| `modelRegistryURL` _string_ | ModelRegistryURL configures the location of the LPU model registry used by LPX.<br />Supported values are an absolute local path (or file:// URL) and gs:// URLs. |  |  |
+| `enabled` _boolean_ | Enabled opts the operator into LPX request production. When true, startup<br />requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to<br />be installed separately. | false | Optional: \{\} <br /> |
+| `modelRegistryURL` _string_ | ModelRegistryURL configures the location of the LPU model registry used by LPX.<br />Supported values are an absolute local path (or file:// URL) and gs:// URLs. |  | Required: \{\} <br /> |
 
 
 #### LWSConfiguration
@@ -4131,7 +4131,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  |  |
+| `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  | Optional: \{\} <br /> |
 
 
 #### LeaderElectionConfiguration
@@ -4147,9 +4147,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled enables leader election for controller manager | false |  |
-| `id` _string_ | ID is the leader election resource identity |  |  |
-| `namespace` _string_ | Namespace is the namespace for the leader election resource |  |  |
+| `enabled` _boolean_ | Enabled enables leader election for controller manager | false | Optional: \{\} <br /> |
+| `id` _string_ | ID is the leader election resource identity |  | Required: \{\} <br /> |
+| `namespace` _string_ | Namespace is the namespace for the leader election resource |  | Required: \{\} <br /> |
 
 
 #### LoggingConfiguration
@@ -4165,8 +4165,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `level` _string_ | Level is the log level (e.g., "info", "debug") | info |  |
-| `format` _string_ | Format is the log format (e.g., "json", "text") | json |  |
+| `level` _string_ | Level is the log level (e.g., "info", "debug") | info | Optional: \{\} <br /> |
+| `format` _string_ | Format is the log format (e.g., "json", "text") | json | Optional: \{\} <br /> |
 
 
 #### MPIConfiguration
@@ -4182,8 +4182,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sshSecretName` _string_ | SSHSecretName is the name of the secret containing the SSH key for MPI |  |  |
-| `sshSecretNamespace` _string_ | SSHSecretNamespace is the namespace where the MPI SSH secret is located |  |  |
+| `sshSecretName` _string_ | SSHSecretName is the name of the secret containing the SSH key for MPI |  | Required: \{\} <br /> |
+| `sshSecretNamespace` _string_ | SSHSecretNamespace is the namespace where the MPI SSH secret is located |  | Required: \{\} <br /> |
 
 
 #### MetricsServer
@@ -4199,9 +4199,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `bindAddress` _string_ | BindAddress is the address the server binds to |  |  |
-| `port` _integer_ | Port is the port the server listens on |  |  |
-| `secure` _boolean_ | Secure enables secure serving for the metrics endpoint.<br />nil = default to true (secure by default). |  |  |
+| `bindAddress` _string_ | BindAddress is the address the server binds to |  | Required: \{\} <br /> |
+| `port` _integer_ | Port is the port the server listens on |  | Required: \{\} <br /> |
+| `secure` _boolean_ | Secure enables secure serving for the metrics endpoint.<br />nil = default to true (secure by default). |  | Optional: \{\} <br /> |
 
 
 #### NamespaceConfiguration
@@ -4217,8 +4217,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restricted` _string_ | Restricted enables namespace-restricted mode for development and testing.<br />Namespace-restricted mode is not supported for production. |  |  |
-| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope configures the namespace ownership claim in namespace-restricted mode. |  |  |
+| `restricted` _string_ | Restricted enables namespace-restricted mode for development and testing.<br />Namespace-restricted mode is not supported for production. |  | Required: \{\} <br /> |
+| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope configures the namespace ownership claim in namespace-restricted mode. |  | Required: \{\} <br /> |
 
 
 #### NamespaceScopeConfiguration
@@ -4234,8 +4234,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `leaseDuration` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | LeaseDuration is the duration of namespace scope marker lease before expiration | 30s |  |
-| `leaseRenewInterval` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | LeaseRenewInterval is the interval for renewing namespace scope marker lease | 10s |  |
+| `leaseDuration` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | LeaseDuration is the duration of namespace scope marker lease before expiration | 30s | Optional: \{\} <br /> |
+| `leaseRenewInterval` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta)_ | LeaseRenewInterval is the interval for renewing namespace scope marker lease | 10s | Optional: \{\} <br /> |
 
 
 #### OperatorConfiguration
@@ -4252,22 +4252,22 @@ OperatorConfiguration is the Schema for the operator configuration.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `operator.config.dynamo.nvidia.com/v1alpha1` | | |
 | `kind` _string_ | `OperatorConfiguration` | | |
-| `server` _[ServerConfiguration](#serverconfiguration)_ | Server configuration (metrics, health probes, webhooks) |  |  |
-| `leaderElection` _[LeaderElectionConfiguration](#leaderelectionconfiguration)_ | Leader election configuration |  |  |
-| `namespace` _[NamespaceConfiguration](#namespaceconfiguration)_ | Namespace configuration (restricted vs cluster-wide) |  |  |
-| `orchestrators` _[OrchestratorConfiguration](#orchestratorconfiguration)_ | Orchestrator configuration with optional overrides |  |  |
-| `dra` _[DRAConfiguration](#draconfiguration)_ | DRA (Dynamic Resource Allocation) settings with optional override |  |  |
-| `infrastructure` _[InfrastructureConfiguration](#infrastructureconfiguration)_ | Service mesh and infrastructure addresses |  |  |
-| `ingress` _[IngressConfiguration](#ingressconfiguration)_ | Ingress configuration |  |  |
-| `serviceMesh` _[ServiceMeshConfiguration](#servicemeshconfiguration)_ | ServiceMesh configures automatic generation of service-mesh resources<br />(e.g., Istio DestinationRules) for EPP components. |  |  |
-| `rbac` _[RBACConfiguration](#rbacconfiguration)_ | RBAC configuration for cross-namespace resource management (cluster-wide mode) |  |  |
-| `mpi` _[MPIConfiguration](#mpiconfiguration)_ | MPI SSH secret configuration |  |  |
-| `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  |  |
-| `discovery` _[DiscoveryConfiguration](#discoveryconfiguration)_ | Discovery backend configuration |  |  |
-| `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  |  |
-| `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  |  |
-| `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  |  |
-| `lpx` _[LPXConfiguration](#lpxconfiguration)_ | LPX scheduler integration and model-registry configuration. |  |  |
+| `server` _[ServerConfiguration](#serverconfiguration)_ | Server configuration (metrics, health probes, webhooks) |  | Required: \{\} <br /> |
+| `leaderElection` _[LeaderElectionConfiguration](#leaderelectionconfiguration)_ | Leader election configuration |  | Required: \{\} <br /> |
+| `namespace` _[NamespaceConfiguration](#namespaceconfiguration)_ | Namespace configuration (restricted vs cluster-wide) |  | Required: \{\} <br /> |
+| `orchestrators` _[OrchestratorConfiguration](#orchestratorconfiguration)_ | Orchestrator configuration with optional overrides |  | Required: \{\} <br /> |
+| `dra` _[DRAConfiguration](#draconfiguration)_ | DRA (Dynamic Resource Allocation) settings with optional override |  | Optional: \{\} <br /> |
+| `infrastructure` _[InfrastructureConfiguration](#infrastructureconfiguration)_ | Service mesh and infrastructure addresses |  | Required: \{\} <br /> |
+| `ingress` _[IngressConfiguration](#ingressconfiguration)_ | Ingress configuration |  | Required: \{\} <br /> |
+| `serviceMesh` _[ServiceMeshConfiguration](#servicemeshconfiguration)_ | ServiceMesh configures automatic generation of service-mesh resources<br />(e.g., Istio DestinationRules) for EPP components. |  | Required: \{\} <br /> |
+| `rbac` _[RBACConfiguration](#rbacconfiguration)_ | RBAC configuration for cross-namespace resource management (cluster-wide mode) |  | Required: \{\} <br /> |
+| `mpi` _[MPIConfiguration](#mpiconfiguration)_ | MPI SSH secret configuration |  | Required: \{\} <br /> |
+| `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  | Required: \{\} <br /> |
+| `discovery` _[DiscoveryConfiguration](#discoveryconfiguration)_ | Discovery backend configuration |  | Required: \{\} <br /> |
+| `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  | Required: \{\} <br /> |
+| `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  | Required: \{\} <br /> |
+| `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  | Required: \{\} <br /> |
+| `lpx` _[LPXConfiguration](#lpxconfiguration)_ | LPX scheduler integration and model-registry configuration. |  | Required: \{\} <br /> |
 
 
 #### OrchestratorConfiguration
@@ -4283,10 +4283,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `grove` _[GroveConfiguration](#groveconfiguration)_ | Grove orchestrator configuration |  |  |
-| `lws` _[LWSConfiguration](#lwsconfiguration)_ | LWS orchestrator configuration |  |  |
-| `kaiScheduler` _[KaiSchedulerConfiguration](#kaischedulerconfiguration)_ | KaiScheduler configuration |  |  |
-| `volcanoScheduler` _[VolcanoSchedulerConfiguration](#volcanoschedulerconfiguration)_ | VolcanoScheduler configuration |  |  |
+| `grove` _[GroveConfiguration](#groveconfiguration)_ | Grove orchestrator configuration |  | Required: \{\} <br /> |
+| `lws` _[LWSConfiguration](#lwsconfiguration)_ | LWS orchestrator configuration |  | Required: \{\} <br /> |
+| `kaiScheduler` _[KaiSchedulerConfiguration](#kaischedulerconfiguration)_ | KaiScheduler configuration |  | Required: \{\} <br /> |
+| `volcanoScheduler` _[VolcanoSchedulerConfiguration](#volcanoschedulerconfiguration)_ | VolcanoScheduler configuration |  | Required: \{\} <br /> |
 
 
 #### RBACConfiguration
@@ -4302,9 +4302,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `plannerClusterRoleName` _string_ | PlannerClusterRoleName is the ClusterRole for planner |  |  |
-| `dgdrProfilingClusterRoleName` _string_ | DGDRProfilingClusterRoleName is the ClusterRole for DGDR profiling jobs |  |  |
-| `eppClusterRoleName` _string_ | EPPClusterRoleName is the ClusterRole for EPP |  |  |
+| `plannerClusterRoleName` _string_ | PlannerClusterRoleName is the ClusterRole for planner |  | Required: \{\} <br /> |
+| `dgdrProfilingClusterRoleName` _string_ | DGDRProfilingClusterRoleName is the ClusterRole for DGDR profiling jobs |  | Required: \{\} <br /> |
+| `eppClusterRoleName` _string_ | EPPClusterRoleName is the ClusterRole for EPP |  | Required: \{\} <br /> |
 
 
 #### SecurityConfiguration
@@ -4320,7 +4320,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enableHTTP2` _boolean_ | EnableHTTP2 enables HTTP/2 for metrics and webhook servers | false |  |
+| `enableHTTP2` _boolean_ | EnableHTTP2 enables HTTP/2 for metrics and webhook servers | false | Optional: \{\} <br /> |
 
 
 #### Server
@@ -4338,8 +4338,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `bindAddress` _string_ | BindAddress is the address the server binds to |  |  |
-| `port` _integer_ | Port is the port the server listens on |  |  |
+| `bindAddress` _string_ | BindAddress is the address the server binds to |  | Required: \{\} <br /> |
+| `port` _integer_ | Port is the port the server listens on |  | Required: \{\} <br /> |
 
 
 #### ServerConfiguration
@@ -4355,9 +4355,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ bindAddress:0.0.0.0 port:8080 secure:true \} |  |
-| `healthProbe` _[Server](#server)_ | Health probe server configuration | \{ bindAddress:0.0.0.0 port:8081 \} |  |
-| `webhook` _[WebhookServer](#webhookserver)_ | Webhook server configuration | \{ certDir:/tmp/k8s-webhook-server/serving-certs host:0.0.0.0 port:9443 \} |  |
+| `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ bindAddress:0.0.0.0 port:8080 secure:true \} | Optional: \{\} <br /> |
+| `healthProbe` _[Server](#server)_ | Health probe server configuration | \{ bindAddress:0.0.0.0 port:8081 \} | Optional: \{\} <br /> |
+| `webhook` _[WebhookServer](#webhookserver)_ | Webhook server configuration | \{ certDir:/tmp/k8s-webhook-server/serving-certs host:0.0.0.0 port:9443 \} | Optional: \{\} <br /> |
 
 
 #### ServiceMeshConfiguration
@@ -4376,9 +4376,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled overrides service mesh auto-detection. nil = auto-detect. |  |  |
-| `provider` _string_ | Provider selects the service mesh implementation. Supported: "istio", "".<br />Empty string disables service mesh resource generation. |  |  |
-| `istio` _[IstioMeshConfiguration](#istiomeshconfiguration)_ | Istio holds Istio-specific settings. Only used when Provider is "istio". |  |  |
+| `enabled` _boolean_ | Enabled overrides service mesh auto-detection. nil = auto-detect. |  | Optional: \{\} <br /> |
+| `provider` _string_ | Provider selects the service mesh implementation. Supported: "istio", "".<br />Empty string disables service mesh resource generation. |  | Required: \{\} <br /> |
+| `istio` _[IstioMeshConfiguration](#istiomeshconfiguration)_ | Istio holds Istio-specific settings. Only used when Provider is "istio". |  | Optional: \{\} <br /> |
 
 
 
@@ -4396,7 +4396,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets. |  |  |
+| `enabled` _boolean_ | EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets. |  | Optional: \{\} <br /> |
 
 
 #### WebhookServer
@@ -4412,13 +4412,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `bindAddress` _string_ | BindAddress is the address the server binds to |  |  |
-| `port` _integer_ | Port is the port the server listens on |  |  |
-| `host` _string_ | Host is the address the webhook server binds to |  |  |
-| `certDir` _string_ | CertDir is the directory containing TLS certificates |  |  |
-| `certProvisionMode` _[CertProvisionMode](#certprovisionmode)_ | CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external) | auto |  |
-| `secretName` _string_ | SecretName is the name of the Kubernetes Secret holding webhook TLS certificates | webhook-server-cert |  |
-| `serviceName` _string_ | ServiceName is the name of the Kubernetes Service fronting the webhook server.<br />Used to generate certificate SANs. Set by the Helm chart. |  |  |
+| `bindAddress` _string_ | BindAddress is the address the server binds to |  | Required: \{\} <br /> |
+| `port` _integer_ | Port is the port the server listens on |  | Required: \{\} <br /> |
+| `host` _string_ | Host is the address the webhook server binds to |  | Required: \{\} <br /> |
+| `certDir` _string_ | CertDir is the directory containing TLS certificates |  | Required: \{\} <br /> |
+| `certProvisionMode` _[CertProvisionMode](#certprovisionmode)_ | CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external) | auto | Optional: \{\} <br /> |
+| `secretName` _string_ | SecretName is the name of the Kubernetes Secret holding webhook TLS certificates | webhook-server-cert | Optional: \{\} <br /> |
+| `serviceName` _string_ | ServiceName is the name of the Kubernetes Service fronting the webhook server.<br />Used to generate certificate SANs. Set by the Helm chart. |  | Required: \{\} <br /> |
 
 
 # Operator Default Values Injection
