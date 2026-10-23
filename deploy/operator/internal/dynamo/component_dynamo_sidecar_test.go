@@ -670,3 +670,71 @@ func TestSGLangComponentTemplateCompatibility(t *testing.T) {
 		}
 	}
 }
+
+func TestSGLangMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
+	cases := []struct {
+		name         string
+		omitRole     Role
+		omitTemplate Role
+		reverseRoles bool
+	}{
+		{name: "complete roles"},
+		{name: "complete roles in reverse order", reverseRoles: true},
+		{name: "missing leader", omitRole: RoleLeader},
+		{name: "missing worker", omitRole: RoleWorker},
+		{name: "missing leader template", omitTemplate: RoleLeader},
+		{name: "missing worker template", omitTemplate: RoleWorker},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Author role templates with a runtime on every present Pod template")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+			}
+			roles := []Role{RoleLeader, RoleWorker}
+			if tc.reverseRoles {
+				roles = []Role{RoleWorker, RoleLeader}
+			}
+			for _, role := range roles {
+				if role == tc.omitRole {
+					continue
+				}
+				spec := v1beta1.ComponentRoleSpec{Name: string(role)}
+				if role != tc.omitTemplate {
+					spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers:     []corev1.Container{{Name: "main", Image: "engine:custom", Command: []string{"/launch.sh"}}},
+						InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}},
+					}}
+				}
+				component.Roles = append(component.Roles, spec)
+			}
+			original := component.DeepCopy()
+
+			t.Log("Require both role templates directly in sidecar validation")
+			complete := tc.omitRole == "" && tc.omitTemplate == ""
+			require.Equal(t, complete, HasCompleteMultinodeRolePodTemplates(component))
+			errs := ValidateDynamoSidecar(component, field.NewPath("spec"), "sglang")
+			if complete {
+				require.Empty(t, errs)
+			} else {
+				require.Equal(t, field.ErrorList{field.Required(field.NewPath("spec", "roles"), "SGLang multinode sidecars require complete leader and worker podTemplates")}, errs)
+			}
+
+			t.Log("Enforce the same requirement when rendering without webhook admission")
+			for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
+				for _, role := range []Role{RoleLeader, RoleWorker} {
+					pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(1))
+					if complete {
+						require.NoError(t, err)
+						require.NotNil(t, pod)
+					} else {
+						require.ErrorContains(t, err, "spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates")
+						require.Nil(t, pod)
+					}
+				}
+			}
+			require.Equal(t, original, component)
+		})
+	}
+}

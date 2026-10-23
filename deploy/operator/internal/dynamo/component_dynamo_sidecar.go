@@ -72,7 +72,7 @@ func ValidateDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpe
 	if component.Multinode != nil {
 		if backendFramework != string(BackendFrameworkSGLang) {
 			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang"))
-		} else if !HasRolePodTemplates(component) {
+		} else if !HasCompleteMultinodeRolePodTemplates(component) {
 			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "SGLang multinode sidecars require complete leader and worker podTemplates"))
 		} else if GetComponentDynamoSidecar(component) == nil {
 			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "the leader template must declare runtime to select sidecar mode"))
