@@ -953,10 +953,8 @@ class TestToolCallingMultiTurn:
             messages=messages,
             tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
             tool_choice={"type": "function", "function": {"name": "search_web"}},
-            # A named tool_choice still allows parallel calls, so the guided
-            # grammar accepts more <tool_call> blocks after the first one. This
-            # model then keeps calling the tool until max_tokens and finishes
-            # with 'length'. One call per step is what this chain needs.
+            # A named tool_choice still allows parallel calls; without this the
+            # model repeats <tool_call> blocks until max_tokens ('length').
             parallel_tool_calls=False,
         )
         assert_finish_reason(step1, {"tool_calls"})
