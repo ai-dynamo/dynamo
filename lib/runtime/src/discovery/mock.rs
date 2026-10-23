@@ -81,134 +81,7 @@ fn query_snapshot(
 
 /// Helper function to check if an instance matches a discovery query
 fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
-    match (instance, query) {
-        // Endpoint matching
-        (DiscoveryInstance::Endpoint(_), DiscoveryQuery::AllEndpoints) => true,
-        (DiscoveryInstance::Endpoint(inst), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
-            &inst.namespace == namespace
-        }
-        (
-            DiscoveryInstance::Endpoint(inst),
-            DiscoveryQuery::ComponentEndpoints {
-                namespace,
-                component,
-            },
-        ) => &inst.namespace == namespace && &inst.component == component,
-        (
-            DiscoveryInstance::Endpoint(inst),
-            DiscoveryQuery::Endpoint {
-                namespace,
-                component,
-                endpoint,
-            },
-        ) => {
-            &inst.namespace == namespace
-                && &inst.component == component
-                && &inst.endpoint == endpoint
-        }
-
-        // Model matching
-        (DiscoveryInstance::Model { .. }, DiscoveryQuery::AllModels) => true,
-        (
-            DiscoveryInstance::Model {
-                namespace: inst_ns, ..
-            },
-            DiscoveryQuery::NamespacedModels { namespace },
-        ) => inst_ns == namespace,
-        (
-            DiscoveryInstance::Model {
-                namespace: inst_ns,
-                component: inst_comp,
-                ..
-            },
-            DiscoveryQuery::ComponentModels {
-                namespace,
-                component,
-            },
-        ) => inst_ns == namespace && inst_comp == component,
-        (
-            DiscoveryInstance::Model {
-                namespace: inst_ns,
-                component: inst_comp,
-                endpoint: inst_ep,
-                ..
-            },
-            DiscoveryQuery::EndpointModels {
-                namespace,
-                component,
-                endpoint,
-            },
-        ) => inst_ns == namespace && inst_comp == component && inst_ep == endpoint,
-
-        // EventChannel matching - unified query
-        (
-            DiscoveryInstance::EventChannel {
-                scope: inst_scope,
-                topic: inst_topic,
-                ..
-            },
-            DiscoveryQuery::EventChannels(query),
-        ) => {
-            query.scope.as_ref().is_none_or(|scope| scope == inst_scope)
-                && query.topic.as_ref().is_none_or(|t| t == inst_topic)
-        }
-
-        (
-            DiscoveryInstance::EventSource {
-                scope: inst_scope,
-                topic: inst_topic,
-                ..
-            },
-            DiscoveryQuery::EventSources(query),
-        ) => {
-            query.scope.as_ref().is_none_or(|scope| scope == inst_scope)
-                && query.topic.as_ref().is_none_or(|t| t == inst_topic)
-        }
-
-        // Cross-type matches return false
-        (
-            DiscoveryInstance::Endpoint(_),
-            DiscoveryQuery::AllModels
-            | DiscoveryQuery::NamespacedModels { .. }
-            | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. }
-            | DiscoveryQuery::EventChannels(_)
-            | DiscoveryQuery::EventSources(_),
-        ) => false,
-        (
-            DiscoveryInstance::Model { .. },
-            DiscoveryQuery::AllEndpoints
-            | DiscoveryQuery::NamespacedEndpoints { .. }
-            | DiscoveryQuery::ComponentEndpoints { .. }
-            | DiscoveryQuery::Endpoint { .. }
-            | DiscoveryQuery::EventChannels(_)
-            | DiscoveryQuery::EventSources(_),
-        ) => false,
-        (
-            DiscoveryInstance::EventChannel { .. },
-            DiscoveryQuery::AllEndpoints
-            | DiscoveryQuery::NamespacedEndpoints { .. }
-            | DiscoveryQuery::ComponentEndpoints { .. }
-            | DiscoveryQuery::Endpoint { .. }
-            | DiscoveryQuery::AllModels
-            | DiscoveryQuery::NamespacedModels { .. }
-            | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. },
-        ) => false,
-        (DiscoveryInstance::EventChannel { .. }, DiscoveryQuery::EventSources(_)) => false,
-        (
-            DiscoveryInstance::EventSource { .. },
-            DiscoveryQuery::AllEndpoints
-            | DiscoveryQuery::NamespacedEndpoints { .. }
-            | DiscoveryQuery::ComponentEndpoints { .. }
-            | DiscoveryQuery::Endpoint { .. }
-            | DiscoveryQuery::AllModels
-            | DiscoveryQuery::NamespacedModels { .. }
-            | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. }
-            | DiscoveryQuery::EventChannels(_),
-        ) => false,
-    }
+    instance.matches(query)
 }
 
 #[async_trait]
@@ -227,7 +100,7 @@ impl Discovery for MockDiscovery {
             .find(|existing| existing.id() == instance_id)
         {
             match &instance {
-                DiscoveryInstance::Endpoint(_) => {
+                DiscoveryInstance::Endpoint(_) | DiscoveryInstance::LpxTopology { .. } => {
                     *existing = instance.clone();
                     state.publish();
                     return Ok(instance);

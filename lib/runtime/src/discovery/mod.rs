@@ -205,6 +205,12 @@ impl EventTransport {
 /// Supports hierarchical queries from all endpoints down to specific endpoints
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DiscoveryQuery {
+    /// PoC allocation snapshots, independent of inference endpoints and model cards.
+    LpxTopologies {
+        namespace: String,
+        deployment: String,
+        allocation: String,
+    },
     /// Query all endpoints in the system
     AllEndpoints,
     /// Query all endpoints in a specific namespace
@@ -551,6 +557,14 @@ impl EventSourceQuery {
 /// Represents the input to the register() operation
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoverySpec {
+    /// A complete LPX snapshot. The sidecar validates the versioned payload before publication.
+    LpxTopology {
+        namespace: String,
+        deployment: String,
+        allocation: String,
+        build: String,
+        payload: String,
+    },
     /// Endpoint specification for registration
     Endpoint {
         namespace: String,
@@ -646,6 +660,20 @@ impl DiscoverySpec {
     /// already carry a publisher-level ID, so they use that instead.
     pub fn into_instance(self, default_instance_id: u64) -> DiscoveryInstance {
         match self {
+            Self::LpxTopology {
+                namespace,
+                deployment,
+                allocation,
+                build,
+                payload,
+            } => DiscoveryInstance::LpxTopology {
+                namespace,
+                deployment,
+                allocation,
+                build,
+                payload,
+                instance_id: default_instance_id,
+            },
             Self::Endpoint {
                 namespace,
                 component,
@@ -712,6 +740,15 @@ impl DiscoverySpec {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum DiscoveryInstance {
+    /// Dedicated PoC topology record; never an inference worker or model card.
+    LpxTopology {
+        namespace: String,
+        deployment: String,
+        allocation: String,
+        build: String,
+        instance_id: u64,
+        payload: String,
+    },
     /// Registered endpoint instance - wraps the component::Instance directly
     Endpoint(crate::component::Instance),
     Model {
@@ -772,6 +809,7 @@ impl DiscoveryInstance {
     /// Returns the instance ID for this discovery instance
     pub fn instance_id(&self) -> u64 {
         match self {
+            Self::LpxTopology { instance_id, .. } => *instance_id,
             Self::Endpoint(inst) => inst.instance_id,
             Self::Model { instance_id, .. } => *instance_id,
             Self::EventChannel { instance_id, .. } => *instance_id,
@@ -787,6 +825,7 @@ impl DiscoveryInstance {
     {
         match self {
             Self::Model { card_json, .. } => Ok(serde_json::from_value(card_json.clone())?),
+            Self::LpxTopology { .. } => anyhow::bail!("Cannot deserialize model from LPX topology"),
             Self::Endpoint(_) => {
                 anyhow::bail!("Cannot deserialize model from Endpoint instance")
             }
@@ -803,6 +842,18 @@ impl DiscoveryInstance {
     /// Used for tracking, diffing, and removal events
     pub fn id(&self) -> DiscoveryInstanceId {
         match self {
+            Self::LpxTopology {
+                namespace,
+                deployment,
+                allocation,
+                instance_id,
+                ..
+            } => DiscoveryInstanceId::LpxTopology(LpxTopologyInstanceId {
+                namespace: namespace.clone(),
+                deployment: deployment.clone(),
+                allocation: allocation.clone(),
+                instance_id: *instance_id,
+            }),
             Self::Endpoint(inst) => DiscoveryInstanceId::Endpoint(EndpointInstanceId {
                 namespace: inst.namespace.clone(),
                 component: inst.component.clone(),
@@ -849,6 +900,19 @@ impl DiscoveryInstance {
     /// Returns true if this instance satisfies `query`.
     pub fn matches(&self, query: &DiscoveryQuery) -> bool {
         match (self, query) {
+            (
+                Self::LpxTopology {
+                    namespace: ns,
+                    deployment: dep,
+                    allocation: alloc,
+                    ..
+                },
+                DiscoveryQuery::LpxTopologies {
+                    namespace,
+                    deployment,
+                    allocation,
+                },
+            ) => ns == namespace && dep == deployment && alloc == allocation,
             (Self::Endpoint(_), DiscoveryQuery::AllEndpoints) => true,
             (Self::Endpoint(i), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
                 &i.namespace == namespace
@@ -1116,9 +1180,45 @@ impl ModelCardInstanceId {
     }
 }
 
+/// Identity of one allocation publisher. Build changes atomically replace its payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LpxTopologyInstanceId {
+    pub namespace: String,
+    pub deployment: String,
+    pub allocation: String,
+    pub instance_id: u64,
+}
+
+impl LpxTopologyInstanceId {
+    pub fn to_path(&self) -> String {
+        format!(
+            "{}/{}/{}/{:x}",
+            encode_event_segment(&self.namespace),
+            encode_event_segment(&self.deployment),
+            encode_event_segment(&self.allocation),
+            self.instance_id
+        )
+    }
+
+    pub fn from_path(path: &str) -> Result<Self> {
+        let parts: Vec<_> = path.split('/').collect();
+        anyhow::ensure!(
+            parts.len() == 4,
+            "invalid LPX topology key: expected four segments"
+        );
+        Ok(Self {
+            namespace: decode_event_segment(parts[0])?,
+            deployment: decode_event_segment(parts[1])?,
+            allocation: decode_event_segment(parts[2])?,
+            instance_id: u64::from_str_radix(parts[3], 16)?,
+        })
+    }
+}
+
 /// Union of instance identifiers for different discovery object types
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DiscoveryInstanceId {
+    LpxTopology(LpxTopologyInstanceId),
     Endpoint(EndpointInstanceId),
     Model(ModelCardInstanceId),
     EventChannel(EventChannelInstanceId),
@@ -1129,6 +1229,7 @@ impl DiscoveryInstanceId {
     /// Returns the raw instance_id regardless of variant type
     pub fn instance_id(&self) -> u64 {
         match self {
+            Self::LpxTopology(id) => id.instance_id,
             Self::Endpoint(eid) => eid.instance_id,
             Self::Model(mid) => mid.instance_id,
             Self::EventChannel(ecid) => ecid.instance_id,
@@ -1139,6 +1240,9 @@ impl DiscoveryInstanceId {
     /// Extracts the EndpointInstanceId, returning an error if this is a Model or EventChannel variant
     pub fn extract_endpoint_id(&self) -> Result<&EndpointInstanceId> {
         match self {
+            Self::LpxTopology(_) => {
+                anyhow::bail!("LPX topology is not an inference or event record")
+            }
             Self::Endpoint(eid) => Ok(eid),
             Self::Model(_) => anyhow::bail!("Expected Endpoint variant, got Model"),
             Self::EventChannel(_) => anyhow::bail!("Expected Endpoint variant, got EventChannel"),
@@ -1149,6 +1253,9 @@ impl DiscoveryInstanceId {
     /// Extracts the ModelCardInstanceId, returning an error if this is an Endpoint or EventChannel variant
     pub fn extract_model_id(&self) -> Result<&ModelCardInstanceId> {
         match self {
+            Self::LpxTopology(_) => {
+                anyhow::bail!("LPX topology is not an inference or event record")
+            }
             Self::Model(mid) => Ok(mid),
             Self::Endpoint(_) => anyhow::bail!("Expected Model variant, got Endpoint"),
             Self::EventChannel(_) => anyhow::bail!("Expected Model variant, got EventChannel"),
@@ -1159,6 +1266,9 @@ impl DiscoveryInstanceId {
     /// Extracts the EventChannelInstanceId, returning an error if this is an Endpoint or Model variant
     pub fn extract_event_channel_id(&self) -> Result<&EventChannelInstanceId> {
         match self {
+            Self::LpxTopology(_) => {
+                anyhow::bail!("LPX topology is not an inference or event record")
+            }
             Self::EventChannel(ecid) => Ok(ecid),
             Self::Endpoint(_) => anyhow::bail!("Expected EventChannel variant, got Endpoint"),
             Self::Model(_) => anyhow::bail!("Expected EventChannel variant, got Model"),
@@ -1171,6 +1281,9 @@ impl DiscoveryInstanceId {
     /// Extracts the EventSourceInstanceId, returning an error for other variants.
     pub fn extract_event_source_id(&self) -> Result<&EventSourceInstanceId> {
         match self {
+            Self::LpxTopology(_) => {
+                anyhow::bail!("LPX topology is not an inference or event record")
+            }
             Self::EventSource(esid) => Ok(esid),
             Self::Endpoint(_) => anyhow::bail!("Expected EventSource variant, got Endpoint"),
             Self::Model(_) => anyhow::bail!("Expected EventSource variant, got Model"),

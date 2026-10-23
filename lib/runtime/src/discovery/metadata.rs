@@ -36,6 +36,9 @@ where
 /// This struct holds all discovery registrations for this pod instance
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryMetadata {
+    /// Complete allocation snapshots published independently of inference registration.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    lpx_topologies: HashMap<String, DiscoveryInstance>,
     /// Registered endpoint instances (key: path string from EndpointInstanceId::to_path())
     #[serde(default, deserialize_with = "deserialize_null_default")]
     endpoints: HashMap<String, DiscoveryInstance>,
@@ -54,6 +57,7 @@ impl DiscoveryMetadata {
     /// Create a new empty metadata store
     pub fn new() -> Self {
         Self {
+            lpx_topologies: HashMap::new(),
             endpoints: HashMap::new(),
             model_cards: HashMap::new(),
             event_channels: HashMap::new(),
@@ -61,9 +65,29 @@ impl DiscoveryMetadata {
         }
     }
 
+    /// Atomically replace one publisher's complete snapshot.
+    pub fn register_lpx_topology(&mut self, instance: DiscoveryInstance) -> Result<()> {
+        let DiscoveryInstanceId::LpxTopology(id) = instance.id() else {
+            anyhow::bail!("expected an LPX topology record");
+        };
+        self.lpx_topologies.insert(id.to_path(), instance);
+        Ok(())
+    }
+
+    pub fn unregister_lpx_topology(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+        let DiscoveryInstanceId::LpxTopology(id) = instance.id() else {
+            anyhow::bail!("expected an LPX topology record");
+        };
+        self.lpx_topologies.remove(&id.to_path());
+        Ok(())
+    }
+
     /// Register an endpoint instance
     pub fn register_endpoint(&mut self, instance: DiscoveryInstance) -> Result<()> {
         match instance.id() {
+            DiscoveryInstanceId::LpxTopology(_) => {
+                anyhow::bail!("LPX topology requires its dedicated metadata API")
+            }
             DiscoveryInstanceId::Endpoint(key) => {
                 self.endpoints.insert(key.to_path(), instance);
                 Ok(())
@@ -86,6 +110,9 @@ impl DiscoveryMetadata {
         instance: DiscoveryInstance,
     ) -> Result<DiscoveryInstance> {
         match instance.id() {
+            DiscoveryInstanceId::LpxTopology(_) => {
+                anyhow::bail!("LPX topology requires its dedicated metadata API")
+            }
             DiscoveryInstanceId::Model(key) => match self.model_cards.entry(key.to_path()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(instance.clone());
@@ -130,6 +157,9 @@ impl DiscoveryMetadata {
     /// Unregister an endpoint instance
     pub fn unregister_endpoint(&mut self, instance: &DiscoveryInstance) -> Result<()> {
         match instance.id() {
+            DiscoveryInstanceId::LpxTopology(_) => {
+                anyhow::bail!("LPX topology requires its dedicated metadata API")
+            }
             DiscoveryInstanceId::Endpoint(key) => {
                 self.endpoints.remove(&key.to_path());
                 Ok(())
@@ -149,6 +179,9 @@ impl DiscoveryMetadata {
     /// Unregister a model card instance
     pub fn unregister_model_card(&mut self, instance: &DiscoveryInstance) -> Result<()> {
         match instance.id() {
+            DiscoveryInstanceId::LpxTopology(_) => {
+                anyhow::bail!("LPX topology requires its dedicated metadata API")
+            }
             DiscoveryInstanceId::Model(key) => {
                 self.model_cards.remove(&key.to_path());
                 Ok(())
@@ -168,6 +201,9 @@ impl DiscoveryMetadata {
     /// Register an event channel instance
     pub fn register_event_channel(&mut self, instance: DiscoveryInstance) -> Result<()> {
         match instance.id() {
+            DiscoveryInstanceId::LpxTopology(_) => {
+                anyhow::bail!("LPX topology requires its dedicated metadata API")
+            }
             DiscoveryInstanceId::EventChannel(key) => {
                 self.event_channels.insert(key.to_path(), instance);
                 Ok(())
@@ -187,6 +223,9 @@ impl DiscoveryMetadata {
     /// Unregister an event channel instance
     pub fn unregister_event_channel(&mut self, instance: &DiscoveryInstance) -> Result<()> {
         match instance.id() {
+            DiscoveryInstanceId::LpxTopology(_) => {
+                anyhow::bail!("LPX topology requires its dedicated metadata API")
+            }
             DiscoveryInstanceId::EventChannel(key) => {
                 self.event_channels.remove(&key.to_path());
                 Ok(())
@@ -206,6 +245,9 @@ impl DiscoveryMetadata {
     /// Register a semantic event source instance.
     pub fn register_event_source(&mut self, instance: DiscoveryInstance) -> Result<()> {
         match instance.id() {
+            DiscoveryInstanceId::LpxTopology(_) => {
+                anyhow::bail!("LPX topology requires its dedicated metadata API")
+            }
             DiscoveryInstanceId::EventSource(key) => {
                 let path = key.to_path();
                 match self.event_sources.entry(path) {
@@ -233,6 +275,9 @@ impl DiscoveryMetadata {
     /// Unregister one exact semantic event source incarnation.
     pub fn unregister_event_source(&mut self, instance: &DiscoveryInstance) -> Result<()> {
         match instance.id() {
+            DiscoveryInstanceId::LpxTopology(_) => {
+                anyhow::bail!("LPX topology requires its dedicated metadata API")
+            }
             DiscoveryInstanceId::EventSource(key) => {
                 self.event_sources.remove(&key.to_path());
                 Ok(())
@@ -276,6 +321,7 @@ impl DiscoveryMetadata {
             .chain(self.model_cards.values())
             .chain(self.event_channels.values())
             .chain(self.event_sources.values())
+            .chain(self.lpx_topologies.values())
             .cloned()
             .collect()
     }
@@ -283,6 +329,7 @@ impl DiscoveryMetadata {
     /// Filter this metadata by query
     pub fn filter(&self, query: &DiscoveryQuery) -> Vec<DiscoveryInstance> {
         let all_instances = match query {
+            DiscoveryQuery::LpxTopologies { .. } => self.lpx_topologies.values().cloned().collect(),
             DiscoveryQuery::AllEndpoints
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
@@ -721,5 +768,72 @@ mod tests {
         assert_eq!(metadata.get_all_endpoints().len(), 1);
         assert_eq!(metadata.get_all_model_cards().len(), 1);
         assert_eq!(metadata.get_all_event_channels().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod lpx_topology_tests {
+    use super::*;
+    use crate::discovery::DiscoverySpec;
+
+    fn topology(replica: &str, build: &str, payload: &str) -> DiscoveryInstance {
+        DiscoverySpec::LpxTopology {
+            namespace: "serving".into(),
+            deployment: "deployment-uid".into(),
+            allocation: replica.into(),
+            build: build.into(),
+            payload: payload.into(),
+        }
+        .into_instance(17)
+    }
+
+    fn query(replica: &str) -> DiscoveryQuery {
+        DiscoveryQuery::LpxTopologies {
+            namespace: "serving".into(),
+            deployment: "deployment-uid".into(),
+            allocation: replica.into(),
+        }
+    }
+
+    #[test]
+    fn topology_survives_dwm_serialization_without_inference_registration() {
+        let mut metadata = DiscoveryMetadata::new();
+        let expected = topology("replica-0", "build-a", "complete-snapshot");
+        metadata.register_lpx_topology(expected.clone()).unwrap();
+        let wire = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(wire["lpx_topologies"].as_object().unwrap().len(), 1);
+        let discovered: DiscoveryMetadata = serde_json::from_value(wire).unwrap();
+        assert_eq!(discovered.filter(&query("replica-0")), vec![expected]);
+        assert!(discovered.filter(&DiscoveryQuery::AllEndpoints).is_empty());
+        assert!(discovered.filter(&DiscoveryQuery::AllModels).is_empty());
+        assert!(discovered.filter(&query("replica-1")).is_empty());
+    }
+
+    #[test]
+    fn replacement_is_one_complete_snapshot_and_does_not_cross_replicas() {
+        let mut metadata = DiscoveryMetadata::new();
+        metadata
+            .register_lpx_topology(topology("replica-0", "build-a", "old"))
+            .unwrap();
+        let sibling = topology("replica-1", "build-a", "sibling");
+        metadata.register_lpx_topology(sibling.clone()).unwrap();
+        let updated = topology("replica-0", "build-b", "new-complete");
+        metadata.register_lpx_topology(updated.clone()).unwrap();
+        assert_eq!(metadata.filter(&query("replica-0")), vec![updated.clone()]);
+        assert_eq!(metadata.filter(&query("replica-1")), vec![sibling.clone()]);
+        metadata.unregister_lpx_topology(&updated).unwrap();
+        assert!(metadata.filter(&query("replica-0")).is_empty());
+        assert_eq!(metadata.get_all(), vec![sibling]);
+    }
+
+    #[test]
+    fn old_and_null_dwm_metadata_have_no_topology() {
+        for wire in [
+            serde_json::json!({}),
+            serde_json::json!({"lpx_topologies": null}),
+        ] {
+            let metadata: DiscoveryMetadata = serde_json::from_value(wire).unwrap();
+            assert!(metadata.filter(&query("replica-0")).is_empty());
+        }
     }
 }

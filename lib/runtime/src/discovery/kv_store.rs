@@ -13,12 +13,13 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventScope,
-    EventSourceInstanceId, ModelCardInstanceId, classify_discovery_change, encode_event_segment,
-    model_with_updated_taints, resync_discovery_events, validate_event_source_reregistration,
-    validate_model_reregistration,
+    EventSourceInstanceId, LpxTopologyInstanceId, ModelCardInstanceId, classify_discovery_change,
+    encode_event_segment, model_with_updated_taints, resync_discovery_events,
+    validate_event_source_reregistration, validate_model_reregistration,
 };
 use crate::storage::kv;
 
+const LPX_TOPOLOGIES_BUCKET: &str = "v1/lpx_topologies";
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
@@ -109,6 +110,17 @@ impl KVStoreDiscovery {
     /// Extract prefix for querying based on discovery query
     fn query_prefix(query: &DiscoveryQuery) -> String {
         match query {
+            DiscoveryQuery::LpxTopologies {
+                namespace,
+                deployment,
+                allocation,
+            } => format!(
+                "{}/{}/{}/{}",
+                LPX_TOPOLOGIES_BUCKET,
+                encode_event_segment(namespace),
+                encode_event_segment(deployment),
+                encode_event_segment(allocation)
+            ),
             DiscoveryQuery::AllEndpoints => INSTANCES_BUCKET.to_string(),
             DiscoveryQuery::NamespacedEndpoints { namespace } => {
                 format!("{}/{}", INSTANCES_BUCKET, namespace)
@@ -206,7 +218,13 @@ impl KVStoreDiscovery {
     }
 
     fn bucket_for_prefix(prefix: &str) -> &'static str {
-        if prefix == INSTANCES_BUCKET
+        if prefix == LPX_TOPOLOGIES_BUCKET
+            || prefix
+                .strip_prefix(LPX_TOPOLOGIES_BUCKET)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            LPX_TOPOLOGIES_BUCKET
+        } else if prefix == INSTANCES_BUCKET
             || prefix
                 .strip_prefix(INSTANCES_BUCKET)
                 .is_some_and(|suffix| suffix.starts_with('/'))
@@ -237,27 +255,29 @@ impl KVStoreDiscovery {
 
     fn parse_instance_id_from_key(key_str: &str, bucket_name: &str) -> Option<DiscoveryInstanceId> {
         let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
-        let parsed = match bucket_name {
-            INSTANCES_BUCKET => {
-                EndpointInstanceId::from_path(relative_key).map(DiscoveryInstanceId::Endpoint)
-            }
-            MODELS_BUCKET => {
-                ModelCardInstanceId::from_path(relative_key).map(DiscoveryInstanceId::Model)
-            }
-            EVENT_CHANNELS_BUCKET => EventChannelInstanceId::from_path(relative_key)
-                .map(DiscoveryInstanceId::EventChannel),
-            EVENT_SOURCES_BUCKET => {
-                EventSourceInstanceId::from_path(relative_key).map(DiscoveryInstanceId::EventSource)
-            }
-            _ => {
-                tracing::warn!(
-                    key = %key_str,
-                    bucket = bucket_name,
-                    "Unknown discovery bucket for delete/resync key"
-                );
-                return None;
-            }
-        };
+        let parsed =
+            match bucket_name {
+                LPX_TOPOLOGIES_BUCKET => LpxTopologyInstanceId::from_path(relative_key)
+                    .map(DiscoveryInstanceId::LpxTopology),
+                INSTANCES_BUCKET => {
+                    EndpointInstanceId::from_path(relative_key).map(DiscoveryInstanceId::Endpoint)
+                }
+                MODELS_BUCKET => {
+                    ModelCardInstanceId::from_path(relative_key).map(DiscoveryInstanceId::Model)
+                }
+                EVENT_CHANNELS_BUCKET => EventChannelInstanceId::from_path(relative_key)
+                    .map(DiscoveryInstanceId::EventChannel),
+                EVENT_SOURCES_BUCKET => EventSourceInstanceId::from_path(relative_key)
+                    .map(DiscoveryInstanceId::EventSource),
+                _ => {
+                    tracing::warn!(
+                        key = %key_str,
+                        bucket = bucket_name,
+                        "Unknown discovery bucket for delete/resync key"
+                    );
+                    return None;
+                }
+            };
 
         parsed
             .inspect_err(|err| {
@@ -410,6 +430,22 @@ impl Discovery for KVStoreDiscovery {
         let is_model = matches!(&instance, DiscoveryInstance::Model { .. });
 
         let (bucket_name, key_path) = match &instance {
+            DiscoveryInstance::LpxTopology {
+                namespace,
+                deployment,
+                allocation,
+                instance_id,
+                ..
+            } => (
+                LPX_TOPOLOGIES_BUCKET,
+                LpxTopologyInstanceId {
+                    namespace: namespace.clone(),
+                    deployment: deployment.clone(),
+                    allocation: allocation.clone(),
+                    instance_id: *instance_id,
+                }
+                .to_path(),
+            ),
             DiscoveryInstance::Endpoint(inst) => {
                 let key = Self::endpoint_key(inst);
                 tracing::debug!(
@@ -530,6 +566,29 @@ impl Discovery for KVStoreDiscovery {
             bucket_name,
             key_path
         );
+        if matches!(instance, DiscoveryInstance::LpxTopology { .. }) {
+            for _ in 0..8 {
+                if let Some(existing) = bucket.get(&key).await? {
+                    if existing.as_ref() == instance_json.as_slice() {
+                        return Ok(instance);
+                    }
+                    match bucket
+                        .compare_and_replace(&key, existing, instance_json.clone().into())
+                        .await
+                    {
+                        Ok(_) => return Ok(instance),
+                        Err(kv::StoreError::Retry) => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                } else if matches!(
+                    bucket.insert(&key, instance_json.clone().into(), 0).await?,
+                    kv::StoreOutcome::Created(_)
+                ) {
+                    return Ok(instance);
+                }
+            }
+            return Err(kv::StoreError::Retry.into());
+        }
         // Use revision 0 for initial registration
         let outcome = match bucket.insert(&key, instance_json.into(), 0).await {
             Ok(outcome) => outcome,
@@ -582,6 +641,22 @@ impl Discovery for KVStoreDiscovery {
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let (bucket_name, key_path) = match &instance {
+            DiscoveryInstance::LpxTopology {
+                namespace,
+                deployment,
+                allocation,
+                instance_id,
+                ..
+            } => (
+                LPX_TOPOLOGIES_BUCKET,
+                LpxTopologyInstanceId {
+                    namespace: namespace.clone(),
+                    deployment: deployment.clone(),
+                    allocation: allocation.clone(),
+                    instance_id: *instance_id,
+                }
+                .to_path(),
+            ),
             DiscoveryInstance::Endpoint(inst) => {
                 let key = Self::endpoint_key(inst);
                 tracing::debug!(
@@ -1534,5 +1609,55 @@ mod tests {
         let taints = card_json["runtime_config"]["taints"].as_array().unwrap();
         assert!(taints.contains(&serde_json::json!("third")));
         assert!(!taints.contains(&serde_json::json!("second")));
+    }
+}
+
+#[cfg(test)]
+mod lpx_snapshot_contract {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_list_replace_and_remove_snapshot_without_inference_endpoints() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let make = |payload: &str| DiscoverySpec::LpxTopology {
+            namespace: "n/s".into(),
+            deployment: "uid".into(),
+            allocation: "r/0".into(),
+            build: "immutable-build".into(),
+            payload: payload.into(),
+        };
+        let query = DiscoveryQuery::LpxTopologies {
+            namespace: "n/s".into(),
+            deployment: "uid".into(),
+            allocation: "r/0".into(),
+        };
+        client
+            .register(make("first-complete-snapshot"))
+            .await
+            .unwrap();
+        let updated = client
+            .register(make("second-complete-snapshot"))
+            .await
+            .unwrap();
+        assert_eq!(
+            client.list(query.clone()).await.unwrap(),
+            vec![updated.clone()]
+        );
+        assert!(
+            client
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            client
+                .list(DiscoveryQuery::AllModels)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        client.unregister(updated).await.unwrap();
+        assert!(client.list(query).await.unwrap().is_empty());
     }
 }

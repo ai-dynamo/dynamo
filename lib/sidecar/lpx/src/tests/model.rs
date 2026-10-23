@@ -6,7 +6,7 @@
 use clap::Parser;
 
 use super::*;
-use crate::args::Args;
+use crate::args::{Args, ServeArgs};
 use crate::pb;
 
 /// Applies `mutate` to a healthy server in `mode` and expects a rejection
@@ -30,8 +30,11 @@ fn assert_rejected(
     }
 }
 
-fn parse(extra: &[&str]) -> Args {
-    Args::try_parse_from(argv("127.0.0.1:50051", extra)).expect("arguments parse")
+fn parse(extra: &[&str]) -> ServeArgs {
+    Args::try_parse_from(argv("127.0.0.1:50051", extra))
+        .expect("arguments parse")
+        .serve()
+        .expect("serving arguments")
 }
 
 /// Any engine name is served as reported, trimmed, and names the engine in the

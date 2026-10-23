@@ -1,0 +1,145 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+// LPX partition topology, version 1.
+//
+// PoC: ServerInfo.extra["lpx_topology"] is a base64-encoded TopologyPayload.
+// The allocation leader exports it before inference readiness. Its sidecar
+// validates and publishes the complete payload in dedicated DWM metadata.
+// This is an explicit LPX exception to OpenEngine's optional-extra contract.
+// TopologyService is ONLY a pod-local consumer API. There is no cross-pod RPC.
+// A matching published snapshot suffices; no fresh Agent response is required.
+//
+// Compatibility: changes within v1 are additive. Never renumber or reuse a field
+// or enum number; reserve removed ones. Any other change needs a new package.
+
+syntax = "proto3";
+
+package lpx.topology.v1;
+
+service TopologyService
+{
+  // Returns the allocation's complete topology.
+  //
+  // Status codes:
+  // - OK: `snapshot` is complete. The server never returns a partial map.
+  // - UNAVAILABLE: no complete snapshot exists yet, or the authority cannot be
+  //   discovered. Callers retry until their own
+  //   topology-acquisition deadline.
+  // - FAILED_PRECONDITION: the authority's snapshot does not match `expected`,
+  //   or it is invalid, unsupported, or ambiguous. Callers fail without retrying.
+  // - INVALID_ARGUMENT: the request is malformed, for example because a server
+  //   that needs `expected` to scope its lookup received an incomplete one.
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+}
+
+message GetSnapshotRequest
+{
+  // The identity the caller expects. Every non-empty field must equal the
+  // snapshot's; a mismatch is FAILED_PRECONDITION. A conductor-side server
+  // requires all three fields, because it finds the authority by them.
+  Identity expected = 1;
+}
+
+message GetSnapshotResponse
+{
+  Snapshot snapshot = 1;
+}
+
+message Snapshot
+{
+  Identity identity = 1;
+
+  // One entry per compiler partition that the allocation executes or owns,
+  // sorted by `partition_id`. Consumers look partitions up by ID and never
+  // infer anything from their order.
+  repeated Partition partitions = 2;
+}
+
+// Every field is non-empty, at most 512 bytes, and contains no ASCII control
+// characters.
+message Identity
+{
+  // The deployment: the UID of the DynamoGraphDeployment.
+  string deployment = 1;
+
+  // The allocation (replica): "<PodCliqueScalingGroup name>-<replica index>",
+  // the Grove scaling-group replica that holds the Agents and the conductors
+  // that use them.
+  string allocation = 2;
+
+  // The immutable model build: the build ID that the compiled bundle records.
+  string build = 3;
+}
+
+message Partition
+{
+  // The compiler (source) partition ID.
+  uint32 partition_id = 1;
+
+  oneof placement
+  {
+    // The allocation executes this partition at these endpoints.
+    Execution execution = 2;
+
+    // This partition belongs to a chain that another partition executes as
+    // one unit. It has no endpoints of its own.
+    ChainMember chain_member = 3;
+  }
+}
+
+message Execution
+{
+  // The number of Agent hosts that execute the partition; at least 1.
+  uint32 node_count = 1;
+
+  // The partition service that a conductor opens sessions with, on the
+  // partition's leader host.
+  Endpoint control = 2;
+
+  // Present only when the partition owns transferred state, such as
+  // sliding-window attention (SWA) state, and accepts it at this endpoint.
+  Endpoint state_ingress = 3;
+}
+
+message ChainMember
+{
+  // The `partition_id` of the partition that executes the chain. It is an
+  // Execution entry of the same snapshot.
+  uint32 owner_partition_id = 1;
+}
+
+message Endpoint
+{
+  // A DNS name or an IP address literal. IPv6 literals have no brackets.
+  string host = 1;
+
+  // A TCP port in 1-65535.
+  uint32 port = 2;
+
+  // What the endpoint speaks.
+  Protocol protocol = 3;
+}
+
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+
+  // Hydra's partition listener (`--port`): conductor sessions over control
+  // plane v4 or NIXL.
+  PROTOCOL_HYDRA_CONTROL = 1;
+
+  // Hydra's state-ingress listener (`--state-rdma-port`): state plan discovery
+  // and the state sideband.
+  PROTOCOL_HYDRA_STATE = 2;
+
+  // The LPUD remoted service of the partition's first host. Quasar drives
+  // these partitions itself; conductors do not connect to them.
+  PROTOCOL_LPUD_REMOTED = 3;
+}
+
+// Complete required LPX PoC extension. Standard padded RFC 4648 base64 encodes
+// this message in a StringValue. DWM preserves that string without alteration.
+message TopologyPayload {
+  uint32 schema_version = 1; // Exactly 1. Missing and unknown versions are errors.
+  Snapshot snapshot = 2;
+}

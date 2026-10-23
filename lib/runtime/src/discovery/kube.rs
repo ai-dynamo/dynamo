@@ -227,6 +227,10 @@ impl Discovery for KubeDiscoveryClient {
         let original_state = metadata.clone();
 
         let registered_instance = match &instance {
+            DiscoveryInstance::LpxTopology { .. } => {
+                metadata.register_lpx_topology(instance.clone())?;
+                instance.clone()
+            }
             DiscoveryInstance::Endpoint(inst) => {
                 tracing::info!(
                     "Registering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
@@ -340,6 +344,7 @@ impl Discovery for KubeDiscoveryClient {
         let original_state = metadata.clone();
 
         match &instance {
+            DiscoveryInstance::LpxTopology { .. } => metadata.unregister_lpx_topology(&instance)?,
             DiscoveryInstance::Endpoint(inst) => {
                 tracing::info!(
                     "Unregistering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
@@ -413,6 +418,25 @@ impl Discovery for KubeDiscoveryClient {
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         tracing::debug!("KubeDiscoveryClient::list called with query={:?}", query);
 
+        if matches!(query, DiscoveryQuery::LpxTopologies { .. }) {
+            // LPX PoC: topology describes deterministic placement, not engine
+            // readiness. Read its dedicated DWM field directly, including while
+            // the Agent restarts. Pod ownership bounds the snapshot's lifetime.
+            // Ordinary endpoint/model queries retain the readiness join below.
+            let api: Api<DynamoWorkerMetadata> =
+                Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+            let records = api.list(&ListParams::default()).await?;
+            let mut instances = Vec::new();
+            for record in records {
+                if record.metadata.deletion_timestamp.is_some() {
+                    continue;
+                }
+                let metadata = crd::deserialize_metadata(record.spec.data)?;
+                instances.extend(metadata.filter(&query));
+            }
+            return Ok(instances);
+        }
+
         // Before the initial sync, list_state is empty whatever the cluster holds.
         self.await_daemon_ready(None).await?;
         let state = self.list_state.read().await;
@@ -433,6 +457,10 @@ impl Discovery for KubeDiscoveryClient {
         query: DiscoveryQuery,
         cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
+        anyhow::ensure!(
+            !matches!(query, DiscoveryQuery::LpxTopologies { .. }),
+            "LPX topology supports startup snapshots only, not watches"
+        );
         use broadcast::error::RecvError;
         use tokio::sync::mpsc;
 
@@ -657,6 +685,72 @@ mod tests {
         assert!(discovery.check_connection().await.is_ok());
         available.store(false, Ordering::Release);
         assert!(discovery.check_connection().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn published_topology_is_available_before_inference_readiness() {
+        use axum::{body::Body, http::Response};
+        let topology = DiscoverySpec::LpxTopology {
+            namespace: "ns".into(),
+            deployment: "deployment".into(),
+            allocation: "allocation-0".into(),
+            build: "immutable-build".into(),
+            payload: "complete-payload".into(),
+        }
+        .into_instance(7);
+        let other_replica = DiscoverySpec::LpxTopology {
+            namespace: "ns".into(),
+            deployment: "deployment".into(),
+            allocation: "allocation-1".into(),
+            build: "immutable-build".into(),
+            payload: "other-replica".into(),
+        }
+        .into_instance(8);
+        let mut metadata = DiscoveryMetadata::new();
+        metadata.register_lpx_topology(topology.clone()).unwrap();
+        metadata.register_lpx_topology(other_replica).unwrap();
+        metadata
+            .register_endpoint(endpoint_instance(7, "127.0.0.1:8000"))
+            .unwrap();
+        let cr = build_cr("agent", "agent", "agent-uid", &metadata).unwrap();
+        let body = serde_json::json!({
+            "apiVersion":"nvidia.com/v1alpha1", "kind":"DynamoWorkerMetadataList",
+            "metadata":{"resourceVersion":"1"}, "items":[cr],
+        })
+        .to_string();
+        let (mut client, state) = client_with(&[]);
+        client.kube_client = KubeClient::new(
+            tower::service_fn(move |request: axum::http::Request<kube::client::Body>| {
+                assert_eq!(request.method(), "GET");
+                assert_eq!(
+                    request.uri().path(),
+                    "/apis/nvidia.com/v1alpha1/namespaces/ns/dynamoworkermetadatas"
+                );
+                let body = body.clone();
+                async move { Ok::<_, std::convert::Infallible>(Response::new(Body::from(body))) }
+            }),
+            "ns",
+        );
+        let records = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.list(DiscoveryQuery::LpxTopologies {
+                namespace: "ns".into(),
+                deployment: "deployment".into(),
+                allocation: "allocation-0".into(),
+            }),
+        )
+        .await
+        .expect("topology must not wait for inference discovery readiness")
+        .unwrap();
+        assert_eq!(records, vec![topology]);
+        state.send_replace(DaemonState::Ready);
+        assert!(
+            client
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
