@@ -139,7 +139,9 @@ def assert_decision_body(body, model, dialect):
             assert_distribution(list(answer["probabilities"].values()))
         if dialect == "systemone":
             probability = urgent["noul"]
+            assert route["type"] == "choice"
             assert urgent["type"] == "noul"
+            assert severity["type"] == "score"
             assert severity["legend"] == {"0": "Low", "1": "Moderate", "2": "High"}
             assert body["usage"]["input_tokens"] > 0
             assert body["usage"]["output_tokens"] == 0
