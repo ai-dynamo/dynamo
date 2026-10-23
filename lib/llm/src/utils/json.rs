@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Sorts object keys at every depth and keeps array order, so that equal JSON
-/// values serialize to the same bytes for checksum and fingerprint inputs.
-pub(crate) fn canonicalize_json(value: &mut serde_json::Value) {
+/// Sorts object keys at every depth before serialization for checksums and fingerprints.
+/// Array order and scalar values, including number representations, stay unchanged.
+pub(crate) fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Array(values) => {
-            values.iter_mut().for_each(canonicalize_json);
+            values.iter_mut().for_each(canonicalize_json_object_keys);
         }
         serde_json::Value::Object(map) => {
-            map.values_mut().for_each(canonicalize_json);
+            map.values_mut().for_each(canonicalize_json_object_keys);
             map.sort_keys();
         }
         _ => {}
@@ -18,14 +18,16 @@ pub(crate) fn canonicalize_json(value: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_json;
+    use super::canonicalize_json_object_keys;
     use serde_json::json;
 
+    /// Serializes a value after sorting its object keys.
     fn canonical_string(mut value: serde_json::Value) -> String {
-        canonicalize_json(&mut value);
+        canonicalize_json_object_keys(&mut value);
         value.to_string()
     }
 
+    /// Checks key order through several levels of objects.
     #[test]
     fn sorts_nested_object_keys() {
         assert_eq!(
@@ -34,32 +36,14 @@ mod tests {
         );
     }
 
+    /// Checks nested keys while preserving array order and scalar values.
     #[test]
     fn sorts_objects_inside_arrays() {
         assert_eq!(
-            canonical_string(json!({"list": [{"b": 1, "a": 2}, [{"d": 3, "c": 4}]], "k": 1})),
-            r#"{"k":1,"list":[{"a":2,"b":1},[{"c":4,"d":3}]]}"#
-        );
-    }
-
-    #[test]
-    fn keeps_array_order() {
-        assert_eq!(canonical_string(json!([3, 1, 2])), "[3,1,2]");
-    }
-
-    #[test]
-    fn leaves_scalars_unchanged() {
-        assert_eq!(canonical_string(json!("text")), r#""text""#);
-        assert_eq!(canonical_string(json!(42)), "42");
-        assert_eq!(canonical_string(json!(-1.5)), "-1.5");
-        assert_eq!(canonical_string(json!(true)), "true");
-    }
-
-    #[test]
-    fn leaves_null_unchanged() {
-        assert_eq!(
-            canonical_string(json!({"b": null, "a": [null]})),
-            r#"{"a":[null],"b":null}"#
+            canonical_string(
+                json!({"list": [{"b": null, "a": 2}, [{"d": 3, "c": 4}], [3, 1, 2], "text", 42, -1.5, true, null], "k": 1})
+            ),
+            r#"{"k":1,"list":[{"a":2,"b":null},[{"c":4,"d":3}],[3,1,2],"text",42,-1.5,true,null]}"#
         );
     }
 }

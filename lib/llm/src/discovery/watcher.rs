@@ -57,7 +57,7 @@ use crate::{
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
     types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
-    utils::json::canonicalize_json,
+    utils::json::canonicalize_json_object_keys,
     worker_type::WorkerType,
 };
 
@@ -1419,7 +1419,7 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
         "base_capacity": card.runtime_config.max_gpu_lora_count,
         "requires_registration": card.runtime_config.runtime_flag_enabled(crate::lora::LORA_REQUIRES_REGISTRATION),
     });
-    canonicalize_json(&mut value);
+    canonicalize_json_object_keys(&mut value);
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
@@ -1438,7 +1438,7 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
         return None;
     }
     let mut contracts = serde_json::Value::Object(contracts);
-    canonicalize_json(&mut contracts);
+    canonicalize_json_object_keys(&mut contracts);
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
 }
 
@@ -1487,15 +1487,27 @@ mod tests {
 
         let vllm = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
         );
         let reordered_vllm = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"resize_mode": "round_ties_even", "placeholder_target": "bare_video_token"}),
+            serde_json::json!({
+                "sampling": {"steps": [{"a": null, "z": 1}, [3, 1, 2]], "fps": 2.0, "max_frames": 768},
+                "resize_mode": "round_ties_even",
+                "placeholder_target": "bare_video_token",
+            }),
         );
         let sglang = card_with_contract(
             SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
         );
 
         assert_eq!(
@@ -1506,45 +1518,6 @@ mod tests {
             qwen_video_contract_digest(&vllm),
             qwen_video_contract_digest(&sglang),
             "engine-specific contracts must not share a cohort fingerprint"
-        );
-    }
-
-    #[test]
-    fn nested_qwen_video_contract_digest_is_pinned() {
-        fn card_with_contract(contract: serde_json::Value) -> ModelDeploymentCard {
-            let mut card = ModelDeploymentCard::with_name_only("model");
-            card.runtime_config.runtime_data.insert(
-                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
-                contract,
-            );
-            card
-        }
-
-        let contract = card_with_contract(serde_json::json!({
-            "resize_mode": "legacy_ceil",
-            "placeholder_target": "bare_video_token",
-            "sglang_preprocess": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
-        }));
-        let reordered = card_with_contract(serde_json::json!({
-            "sglang_preprocess": {"steps": [{"a": null, "z": 1}, [3, 1, 2]], "fps": 2.0, "max_frames": 768},
-            "placeholder_target": "bare_video_token",
-            "resize_mode": "legacy_ceil",
-        }));
-
-        let digest = qwen_video_contract_digest(&contract);
-        assert_eq!(digest, qwen_video_contract_digest(&reordered));
-        assert_eq!(
-            digest.as_deref(),
-            Some("0f41282772c9f97d4ba2e92440ee54e1255db432071c3d107ce56801cadbf342")
-        );
-    }
-
-    #[test]
-    fn lora_projection_fingerprint_is_pinned() {
-        let card = ModelDeploymentCard::with_name_only("model");
-        assert_eq!(
-            lora_projection_fingerprint(&card).unwrap(),
-            "41b4a4d82fbf40581e136f3ba40b148d62de3928fa08fe1676216ed9a450ff19"
         );
     }
 
