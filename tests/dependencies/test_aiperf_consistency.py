@@ -90,9 +90,22 @@ def test_pillow_floor_accepts_aiperf_requirement() -> None:
     )
     floors = [spec.version for spec in pin.specifier if spec.operator == ">="]
     assert len(floors) == 1, "Expected one inclusive Pillow minimum version"
-    # AIPerf 0.13.0 still limits Pillow to the 12.3 patch series. Revisit its
-    # constraint before raising the shared floor now that overrides are gone.
-    assert floors[0] in SpecifierSet("~=12.3.0"), (
-        f"Pillow floor {floors[0]} is outside AIPerf 0.13.0's ~=12.3.0 range; "
-        "update AIPerf or restore an explicit override before raising the floor"
-    )
+    # AIPerf 0.13.0 limits Pillow to the 12.3 patch series, so a floor outside
+    # that range needs an override in every image that resolves AIPerf.
+    if floors[0] in SpecifierSet("~=12.3.0"):
+        return
+    for image in ("frontend", "planner"):
+        overrides = ROOT / f"container/deps/overrides.{image}.txt"
+        assert overrides.is_file(), (
+            f"Pillow floor {floors[0]} is outside AIPerf 0.13.0's ~=12.3.0 range; "
+            f"restore {overrides.name} or update AIPerf"
+        )
+        override = next(
+            Requirement(line)
+            for line in overrides.read_text(encoding="utf-8").splitlines()
+            if line.startswith("pillow")
+        )
+        assert floors[0] in override.specifier, (
+            f"{overrides.name} pins {override.specifier}, which excludes the "
+            f"Pillow floor {floors[0]}"
+        )
