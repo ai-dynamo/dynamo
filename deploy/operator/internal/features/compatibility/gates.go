@@ -23,6 +23,13 @@ import semver "github.com/Masterminds/semver/v3"
 // first reconciled / created the DGD resource).
 
 var (
+	// FrontendStartupProbe pins generated startup probes to newly created graphs.
+	// The published 1.6 operator did not render this default, even for 1.6 runtimes.
+	FrontendStartupProbe = Gate{
+		Name:             "FrontendStartupProbe",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
+
 	// GroveNativeMinAvailable enables native availability defaults for newly created Grove workloads.
 	// Existing graphs retain their persisted minimum form. This gate does not select a rollout strategy.
 	GroveNativeMinAvailable = Gate{
