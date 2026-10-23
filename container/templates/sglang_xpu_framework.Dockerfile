@@ -77,9 +77,9 @@ RUN curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused -o /tmp/miniforge.s
     bash /tmp/miniforge.sh -b -p ${CONDA_DIR} && \
     rm /tmp/miniforge.sh && \
     CONDA_SSL_VERIFY=/etc/ssl/certs/ca-certificates.crt \
-        ${CONDA_DIR}/bin/conda install -y -n base ca-certificates=2026.10.19 certifi=2026.10.19 && \
+        ${CONDA_DIR}/bin/conda install -y -n base ca-certificates=2026.10.23 certifi=2026.10.23 && \
     ${CONDA_DIR}/bin/python -m pip install --no-deps --upgrade pip==26.2.2 && \
-    ${CONDA_DIR}/bin/conda create -y -n sglang python=${PYTHON_VERSION} ca-certificates=2026.10.19 certifi=2026.10.19 && \
+    ${CONDA_DIR}/bin/conda create -y -n sglang python=${PYTHON_VERSION} ca-certificates=2026.10.23 certifi=2026.10.23 && \
     ${CONDA_DIR}/bin/conda run -n sglang conda install -y pip && \
     ${CONDA_DIR}/envs/sglang/bin/python -m pip install --no-deps --upgrade pip==26.2.2
 
