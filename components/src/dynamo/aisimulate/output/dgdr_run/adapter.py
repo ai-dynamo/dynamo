@@ -41,6 +41,7 @@ selection policy is a separate piece of work and is rejected explicitly.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -50,7 +51,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NoReturn, Protocol
 
 import yaml
 from aisimulate.output_adapter import (
@@ -82,16 +83,37 @@ _MAX_RENDER_ATTEMPTS = 3
 _MAX_ERROR_MESSAGE = 500
 _WRITE_RETRY_BACKOFF = 1.0
 _ID_HEX_LENGTH = 12
+# Metric names the adapter derives itself. They are reserved: a measurement AISimulate resolves under
+# one of these names is replaced by the adapter's value (and logged), never merged with it.
+_RESERVED_METRICS = ("score", "usedGpus", "objectives")
 
 
 class CandidateRecordLike(Protocol):
-    """The subset of aisimulate's ``CandidateRecord`` this adapter reads."""
+    """The subset of aisimulate's ``CandidateRecord`` this adapter reads (read-only)."""
 
-    candidate_id: str
-    status: Any  # aisimulate.sweeper.result.CandidateStatus
-    score: float | None
-    used_gpus: int | None
-    config: dict[str, Any]
+    @property
+    def candidate_id(self) -> str:
+        ...
+
+    @property
+    def status(self) -> Any:
+        ...  # aisimulate.sweeper.result.CandidateStatus
+
+    @property
+    def score(self) -> float | None:
+        ...
+
+    @property
+    def used_gpus(self) -> int | None:
+        ...
+
+    @property
+    def config(self) -> Mapping[str, Any]:
+        ...
+
+    @property
+    def metrics(self) -> Mapping[str, float | None]:
+        ...
 
 
 def _plain(value: Any) -> Any:
@@ -179,7 +201,9 @@ class DGDRRunOutputConfig(BaseModel):
     runtime_image: str = Field(min_length=1)
     runtime_version_override: str | None = None
     num_gpus_per_node: int = Field(gt=0)
-    max_candidates: int = Field(default=5, ge=1)
+    # The already-defaulted spec.recommendation.maxCandidates (API range 1..100). The adapter owns
+    # no default of its own: a missing value must fail, not silently change the cardinality.
+    max_candidates: int = Field(ge=1, le=100)
     snapshot_interval_seconds: float = Field(default=5.0, ge=0)
 
     def generation_options(self) -> DGDGenerationOptions:
@@ -312,10 +336,22 @@ class DGDRRunOutputAdapter:
             return None
         parameters = _plain(dict(record.config))
         score = float(record.score)
-        metrics: dict[str, Any] = {
-            "score": score if math.isfinite(score) else None,
-            "usedGpus": int(record.used_gpus),
-        }
+        # Every measurement AISimulate resolved for the point (throughput, TTFT, ITL, E2E latency,
+        # goodput, power, ...) is kept under its own name, with non-finite values as null. The
+        # adapter's rank metadata is added under the reserved names.
+        metrics: dict[str, Any] = _finite(
+            _plain(dict(getattr(record, "metrics", None) or {}))
+        )
+        for reserved in _RESERVED_METRICS:
+            if reserved in metrics:
+                logger.warning(
+                    "dgdr_run: candidate %s reports a metric named %r, which the adapter reserves; replaced",
+                    record.candidate_id,
+                    reserved,
+                )
+                del metrics[reserved]
+        metrics["score"] = score if math.isfinite(score) else None
+        metrics["usedGpus"] = int(record.used_gpus)
         objectives = getattr(record, "objectives", None)
         if objectives:
             metrics["objectives"] = _finite(_plain(dict(objectives)))
@@ -379,17 +415,58 @@ class DGDRRunOutputAdapter:
         try:
             self._publish()
         except _RendererUnavailable as unavailable:
-            cause = unavailable.__cause__ or unavailable
-            logger.error("dgdr_run: renderer unavailable", exc_info=cause)
+            self._fail_renderer(unavailable)
+
+    def _fail_renderer(self, unavailable: _RendererUnavailable) -> NoReturn:
+        cause = unavailable.__cause__ or unavailable
+        logger.error("dgdr_run: renderer unavailable", exc_info=cause)
+        with self._lock:
+            self._accepting = False
+            self._terminal = _Terminal(
+                phase=RunPhase.FAILED,
+                message=_bounded(str(cause)),
+                error=type(cause).__name__,
+            )
+        self._publish(render=False)
+        raise cause
+
+    def _materialize_retained(self) -> list[SnapshotCandidate]:
+        with self._publish_lock:
             with self._lock:
-                self._accepting = False
-                self._terminal = _Terminal(
-                    phase=RunPhase.FAILED,
-                    message=_bounded(str(cause)),
-                    error=type(cause).__name__,
-                )
-            self._publish(render=False)
-            raise cause
+                items = list(self._retained.values())
+            return [self._materialize(item) for item in items]
+
+    def close_selection(self) -> None:
+        """Write the terminal snapshot of a finished search that selected candidates.
+
+        ``Succeeded`` means at least one selected candidate has a manifest. Candidates are
+        materialized (with the same bounded retries as the live path) before the phase is
+        chosen; when none materialized the run is ``Failed`` with a bounded aggregate reason,
+        and the same error is raised so the recommendation does not exit successfully.
+        """
+        entries: list[SnapshotCandidate] = []
+        for attempt in range(_MAX_RENDER_ATTEMPTS):
+            try:
+                entries = self._materialize_retained()
+            except _RendererUnavailable as unavailable:
+                self._fail_renderer(unavailable)
+            if all(entry.outcome is CandidateOutcome.MATERIALIZED for entry in entries):
+                break
+            if attempt + 1 < _MAX_RENDER_ATTEMPTS:
+                time.sleep(_WRITE_RETRY_BACKOFF)
+        if any(entry.outcome is CandidateOutcome.MATERIALIZED for entry in entries):
+            self.close(phase=RunPhase.SUCCEEDED)
+            return
+        first = next((entry.error for entry in entries if entry.error), "")
+        message = _bounded(
+            f"no selected candidate could be materialized ({len(entries)} failed): {first}"
+        )
+        self.close(
+            phase=RunPhase.FAILED,
+            message=message,
+            error="CandidateMaterializationError",
+        )
+        raise CandidateMaterializationError(message)
 
     def finish_search(self) -> None:
         """The search ended normally: flush the last live state and stop the writer.
@@ -625,7 +702,7 @@ class DGDRRunOutputPlugin:
             # written by the search process does; progress never goes backwards.
             round_no=_last_published_round(directory),
         )
-        adapter.close(phase=RunPhase.SUCCEEDED)
+        adapter.close_selection()
         # AISimulate requires reported artifacts to live under output_dir; a snapshot
         # on the shared volume does not, and is consumed by the publisher instead.
         if directory.resolve() == Path(output_dir).resolve():
@@ -651,6 +728,7 @@ class _FinalCandidate:
     used_gpus: int | None
     objectives: dict[str, float] | None = None
     status: str = "feasible"
+    metrics: dict[str, float | None] = dataclasses.field(default_factory=dict)
 
 
 def _as_feasible(candidate: Any) -> _FinalCandidate:
@@ -666,6 +744,7 @@ def _as_feasible(candidate: Any) -> _FinalCandidate:
         score=score,
         used_gpus=used_gpus,
         objectives=getattr(candidate, "objectives", None),
+        metrics=dict(getattr(candidate, "metrics", None) or {}),
     )
 
 

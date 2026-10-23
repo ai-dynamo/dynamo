@@ -3,7 +3,7 @@
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,6 +38,7 @@ class Record:
     config: dict[str, Any]
     status: str = "feasible"
     objectives: dict[str, float] | None = None
+    metrics: dict[str, float | None] = field(default_factory=dict)
 
 
 def record(tag: str, score: float, gpus: int = 8, **kwargs: Any) -> Record:
@@ -475,6 +476,7 @@ def test_pareto_objectives_are_rejected_explicitly(tmp_path: Path) -> None:
     "overrides",
     [
         {"max_candidates": 0},
+        {"max_candidates": 101},
         {"snapshot_interval_seconds": -1},
         {"name": "Not_DNS"},
         {"num_gpus_per_node": 0},
@@ -488,14 +490,24 @@ def test_invalid_configuration_is_rejected(
         make_config(tmp_path, **overrides)
 
 
-def test_there_is_no_hardcoded_candidate_ceiling(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path, max_candidates=200), None)
-    for index in range(150):
-        adapter.on_candidate(record(f"p{index:03d}", score=float(index)))
-    adapter.close()
-    assert len(load(tmp_path)["candidates"]) == 150
+def test_max_candidates_follows_the_api_range(tmp_path: Path) -> None:
+    # spec.recommendation.maxCandidates is 1..100; the adapter accepts exactly that range.
+    assert make_config(tmp_path, max_candidates=1).max_candidates == 1
+    assert make_config(tmp_path, max_candidates=100).max_candidates == 100
+    for invalid in (0, 101, 200):
+        with pytest.raises(ValueError):
+            make_config(tmp_path, max_candidates=invalid)
+
+
+def test_max_candidates_has_no_default_of_its_own() -> None:
+    # The operator supplies the already-defaulted API value; a missing one must fail.
+    with pytest.raises(ValueError, match="max_candidates"):
+        DGDRRunOutputConfig(
+            name="sweep",
+            snapshot_dir="/tmp/x",
+            runtime_image="nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
+            num_gpus_per_node=8,
+        )
 
 
 def test_a_snapshot_directory_is_required() -> None:
@@ -503,6 +515,7 @@ def test_a_snapshot_directory_is_required() -> None:
         name="sweep",
         runtime_image="nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
         num_gpus_per_node=8,
+        max_candidates=1,
     )
     with pytest.raises(ValueError, match="snapshot directory"):
         DGDRRunOutputAdapter(config, workload=None)
@@ -517,6 +530,7 @@ def test_the_plugin_is_discoverable_and_builds_a_live_adapter(tmp_path: Path) ->
             "snapshot_dir": str(tmp_path),
             "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
             "num_gpus_per_node": 8,
+            "max_candidates": 5,
         },
         workload=None,
     )
@@ -529,6 +543,7 @@ def test_plugin_subscribe_validates_config_before_search() -> None:
         "name": "run",
         "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
         "num_gpus_per_node": 8,
+        "max_candidates": 5,
     }
 
     assert plugin.subscribe(good) is None
@@ -562,6 +577,7 @@ def test_plugin_write_publishes_the_final_selection_as_a_terminal_snapshot(
             "name": "sweep",
             "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
             "num_gpus_per_node": 8,
+            "max_candidates": 5,
         },
         result=result,  # type: ignore[arg-type]
         output_dir=tmp_path,
@@ -593,6 +609,7 @@ def test_plugin_write_refuses_pareto_and_empty_results(tmp_path: Path) -> None:
         "name": "sweep",
         "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
         "num_gpus_per_node": 8,
+        "max_candidates": 5,
     }
     pareto = SimpleNamespace(views=SimpleNamespace(pareto_front=[object()]))
     with pytest.raises(NotImplementedError):
@@ -608,6 +625,7 @@ PLUGIN_CONFIG = {
     "name": "sweep",
     "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
     "num_gpus_per_node": 8,
+    "max_candidates": 5,
     "snapshot_interval_seconds": 0,
 }
 
@@ -950,3 +968,110 @@ def test_the_renderer_receives_the_candidates_gpu_count(
     (candidate,) = seen
     assert candidate.used_gpus == 4
     assert candidate.config["tag"] == "a"
+
+
+# -- evaluated metrics survive, and a run without a deployable candidate fails ----
+
+
+SOURCE_METRICS: dict[str, float | None] = {
+    "throughput": 70.4,
+    "ttft": 18.2,
+    "itl": 7.1,
+    "e2e_latency": 300.5,
+    "goodput": 66.0,
+    "power_w": 410.0,
+    "normalized_power": 0.8,
+    "broken": float("nan"),
+}
+
+
+def test_every_finite_source_metric_survives_in_live_and_terminal_snapshots(
+    tmp_path: Path, renders: list[str], fake_search_config: None
+) -> None:
+    expected = {
+        **{key: value for key, value in SOURCE_METRICS.items() if key != "broken"},
+        "broken": None,
+        "score": 87.7,
+        "usedGpus": 4,
+    }
+
+    live = tmp_path / "live"
+    live.mkdir()
+    adapter = DGDRRunOutputAdapter(make_config(live), workload=None)
+    adapter.start()
+    adapter.on_candidate(record("a", 87.7, gpus=4, metrics=dict(SOURCE_METRICS)))
+    wait_for(lambda: tags(load(live)) == ["a"])
+    assert load(live)["candidates"][0]["metrics"] == expected
+    adapter.close()
+
+    final = tmp_path / "final"
+    final.mkdir()
+    result = _final_result(1)
+    result.selected_candidates = [
+        record("a", 87.7, gpus=4, metrics=dict(SOURCE_METRICS))
+    ]
+    create_adapter().write(
+        {**PLUGIN_CONFIG, "snapshot_dir": str(final)}, result=result, output_dir=final
+    )
+    assert load(final)["candidates"][0]["metrics"] == expected
+
+
+def test_reserved_metric_names_are_replaced_by_the_adapters_values(
+    tmp_path: Path, renders: list[str]
+) -> None:
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    adapter.on_candidate(
+        record("a", 5.0, gpus=2, metrics={"score": 999.0, "usedGpus": 99, "ttft": 1.0})
+    )
+    adapter.close()
+    assert load(tmp_path)["candidates"][0]["metrics"] == {
+        "ttft": 1.0,
+        "score": 5.0,
+        "usedGpus": 2,
+    }
+
+
+def test_a_selection_where_every_candidate_fails_to_materialize_is_a_failed_run(
+    tmp_path: Path,
+    renders: list[str],
+    fake_search_config: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(adapter_module, "_WRITE_RETRY_BACKOFF", 0)
+    result = _final_result(2)
+    result.selected_candidates = [record("bad1", 9.0), record("bad2", 5.0)]
+
+    with pytest.raises(CandidateMaterializationError, match="no selected candidate"):
+        create_adapter().write(
+            {**PLUGIN_CONFIG, "max_candidates": 2}, result=result, output_dir=tmp_path
+        )
+
+    snapshot = load(tmp_path)
+    assert snapshot["run"]["phase"] == "Failed"
+    assert snapshot["run"]["terminal"] is True
+    assert snapshot["run"]["error"] == "CandidateMaterializationError"
+    assert "cannot render bad1" in snapshot["run"]["message"]
+    assert len(snapshot["run"]["message"]) <= adapter_module._MAX_ERROR_MESSAGE
+    assert all(c["outcome"] == "materialization_failed" for c in snapshot["candidates"])
+
+
+def test_a_selection_with_one_materialized_candidate_still_succeeds(
+    tmp_path: Path,
+    renders: list[str],
+    fake_search_config: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(adapter_module, "_WRITE_RETRY_BACKOFF", 0)
+    result = _final_result(2)
+    result.selected_candidates = [record("bad1", 9.0), record("good", 5.0)]
+
+    create_adapter().write(
+        {**PLUGIN_CONFIG, "max_candidates": 2}, result=result, output_dir=tmp_path
+    )
+
+    snapshot = load(tmp_path)
+    assert snapshot["run"]["phase"] == "Succeeded"
+    assert {c["parameters"]["tag"]: c["outcome"] for c in snapshot["candidates"]} == {
+        "bad1": "materialization_failed",
+        "good": "materialized",
+    }
