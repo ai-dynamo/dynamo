@@ -31,6 +31,9 @@ RAMP_STEP=${RAMP_STEP:-512}
 DYNAMO_VERSION=${DYNAMO_VERSION:-1.5.1}
 FRONTEND_IMAGE=${FRONTEND_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION}
 WORKER_IMAGE=${WORKER_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION}
+# The Dynamo version of those images, for tags the operator cannot read a
+# version from, such as nightly tags.
+RUNTIME_VERSION=${RUNTIME_VERSION:-}
 # Empty means the image of the arm's Frontend or EPP, which ships aiperf. Pin it
 # to keep one aiperf version across the builds you compare.
 AIPERF_IMAGE=${AIPERF_IMAGE:-}
@@ -63,8 +66,8 @@ SERVER_METRICS_FORMATS=${SERVER_METRICS_FORMATS:-json csv}
 
 # Every setting above. deploy and bench record them with the arm's results.
 SETTINGS=(
-  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE AIPERF_IMAGE
-  MODEL_CACHE_PVC IMAGE_PULL_SECRET GATEWAY_NAME GATEWAY_NAMESPACE READY_TIMEOUT SETTLE_SECONDS
+  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE RUNTIME_VERSION
+  AIPERF_IMAGE MODEL_CACHE_PVC IMAGE_PULL_SECRET GATEWAY_NAME GATEWAY_NAMESPACE READY_TIMEOUT SETTLE_SECONDS
   BENCH_TIMEOUT ORDER KEEP SESSIONS DURATION_S ROUNDS DATASET MAX_CONTEXT TRACES COOLDOWN_S SEED
   SMOKE_TIMEOUT_S SAMPLE_WORKERS SERVER_METRICS_FORMATS
 )
@@ -116,6 +119,8 @@ validate_settings() {
   done
   [[ -z $TRACES || $TRACES =~ ^[1-9][0-9]*$ ]] ||
     invalid "TRACES must be empty or a positive integer, not '$TRACES'"
+  [[ -z $RUNTIME_VERSION || $RUNTIME_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] ||
+    invalid "RUNTIME_VERSION must be empty or a version such as 1.6.0, not '$RUNTIME_VERSION'"
   [[ $KEEP == 0 || $KEEP == 1 ]] || invalid "KEEP must be 0 or 1, not '$KEEP'"
 }
 
@@ -165,6 +170,7 @@ render_arm() {
   k create --dry-run=client -o json -f "$HERE/$(label_of "$1").yaml" |
     python3 "$HERE/render.py" arm --replicas "$2" \
       --frontend-image "$FRONTEND_IMAGE" --worker-image "$WORKER_IMAGE" \
+      --runtime-version "$RUNTIME_VERSION" \
       --model-cache-pvc "$MODEL_CACHE_PVC" --image-pull-secret "$IMAGE_PULL_SECRET" \
       --gateway-name "$GATEWAY_NAME" --gateway-namespace "$GATEWAY_NAMESPACE" \
       --arm-header "$(arm_header "$1")"

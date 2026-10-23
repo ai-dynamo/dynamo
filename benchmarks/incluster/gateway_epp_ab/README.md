@@ -274,10 +274,13 @@ Keep these limits in mind when reading the results:
   then wait about 40 ms for the gateway's delayed ACK. Arm A's requests cross one such hop and arm
   B's cross two, so these images skew the difference between the arms as well as the absolute TTFT.
   [#16728](https://github.com/ai-dynamo/dynamo/pull/16728) fixes the Frontend and
-  [#16862](https://github.com/ai-dynamo/dynamo/pull/16862) the EPP. Until a release has both, set
-  `FRONTEND_IMAGE` and `WORKER_IMAGE` to one build of a main commit that includes #16862, so the
-  Frontend, the EPP and the workers run the same version. `run.sh` warns when `FRONTEND_IMAGE` is a
-  1.5 image.
+  [#16862](https://github.com/ai-dynamo/dynamo/pull/16862) the EPP. Releases up to 1.6.0 lack the
+  EPP fix. Until a release has both, use NGC's nightly images from `20261022-5df849a` on, which are
+  public and built for amd64 and arm64: `nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:<tag>`
+  for `FRONTEND_IMAGE` and `nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:<tag>` for
+  `WORKER_IMAGE`, with the same tag for both. Their tags carry no version, so also set
+  `RUNTIME_VERSION`: 1.6.0 for `20261022-5df849a`. `run.sh` warns when `FRONTEND_IMAGE` is a 1.5
+  image.
 - **Arm B needs agentgateway v1.2.x.** Before v1.2.0, agentgateway opens a new TLS connection to
   the EPP for every request and keeps it idle for 90 to 180 seconds
   ([agentgateway#1528](https://github.com/agentgateway/agentgateway/pull/1528)). The EPP accepts at
@@ -330,6 +333,7 @@ Keep these limits in mind when reading the results:
 | `DYNAMO_VERSION` | `1.5.1` | tag of the default images |
 | `FRONTEND_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION` | Frontend, EPP and sidecar; 1.5 images lack the latency fixes |
 | `WORKER_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION` | mocker workers |
+| `RUNTIME_VERSION` | none | Dynamo version of both images, for tags without one, such as nightly tags; the operator then requires it |
 | `AIPERF_IMAGE` | the image of the arm's Frontend or EPP | the aiperf Job; the frontend image ships aiperf. Pin it to keep one aiperf version across the builds you compare |
 | `MODEL_CACHE_PVC` | `model-cache` | PVC with the model files |
 | `IMAGE_PULL_SECRET` | none | pull secret for every pod |

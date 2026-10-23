@@ -161,18 +161,35 @@ def test_read_objects_takes_kubectl_output_for_several_manifests(arm_b):
     assert render.read_objects(wrapped) == arm_b
 
 
-def test_render_arm_applies_the_run_settings(arm_b):
-    args = argparse.Namespace(
+def render_args(**overrides):
+    """render.py arm's arguments for arm tests, with the given changes."""
+    args = dict(
         replicas=8,
         frontend_image="registry.test/frontend:x",
         worker_image="registry.test/planner:x",
+        runtime_version="",
         model_cache_pvc="shared-cache",
         image_pull_secret="pull-secret",
         gateway_name="gw",
         gateway_namespace="gw-ns",
         arm_header="bench-ns/qwen-b",
     )
-    objects = render.render_arm(copy.deepcopy(arm_b), args)
+    return argparse.Namespace(**{**args, **overrides})
+
+
+@pytest.mark.parametrize("version", ["", "1.6.0"])
+def test_render_arm_sets_the_runtime_version_only_when_given(arm_b, version):
+    # A nightly tag such as 20261022-5df849a carries no version, and the
+    # operator then requires runtimeVersionOverride on every component.
+    objects = render.render_arm(
+        copy.deepcopy(arm_b), render_args(runtime_version=version)
+    )
+    for comp in by_kind(objects, "DynamoGraphDeployment")["spec"]["components"]:
+        assert comp.get("runtimeVersionOverride") == (version or None)
+
+
+def test_render_arm_applies_the_run_settings(arm_b):
+    objects = render.render_arm(copy.deepcopy(arm_b), render_args())
     dgd = by_kind(objects, "DynamoGraphDeployment")
     worker = component(dgd, "decode")
     assert worker["replicas"] == 8
@@ -372,6 +389,10 @@ def run_script(tmp_path, args, settings=None, extra_env=None, kubectl_body="exit
         ({"TRACES": "all"}, "TRACES must be empty or a positive integer, not 'all'"),
         ({"WORKERS": "0"}, "WORKERS must be a positive integer, not '0'"),
         ({"COOLDOWN_S": "-1"}, "COOLDOWN_S must be a whole number, not '-1'"),
+        (
+            {"RUNTIME_VERSION": "nightly"},
+            "RUNTIME_VERSION must be empty or a version such as 1.6.0, not 'nightly'",
+        ),
         ({"KEEP": "yes"}, "KEEP must be 0 or 1, not 'yes'"),
     ],
 )

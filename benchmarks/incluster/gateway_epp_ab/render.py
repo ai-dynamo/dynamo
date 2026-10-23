@@ -63,6 +63,10 @@ def render_arm(
     for obj in objects:
         if obj["kind"] == "DynamoGraphDeployment":
             for component in obj["spec"]["components"]:
+                # The operator reads the runtime version from the image tag, and
+                # requires it here when the tag has none.
+                if args.runtime_version:
+                    component["runtimeVersionOverride"] = args.runtime_version
                 spec = component["podTemplate"]["spec"]
                 if component["type"] in ROUTER_TYPES:
                     images = {"main": args.frontend_image}
@@ -201,6 +205,9 @@ def main(argv: list[str] | None = None) -> None:
     arm.add_argument("--replicas", type=int, required=True, help="mocker workers")
     arm.add_argument("--frontend-image", required=True)
     arm.add_argument("--worker-image", required=True)
+    arm.add_argument(
+        "--runtime-version", default="", help="Dynamo version of the images"
+    )
     arm.add_argument("--model-cache-pvc", required=True)
     arm.add_argument("--image-pull-secret", default="")
     arm.add_argument("--gateway-name", required=True)
