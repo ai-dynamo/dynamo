@@ -114,7 +114,6 @@ type WorkloadSpec struct {
 	// defaulted individually: the default belongs to spec.workload as a whole, so an
 	// explicit workload object keeps exactly the fields it names.
 	// +optional
-	// +kubebuilder:default={isl: 1024, osl: 128, concurrency: 10}
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
 
@@ -161,7 +160,6 @@ type ObjectiveSLASpec struct {
 type ObjectiveSpec struct {
 	// Mode selects scalar optimization or a Pareto search.
 	// +optional
-	// +kubebuilder:default=Optimize
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
 	// Metric is the scalar target when mode is Optimize.
@@ -212,7 +210,6 @@ type RecommendationSpec struct {
 	// candidates are ordered best first; Pareto candidates have no scalar rank.
 	// This field does not limit internal trials.
 	// +optional
-	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`

@@ -156,17 +156,25 @@ func TestDefaultSpecV1beta2PreservesExplicitValues(t *testing.T) {
 	})
 }
 
-func TestDefaultSpecV1beta2NeverTouchesTheSchemaOwnedValues(t *testing.T) {
+func TestDefaultSpecV1beta2KeepsExplicitValues(t *testing.T) {
 	opts := dynamoGraphDeploymentRequestV1beta2DefaultOptions{
 		hardware:        hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8},
 		aisimulateImage: "registry.example.com/aisimulate:1.2.0",
 	}
-	t.Run("explicit empty workload", func(t *testing.T) {
+	t.Run("an empty workload receives the static default", func(t *testing.T) {
 		spec := v1beta2SchemaDefaulted()
 		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{}
 		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
-		if spec.Workload.Static != nil {
-			t.Fatal("an explicit workload: {} was filled")
+		if !hasModelOnlyStatic(spec.Workload) {
+			t.Fatal("workload: {} must receive the static model-only default")
+		}
+	})
+	t.Run("an explicit empty static workload is an opt-out", func(t *testing.T) {
+		spec := v1beta2SchemaDefaulted()
+		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}}
+		defaultDynamoGraphDeploymentRequestSpecV1beta2(spec, opts)
+		if spec.Workload.Static.ISL != nil || spec.Workload.Static.OSL != nil || spec.Workload.Static.Concurrency != nil {
+			t.Fatal("an explicit workload.static: {} was filled")
 		}
 	})
 	t.Run("omitted workload", func(t *testing.T) {
@@ -204,7 +212,7 @@ func TestDefaultObjectiveSpecV1beta2(t *testing.T) {
 		{"optimize without a metric", nvidiacomv1beta2.ObjectiveSpec{Mode: nvidiacomv1beta2.ObjectiveModeOptimize}, "Throughput"},
 		{"an explicit metric is kept", nvidiacomv1beta2.ObjectiveSpec{Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: v1beta2Ptr(nvidiacomv1beta2.ObjectiveMetric("TTFT"))}, "TTFT"},
 		{"pareto has no scalar metric", nvidiacomv1beta2.ObjectiveSpec{Mode: nvidiacomv1beta2.ObjectiveModePareto, Metrics: []nvidiacomv1beta2.ObjectiveMetric{"TTFT", "Throughput"}}, ""},
-		{"an absent mode is Optimize, which the schema fills after admission", nvidiacomv1beta2.ObjectiveSpec{}, "Throughput"},
+		{"an absent mode is Optimize, which admission fills", nvidiacomv1beta2.ObjectiveSpec{}, "Throughput"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -272,14 +280,14 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	}
 
 	t.Run("no discoverer", func(t *testing.T) {
-		if got := (DGDRV1beta2Options{}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); !got.empty() {
+		if got := (DGDRV1beta2Options{}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); !(got == hardwareDefaultsV1beta2{}) {
 			t.Fatalf("got %+v", got)
 		}
 	})
 	t.Run("complete hardware never asks the cluster", func(t *testing.T) {
 		d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h100_sxm", GPUs: 4}}
 		got := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, spec(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))))
-		if d.calls != 0 || !got.empty() {
+		if d.calls != 0 || !(got == hardwareDefaultsV1beta2{}) {
 			t.Fatalf("calls=%d got=%+v", d.calls, got)
 		}
 	})
@@ -324,7 +332,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	})
 	t.Run("a discovery failure leaves everything unset", func(t *testing.T) {
 		d := &fakeDiscoverer{err: errors.New("no DCGM")}
-		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); !got.empty() {
+		if got := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, spec(nil, nil)); !(got == hardwareDefaultsV1beta2{}) {
 			t.Fatalf("got %+v", got)
 		}
 	})
@@ -422,7 +430,7 @@ func TestHardwareIsDiscoveredOnlyOnCreate(t *testing.T) {
 		t.Run("operation "+string(op), func(t *testing.T) {
 			d := &fakeDiscoverer{found: DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}}
 			options := DGDRV1beta2Options{Hardware: d}
-			if got := options.resolveHardware(context.Background(), op, v1beta2SchemaDefaulted()); !got.empty() {
+			if got := options.resolveHardware(context.Background(), op, v1beta2SchemaDefaulted()); !(got == hardwareDefaultsV1beta2{}) {
 				t.Fatalf("hardware resolved on %q: %+v", op, got)
 			}
 			if d.calls != 0 {
