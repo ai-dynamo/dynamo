@@ -198,9 +198,6 @@ spec:
                 totalEndpoints:
                   description: TotalEndpoints is the total count of endpoints
                   type: integer
-              required:
-                - readyEndpoints
-                - totalEndpoints
               type: object
           type: object
       served: true

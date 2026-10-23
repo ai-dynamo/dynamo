@@ -37,11 +37,12 @@ import (
 // Used to reference external configuration data stored in ConfigMaps.
 type ConfigMapKeySelector struct {
 	// Name of the ConfigMap containing the desired data.
-	// +kubebuilder:validation:Required
+	// +required
 	Name string `json:"name"`
 
 	// Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
 	// +kubebuilder:default=disagg.yaml
+	// +optional
 	Key string `json:"key,omitempty"`
 }
 
@@ -51,7 +52,7 @@ type ConfigMapKeySelector struct {
 type ProfilingConfigSpec struct {
 	// Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.
 	// The profiler will validate the configuration and report any errors.
-	// +kubebuilder:validation:Optional
+	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	Config *apiextensionsv1.JSON `json:"config,omitempty"`
@@ -59,13 +60,13 @@ type ProfilingConfigSpec struct {
 	// ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment
 	// base config file (disagg.yaml). This is separate from the profiling config above.
 	// The path to this config will be set as engine.config in the profiling config.
-	// +kubebuilder:validation:Optional
+	// +optional
 	ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
 
 	// ProfilerImage specifies the container image to use for profiling jobs.
 	// This image contains the profiler code and dependencies needed for SLA-based profiling.
 	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"
-	// +kubebuilder:validation:Required
+	// +required
 	ProfilerImage string `json:"profilerImage"`
 
 	// OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.
@@ -75,22 +76,22 @@ type ProfilingConfigSpec struct {
 	// The PVC must exist in the same namespace as the DGDR.
 	// If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.
 	// Note: ConfigMaps are still created regardless of this setting for planner integration.
-	// +kubebuilder:validation:Optional
+	// +optional
 	OutputPVC string `json:"outputPVC,omitempty"`
 
 	// Resources specifies the compute resource requirements for the profiling job container.
 	// If not specified, no resource requests or limits are set.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Tolerations allows the profiling job to be scheduled on nodes with matching taints.
 	// For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
 	// NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.
 	// For example, to schedule on ARM64 nodes, use {"kubernetes.io/arch": "arm64"}.
-	// +kubebuilder:validation:Optional
+	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
@@ -112,28 +113,28 @@ const (
 type DeploymentOverridesSpec struct {
 	// Name is the desired name for the created DynamoGraphDeployment.
 	// If not specified, defaults to the DGDR name.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Name string `json:"name,omitempty"`
 
 	// Namespace is the desired namespace for the created DynamoGraphDeployment.
 	// If not specified, defaults to the DGDR namespace.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Namespace string `json:"namespace,omitempty"`
 
 	// Labels are additional labels to add to the DynamoGraphDeployment metadata.
 	// These are merged with auto-generated labels from the profiling process.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// Annotations are additional annotations to add to the DynamoGraphDeployment metadata.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 
 	// WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
 	// This image is used for both temporary DGDs created during online profiling and the final DGD.
 	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
 	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0"
-	// +kubebuilder:validation:Optional
+	// +optional
 	WorkersImage string `json:"workersImage,omitempty"`
 }
 
@@ -157,6 +158,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 	// don't require GPUs, using the profiling data to simulate realistic timing behavior.
 	// Mocker is available in all backend images and useful for large-scale experiments.
 	// Profiling still runs against the real backend (specified above) to collect performance data.
+	// +optional
 	UseMocker bool `json:"useMocker,omitempty"`
 
 	// ProfilingConfig provides the complete configuration for the profiling job.
@@ -192,11 +194,12 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
 	// after profiling completes. If false, only the spec is generated and stored in status.
 	// Users can then manually create a DGD using the generated spec.
+	// +optional
 	AutoApply bool `json:"autoApply,omitempty"`
 
 	// DeploymentOverrides allows customizing metadata for the auto-created DGD.
 	// Only applicable when AutoApply is true.
-	// +kubebuilder:validation:Optional
+	// +optional
 	DeploymentOverrides *DeploymentOverridesSpec `json:"deploymentOverrides,omitempty"`
 }
 
@@ -225,18 +228,22 @@ type DynamoGraphDeploymentRequestSpec struct {
 // This status is populated when autoApply is enabled and a DGD is created.
 type DeploymentStatus struct {
 	// Name is the name of the created DynamoGraphDeployment.
+	// +optional
 	Name string `json:"name,omitempty"`
 
 	// Namespace is the namespace of the created DynamoGraphDeployment.
+	// +optional
 	Namespace string `json:"namespace,omitempty"`
 
 	// State is the current state of the DynamoGraphDeployment.
 	// This value is mirrored from the DGD's status.state field.
 	// +kubebuilder:default=initializing
+	// +optional
 	State DGDState `json:"state"`
 
 	// Created indicates whether the DGD has been successfully created.
 	// Used to prevent recreation if the DGD is manually deleted by users.
+	// +optional
 	Created bool `json:"created,omitempty"`
 }
 
@@ -248,21 +255,23 @@ type DynamoGraphDeploymentRequestNativeStatus struct {
 
 	// Backend is extracted from profilingConfig.config.engine.backend for display purposes.
 	// This field is populated by the controller and shown in kubectl output.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Backend string `json:"backend,omitempty"`
 
 	// ObservedGeneration reflects the generation of the most recently observed spec.
 	// Used to detect spec changes and enforce immutability after profiling starts.
+	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions contains the latest observed conditions of the deployment request.
 	// Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.
 	// Conditions are merged by type on patch updates.
+	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
 	// ProfilingResults contains a reference to the ConfigMap holding profiling data.
 	// Format: "configmap/\<name\>"
-	// +kubebuilder:validation:Optional
+	// +optional
 	ProfilingResults string `json:"profilingResults,omitempty"`
 
 	// GeneratedDeployment contains the full generated DynamoGraphDeployment specification
@@ -270,14 +279,14 @@ type DynamoGraphDeploymentRequestNativeStatus struct {
 	// a DGD manually, or it's used automatically when autoApply is true.
 	// Stored as RawExtension to preserve all fields including metadata.
 	// For mocker backends, this contains the mocker DGD spec.
-	// +kubebuilder:validation:Optional
+	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource
 	GeneratedDeployment *runtime.RawExtension `json:"generatedDeployment,omitempty"`
 
 	// Deployment tracks the auto-created DGD when AutoApply is true.
 	// Contains name, namespace, state, and creation status of the managed DGD.
-	// +kubebuilder:validation:Optional
+	// +optional
 	Deployment *DeploymentStatus `json:"deployment,omitempty"`
 }
 
@@ -325,13 +334,16 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta2) || has(self.status.state) || has(self.status.backend) || has(self.status.observedGeneration) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.generatedDeployment) || has(self.status.deployment)) || has(self.spec.v1beta2) == has(self.status.v1beta2)",message="nonempty status must use the representation selected by spec"
 type DynamoGraphDeploymentRequest struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// Spec defines the desired state for this deployment request.
+	// +optional
 	Spec DynamoGraphDeploymentRequestSpec `json:"spec,omitempty"`
 
 	// Status reflects the current observed state of this deployment request.
+	// +optional
 	Status DynamoGraphDeploymentRequestStatus `json:"status,omitempty"`
 }
 

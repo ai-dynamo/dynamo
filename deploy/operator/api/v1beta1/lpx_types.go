@@ -7,6 +7,7 @@ package v1beta1
 type LPXConfig struct {
 	// buildId references the immutable model build.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	BuildID string `json:"buildId"`
 
 	// scheduling configures this component's LPX scheduling attempts.

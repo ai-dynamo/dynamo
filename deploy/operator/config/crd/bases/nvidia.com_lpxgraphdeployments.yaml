@@ -262,10 +262,6 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
-                    required:
-                      - componentKind
-                      - replicas
-                      - updatedReplicas
                     type: object
                   description: components reports logical replicas by authored component name, never Agent Pods.
                   type: object

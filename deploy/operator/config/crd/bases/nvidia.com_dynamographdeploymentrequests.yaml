@@ -440,8 +440,6 @@ spec:
                         - successful
                         - failed
                       type: string
-                  required:
-                    - state
                   type: object
                 generatedDeployment:
                   description: |-
@@ -562,18 +560,12 @@ spec:
                     for manual review and application.
                   type: boolean
                 backend:
-                  allOf:
-                    - enum:
-                        - auto
-                        - sglang
-                        - trtllm
-                        - vllm
-                    - enum:
-                        - auto
-                        - sglang
-                        - trtllm
-                        - vllm
                   description: Backend specifies the inference backend to use for profiling and deployment.
+                  enum:
+                    - auto
+                    - sglang
+                    - trtllm
+                    - vllm
                   type: string
                 features:
                   description: Features controls optional Dynamo platform features in the generated deployment.
@@ -618,49 +610,6 @@ spec:
                     Typically auto-filled by the operator from cluster discovery.
                   properties:
                     gpuSku:
-                      allOf:
-                        - enum:
-                            - vr_nvl72
-                            - gb200
-                            - gb200_sxm
-                            - gb10
-                            - b300_sxm
-                            - b200_sxm
-                            - h200_sxm
-                            - h100_sxm
-                            - h100_pcie
-                            - a100_sxm
-                            - a100_pcie
-                            - a30
-                            - l40s
-                            - l40
-                            - l4
-                            - v100_sxm
-                            - v100_pcie
-                            - t4
-                            - mi200
-                            - mi300
-                        - enum:
-                            - vr_nvl72
-                            - gb200
-                            - gb200_sxm
-                            - gb10
-                            - b300_sxm
-                            - b200_sxm
-                            - h200_sxm
-                            - h100_sxm
-                            - h100_pcie
-                            - a100_sxm
-                            - a100_pcie
-                            - a30
-                            - l40s
-                            - l40
-                            - l4
-                            - v100_sxm
-                            - v100_pcie
-                            - t4
-                            - mi200
-                            - mi300
                       description: |-
                         GPUSKU selects the GPU type to target.
                         When omitted, auto-detected by selecting the GPU with the highest
@@ -668,6 +617,27 @@ spec:
                         choose which GPU type to use. Discovery and totalGpus are then
                         restricted to nodes matching this SKU.
                         The legacy value gb200_sxm is deprecated; use gb200 instead.
+                      enum:
+                        - vr_nvl72
+                        - gb200
+                        - gb200_sxm
+                        - gb10
+                        - b300_sxm
+                        - b200_sxm
+                        - h200_sxm
+                        - h100_sxm
+                        - h100_pcie
+                        - a100_sxm
+                        - a100_pcie
+                        - a30
+                        - l40s
+                        - l40
+                        - l4
+                        - v100_sxm
+                        - v100_pcie
+                        - t4
+                        - mi200
+                        - mi300
                       type: string
                     interconnect:
                       description: |-
@@ -9312,16 +9282,12 @@ spec:
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 searchStrategy:
-                  allOf:
-                    - enum:
-                        - rapid
-                        - thorough
-                    - enum:
-                        - rapid
-                        - thorough
                   description: |-
                     SearchStrategy controls the profiling search depth.
                     "rapid" performs a fast sweep; "thorough" explores more configurations.
+                  enum:
+                    - rapid
+                    - thorough
                   type: string
                 sla:
                   description: SLA defines service-level agreement targets that drive profiling optimization.

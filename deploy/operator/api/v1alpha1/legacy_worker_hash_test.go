@@ -40,8 +40,11 @@ func TestComputeDGDWorkersSpecHashGolden(t *testing.T) {
 }
 
 type legacyWorkerHashGoldenCase struct {
+	// +required
 	name string
-	dgd  *DynamoGraphDeployment
+	// +required
+	dgd *DynamoGraphDeployment
+	// +required
 	want string
 }
 

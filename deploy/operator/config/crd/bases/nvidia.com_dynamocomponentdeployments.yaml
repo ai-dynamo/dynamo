@@ -11269,8 +11269,6 @@ spec:
                       format: int32
                       minimum: 2
                       type: integer
-                  required:
-                    - nodeCount
                   type: object
                 readinessProbe:
                   description: ReadinessProbe to signal when the container is ready to receive traffic.
@@ -19998,14 +19996,7 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
-                  required:
-                    - componentKind
-                    - componentName
-                    - replicas
-                    - updatedReplicas
                   type: object
-              required:
-                - conditions
               type: object
           type: object
       served: true
@@ -37198,10 +37189,6 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
-                  required:
-                    - componentKind
-                    - replicas
-                    - updatedReplicas
                   type: object
                 conditions:
                   description: |-

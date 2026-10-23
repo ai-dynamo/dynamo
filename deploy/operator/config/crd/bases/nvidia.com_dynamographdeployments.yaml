@@ -11670,8 +11670,6 @@ spec:
                             format: int32
                             minimum: 2
                             type: integer
-                        required:
-                          - nodeCount
                         type: object
                       providerOverride:
                         description: |-
@@ -20587,11 +20585,6 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
-                    required:
-                      - componentKind
-                      - componentName
-                      - replicas
-                      - updatedReplicas
                     type: object
                   description: |-
                     Services contains per-service replica status information.
@@ -20606,8 +20599,6 @@ spec:
                     - successful
                     - failed
                   type: string
-              required:
-                - state
               type: object
           type: object
       served: true
@@ -38328,10 +38319,6 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
-                    required:
-                      - componentKind
-                      - replicas
-                      - updatedReplicas
                     type: object
                   description: components contains per-component replica status information, keyed by component name.
                   type: object
@@ -38481,8 +38468,6 @@ spec:
                     - successful
                     - failed
                   type: string
-              required:
-                - state
               type: object
           type: object
       served: true
