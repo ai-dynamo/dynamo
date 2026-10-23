@@ -36,7 +36,7 @@ pub enum DiscoveryClientError {
     Decode {
         url: Url,
         #[source]
-        source: reqwest::Error,
+        source: serde_json::Error,
     },
 }
 
@@ -53,6 +53,9 @@ impl GlobalDiscoveryClient {
     pub fn new(base_url: Url, request_timeout: Duration) -> Result<Self, DiscoveryClientError> {
         let http = reqwest::Client::builder()
             .timeout(request_timeout)
+            // A followed redirect can turn the registration POST into a GET,
+            // so a 3xx must fail instead of looking like a success.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(DiscoveryClientError::Build)?;
         Ok(Self {
@@ -70,14 +73,18 @@ impl GlobalDiscoveryClient {
     pub async fn routers(&self) -> Result<Vec<ReplicaEndpoint>, DiscoveryClientError> {
         let url = &self.routers_url;
         let response = self.send(self.http.get(url.clone()), url).await?;
+        let body = response
+            .bytes()
+            .await
+            .map_err(|source| DiscoveryClientError::Request {
+                url: url.clone(),
+                source,
+            })?;
         let body: RoutersResponse =
-            response
-                .json()
-                .await
-                .map_err(|source| DiscoveryClientError::Decode {
-                    url: url.clone(),
-                    source,
-                })?;
+            serde_json::from_slice(&body).map_err(|source| DiscoveryClientError::Decode {
+                url: url.clone(),
+                source,
+            })?;
         Ok(body.routers)
     }
 
