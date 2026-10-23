@@ -78,10 +78,14 @@ struct Parameters {
     compute_workers: Option<usize>,
     /// When `true`, a warm request with no cache affinity may spill onto idle cold-pool
     /// workers once every warm worker has been removed from eligibility (overload
-    /// draining). When `false` (the default), cold workers serve only cold requests and
-    /// warm requests whose cache overlap lives there; a fully-drained warm pool rejects
-    /// with the overload status instead.
+    /// draining). When `false` (the default), cold workers serve only cold requests;
+    /// a fully-drained warm pool rejects with the overload status instead.
     allow_warm_spillover: bool,
+    /// Minimum fraction of cold-pool members still eligible before a warm spillover is
+    /// allowed: with the default 0.5, at least half the pool's workers must remain
+    /// un-drained. 0 escapes whenever any member remains. Only consulted when
+    /// `allow_warm_spillover` is `true`.
+    spillover_free_threshold: f64,
 }
 
 impl Default for Parameters {
@@ -91,6 +95,7 @@ impl Default for Parameters {
             pools: None,
             compute_workers: None,
             allow_warm_spillover: false,
+            spillover_free_threshold: 0.5,
         }
     }
 }
@@ -100,6 +105,13 @@ impl Parameters {
         if self.uncached_threshold_tokens == 0 {
             return Err(WorkerSelectionPolicyProviderError::new(
                 "uncached_threshold_tokens must be positive",
+            ));
+        }
+        if !self.spillover_free_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.spillover_free_threshold)
+        {
+            return Err(WorkerSelectionPolicyProviderError::new(
+                "spillover_free_threshold must be a fraction in [0.0, 1.0]",
             ));
         }
         match (&self.pools, self.compute_workers) {
@@ -173,6 +185,14 @@ enum Lane {
 
 struct UncachedPoolSplitPicker {
     parameters: Parameters,
+    /// Cold members observed in past selections. Overload draining removes workers from
+    /// the candidate set before the picker runs, so the live candidates alone
+    /// overstate the pool's headroom; the remembered union restores the denominator.
+    /// Only grows, and erring large only makes spillover harder, which is the safe
+    /// direction. Pool shrinkage (a member permanently removed) is handled by deployment
+    /// ordering: removing the taint first, then the worker, keeps this from blocking
+    /// spillover indefinitely.
+    seen_cold_ids: std::cell::RefCell<HashSet<WorkerId>>,
 }
 
 impl UncachedPoolSplitPicker {
@@ -208,30 +228,48 @@ impl UncachedPoolSplitPicker {
         }
     }
 
-    /// Rows a warm request may select from: every non-cold worker, plus cold workers
-    /// holding the largest cache overlap (the affinity exemption that keeps a cold
-    /// request's follow-up turns on the worker that warmed their prefix). With
-    /// `allow_warm_spillover`, an empty warm set — every warm worker was drained from
-    /// eligibility — falls back to all candidates so idle cold capacity absorbs the
-    /// overflow; without it the picker fails and the host answers with the overload
-    /// status code.
+    /// Rows a warm request may select from.
+    ///
+    /// The warm lane is the non-cold workers. Cold workers never join it while any warm
+    /// worker remains eligible — including the one holding this request's largest cached
+    /// prefix: keeping the split pure costs that follow-up turn a re-prefill, which is
+    /// the isolation trade the policy exists to make. Only when the warm lane is empty
+    /// (every warm worker drained by overload detection) does `allow_warm_spillover`
+    /// decide: with it on, warm traffic may use the cold pool while enough of it remains
+    /// eligible (`spillover_free_threshold`, measured against the cold ids in this
+    /// candidate set); with it off the picker fails and the host answers with the
+    /// overload status code.
     fn warm_candidate_rows(
         &self,
         candidates: &[dynamo_kv_router::plugins::worker_selection::ScoredWorkerCandidate],
         cached: &[usize],
         cold_ids: &HashSet<WorkerId>,
     ) -> Vec<usize> {
-        let max_cached = cached.iter().copied().max().unwrap_or(0);
-        let mut rows: Vec<usize> = (0..candidates.len())
-            .filter(|&row| {
-                let id = candidates[row].worker().worker_id;
-                !cold_ids.contains(&id) || (max_cached > 0 && cached[row] == max_cached)
-            })
+        let warm_rows: Vec<usize> = (0..candidates.len())
+            .filter(|&row| !cold_ids.contains(&candidates[row].worker().worker_id))
             .collect();
-        if rows.is_empty() && self.parameters.allow_warm_spillover {
-            rows = (0..candidates.len()).collect();
+        if !warm_rows.is_empty() || !self.parameters.allow_warm_spillover {
+            return warm_rows;
         }
-        rows
+        // Remember every cold member ever seen, then measure headroom against the
+        // remembered set: workers drained from eligibility are absent from this
+        // selection's candidates, and without the memory the surviving fraction would
+        // overstate the pool's health.
+        let mut seen = self.seen_cold_ids.borrow_mut();
+        seen.extend(cold_ids.iter().copied());
+        let cold_eligible = cold_ids.len();
+        let cold_present = seen.len();
+        drop(seen);
+        if cold_present == 0 {
+            return warm_rows;
+        }
+        let free_fraction = cold_eligible as f64 / cold_present as f64;
+        if free_fraction + f64::EPSILON < self.parameters.spillover_free_threshold {
+            // Below the headroom floor: not enough cold capacity left to borrow.
+            return warm_rows;
+        }
+        let _ = cached;
+        (0..candidates.len()).collect()
     }
 
     fn classify(&self, isl_tokens: usize, best_effective_prefill: usize) -> Lane {
@@ -384,6 +422,7 @@ fn provider(
                 Vec::new(),
                 Box::new(UncachedPoolSplitPicker {
                     parameters: parameters.clone(),
+                    seen_cold_ids: std::cell::RefCell::new(HashSet::new()),
                 }),
             )
         },
@@ -448,13 +487,15 @@ mod tests {
 
     /// Select among workers given as `(worker_id, device_overlap_blocks, active_requests)`.
     /// `pool_taints` maps worker id to the taints its config publishes.
+    type SharedColdIds = std::rc::Rc<std::cell::RefCell<HashSet<WorkerId>>>;
+
     fn select_result(
         parameters: &Parameters,
         isl_tokens: usize,
         workers: &[(u64, usize, usize)],
         pool_taints: &HashMap<u64, Arc<HashSet<String>>>,
     ) -> Result<WorkerWithDpRank, dynamo_kv_router::scheduling::KvSchedulerError> {
-        select_result_allowed(parameters, isl_tokens, workers, pool_taints, None)
+        select_result_stateful(parameters, isl_tokens, workers, pool_taints, None, None)
     }
 
     /// Like [`select_result`] but with `allowed` restricting the eligible worker ids,
@@ -465,6 +506,19 @@ mod tests {
         workers: &[(u64, usize, usize)],
         pool_taints: &HashMap<u64, Arc<HashSet<String>>>,
         allowed: Option<Vec<u64>>,
+    ) -> Result<WorkerWithDpRank, dynamo_kv_router::scheduling::KvSchedulerError> {
+        select_result_stateful(parameters, isl_tokens, workers, pool_taints, allowed, None)
+    }
+
+    /// Like [`select_result_allowed`] but carrying picker state across calls, so the
+    /// remembered cold membership persists between requests like it does in production.
+    fn select_result_stateful(
+        parameters: &Parameters,
+        isl_tokens: usize,
+        workers: &[(u64, usize, usize)],
+        pool_taints: &HashMap<u64, Arc<HashSet<String>>>,
+        allowed: Option<Vec<u64>>,
+        shared: Option<&SharedColdIds>,
     ) -> Result<WorkerWithDpRank, dynamo_kv_router::scheduling::KvSchedulerError> {
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
@@ -517,13 +571,17 @@ mod tests {
                 )
             })
             .collect();
-        WorkerSelectionPolicy::new(
+        let picker = UncachedPoolSplitPicker {
+            parameters: parameters.clone(),
+            seen_cold_ids: std::cell::RefCell::new(
+                shared.map(|rc| rc.borrow().clone()).unwrap_or_default(),
+            ),
+        };
+        let result = WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",
             Vec::new(),
-            Box::new(UncachedPoolSplitPicker {
-                parameters: parameters.clone(),
-            }),
+            Box::new(picker),
         )
         .select_worker(WorkerSelectionInput::configured(
             &configs,
@@ -531,7 +589,8 @@ mod tests {
             request.eligibility(),
             BLOCK_SIZE,
         ))
-        .map(|outcome| outcome.worker)
+        .map(|outcome| outcome.worker);
+        result
     }
 
     /// Two tiers over effective prefill: [100, 160) on taint cold-1, [160, ∞) on cold-2.
@@ -552,6 +611,7 @@ mod tests {
             ]),
             compute_workers: None,
             allow_warm_spillover: false,
+            spillover_free_threshold: 0.5,
         }
     }
 
@@ -561,6 +621,7 @@ mod tests {
             pools: None,
             compute_workers: Some(compute_workers),
             allow_warm_spillover: false,
+            spillover_free_threshold: 0.5,
         }
     }
 
@@ -682,6 +743,7 @@ mod tests {
             ]),
             compute_workers: None,
             allow_warm_spillover: false,
+            spillover_free_threshold: 0.5,
         };
         let pool_taints = HashMap::new();
         let selected =
@@ -744,6 +806,119 @@ mod tests {
                 dynamo_kv_router::scheduling::KvSchedulerError::AllEligibleWorkersOverloaded
             ),
             "expected AllEligibleWorkersOverloaded, got: {error}"
+        );
+    }
+
+    #[test]
+    fn affinity_on_cold_worker_does_not_join_cold_pool_when_warm_alive() {
+        // The request's largest overlap lives on the cold-1 worker, but the warm worker
+        // is still eligible: the warm lane stays warm-only and the request re-prefills
+        // rather than contending on the cold pool. Losing the affinity is the cost of
+        // keeping the split pure.
+        let pool_taints = HashMap::from([(A, taint_set(&["cold-1"]))]);
+        let selected = select_result(
+            &two_tier_params(),
+            80,
+            &[(A, 5, 0), (B, 0, 6)],
+            &pool_taints,
+        )
+        .unwrap();
+        assert_eq!(selected, worker(B));
+    }
+
+    #[test]
+    fn spillover_respects_free_threshold() {
+        // Three cold-1 members and one warm worker. The picker first sees the full pool
+        // through a cold request, so the remembered denominator is three; a subsequent
+        // warm request with the warm worker drained and one cold member removed
+        // (allowed=[B,C]) measures free fraction 2/3 >= 0.5 and may escape.
+        let pool_taints = HashMap::from([
+            (A, taint_set(&["cold-1"])),
+            (B, taint_set(&["cold-1"])),
+            (C, taint_set(&["cold-1"])),
+        ]);
+        let params = Parameters {
+            allow_warm_spillover: true,
+            ..two_tier_params()
+        };
+        // Prime the remembered membership with a cold request over the full pool.
+        let shared: SharedColdIds = Default::default();
+        shared.borrow_mut().extend([A, B, C]);
+        let selected = select_result_stateful(
+            &params,
+            80,
+            &[(A, 0, 0), (B, 0, 0), (C, 0, 0), (D, 0, 6)],
+            &pool_taints,
+            Some(vec![B, C]),
+            Some(&shared),
+        )
+        .unwrap();
+        assert!(selected == worker(B) || selected == worker(C));
+    }
+
+    #[test]
+    fn spillover_blocked_below_free_threshold() {
+        // Three cold members (primed via a cold request first), then the warm worker and
+        // two cold members drained (allowed=[B]): free fraction 1/3 < 0.5 fails the
+        // headroom floor, so the drained warm pool rejects with the overload
+        // classification instead of borrowing.
+        let pool_taints = HashMap::from([
+            (A, taint_set(&["cold-1"])),
+            (B, taint_set(&["cold-1"])),
+            (C, taint_set(&["cold-1"])),
+        ]);
+        let params = Parameters {
+            allow_warm_spillover: true,
+            ..two_tier_params()
+        };
+        let shared: SharedColdIds = Default::default();
+        shared.borrow_mut().extend([A, B, C]);
+        let result = select_result_stateful(
+            &params,
+            80,
+            &[(A, 0, 0), (B, 0, 0), (C, 0, 0), (D, 0, 6)],
+            &pool_taints,
+            Some(vec![B]),
+            Some(&shared),
+        );
+        let Err(error) = result else {
+            panic!("below headroom floor must reject");
+        };
+        assert!(
+            matches!(
+                error,
+                dynamo_kv_router::scheduling::KvSchedulerError::AllEligibleWorkersOverloaded
+            ),
+            "expected AllEligibleWorkersOverloaded, got: {error}"
+        );
+    }
+
+    #[test]
+    fn spillover_free_threshold_is_validated() {
+        assert!(
+            Parameters {
+                spillover_free_threshold: 1.1,
+                ..Parameters::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Parameters {
+                spillover_free_threshold: f64::NAN,
+                ..Parameters::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Parameters {
+                spillover_free_threshold: 0.0,
+                compute_workers: Some(1),
+                ..Parameters::default()
+            }
+            .validate()
+            .is_ok()
         );
     }
 

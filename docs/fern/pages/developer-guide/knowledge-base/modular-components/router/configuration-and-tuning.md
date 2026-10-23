@@ -174,23 +174,31 @@ via `DYN_HTTP_OVERLOAD_STATUS_CODE`) with `ServiceOverloaded` semantics; it neve
 falls back to warm workers. Queue-side admission (`uncached_token_queue_limit_per_worker`)
 bounds waiting independently. Warm and cache-affine traffic is unaffected by the pools.
 
-By default the split is strict: a warm request without cache affinity selects only non-pool
-workers, so an idle cold pool stays idle until cold traffic arrives (dedicated capacity). Set
-`allow_warm_spillover: true` to let warm traffic escape onto idle cold workers once every
-warm worker has been drained from eligibility by overload detection:
+By default the split is strict: a warm request selects only non-pool workers — even when its
+largest cached prefix lives on a pool worker, since borrowing that affinity would drag warm
+contention onto the dedicated pool — so an idle cold pool stays idle until cold traffic
+arrives. Set `allow_warm_spillover: true` to let warm traffic escape onto cold workers once
+every warm worker has been drained from eligibility by overload detection, subject to a
+headroom floor:
 
 ```yaml
       parameters:
         allow_warm_spillover: true
+        spillover_free_threshold: 0.5   # default: escape only while >= 50% of the cold pool remains eligible
         pools:
           - min_uncached_tokens: 131072
             taint: dynamo.topology/worker_pool=cold-1
 ```
 
+`spillover_free_threshold` (default `0.5`, range `[0.0, 1.0]`) is the minimum fraction of
+cold-pool members that must still be eligible before a spillover is allowed: with three pool
+workers and the default 0.5, draining two of them blocks escape until capacity returns. The
+denominator is the pool membership the policy remembers across requests, so it reflects
+workers drained from eligibility rather than only the survivors of the current selection.
 Spillover is one-directional and last-resort: warm requests still prefer warm workers while
-any remains eligible, cache affinity to a pool worker is exempt in both modes (a cold
-request's follow-up turns must return to the worker that warmed their prefix), and cold
-requests never spill into the warm pool.
+any remains eligible, warm traffic already carrying affinity to a pool worker stays on it
+only when the escape is allowed (below the floor, a drained warm pool rejects with the
+overload status instead), and cold requests never spill into the warm pool.
 
 #### Configure the Default Policy
 
