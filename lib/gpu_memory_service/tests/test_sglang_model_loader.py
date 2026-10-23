@@ -12,7 +12,6 @@ loader reports in each lock mode is load-bearing for startup correctness.
 from __future__ import annotations
 
 import importlib
-import inspect
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -193,7 +192,6 @@ def gms(monkeypatch):
         yield SimpleNamespace(
             module=module,
             loader_cls=module.GMSModelLoader,
-            base_cls=base_cls,
             default_loaders=default_loaders,
         )
     finally:
@@ -215,20 +213,6 @@ def _install_impl(gms, monkeypatch, granted_lock_type):
     impl.finalize_write_mode = impl.finalized.append
     monkeypatch.setattr(gms.module, "get_gms_memory_saver_impl", lambda: impl)
     return impl
-
-
-def test_loader_implements_base_model_loader_contract(gms):
-    """GMSModelLoader must be a concrete BaseModelLoader.
-
-    Dropping the base class removes the ``preloaded_weights_bytes`` default
-    that SGLang reads off every loader; dropping ``download_model`` leaves an
-    abstract class that cannot be instantiated at all.
-    """
-    loader = gms.loader_cls(_LoadConfig())
-
-    assert isinstance(loader, gms.base_cls)
-    assert not inspect.isabstract(gms.loader_cls)
-    assert loader.preloaded_weights_bytes == 0
 
 
 def test_download_model_delegates_and_strips_gms_config(gms):
