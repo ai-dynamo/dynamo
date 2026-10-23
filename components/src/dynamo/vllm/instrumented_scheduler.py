@@ -2656,13 +2656,7 @@ class InstrumentedScheduler(AsyncScheduler):
         """Classify requests across vLLM's waiting queues by their next work."""
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
-        # vLLM 0.31 splits waiting queues by whether requests hold KV blocks.
-        if hasattr(self, "kv_holding_waiting"):
-            other_waiting = self.kv_holding_waiting
-        else:
-            other_waiting = self.skipped_waiting
-
-        for request in chain(self.waiting, other_waiting):
+        for request in chain(self.waiting, self.kv_holding_waiting):
             if request.status in (
                 RequestStatus.PREEMPTED,
                 RequestStatus.WAITING_FOR_REMOTE_KVS,

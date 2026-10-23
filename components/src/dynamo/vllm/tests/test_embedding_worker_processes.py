@@ -5,6 +5,7 @@
 
 import json
 import os
+import socket
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -17,7 +18,6 @@ import zmq
 pytest.importorskip("vllm.usage.usage_lib")
 
 from vllm.usage.usage_lib import UsageContext  # noqa: E402
-from vllm.v1.engine import utils as engine_utils  # noqa: E402
 
 from dynamo.vllm import embedding_worker_processes as processes  # noqa: E402
 
@@ -40,6 +40,21 @@ def _vllm_config():
     )
 
 
+def _zmq_listeners(addresses):
+    """Stand in for vLLM's supervisor-bound ``EngineZmqListeners``."""
+
+    def listener(fd):
+        return SimpleNamespace(socket=Mock(**{"fileno.return_value": fd}))
+
+    count = len(addresses.inputs)
+    return SimpleNamespace(
+        addresses=addresses,
+        inputs=[listener(100 + i) for i in range(count)],
+        outputs=[listener(200 + i) for i in range(count)],
+        cleanup=Mock(),
+    )
+
+
 def _core_engine_launch_object(engine_manager, addresses):
     return SimpleNamespace(
         engine_manager=engine_manager,
@@ -56,11 +71,13 @@ def test_child_environment_offsets_system_port_by_index(monkeypatch):
         process_index=2,
         addresses_json='{"process_count": 4}',
         parent_pid=123,
+        listener_fds=(7, 8),
     )
 
     assert env[processes._ROLE_ENV] == processes._CHILD_ROLE
     assert env[processes._INDEX_ENV] == "2"
     assert env[processes._PARENT_PID_ENV] == "123"
+    assert json.loads(env[processes._LISTENER_FDS_ENV]) == [7, 8]
     # The parent keeps 19401 as index 0, so children start one above it.
     assert env["DYN_SYSTEM_PORT"] == "19403"
     assert env["PYTHONUNBUFFERED"] == "1"
@@ -79,6 +96,7 @@ def test_child_environment_preserves_non_positive_system_port(monkeypatch, raw):
         process_index=1,
         addresses_json='{"process_count": 2}',
         parent_pid=123,
+        listener_fds=(7, 8),
     )
 
     assert env["DYN_SYSTEM_PORT"] == raw
@@ -91,6 +109,7 @@ def test_child_environment_omits_system_port_when_parent_has_none(monkeypatch):
         process_index=1,
         addresses_json='{"process_count": 2}',
         parent_pid=123,
+        listener_fds=(7, 8),
     )
 
     assert "DYN_SYSTEM_PORT" not in env
@@ -121,6 +140,7 @@ def test_decode_child_addresses_validates_parent_count(monkeypatch):
 def test_attach_client_sets_vllm_api_rank():
     client = Mock()
     config = _vllm_config()
+    input_listener, output_listener = Mock(), Mock()
     with patch.object(
         processes.AsyncLLM, "from_vllm_config", return_value=client
     ) as create:
@@ -134,6 +154,7 @@ def test_attach_client_sets_vllm_api_rank():
             stat_loggers=[],
             enable_log_requests=False,
             disable_log_stats=False,
+            listeners=(input_listener, output_listener),
         )
 
     assert result is client
@@ -145,6 +166,8 @@ def test_attach_client_sets_vllm_api_rank():
     assert kwargs["client_addresses"] == {
         "input_address": "ipc://input",
         "output_address": "ipc://output",
+        "input_listener": input_listener,
+        "output_listener": output_listener,
     }
     assert kwargs["client_count"] == 8
     assert kwargs["client_index"] == 3
@@ -169,18 +192,21 @@ def test_process_group_cleanup_is_ordered_and_idempotent(monkeypatch):
     rpc_directory = Mock(name="rpc_directory")
     rpc_directory.name = "/tmp/dynamo-vllm-rpc-test"
     monkeypatch.setenv(processes._RPC_BASE_PATH_ENV, rpc_directory.name)
+    zmq_listeners = Mock()
 
     group = processes.EmbeddingWorkerProcessGroup(
         children=[(1, child)],
         engine_manager=engine_manager,
         rpc_directory=rpc_directory,
         previous_rpc_base_path="/tmp/original-rpc",
+        zmq_listeners=zmq_listeners,
     )
     group.cleanup(timeout=2.0)
     group.cleanup(timeout=2.0)
 
     child.terminate.assert_called_once()
     engine_manager.shutdown.assert_called_once_with(timeout=2.0)
+    zmq_listeners.cleanup.assert_called_once()
     rpc_directory.cleanup.assert_called_once()
     assert os.environ[processes._RPC_BASE_PATH_ENV] == "/tmp/original-rpc"
 
@@ -196,6 +222,7 @@ def test_process_group_reports_unexpected_child_exit():
         engine_manager=Mock(),
         rpc_directory=rpc_directory,
         previous_rpc_base_path=None,
+        zmq_listeners=Mock(),
         parent_failure_callback=callback,
     )
 
@@ -251,8 +278,9 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     parent_config = _vllm_config()
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
+    zmq_listeners = _zmq_listeners(addresses)
     monkeypatch.setattr(
-        engine_utils, "get_engine_zmq_addresses", lambda *_: addresses, raising=False
+        processes, "bind_engine_zmq_listeners", lambda *_: zmq_listeners
     )
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
@@ -281,10 +309,16 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     assert len(children) == process_count - 1
     assert group.engine_manager is engine_manager
     group.cleanup()
+    zmq_listeners.cleanup.assert_called_once()
 
 
 def test_child_attaches_without_launching_engine(monkeypatch):
+    input_end, output_end = socket.socketpair()
     monkeypatch.setenv(processes._ROLE_ENV, processes._CHILD_ROLE)
+    monkeypatch.setenv(
+        processes._LISTENER_FDS_ENV,
+        json.dumps([input_end.fileno(), output_end.fileno()]),
+    )
     monkeypatch.setenv(processes._INDEX_ENV, "1")
     monkeypatch.setenv(
         processes._ENGINE_ADDRESSES_ENV,
@@ -301,14 +335,26 @@ def test_child_attaches_without_launching_engine(monkeypatch):
     attach = Mock(return_value=(child_client, child_config))
     monkeypatch.setattr(processes, "_attach_client", attach)
 
-    client, config, group = processes.create_shared_embedding_engine_client(
-        vllm_config=_vllm_config(),
-        process_count=2,
-        usage_context=UsageContext.OPENAI_API_SERVER,
-        stat_loggers=[],
-        enable_log_requests=False,
-        disable_log_stats=True,
-    )
+    try:
+        client, config, group = processes.create_shared_embedding_engine_client(
+            vllm_config=_vllm_config(),
+            process_count=2,
+            usage_context=UsageContext.OPENAI_API_SERVER,
+            stat_loggers=[],
+            enable_log_requests=False,
+            disable_log_stats=True,
+        )
+        listeners = attach.call_args.kwargs["listeners"]
+        assert [s.fileno() for s in listeners] == [
+            input_end.fileno(),
+            output_end.fileno(),
+        ]
+        # The adopted sockets share the socketpair's descriptors.
+        for adopted in listeners:
+            adopted.detach()
+    finally:
+        input_end.close()
+        output_end.close()
 
     assert client is child_client
     assert config is child_config
@@ -346,21 +392,18 @@ def _run_listener_child():
             )
         assert group is None
         try:
-            for socket in sockets:
-                socket.setsockopt(zmq.RCVTIMEO, 30000)
+            for sock in sockets:
+                sock.setsockopt(zmq.RCVTIMEO, 30000)
             assert sockets[1].recv() == b"output"
             identity, payload = sockets[0].recv_multipart()
             sockets[0].send_multipart([identity, payload])
         finally:
-            for socket in sockets:
-                socket.close(linger=0)
+            for sock in sockets:
+                sock.close(linger=0)
 
 
 @pytest.mark.timeout(180)
 def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
-    if not hasattr(engine_utils, "bind_engine_zmq_listeners"):
-        pytest.skip("requires the inherited-listener API")
-
     config = _vllm_config()
     config.parallel_config = SimpleNamespace(
         data_parallel_size_local=1,
@@ -404,10 +447,10 @@ def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
         with zmq.Context() as context, context.socket(
             zmq.PUSH
         ) as output, context.socket(zmq.DEALER) as input_socket:
-            for socket in (output, input_socket):
-                socket.setsockopt(zmq.LINGER, 0)
-                socket.setsockopt(zmq.RCVTIMEO, 30000)
-                socket.setsockopt(zmq.SNDTIMEO, 30000)
+            for sock in (output, input_socket):
+                sock.setsockopt(zmq.LINGER, 0)
+                sock.setsockopt(zmq.RCVTIMEO, 30000)
+                sock.setsockopt(zmq.SNDTIMEO, 30000)
             output.connect(addresses.outputs[1])
             input_socket.connect(addresses.inputs[1])
             output.send(b"output")
