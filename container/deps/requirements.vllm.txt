@@ -44,6 +44,12 @@ opendal==0.47.10
 # The upstream vllm-openai image bundles pillow at an older patch release;
 # floor it so the --no-deps install moves it to the current patch line.
 pillow>=12.3.0
+# The upstream vllm-openai base bundles pydantic above the ceiling that
+# ai-dynamo-runtime declares and the test image installs; pin both packages,
+# since pydantic requires an exact pydantic-core and this install is --no-deps.
+# CUDA only: stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
+pydantic==2.13.5
+pydantic-core==2.46.5
 # NVDEC hardware decode for H.264/H.265 video input (common/multimodal/
 # nvdec_decoder). The vllm-openai base ships 2.0.4, which bundles a full FFmpeg
 # including a libavcodec the codec gate rejects, so vllm_runtime.Dockerfile
