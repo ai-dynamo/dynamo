@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-sglang-generate"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "SGLang client format for Dynamo /generate"
+
+[dependencies]
+tracing = { workspace = true }
+dynamo-protocols = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-runtime = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+proptest = { version = "1.5", optional = true }
+
+[features]
+testkit = ["dep:proptest"]
+
+[dev-dependencies]
+proptest = "1.5"

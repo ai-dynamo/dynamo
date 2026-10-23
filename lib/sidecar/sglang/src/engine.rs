@@ -318,6 +318,15 @@ impl LLMEngine for SglangSidecarEngine {
             config
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
+            // What the frontend's format needs to continue migrated requests.
+            let info = |key| discovery.server_info.get(key).cloned().unwrap_or_default();
+            config.runtime_data.insert(
+                dynamo_llm::generate_format::ENGINE_INFO_KEY.into(),
+                serde_json::json!({
+                    "preferred_sampling_params": info("preferred_sampling_params"),
+                    "skip_tokenizer_init": info("skip_tokenizer_init"),
+                }),
+            );
         }
         let kv_event_sources =
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
@@ -567,10 +576,15 @@ impl LLMEngine for SglangSidecarEngine {
         let Some(state) = self.state.get() else {
             return;
         };
+        let request_id = state
+            .native_http
+            .as_ref()
+            .and_then(|http| http.request_id(&ctx))
+            .unwrap_or_else(|| ctx.id().to_string());
         // HTTP queues scheduler cancellation without first closing the gRPC stream.
         if let Some(native_http) = &state.native_http {
             match native_http
-                .abort(ctx.id(), self.transport.connect_attempt_timeout)
+                .abort(&request_id, self.transport.connect_attempt_timeout)
                 .await
             {
                 Ok(()) => return,
@@ -583,7 +597,7 @@ impl LLMEngine for SglangSidecarEngine {
         }
         let mut grpc_client = state.pool.control_client();
         let request = pb::AbortRequest {
-            rid: ctx.id().to_string(),
+            rid: request_id,
             abort_all: false,
         };
         if let Err(error) = client::abort(

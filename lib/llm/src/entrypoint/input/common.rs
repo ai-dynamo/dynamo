@@ -525,12 +525,44 @@ impl PreprocessedRouting {
     ) -> anyhow::Result<
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     > {
+        self.link_preprocessed(Migration::from_mdc(
+            card,
+            migration_limit,
+            migration_max_seq_len,
+            metrics,
+        ))
+    }
+
+    /// The engine-native Generate pipeline: requests migrate only through
+    /// their `/generate` format's continuation.
+    pub fn build_generate_pipeline(
+        &self,
+        card: &ModelDeploymentCard,
+        migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
+        metrics: Arc<Metrics>,
+    ) -> anyhow::Result<
+        ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    > {
+        self.link_preprocessed(Migration::for_generate(
+            card,
+            migration_limit,
+            migration_max_seq_len,
+            metrics,
+        ))
+    }
+
+    fn link_preprocessed(
+        &self,
+        migration: Arc<Migration>,
+    ) -> anyhow::Result<
+        ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    > {
         let frontend = SegmentSource::<
             SingleIn<PreprocessedRequest>,
             ManyOut<Annotated<LLMEngineOutput>>,
         >::new();
-        let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
-            .into_operator_for::<LLMEngineOutput>();
+        let migration = migration.into_operator_for::<LLMEngineOutput>();
         let prefill_op = self.prefill_router.into_operator();
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());

@@ -4,9 +4,7 @@
 use super::*;
 use crate::test_fixtures::*;
 use dynamo_backend_common::engine::RoutingHints;
-use dynamo_backend_common::{
-    BackendError, ErrorType, OutputOptions, SamplingOptions, StopConditions,
-};
+use dynamo_backend_common::{BackendError, ErrorType, SamplingOptions, StopConditions};
 use serde_json::json;
 
 fn assert_invalid(error: DynamoError) {
@@ -39,46 +37,49 @@ fn media_strings_move_into_generate_request() {
     }
 }
 
+// Exercise the real frontend projection before lowering to the engine protocol.
+fn plugin_request(body: serde_json::Value) -> PreprocessedRequest {
+    use dynamo_llm::generate_format::{ClientRequest, GenerateFormat, Worker};
+    let body = serde_json::to_vec(&body).unwrap();
+    let opened = dynamo_vllm_generate::VllmFormat
+        .open(ClientRequest {
+            body: &body,
+            headers: &[(
+                "content-type".parse().unwrap(),
+                "application/json".parse().unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+            default_request_id: "native",
+        })
+        .unwrap();
+    opened.validation.unwrap();
+    (opened.bind)(&Worker {
+        model: "served-model",
+        engine_info: &serde_json::Value::Null,
+        kv_cache_block_size: 16,
+        lora_name: None,
+        tower_connector_lora_enabled: false,
+    })
+    .unwrap()
+    .request
+}
+
 #[test]
-fn compatibility_envelope_preserves_typed_controls() {
+fn plugin_preserves_typed_controls() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
-        let request = PreprocessedRequest::builder()
-            .model("served-model".to_string())
-            .token_ids(vec![11, 22, 33])
-            .stop_conditions(StopConditions {
-                max_tokens: Some(8),
-                min_tokens: Some(2),
-                ignore_eos: Some(true),
-                ..Default::default()
-            })
-            .sampling_options(SamplingOptions {
-                n: Some(1),
-                temperature: Some(1.0),
-                ..Default::default()
-            })
-            .output_options(OutputOptions::default())
-            .prefill_result(if mode.is_decode() {
-                decode_request().prefill_result
-            } else {
-                None
-            })
-            .extra_args(Some(json!({
-                "vllm_tito": {
-                    "sampling_params": {
-                        "max_tokens": 8,
-                        "min_tokens": 2,
-                        "ignore_eos": true,
-                        "logprobs": 2,
-                        "prompt_logprobs": 3,
-                        "skip_special_tokens": false,
-                        "return_token_ids": true
-                    }
-                }
-            })))
-            .build()
-            .expect("v1.4 request");
-        let wire = build_generate_request(request, "legacy".to_string(), mode)
-            .expect("legacy typed controls should be preserved");
+        let mut request = plugin_request(json!({
+            "token_ids": [11, 22, 33],
+            "sampling_params": {
+                "max_tokens": 8, "min_tokens": 2, "ignore_eos": true,
+                "logprobs": 2, "prompt_logprobs": 3,
+                "skip_special_tokens": false, "return_token_ids": true
+            }
+        }));
+        if mode.is_decode() {
+            request.prefill_result = decode_request().prefill_result;
+        }
+        let wire = build_generate_request(request, "native".to_string(), mode).unwrap();
         let stopping = wire.stopping.expect("stopping");
         assert_eq!(stopping.max_new_tokens, 8);
         assert_eq!(stopping.min_new_tokens, 2);
@@ -101,9 +102,9 @@ fn compatibility_envelope_preserves_typed_controls() {
 
 #[test]
 fn prefill_uses_canonical_controls_without_decode_sampling_json() {
-    let mut request = request();
-    request.extra_args = Some(json!({
-        "vllm_tito": {"sampling_params": {"skip_special_tokens": false, "max_tokens": 100}}
+    let request = plugin_request(json!({
+        "token_ids": [11, 22, 33],
+        "sampling_params": {"skip_special_tokens": false, "max_tokens": 100}
     }));
     let wire = build_generate_request(request, "prefill".to_string(), DisaggregationMode::Prefill)
         .expect("prefill does not require native decode sampling");
@@ -114,33 +115,24 @@ fn prefill_uses_canonical_controls_without_decode_sampling_json() {
 }
 
 #[test]
-fn released_envelope_hydrates_kv_transfer_with_canonical_precedence() {
-    let mut legacy = request();
-    legacy.extra_args = Some(json!({
-        "vllm_tito": {
-            "sampling_params": {},
-            "kv_transfer_params": {"source": "legacy"}
+fn plugin_projects_kv_transfer() {
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+        let request = plugin_request(json!({
+            "token_ids": [11], "sampling_params": {},
+            "kv_transfer_params": {"remote_engine_id": "caller"}
+        }));
+        let wire = build_generate_request(request, "native".into(), mode).unwrap();
+        let kv = struct_to_json_v14(
+            wire.kv.unwrap().kv_transfer_params.unwrap(),
+            PEER,
+            KV_TRANSFER_PARAMS,
+        )
+        .unwrap();
+        assert_eq!(kv["remote_engine_id"], "caller");
+        if mode.is_prefill() {
+            assert_eq!(kv["do_remote_decode"], true);
         }
-    }));
-    let legacy = normalize_response_options(legacy).expect("normalize legacy KV transfer");
-    assert_eq!(
-        legacy.extra_args.as_ref().unwrap()["kv_transfer_params"],
-        json!({"source": "legacy"})
-    );
-
-    let mut canonical = request();
-    canonical.extra_args = Some(json!({
-        "kv_transfer_params": {"source": "canonical"},
-        "vllm_tito": {
-            "sampling_params": {},
-            "kv_transfer_params": {"source": "legacy"}
-        }
-    }));
-    let canonical = normalize_response_options(canonical).expect("normalize canonical KV transfer");
-    assert_eq!(
-        canonical.extra_args.as_ref().unwrap()["kv_transfer_params"],
-        json!({"source": "canonical"})
-    );
+    }
 }
 
 #[test]
@@ -876,33 +868,21 @@ fn full_vocabulary_logprobs_select_all_candidates() {
 }
 
 #[test]
-fn compatibility_envelope_accepts_sampling_projected_to_proto() {
+fn plugin_sampling_reaches_proto() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
-        let mut request = request();
+        let mut request = plugin_request(json!({
+            "token_ids": [11, 22, 33],
+            "sampling_params": {
+                "temperature": 0.2, "top_p": 0.9, "top_k": 4, "min_p": 0.1,
+                "seed": 123, "presence_penalty": 0.3, "frequency_penalty": 0.4,
+                "repetition_penalty": 1.1, "max_tokens": 1, "min_tokens": 1,
+                "stop_token_ids": [2], "ignore_eos": true,
+                "logprobs": 1, "prompt_logprobs": 1, "skip_special_tokens": false
+            }
+        }));
         if mode.is_decode() {
             request.prefill_result = decode_request().prefill_result;
         }
-        request.extra_args = Some(json!({
-            "vllm_tito": {
-                "sampling_params": {
-                    "temperature": 0.2,
-                    "top_p": 0.9,
-                    "top_k": 4,
-                    "min_p": 0.1,
-                    "seed": 123,
-                    "presence_penalty": 0.3,
-                    "frequency_penalty": 0.4,
-                    "repetition_penalty": 1.1,
-                    "max_tokens": 1,
-                    "min_tokens": 1,
-                    "stop_token_ids": [2],
-                    "ignore_eos": true,
-                    "logprobs": 1,
-                    "prompt_logprobs": 1,
-                    "skip_special_tokens": false
-                }
-            }
-        }));
         let wire = build_generate_request(request, "native".to_string(), mode)
             .expect("vllm-proto 0.3 preserves projected sampling controls");
         assert_eq!(wire.temperature, Some(0.2));
@@ -917,70 +897,6 @@ fn compatibility_envelope_accepts_sampling_projected_to_proto() {
         assert_eq!(decoding.repetition_penalty, 1.1);
         assert_eq!(wire.stopping.expect("stopping").stop_token_ids, vec![2]);
     }
-}
-
-#[test]
-fn released_envelope_hydrates_legacy_sampling_with_canonical_precedence() {
-    let mut legacy = request();
-    legacy.sampling_options = SamplingOptions::default();
-    legacy.stop_conditions = StopConditions::default();
-    legacy.output_options = OutputOptions::default();
-    legacy.extra_args = Some(json!({
-        "vllm_tito": {
-            "sampling_params": {
-                "temperature": 0.8,
-                "top_p": 0.85,
-                "top_k": 7,
-                "min_p": 0.05,
-                "seed": 321,
-                "presence_penalty": 0.2,
-                "frequency_penalty": 0.3,
-                "repetition_penalty": 1.2,
-                "max_tokens": 9,
-                "min_tokens": 2,
-                "stop_token_ids": [42, 43],
-                "ignore_eos": true,
-                "logprobs": 2,
-                "prompt_logprobs": 3,
-                "skip_special_tokens": false
-            }
-        }
-    }));
-
-    let legacy = normalize_response_options(legacy).expect("normalize v1.4 controls");
-    assert_eq!(legacy.sampling_options.temperature, Some(0.8));
-    assert_eq!(legacy.sampling_options.top_p, Some(0.85));
-    assert_eq!(legacy.sampling_options.top_k, Some(7));
-    assert_eq!(legacy.sampling_options.min_p, Some(0.05));
-    assert_eq!(legacy.sampling_options.seed, Some(321));
-    assert_eq!(legacy.sampling_options.presence_penalty, Some(0.2));
-    assert_eq!(legacy.sampling_options.frequency_penalty, Some(0.3));
-    assert_eq!(legacy.sampling_options.repetition_penalty, Some(1.2));
-    assert_eq!(legacy.stop_conditions.max_tokens, Some(9));
-    assert_eq!(legacy.stop_conditions.min_tokens, Some(2));
-    assert_eq!(legacy.stop_conditions.stop_token_ids, Some(vec![42, 43]));
-    assert_eq!(legacy.stop_conditions.ignore_eos, Some(true));
-    assert_eq!(legacy.output_options.logprobs, Some(2));
-    assert_eq!(legacy.output_options.prompt_logprobs, Some(3));
-    assert_eq!(legacy.output_options.skip_special_tokens, Some(false));
-
-    let mut canonical = legacy.clone();
-    canonical.sampling_options.temperature = Some(0.4);
-    canonical.stop_conditions.stop_token_ids = Some(vec![7]);
-    let canonical = normalize_response_options(canonical).expect("keep canonical controls");
-    assert_eq!(canonical.sampling_options.temperature, Some(0.4));
-    assert_eq!(canonical.stop_conditions.stop_token_ids, Some(vec![7]));
-
-    let mut canonical_hidden = legacy;
-    canonical_hidden.stop_conditions.stop_token_ids = None;
-    canonical_hidden.stop_conditions.stop_token_ids_hidden = Some(vec![7]);
-    let canonical_hidden =
-        normalize_response_options(canonical_hidden).expect("keep canonical hidden stops");
-    assert_eq!(canonical_hidden.stop_conditions.stop_token_ids, None);
-    assert_eq!(
-        canonical_hidden.stop_conditions.stop_token_ids_hidden,
-        Some(vec![7])
-    );
 }
 
 #[test]
@@ -1019,28 +935,26 @@ fn native_generate_preserves_explicitly_disabled_sampling_controls() {
 }
 
 #[test]
-fn compatibility_envelope_allows_projected_prefix_cache_bypass() {
-    for extra in [
-        json!({
-            "skip_reading_prefix_cache": true,
-            "vllm_tito": {"sampling_params": {"skip_reading_prefix_cache": true}}
-        }),
-        json!({"vllm_tito": {"sampling_params": {"skip_reading_prefix_cache": true}}}),
-    ] {
-        let mut request = request();
-        request.extra_args = Some(extra);
+fn plugin_projects_prefix_cache_bypass() {
+    for bypass in [None, Some(false), Some(true)] {
+        let request = plugin_request(json!({
+            "token_ids": [11], "sampling_params": {"skip_reading_prefix_cache": bypass}
+        }));
         let wire = build_generate_request(
             request,
-            "cache-bypass".to_string(),
+            "cache-bypass".into(),
             DisaggregationMode::Aggregated,
         )
-        .expect("projected cache bypass should be accepted");
-        assert!(wire.kv.expect("kv options").bypass_prefix_cache);
+        .unwrap();
+        assert_eq!(
+            wire.kv.unwrap().bypass_prefix_cache,
+            bypass.unwrap_or(false)
+        );
     }
 }
 
 #[test]
-fn compatibility_envelope_rejects_disabled_token_ids() {
+fn native_envelope_rejects_disabled_token_ids() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
         let mut request = request();
         request.extra_args = Some(json!({

@@ -66,6 +66,7 @@
 
 # === frontend  (@ai-dynamo/dynamo-frontend-codeowners) ===
 /examples/chat_templates/                                                                               @ai-dynamo/dynamo-frontend-codeowners
+/lib/generate-format-catalog/                                                                           @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
@@ -93,6 +94,7 @@
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /lib/sidecar/vllm/                                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners
 /examples/backends/vllm/                                                                                @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/generate-formats/vllm/                                                                             @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/                                                                            @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/tests/                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners
 
@@ -111,6 +113,7 @@
 # === backend-sglang  (@ai-dynamo/dynamo-backend-sglang-codeowners) ===
 /lib/sidecar/sglang/                                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners
 /examples/backends/sglang/                                                                              @ai-dynamo/dynamo-backend-sglang-codeowners
+/lib/generate-formats/sglang/                                                                           @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/                                                                          @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/tests/                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/request_handlers/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners
@@ -520,6 +523,7 @@ requirements.txt                                                                
 /lib/llm/src/protocols/common/                                                                          @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/protocols/openai/                                                                          @ai-dynamo/dynamo-frontend-codeowners
 /tests/fault_tolerance/deploy/                                                                          @ai-dynamo/dynamo-fault-tolerance-codeowners
+/lib/llm/src/generate_format.rs                                                                         @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/kv_router/indexer/                                                                         @ai-dynamo/dynamo-router-codeowners
 /tests/fault_tolerance/etcd_ha/                                                                         @ai-dynamo/dynamo-fault-tolerance-codeowners
 /lib/llm/src/block_manager/pool/                                                                        @ai-dynamo/dynamo-kv-memory-codeowners
