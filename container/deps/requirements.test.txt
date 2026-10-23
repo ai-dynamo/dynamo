@@ -53,6 +53,8 @@ openai==2.32.0  # for Fault Tolerance migration tests
 # Protobuf definitions the OTLP parity receiver decodes; see grpcio above.
 # Version-matched to the opentelemetry-* pins in requirements.common.txt.
 opentelemetry-proto<=1.38.0
+# Planner and benchmark DataFrame assertions.
+pandas>=2.2,<3
 pandas-stubs>=1.3.0
 psutil<=7.0.0  # System package, may vary by platform (was >=5.0.0)
 # Required by pyproject.toml warning filters (pydantic.warnings.PydanticDeprecatedSince20)
