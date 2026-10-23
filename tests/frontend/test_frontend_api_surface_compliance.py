@@ -477,9 +477,9 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
-# codex exec (up to 180s shared by all attempts) + Codex child process (up to
-# 210s) + claude exec (up to 180s) + optional Claude subagent probe (up to
-# 45s) + opencode run (up to 180s) + inter-suite health checks + teardown.
+# codex exec (180s shared by retries) + Codex child process (up to 210s) + claude
+# exec (up to 180s) + optional Claude subagent probe (up to 45s) + opencode run
+# (up to 180s) + inter-suite health checks + teardown.
 @pytest.mark.timeout(1095)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
@@ -1020,11 +1020,8 @@ def _run_bun_compliance(
         )
 
 
-# `codex exec` hard-codes approval policy `Never`, so Codex itself refuses any
-# exec_command call that asks for a sandbox override (`sandbox_permissions`)
-# and hands this text back to the model instead of running the command. The
-# compliance model sometimes adds that field despite the prompt. Only that
-# local refusal earns another attempt; every other miss stays fatal.
+# `codex exec` forces approval policy `Never`, so Codex refuses exec_command calls
+# that set `sandbox_permissions`. Only that refusal is retried; other misses fail.
 _CODEX_EXEC_ATTEMPTS = 3
 _CODEX_EXEC_BUDGET_S = 180.0
 # Do not start a retry with less time than this left in the shared budget.
