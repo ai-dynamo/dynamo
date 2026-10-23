@@ -33,8 +33,8 @@ fn help_names_dyn_served_model_name() {
     assert!(stdout.contains("DYN_SERVED_MODEL_NAME"), "{stdout}");
 }
 
-/// Unsupported roles and flags fail before the runtime is configured; an
-/// invalid runtime setting must not mask them.
+/// Unsupported roles and flags fail before the runtime is configured;
+/// accepted settings reach runtime validation.
 #[test]
 fn unsupported_arguments_fail_before_runtime_configuration() {
     for (extra, expect) in [
@@ -46,12 +46,28 @@ fn unsupported_arguments_fail_before_runtime_configuration() {
             &["--model-path", "model", "--route-to-encoder"][..],
             "route-to-encoder is not supported",
         ),
+        (
+            &["--model-path", "model", "--dyn-structural-tag", "true"][..],
+            "--dyn-structural-tag is not supported",
+        ),
+        (
+            &["--model-path", "model", "--dyn-structural-tag", "{}"][..],
+            "--dyn-structural-tag is not supported",
+        ),
+        (
+            &["--model-path", "model"][..],
+            "num_worker_threads: Validation error",
+        ),
+        (
+            &["--model-path", "model", "--dyn-structural-tag", "false"][..],
+            "num_worker_threads: Validation error",
+        ),
         (&["--model-path", " "][..], "model-path must not be empty"),
     ] {
         let output = sidecar()
             .args(["--grpc-endpoint", "http://127.0.0.1:1"])
             .args(extra)
-            .env("ETCD_ENDPOINTS", "://invalid")
+            .env("DYN_RUNTIME_NUM_WORKER_THREADS", "0")
             .output()
             .expect("run dynamo-lpx-sidecar");
         assert!(!output.status.success(), "{extra:?} must fail");

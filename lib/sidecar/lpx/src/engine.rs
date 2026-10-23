@@ -155,6 +155,11 @@ fn validate_args(args: &Args) -> Result<(), DynamoError> {
             "route-to-encoder is not supported by the LPX sidecar",
         ));
     }
+    if common.structural_tag(false).is_some() {
+        return Err(invalid_argument(
+            "--dyn-structural-tag is not supported by the LPX sidecar",
+        ));
+    }
     Ok(())
 }
 
