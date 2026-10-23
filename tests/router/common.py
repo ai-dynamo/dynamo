@@ -19,6 +19,7 @@ from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
 from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
     assert_event_dumps_equal,
+    frontend_admin_port,
     get_runtime,
     managed_runtime,
     poll_for_worker_instances,
@@ -1715,7 +1716,7 @@ def _test_router_threshold_none_disables_rejection(
         frontend_port,
     )
 
-    with KVRouterProcess(
+    with frontend_admin_port() as admin_port, KVRouterProcess(
         request=request,
         block_size=block_size,
         frontend_port=frontend_port,
@@ -1723,11 +1724,11 @@ def _test_router_threshold_none_disables_rejection(
         blocks_threshold="None",
         tokens_threshold="None",
         tokens_threshold_frac="None",
-        extra_env={"DYN_ENABLE_FRONTEND_ADMIN_API": "1"},
+        extra_env={"DYN_FRONTEND_ADMIN_PORT": str(admin_port)},
     ):
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
-        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        busy_threshold_url = f"http://127.0.0.1:{admin_port}/busy_threshold"
         model_name = test_payload.get("model", "test-model")
         load_payload = {
             **test_payload,
@@ -3356,7 +3357,7 @@ def _test_busy_threshold_endpoint(
     initial_active_decode_blocks_threshold = 0.9
     initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
 
-    with KVRouterProcess(
+    with frontend_admin_port() as admin_port, KVRouterProcess(
         request,
         block_size,
         frontend_port,
@@ -3365,13 +3366,13 @@ def _test_busy_threshold_endpoint(
         blocks_threshold=initial_active_decode_blocks_threshold,
         tokens_threshold=initial_active_prefill_tokens_threshold,
         request_plane=request_plane,
-        extra_env={"DYN_ENABLE_FRONTEND_ADMIN_API": "1"},
+        extra_env={"DYN_FRONTEND_ADMIN_PORT": str(admin_port)},
     ):
         # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
         frontend_url = f"http://localhost:{frontend_port}"
-        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        busy_threshold_url = f"http://127.0.0.1:{admin_port}/busy_threshold"
 
         # Wait for workers to register with frontend
         logger.info("Waiting for workers to register with frontend...")

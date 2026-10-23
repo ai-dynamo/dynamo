@@ -437,10 +437,21 @@ pub mod llm {
     pub const DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: &str =
         "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
 
-    /// Enable the frontend's HTTP admin routes. They are disabled by default.
-    /// Truthy values register `/router_policy`, its busy-threshold subresource,
-    /// and the legacy `/busy_threshold` routes on the inference HTTP port.
-    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+    /// Master switch for the frontend's HTTP admin API surface.
+    /// The admin API is **enabled by default** on its own listener (see
+    /// `DYN_FRONTEND_ADMIN_HOST` / `DYN_FRONTEND_ADMIN_PORT`); this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent the admin
+    /// listener from starting, so `/router_policy`, its busy-threshold subresource,
+    /// and the legacy `/busy_threshold` routes are not served. Inference, metrics,
+    /// models, health, and liveness routes are unaffected.
+    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
+
+    /// Host the frontend admin listener binds to. Default `127.0.0.1`.
+    pub const DYN_FRONTEND_ADMIN_HOST: &str = "DYN_FRONTEND_ADMIN_HOST";
+
+    /// Port of the frontend admin listener. Default `8002`, where a bind failure only
+    /// logs an error; when this is set, a bind failure aborts startup.
+    pub const DYN_FRONTEND_ADMIN_PORT: &str = "DYN_FRONTEND_ADMIN_PORT";
 
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
@@ -1179,7 +1190,9 @@ mod tests {
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
-            llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+            llm::DYN_FRONTEND_ADMIN_HOST,
+            llm::DYN_FRONTEND_ADMIN_PORT,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,

@@ -16,6 +16,8 @@ import aiohttp
 
 from dynamo.llm import KvRouter
 from dynamo.runtime import DistributedRuntime
+from tests.utils.constants import DynamoPortRange
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
@@ -629,6 +631,16 @@ def managed_runtime(
         yield runtime
     finally:
         runtime.shutdown()
+
+
+@contextlib.contextmanager
+def frontend_admin_port():
+    """Allocates a port for the frontend admin listener (`DYN_FRONTEND_ADMIN_PORT`)."""
+    port = allocate_port(DynamoPortRange.FRONTEND.value)
+    try:
+        yield port
+    finally:
+        deallocate_port(port)
 
 
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
