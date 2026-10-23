@@ -2482,6 +2482,7 @@ dependencies = [
  "axum 0.8.4",
  "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "url",

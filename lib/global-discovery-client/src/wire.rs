@@ -9,7 +9,6 @@ use url::Url;
 
 use crate::replicas::ReplicaEndpoint;
 
-/// `GET /routers` response body.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RoutersResponse {
     pub routers: Vec<ReplicaEndpoint>,
