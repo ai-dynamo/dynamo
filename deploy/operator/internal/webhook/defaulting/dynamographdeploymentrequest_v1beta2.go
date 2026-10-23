@@ -130,48 +130,63 @@ type hardwareDefaultsV1beta2 struct {
 }
 
 // defaultDynamoGraphDeploymentRequestSpecV1beta2 defaults spec in place. It applies on
-// CREATE and UPDATE and is idempotent; opts carries no hardware on UPDATE. spec must not be
-// nil. Explicit values, including empty objects, are kept. Children are visited in the
-// declaration order of the API type.
+// CREATE and UPDATE and is idempotent; opts carries hardware only when the environment was
+// asked (see resolveHardware). spec must not be nil. Explicit values, including empty
+// objects, are kept. The functions below mirror the Go API tree and visit children in
+// declaration order.
 func defaultDynamoGraphDeploymentRequestSpecV1beta2(
 	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
 	opts dynamoGraphDeploymentRequestV1beta2DefaultOptions,
 ) {
-	if spec.Backends == nil {
-		spec.Backends = []nvidiacomv1beta2.Backend{"vllm", "sglang", "trtllm"}
+	defaultDynamoGraphDeploymentRequestNativeSpecV1beta2(&spec.DynamoGraphDeploymentRequestNativeSpec, opts)
+}
+
+func defaultDynamoGraphDeploymentRequestNativeSpecV1beta2(
+	native *nvidiacomv1beta2.DynamoGraphDeploymentRequestNativeSpec,
+	opts dynamoGraphDeploymentRequestV1beta2DefaultOptions,
+) {
+	defaultNativeSearchInputV1beta2(&native.NativeSearchInput, opts)
+}
+
+func defaultNativeSearchInputV1beta2(
+	input *nvidiacomv1beta2.NativeSearchInput,
+	opts dynamoGraphDeploymentRequestV1beta2DefaultOptions,
+) {
+	if input.Backends == nil {
+		input.Backends = []nvidiacomv1beta2.Backend{"vllm", "sglang", "trtllm"}
 	}
 
 	// Hardware has no static default: it exists only when the cluster supplied some.
-	if spec.Hardware == nil && opts.hardware != (hardwareDefaultsV1beta2{}) {
-		spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
+	if input.Hardware == nil && opts.hardware != (hardwareDefaultsV1beta2{}) {
+		input.Hardware = &nvidiacomv1beta2.HardwareSpec{}
 	}
-	if spec.Hardware != nil {
-		defaultHardwareSpecV1beta2(spec.Hardware, opts.hardware)
+	if input.Hardware != nil {
+		defaultHardwareSpecV1beta2(input.Hardware, opts.hardware)
 	}
 
-	if spec.Workload == nil {
-		spec.Workload = &nvidiacomv1beta2.WorkloadSpec{}
+	if input.Workload == nil {
+		input.Workload = &nvidiacomv1beta2.WorkloadSpec{}
 	}
-	defaultWorkloadSpecV1beta2(spec.Workload)
+	defaultWorkloadSpecV1beta2(input.Workload)
 
-	if spec.Objective == nil {
-		spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{}
+	if input.Objective == nil {
+		input.Objective = &nvidiacomv1beta2.ObjectiveSpec{}
 	}
-	defaultObjectiveSpecV1beta2(spec.Objective)
+	defaultObjectiveSpecV1beta2(input.Objective)
 
 	// The operator image is persisted with the Request, so spec.aisimulate is created to
 	// carry it.
-	if spec.AISimulate == nil && opts.aisimulateImage != "" {
-		spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{}
+	if input.AISimulate == nil && opts.aisimulateImage != "" {
+		input.AISimulate = &nvidiacomv1beta2.AISimulateSpec{}
 	}
-	if spec.AISimulate != nil {
-		defaultAISimulateSpecV1beta2(spec.AISimulate, opts.aisimulateImage)
+	if input.AISimulate != nil {
+		defaultAISimulateSpecV1beta2(input.AISimulate, opts.aisimulateImage)
 	}
 
-	if spec.Recommendation == nil {
-		spec.Recommendation = &nvidiacomv1beta2.RecommendationSpec{}
+	if input.Recommendation == nil {
+		input.Recommendation = &nvidiacomv1beta2.RecommendationSpec{}
 	}
-	defaultRecommendationSpecV1beta2(spec.Recommendation)
+	defaultRecommendationSpecV1beta2(input.Recommendation)
 }
 
 func defaultHardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec, defaults hardwareDefaultsV1beta2) {

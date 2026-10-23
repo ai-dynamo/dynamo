@@ -29,7 +29,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -59,7 +59,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		"spec":{"components":[{"name":"VllmPrefillWorker"}]}
 	}`
 
-	discoveredH200 := webhookdefaulting.DiscoveredHardware{SKU: "h200_sxm", GPUs: 8}
+	discoveredH200 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}
 
 	tests := []struct {
 		name               string
@@ -69,7 +69,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		seedWithoutWebhook bool
 		// discovered and discoveryErr are what cluster GPU discovery reports while the case
 		// runs; beforeUpdate may change them between the seed and the update.
-		discovered   webhookdefaulting.DiscoveredHardware
+		discovered   gpu.GPUInfo
 		discoveryErr error
 		beforeUpdate func(*testing.T)
 		// check inspects the object the API server returned.
@@ -872,7 +872,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			admissionHardware.set(tt.discovered, tt.discoveryErr)
-			t.Cleanup(func() { admissionHardware.set(webhookdefaulting.DiscoveredHardware{}, nil) })
+			t.Cleanup(func() { admissionHardware.set(gpu.GPUInfo{}, nil) })
 
 			gates := features.Gates{GPUDiscovery: tt.gpuDiscovery}
 			test := admissionTestCase{

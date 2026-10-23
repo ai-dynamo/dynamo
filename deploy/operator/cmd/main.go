@@ -674,12 +674,12 @@ func registerWebhookHandlers(
 			AISimulateImage: dgdrAISimulateDefaultImage,
 			// The same discovery order as the DGDR reconciler: DCGM first, then node labels when
 			// the GPUDiscovery gate is on. The webhook keeps its own short-lived cache.
-			Hardware: webhookdefaulting.NewGPUHardwareDiscoverer(&gpu.Discoverer{
+			Hardware: &gpu.Discoverer{
 				Reader:     mgr.GetAPIReader(),
 				DCGM:       gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
 				Cache:      gpu.NewGPUDiscoveryCache(),
 				NodeLabels: func() bool { return gate.Enabled(features.GPUDiscovery) },
-			}),
+			},
 		},
 		OperatorPrincipal: operatorPrincipal,
 		Gate:              gate,

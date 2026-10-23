@@ -39,25 +39,25 @@ const (
 func applyDefaults(underlay map[string]any) error {
 	b := builder{root: underlay}
 
-	if has(underlay, Workload...) {
-		if !has(underlay, WorkloadRequestCount...) && !has(underlay, WorkloadNumRequestRatio...) {
-			b.set(float64(DefaultRequestCount), WorkloadRequestCount)
+	if has(underlay, workloadPath...) {
+		if !has(underlay, workloadRequestCount...) && !has(underlay, workloadNumRequestRatio...) {
+			b.set(float64(DefaultRequestCount), workloadRequestCount)
 		}
-		kvLoadRatio, _, _ := unstructured.NestedFieldNoCopy(underlay, WorkloadKVLoadRatio...)
-		if _, isRange := kvLoadRatio.([]any); isRange && !has(underlay, SweepMaxTrials...) {
-			b.set(float64(DefaultMaxTrials), SweepMaxTrials)
+		kvLoadRatio, _, _ := unstructured.NestedFieldNoCopy(underlay, workloadKVLoadRatio...)
+		if _, isRange := kvLoadRatio.([]any); isRange && !has(underlay, sweepMaxTrials...) {
+			b.set(float64(DefaultMaxTrials), sweepMaxTrials)
 		}
 	}
 
-	if hasSLABound(underlay) && !has(underlay, GoalStrictSLA...) {
-		b.set(true, GoalStrictSLA)
+	if hasSLABound(underlay) && !has(underlay, goalStrictSLA...) {
+		b.set(true, goalStrictSLA)
 	}
 	return b.err
 }
 
 // hasSLABound reports whether the input bounds at least one latency.
 func hasSLABound(input map[string]any) bool {
-	for _, path := range [][]string{GoalSLATTFTMs, GoalSLAITLMs, GoalSLAE2EMs} {
+	for _, path := range [][]string{goalSLATTFTMs, goalSLAITLMs, goalSLAE2EMs} {
 		if bound, _, _ := unstructured.NestedFieldNoCopy(input, path...); bound != nil {
 			return true
 		}
