@@ -263,15 +263,28 @@ Creates a writable operation for transferring data to a remote worker.
 
 [source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L880)
 
+<h4 id="api-dynamo-nixl-connect-connector-warmup">warmup</h4>
+
+```python
+warmup() -> None
+```
+
+Create the shared NIXL agent before the first transfer.
+
+Repeated calls reuse the same connection as transfer operations. Setup
+errors propagate to the caller so startup can fail before serving traffic.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L896)
+
 <h4 id="api-dynamo-nixl-connect-connector-initialize">initialize</h4>
 
 ```python
 initialize() -> None
 ```
 
-Deprecated method.
+Deprecated no-op; use warmup() for eager NIXL agent creation.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L896)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L904)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-descriptor" title="Descriptor (class)">
@@ -285,7 +298,7 @@ from dynamo.nixl_connect import Descriptor
 Descriptor(data: torch.Tensor | tuple[array_module.ndarray, Device | str] | bytes | tuple[int, int, Device | str, Any]) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L919`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L919)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L925`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L925)
 
 **Public methods**
 
@@ -324,7 +337,7 @@ This is useful for keeping a reference to the data in memory, but it is not requ
 - `TypeError` — When `data` is not a valid type (i.e., not `torch.Tensor`, `bytes`, or a valid tuple).
 - `TypeError` — When `data` is a tuple but the elements are not of the expected types (i.e., [`ndarray`, `Device|str`] OR [`int`, `int`, `Device|str`, `Any`]).
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L924)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L930)
 
 <h4 id="api-dynamo-nixl-connect-descriptor-from-serialized">from_serialized</h4>
 
@@ -344,7 +357,7 @@ The serialized descriptor to deserialize.
 
 - `Descriptor` — The deserialized descriptor.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1117)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1123)
 
 <h4 id="api-dynamo-nixl-connect-descriptor-deregister-with-connector">deregister_with_connector</h4>
 
@@ -354,7 +367,7 @@ deregister_with_connector(connection: Connection) -> None
 
 Deregisters the memory of the descriptor with NIXL.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1153)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1159)
 
 <h4 id="api-dynamo-nixl-connect-descriptor-register-with-connector">register_with_connector</h4>
 
@@ -364,7 +377,7 @@ register_with_connector(connection: Connection) -> None
 
 Registers the memory of the descriptor with NIXL.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1181)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1187)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-device" title="Device (class)">
@@ -378,7 +391,7 @@ from dynamo.nixl_connect import Device
 Device(metadata: str | tuple[DeviceKind, int]) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1283`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1283)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1289`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1289)
 
 **Public methods**
 
@@ -390,7 +403,7 @@ __init__(metadata: str | tuple[DeviceKind, int]) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1288)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1294)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-devicekind" title="DeviceKind (class)">
@@ -400,7 +413,7 @@ Type of memory a descriptor has been allocated to.
 from dynamo.nixl_connect import DeviceKind
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1353`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1353)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1359`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1359)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-operationkind" title="OperationKind (class)">
@@ -410,7 +423,7 @@ Kind of an operation.
 from dynamo.nixl_connect import OperationKind
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1396`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1396)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1402`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1402)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-operationstatus" title="OperationStatus (class)">
@@ -420,7 +433,7 @@ Status of an operation.
 from dynamo.nixl_connect import OperationStatus
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1414`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1414)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1420`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1420)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-passiveoperation" title="PassiveOperation (class)">
@@ -434,7 +447,7 @@ from dynamo.nixl_connect import PassiveOperation
 PassiveOperation(connection: Connection, operation_kind: OperationKind, local_descriptors: Descriptor | list[Descriptor]) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1452`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1452)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1458`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1458)
 
 **Public methods**
 
@@ -446,7 +459,7 @@ __init__(connection: Connection, operation_kind: OperationKind, local_descriptor
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1457)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1463)
 
 <h4 id="api-dynamo-nixl-connect-passiveoperation-metadata">metadata</h4>
 
@@ -456,7 +469,7 @@ metadata(hex_encode: bool = False) -> RdmaMetadata
 
 Gets the request descriptor for the operation.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1520)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1526)
 
 <h4 id="api-dynamo-nixl-connect-passiveoperation-wait-for-completion">wait_for_completion</h4>
 
@@ -466,7 +479,7 @@ wait_for_completion() -> None
 
 Blocks the caller asynchronously until the operation has completed.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1606)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1612)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-rdmametadata" title="RdmaMetadata (class)">
@@ -476,7 +489,7 @@ Pydantic serialization type for describing the passive side of a transfer.
 from dynamo.nixl_connect import RdmaMetadata
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1758`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1758)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1764`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1764)
 
 **Public methods**
 
@@ -488,7 +501,7 @@ to_descriptors() -> Descriptor | list[Descriptor]
 
 Deserializes the request descriptor into a `dynamo.nixl_connect.Descriptor` or list of `dynamo.nixl_connect.Descriptor` objects.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1773)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1779)
 
 <h4 id="api-dynamo-nixl-connect-rdmametadata-validate-operation-kind">validate_operation_kind</h4>
 
@@ -498,7 +511,7 @@ validate_operation_kind(cls, v: int) -> int
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1785)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1791)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-readoperation" title="ReadOperation (class)">
@@ -512,7 +525,7 @@ from dynamo.nixl_connect import ReadOperation
 ReadOperation(connection: Connection, remote_metadata: RdmaMetadata, local_descriptors: Descriptor | list[Descriptor]) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1614`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1614)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1620`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1620)
 
 **Public methods**
 
@@ -536,7 +549,7 @@ Serialized request from the remote worker.
 Local descriptor(s) to to receive the data from the remote worker.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1620)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1626)
 
 <h4 id="api-dynamo-nixl-connect-readoperation-cancel">cancel</h4>
 
@@ -546,7 +559,7 @@ cancel() -> None
 
 Cancels the operation. No affect if the operation has already completed or errored, or been cancelled.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1692)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1698)
 
 <h4 id="api-dynamo-nixl-connect-readoperation-results">results</h4>
 
@@ -556,7 +569,7 @@ results() -> list[Descriptor]
 
 Gets the results of the operation. Returns a single descriptor if only one was requested, or a list of descriptors if multiple were requested.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1699)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1705)
 
 <h4 id="api-dynamo-nixl-connect-readoperation-wait-for-completion">wait_for_completion</h4>
 
@@ -566,7 +579,7 @@ wait_for_completion() -> None
 
 Blocks the caller asynchronously until the operation has completed.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1713)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1719)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-readableoperation" title="ReadableOperation (class)">
@@ -580,7 +593,7 @@ from dynamo.nixl_connect import ReadableOperation
 ReadableOperation(connection: Connection, local_descriptors: Descriptor | list[Descriptor]) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1720`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1720)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1726`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1726)
 
 **Public methods**
 
@@ -592,7 +605,7 @@ __init__(connection: Connection, local_descriptors: Descriptor | list[Descriptor
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1725)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1731)
 
 <h4 id="api-dynamo-nixl-connect-readableoperation-wait-for-completion">wait_for_completion</h4>
 
@@ -602,7 +615,7 @@ wait_for_completion() -> None
 
 Blocks the caller asynchronously until the operation has completed.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1751)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1757)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-remote" title="Remote (class)">
@@ -616,7 +629,7 @@ from dynamo.nixl_connect import Remote
 Remote(connection: Connection, nixl_metadata: bytes | str) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1795`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1795)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1801`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1801)
 
 **Public methods**
 
@@ -628,7 +641,7 @@ __init__(connection: Connection, nixl_metadata: bytes | str) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1800)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1806)
 
 <h4 id="api-dynamo-nixl-connect-remote-decode-metadata">decode_metadata</h4>
 
@@ -638,7 +651,7 @@ decode_metadata(nixl_metadata: bytes | str) -> bytes
 
 Decode agent metadata without registering a remote or starting a transfer.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1823)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1829)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-serializeddescriptor" title="SerializedDescriptor (class)">
@@ -648,7 +661,7 @@ Pydantic serialization type for memory descriptors.
 from dynamo.nixl_connect import SerializedDescriptor
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1889`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1889)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1895`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1895)
 
 **Public methods**
 
@@ -660,7 +673,7 @@ to_descriptor() -> Descriptor
 
 Deserialize the serialized descriptor into a `Descriptor` object.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1904)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1910)
 
 <h4 id="api-dynamo-nixl-connect-serializeddescriptor-validate-device">validate_device</h4>
 
@@ -670,7 +683,7 @@ validate_device(cls, v: str) -> str
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1910)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1916)
 
 <h4 id="api-dynamo-nixl-connect-serializeddescriptor-validate-ptr">validate_ptr</h4>
 
@@ -680,7 +693,7 @@ validate_ptr(cls, v: int) -> int
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1922)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1928)
 
 <h4 id="api-dynamo-nixl-connect-serializeddescriptor-validate-size">validate_size</h4>
 
@@ -690,7 +703,7 @@ validate_size(cls, v: int) -> int
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1929)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1935)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-writableoperation" title="WritableOperation (class)">
@@ -704,7 +717,7 @@ from dynamo.nixl_connect import WritableOperation
 WritableOperation(connection: Connection, local_descriptors: Descriptor | list[Descriptor]) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1939`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1939)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1945`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1945)
 
 **Public methods**
 
@@ -733,7 +746,7 @@ When `connection` is not a `dynamo.nixl_connect.Connection`.
 When `local_descriptors` is not a `dynamo.nixl_connect.Descriptor` or `list[dynamo.nixl_connect.Descriptor]`.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1944)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1950)
 
 <h4 id="api-dynamo-nixl-connect-writableoperation-wait-for-completion">wait_for_completion</h4>
 
@@ -743,7 +756,7 @@ wait_for_completion() -> None
 
 Blocks the caller asynchronously until the operation has completed.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1987)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1993)
 </Accordion>
 
 <Accordion id="api-dynamo-nixl-connect-writeoperation" title="WriteOperation (class)">
@@ -757,7 +770,7 @@ from dynamo.nixl_connect import WriteOperation
 WriteOperation(connection: Connection, local_descriptors: Descriptor | list[Descriptor], remote_metadata: RdmaMetadata) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1994`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L1994)
+[`lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L2000`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L2000)
 
 **Public methods**
 
@@ -798,7 +811,7 @@ When `remote_metadata.nixl_metadata` is not a non-empty `str`.
 When `local_descriptors` is not a `dynamo.nixl_connect.Descriptor` or `list[dynamo.nixl_connect.Descriptor]`.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L2000)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L2006)
 
 <h4 id="api-dynamo-nixl-connect-writeoperation-cancel">cancel</h4>
 
@@ -808,7 +821,7 @@ cancel() -> None
 
 Cancels the operation. No affect if the operation has already completed or errored, or has been cancelled.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L2073)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L2079)
 
 <h4 id="api-dynamo-nixl-connect-writeoperation-wait-for-completion">wait_for_completion</h4>
 
@@ -818,5 +831,5 @@ wait_for_completion() -> None
 
 Blocks the caller asynchronously until the operation has completed.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L2080)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/nixl_connect/__init__.py#L2086)
 </Accordion>
