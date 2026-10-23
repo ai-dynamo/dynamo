@@ -7,6 +7,10 @@ subtitle: Point coding-agent CLIs at a Dynamo deployment
 
 Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages`, so any agent that uses these APIs can talk to a Dynamo endpoint even if it is not listed in this guide. This guide focuses on popular agent harnesses that send stable session IDs. Dynamo normalizes these IDs for tracing and other explicitly configured consumers.
 
+On Chat Completions and Responses requests, function tools with explicit `strict: true` receive schema preflight before inference. Invalid schemas now return HTTP 400 where earlier versions could accept them. Responses validates every submitted function, including namespace members and functions excluded by `allowed_tools` or `tool_choice: "none"`. Omitted, `null`, or `false` strictness and omitted or `null` parameters retain existing behavior.
+
+Preflight runs independently of structural-tag activation. Passing preflight does not guarantee complete OpenAI compatibility or backend enforcement. See [Request Validation](../tool-calling-and-reasoning/structural-tag.md#request-validation) for object rules, size budgets, and Dynamo's bounded local-reference support.
+
 <Steps toc={true}>
 <Step title="Start a local agent endpoint" id="local-setup">
 To locally test these out, we have a small script that runs an SGLang-backed `zai-org/GLM-4.7-Flash` endpoint. This script starts a TP2 instance on port 8000 and enables request tracing for replay and visualization. By default traces are saved in `/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)`

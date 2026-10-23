@@ -8,6 +8,7 @@ package lpx
 import (
 	"testing"
 
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -21,19 +22,9 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 	t.Log("Project the complete build contract")
 	build, err := buildFromGbuildManifestV2("gs://models/build", manifest)
 	require.NoError(t, err)
-	require.EqualValues(t, 4, build.IOFPGACount)
-	require.EqualValues(t, 2, build.IOFanoutFactor)
-	require.Len(t, build.Partitions, 1)
-
-	t.Log("Accept compat FPGA I/O mode without changing the normalized build contract")
-	deployment, err := manifest.Deployment()
-	require.NoError(t, err)
-	runtimeIO, err := deployment.RuntimeIo()
-	require.NoError(t, err)
-	runtimeIO.SetReserved1(1)
-	compat, err := buildFromGbuildManifestV2("gs://models/build", manifest)
-	require.NoError(t, err)
-	require.Equal(t, build, compat)
+	require.EqualValues(t, 4, build.ioFPGACount)
+	require.EqualValues(t, 2, build.ioFanoutFactor)
+	require.Len(t, build.partitions, 1)
 
 	t.Log("Reject an unsupported contract revision before lowering the manifest")
 	manifest.SetContractRevision(manifest.ContractRevision() + 1)
@@ -41,14 +32,82 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 	require.ErrorContains(t, err, "contractRevision")
 }
 
-func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
+func TestManifestReadersIgnoreExecutionMetadata(t *testing.T) {
+	for _, field := range []string{"batch size", "node count", "compilation mode", "protocol", "FPGA mode", "runtime assets", "partition selection"} {
+		t.Run(field, func(t *testing.T) {
+			t.Log("Normalize equivalent legacy and split deployment contracts")
+			legacy := newManifestV2ContractFixture(t)
+			split := newDeploymentV1ContractFixture(t)
+			want, err := buildFromGbuildManifestV2("gs://models/build", legacy)
+			require.NoError(t, err)
+			legacyConfig, err := legacy.Deployment()
+			require.NoError(t, err)
+			splitConfig, err := split.Config()
+			require.NoError(t, err)
+			legacyArtifacts, err := legacy.Artifacts()
+			require.NoError(t, err)
+
+			t.Log("Change metadata that does not determine Dynamo deployment output")
+			switch field {
+			case "batch size":
+				legacyProgram, err := legacyConfig.Program()
+				require.NoError(t, err)
+				legacyProgram.SetBatchSize(7)
+				splitProgram, err := splitConfig.Program()
+				require.NoError(t, err)
+				splitProgram.SetBatchSize(7)
+			case "node count":
+				legacyConfig.SetNumLpuNodes(99)
+				splitConfig.SetNumLpuNodes(99)
+			case "compilation mode":
+				legacyConfig.SetCompilationMode(manifestcapnpv2.CompilationMode(99))
+				splitConfig.SetCompilationMode(deploymentcapnpv1.CompilationMode(99))
+			case "protocol":
+				legacyIO, err := legacyConfig.RuntimeIo()
+				require.NoError(t, err)
+				legacyIO.SetProtocol(99)
+				splitIO, err := splitConfig.RuntimeIo()
+				require.NoError(t, err)
+				splitIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol(99))
+			case "FPGA mode":
+				legacyIO, err := legacyConfig.RuntimeIo()
+				require.NoError(t, err)
+				legacyIO.SetReserved1(99)
+				splitIO, err := splitConfig.RuntimeIo()
+				require.NoError(t, err)
+				splitIO.SetFpgaMode(deploymentcapnpv1.FpgaIoMode(99))
+			case "runtime assets":
+				legacyAssets, err := legacyArtifacts.NewRuntimeAssets()
+				require.NoError(t, err)
+				require.NoError(t, legacyAssets.SetTokenEmbeddingsPath("../runtime-only"))
+				splitAssets, err := split.NewRuntimeAssets()
+				require.NoError(t, err)
+				require.NoError(t, splitAssets.SetTokenEmbeddingsPath("../runtime-only"))
+			case "partition selection":
+				_, err := legacyArtifacts.NewPartSelect()
+				require.NoError(t, err)
+				_, err = split.NewPartSelect()
+				require.NoError(t, err)
+			}
+
+			t.Log("Preserve the normalized deployment from both readers")
+			gotLegacy, err := buildFromGbuildManifestV2("gs://models/build", legacy)
+			require.NoError(t, err)
+			require.Equal(t, want, gotLegacy)
+			gotSplit, err := buildFromGbuildDeploymentV1("gs://models/build", split)
+			require.NoError(t, err)
+			require.Equal(t, want, gotSplit)
+		})
+	}
+}
+
+func TestAcquireBuildRejectsInvalidHXArtifacts(t *testing.T) {
 	t.Log("Define malformed HX artifact inventories")
 	tests := []struct {
 		name    string
 		wantErr string
 	}{
 		{name: "duplicate LPU partition ID", wantErr: "repeats LPU partition ID 1"},
-		{name: "topology metadata node-count mismatch", wantErr: "deployment.numLpuNodes = 2, but partition extents require 1 LPU nodes"},
 		{name: "partial build", wantErr: "partSelect builds are not supported"},
 		{name: "empty selected prop-sync chain", wantErr: "deployment.selectedPropSyncChains[0] must contain at least two partitionIds"},
 		{name: "singleton selected prop-sync chain", wantErr: "deployment.selectedPropSyncChains[0] must contain at least two partitionIds"},
@@ -60,10 +119,6 @@ func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
 			switch test.name {
 			case "duplicate LPU partition ID":
 				fixture.partitions = append(fixture.partitions, fixture.partitions[0])
-			case "topology metadata node-count mismatch":
-				fixture.partitions[0].topology = v3HXTopologyFamily
-				fixture.partitions[0].topologyFamily = v3HXTopologyFamily
-				fixture.partitions[0].partitionShape = []uint32{16, 1, 1, 1}
 			case "partial build":
 				fixture.partSelect = true
 			case "empty selected prop-sync chain":
@@ -71,224 +126,48 @@ func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
 			case "singleton selected prop-sync chain":
 				fixture.selectedPropSyncChains = [][]uint32{{1}}
 			}
-			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+			buildDir := writeCompilerFixture(t, fixture)
 
-			t.Log("Reject malformed HX artifacts during manifest normalization")
-			_, err := normalizeBuildSnapshot(snapshot)
+			t.Log("Reject malformed HX artifacts before publishing the acquired snapshot")
+			snapshot, err := (&defaultModelRegistry{}).AcquireBuild(t.Context(), buildDir)
+			require.ErrorIs(t, err, errInvalidBuildManifest)
 			require.ErrorContains(t, err, test.wantErr)
+			require.Nil(t, snapshot)
 		})
 	}
 }
 
-func TestBuildFromGbuildManifestV2ValidatesPartSelect(t *testing.T) {
+func TestBuildFromGbuildManifestV2ValidatesPartitionGeometry(t *testing.T) {
 	t.Parallel()
-
-	t.Log("Define valid and invalid revision-2 partSelect inventories")
-	tests := []struct {
-		name        string
-		selectedIDs []uint32
-		wantErr     string
+	for _, test := range []struct {
+		name, path, wantErr      string
+		numChips, devicesPerNode uint32
 	}{
-		{name: "valid", selectedIDs: []uint32{1, 0}},
-		{
-			name:        "duplicate",
-			selectedIDs: []uint32{0, 0},
-			wantErr:     "artifacts.partSelect has duplicate LPU partition id 0",
-		},
-		{
-			name:        "unpackaged",
-			selectedIDs: []uint32{0, 2},
-			wantErr:     "artifacts.partSelect references unpackaged LPU partition id 2",
-		},
-		{
-			name:        "incomplete",
-			selectedIDs: []uint32{0},
-			wantErr:     "artifacts.partSelect selects 1 LPU partitions, but artifacts package 2",
-		},
-	}
-
-	for _, test := range tests {
+		{"partition traversal", "../outside", "LPU partition 0 path", 8, 8},
+		{"missing chips", "part-0", "numChips must be >= 1", 0, 8},
+		{"missing node width", "part-0", "devicesPerNode must be >= 1", 8, 0},
+	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			t.Log("Build an unsorted two-partition V2 artifact inventory and explicit selector")
+			t.Log("Set an invalid partition field used by Dynamo")
 			manifest := newManifestV2ContractFixture(t)
-			deployment, err := manifest.Deployment()
-			require.NoError(t, err)
-			deployment.SetNumLpuNodes(2)
 			artifacts, err := manifest.Artifacts()
 			require.NoError(t, err)
-			partitions, err := artifacts.NewPartitions(2)
+			partitions, err := artifacts.Partitions()
 			require.NoError(t, err)
-			setManifestV2LPUArtifact(t, partitions.At(0), 1)
-			setManifestV2LPUArtifact(t, partitions.At(1), 0)
-			partSelect, err := artifacts.NewPartSelect()
+			detail, err := partitions.At(0).Detail().Lpu()
 			require.NoError(t, err)
-			selected, err := partSelect.NewPartitions(int32(len(test.selectedIDs)))
-			require.NoError(t, err)
-			for index, id := range test.selectedIDs {
-				selected.At(index).SetPartitionId(id)
-				selected.At(index).SetDeviceType(manifestcapnpv2.DeviceType_lpu)
-			}
+			require.NoError(t, detail.SetPath(test.path))
+			detail.SetNumChips(test.numChips)
+			detail.SetDevicesPerNode(test.devicesPerNode)
 
-			t.Log("Validate against the sorted unique XT inventory produced by classification")
-			build, err := buildFromGbuildManifestV2("gs://models/build", manifest)
-			if test.wantErr != "" {
-				require.ErrorContains(t, err, test.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			require.Len(t, build.Partitions, 2)
-			require.Equal(t, 0, build.Partitions[0].SourcePartitionID)
-			require.Equal(t, 1, build.Partitions[1].SourcePartitionID)
-		})
-	}
-}
-
-func TestBuildFromGbuildManifestV2ValidatesRuntimeInvariants(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define invalid revision-2 runtime I/O contracts")
-	tests := []struct {
-		name                             string
-		batchSize, ioCount, fanoutFactor uint32
-		wantErr                          string
-	}{
-		{
-			name: "positive batch size", batchSize: 0, ioCount: 4, fanoutFactor: 2,
-			wantErr: "deployment.program.batchSize must be >= 1, got 0",
-		},
-		{
-			name: "batch divisibility", batchSize: 3, ioCount: 4, fanoutFactor: 2,
-			wantErr: "deployment.program.batchSize 3 must be divisible by deployment.runtimeIo.ioFpgaCount 4",
-		},
-		{
-			name: "fanout divisibility", batchSize: 8, ioCount: 4, fanoutFactor: 3,
-			wantErr: "deployment.program.batchSize per endpoint 2 must be divisible by deployment.runtimeIo.fanoutFactor 3",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			t.Log("Build a manifest with malformed runtime metadata")
-			manifest := newManifestV2ContractFixture(t)
-			deployment, err := manifest.Deployment()
-			require.NoError(t, err)
-			program, err := deployment.Program()
-			require.NoError(t, err)
-			program.SetBatchSize(test.batchSize)
-			runtimeIO, err := deployment.RuntimeIo()
-			require.NoError(t, err)
-			runtimeIO.SetIoFpgaCount(test.ioCount)
-			runtimeIO.SetFanoutFactor(test.fanoutFactor)
-
-			t.Log("Reject it before scheduler-facing artifact projection")
+			t.Log("Reject the invalid scheduler or runtime configuration input")
 			_, err = buildFromGbuildManifestV2("gs://models/build", manifest)
 			require.ErrorContains(t, err, test.wantErr)
 		})
 	}
 }
 
-func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
-	t.Parallel()
-
-	type geometryFixture struct {
-		numChips, devicesPerNode, numNodes uint32
-	}
-	type embeddingFixture struct {
-		path            string
-		cpu, standalone bool
-	}
-
-	t.Log("Define revision-2 path, XT geometry, node-count, and embedding contracts")
-	tests := []struct {
-		name, partitionPath, wantErr string
-		geometry                     *geometryFixture
-		embedding                    *embeddingFixture
-	}{
-		{name: "partition traversal", partitionPath: "../outside", wantErr: "LPU partition 0 path"},
-		{
-			name: "runtime asset line break", embedding: &embeddingFixture{path: "runtime\nasset", cpu: true},
-			wantErr: "artifacts.runtimeAssets.tokenEmbeddingsPath",
-		},
-		{name: "missing numChips", geometry: &geometryFixture{devicesPerNode: 8, numNodes: 1}, wantErr: "numChips must be >= 1"},
-		{name: "missing devicesPerNode", geometry: &geometryFixture{numChips: 8, numNodes: 1}, wantErr: "devicesPerNode must be >= 1"},
-		{
-			name: "deployment node count mismatch", geometry: &geometryFixture{numChips: 8, devicesPerNode: 8, numNodes: 2},
-			wantErr: "LPU partitions use 1 LPU nodes, want deployment.numLpuNodes 2",
-		},
-		{
-			name: "asset without CPU embeddings", embedding: &embeddingFixture{path: "runtime/text_embeddings.npz"},
-			wantErr: "requires supportsCpuEmbeddings=true",
-		},
-		{
-			name: "missing standalone asset", embedding: &embeddingFixture{cpu: true, standalone: true},
-			wantErr: "is required when standaloneTokenEmbeddings=true",
-		},
-		{
-			name: "valid standalone asset", embedding: &embeddingFixture{path: "runtime/text_embeddings.npz", cpu: true, standalone: true},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			t.Log("Apply one contract mutation to an otherwise valid revision-2 manifest")
-			manifest := newManifestV2ContractFixture(t)
-			if test.partitionPath != "" || test.geometry != nil {
-				artifacts, err := manifest.Artifacts()
-				require.NoError(t, err)
-				partitions, err := artifacts.Partitions()
-				require.NoError(t, err)
-				detail, err := partitions.At(0).Detail().Lpu()
-				require.NoError(t, err)
-				if test.partitionPath != "" {
-					require.NoError(t, detail.SetPath(test.partitionPath))
-				}
-				if test.geometry != nil {
-					detail.SetNumChips(test.geometry.numChips)
-					detail.SetDevicesPerNode(test.geometry.devicesPerNode)
-					deployment, err := manifest.Deployment()
-					require.NoError(t, err)
-					deployment.SetNumLpuNodes(test.geometry.numNodes)
-				}
-			}
-			if test.embedding != nil {
-				deployment, err := manifest.Deployment()
-				require.NoError(t, err)
-				deployment.SetNumLpuNodes(2)
-				program, err := deployment.Program()
-				require.NoError(t, err)
-				program.SetSupportsCpuEmbeddings(test.embedding.cpu)
-				program.SetStandaloneTokenEmbeddings(test.embedding.standalone)
-				artifacts, err := manifest.Artifacts()
-				require.NoError(t, err)
-				partitions, err := artifacts.NewPartitions(2)
-				require.NoError(t, err)
-				setManifestV2LPUArtifact(t, partitions.At(0), 0)
-				setManifestV2LPUArtifact(t, partitions.At(1), 1)
-				if test.embedding.path != "" {
-					runtimeAssets, err := artifacts.NewRuntimeAssets()
-					require.NoError(t, err)
-					require.NoError(t, runtimeAssets.SetTokenEmbeddingsPath(test.embedding.path))
-				}
-			}
-
-			t.Log("Accept only the safe and internally consistent revision-2 contract")
-			_, err := buildFromGbuildManifestV2("gs://models/build", manifest)
-			if test.wantErr != "" {
-				require.ErrorContains(t, err, test.wantErr)
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
-}
-
-func TestBuildFromGbuildManifestV2RejectsNonLPUArtifactForLPUOnly(t *testing.T) {
+func TestBuildFromGbuildManifestV2DetectsCUDAPartitions(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Build an lpuOnly manifest with one LPU and one CUDA artifact")
@@ -306,7 +185,9 @@ func TestBuildFromGbuildManifestV2RejectsNonLPUArtifactForLPUOnly(t *testing.T) 
 	cudaRef.SetPartitionId(1)
 	cudaRef.SetDeviceType(manifestcapnpv2.DeviceType_cuda)
 
-	t.Log("Reject the mixed-device lpuOnly artifact set")
-	_, err = buildFromGbuildManifestV2("gs://bucket/registry/build-id", manifest)
-	require.ErrorContains(t, err, "deployment.compilationMode lpuOnly requires every artifact partition to use deviceType lpu")
+	t.Log("Retain CUDA requirements independently of the compilation mode label")
+	build, err := buildFromGbuildManifestV2("gs://bucket/registry/build-id", manifest)
+	require.NoError(t, err)
+	require.True(t, build.hasCUDAPartitions)
+	require.Len(t, build.partitions, 1)
 }

@@ -27,7 +27,8 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEventSink,
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent, RawKvEventSink,
+    ReplayRequestContext,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -38,8 +39,10 @@ use dynamo_mocker::services::bootstrap::{
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::{
     component::Endpoint,
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
@@ -168,6 +171,17 @@ impl ResponseReplayTable {
 struct KvEventSinkAdapter(KvEventPublisher);
 
 impl KvCacheEventSink for KvEventSinkAdapter {
+    fn publish_batch_with_metadata(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        self.0
+            .publish_batch_with_session_ids(
+                events
+                    .into_iter()
+                    .map(|event| (event.event, event.storage_tier, event.session_id))
+                    .collect(),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to send KV event batch: {}", e))
+    }
+
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
         self.0
             .publish(event)
@@ -212,6 +226,7 @@ fn usage_with_cached_tokens(
         prompt_tokens_details: Some(PromptTokensDetails {
             audio_tokens: None,
             cached_tokens: Some(to_u32(cached_tokens)),
+            ..Default::default()
         }),
         completion_tokens_details: None,
     }
@@ -644,6 +659,8 @@ impl MockerExecutionContext {
                     {
                         Ok(sink) => {
                             let source_config = Some(KvEventSourceConfig::Zmq {
+                                liveness: None,
+                                expected_rank: None,
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
                                 topic: String::new(),
                                 image_token_id: None,
@@ -785,6 +802,23 @@ impl MockerExecutionContext {
     }
 }
 
+fn invalid_argument(message: impl Into<String>, public_message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .public_message(public_message)
+        .build()
+}
+
+/// A stream whose only item is `error`, so the request fails without marking the worker down.
+fn error_stream(
+    ctx: &impl AsyncEngineContextProvider,
+    error: DynamoError,
+) -> ManyOut<Annotated<LLMEngineOutput>> {
+    let stream = futures::stream::iter([Annotated::from_err(error)]);
+    ResponseStream::new(Box::pin(stream), ctx.context())
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for MockerExecutionContext
@@ -795,34 +829,48 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
-        let native_sglang = sglang::response_metadata(&request, ctx.id()).map_err(Error::from)?;
+        // Client-input errors go into the stream, not `Err`: the egress treats every pre-stream
+        // failure as `CannotConnect` and takes the worker out of routing.
+        let native_sglang = match sglang::response_metadata(&request, ctx.id()) {
+            Ok(metadata) => metadata,
+            Err(error) => return Ok(error_stream(&ctx, error)),
+        };
         let native_sglang_terminal = native_sglang.is_some();
 
         let dp_rank = self.resolve_dp_rank(&request);
 
-        // Validate dp_rank
+        // A client can pick dp_rank with `x-dynamo-dp-rank` plus an explicit worker.
         if dp_rank >= self.engine_args.dp_size {
-            return Err(Error::msg(format!(
+            let message = format!(
                 "dp_rank {} is out of bounds for dp_size {}",
                 dp_rank, self.engine_args.dp_size
-            )));
+            );
+            return Ok(error_stream(
+                &ctx,
+                invalid_argument(message.clone(), message),
+            ));
         }
+        let is_prefill = self.engine_args.is_prefill();
+        let requested_max_output_tokens = if is_prefill {
+            1
+        } else {
+            let Some(max_tokens) = request.stop_conditions.max_tokens else {
+                return Ok(error_stream(
+                    &ctx,
+                    invalid_argument(
+                        "max_output_tokens must be specified for mocker",
+                        "`max_output_tokens` (or `max_tokens`) is required by the mocker worker",
+                    ),
+                ));
+            };
+            max_tokens as usize
+        };
         let engine = self
             .engine(dp_rank as usize)
             .await
             .map_err(|error| Error::msg(error.to_string()))?;
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
-        let is_prefill = self.engine_args.is_prefill();
-        let requested_max_output_tokens = if is_prefill {
-            1
-        } else {
-            request
-                .stop_conditions
-                .max_tokens
-                .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
-                as usize
-        };
         let replay_key = request
             .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
             .or_else(|| {
@@ -880,6 +928,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             uuid: Some(request_uuid),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
+            replay_context: request
+                .agent_context
+                .as_ref()
+                .map(|context| context.session_id.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(|id| ReplayRequestContext {
+                    session_id: Some(id.to_owned()),
+                    ..Default::default()
+                }),
             ..Default::default()
         };
 
@@ -1492,6 +1550,7 @@ mod tests {
                 prompt_tokens_details: Some(PromptTokensDetails {
                     audio_tokens: None,
                     cached_tokens: Some(0),
+                    ..Default::default()
                 }),
                 completion_tokens_details: None,
             })
@@ -1500,6 +1559,54 @@ mod tests {
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn client_input_errors_fail_in_stream_without_marking_worker_down() {
+        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_runtime::error::ErrorClass;
+
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut missing_max_tokens = decode_request(3, 1);
+        missing_max_tokens.stop_conditions.max_tokens = None;
+        let mut bad_dp_rank = decode_request(3, 1);
+        bad_dp_rank.routing = Some(RoutingHints {
+            dp_rank: Some(7),
+            ..Default::default()
+        });
+        let mut bad_sglang = decode_request(3, 1);
+        bad_sglang.extra_args = Some(serde_json::json!({"sglang_tito": 7}));
+
+        for (request, expected, public) in [
+            (missing_max_tokens, "max_output_tokens", true),
+            (bad_dp_rank, "dp_rank 7", true),
+            (bad_sglang, "sglang_tito", false),
+        ] {
+            // An `Err` here is what the egress turns into `CannotConnect` and an evicted worker.
+            let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+            let item = stream.next().await.unwrap();
+            assert!(item.data.is_none());
+            let error = item.err().unwrap();
+            assert_eq!(error.class(), ErrorClass::InvalidRequest, "{expected}");
+            assert!(error.to_string().contains(expected), "{error}");
+            if public {
+                assert!(error.public_message().unwrap().contains(expected));
+            }
+            assert!(!crate::migration::is_migratable(&error), "{expected}");
+            assert!(stream.next().await.is_none());
+        }
     }
 
     #[tokio::test]

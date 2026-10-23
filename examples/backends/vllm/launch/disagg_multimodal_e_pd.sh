@@ -39,6 +39,10 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Disaggregated multimodal serving with separate Encode and aggregated PD worker"
             echo ""
+            echo "Single-GPU mode uses the first CUDA_VISIBLE_DEVICES entry; missing or empty is an error."
+            echo "Explicit DYN_ENCODE_WORKER_GPU and DYN_PD_WORKER_GPU values override it."
+            echo "Set CUDA_VISIBLE_DEVICES unless every worker has an explicit GPU override."
+            echo ""
             echo "Options:"
             echo "  --model <model_name>          Specify the VLM model to use (default: $MODEL_NAME)"
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
@@ -55,7 +59,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --model microsoft/Phi-3.5-vision-instruct"
             echo "  $0 --model Qwen/Qwen2.5-VL-7B-Instruct"
             echo "  $0 --no-enable-prefix-caching --multimodal-embedding-cache-capacity-gb 2"
-            echo "  $0 --model Qwen/Qwen2-VL-2B-Instruct --single-gpu"
+            echo "  CUDA_VISIBLE_DEVICES=0 $0 --model Qwen/Qwen2-VL-2B-Instruct --single-gpu"
             echo ""
             exit 0
             ;;
@@ -98,10 +102,10 @@ if [[ "$FRONTEND_DECODING" == "true" ]]; then
 fi
 
 # GPU assignments (override via environment variables)
-# In single-GPU mode both workers share the same GPU.
+# In single-GPU mode both workers share the inherited GPU (see inherited_gpu_id).
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
-    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-$(inherited_gpu_id)}
     DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager --max-model-len $PD_MAX_MODEL_LEN"

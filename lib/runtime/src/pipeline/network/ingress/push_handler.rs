@@ -3,7 +3,6 @@
 
 use super::*;
 
-use crate::admission_gate;
 use crate::engine::AsyncEngineContext;
 use crate::error::DynamoError;
 use crate::metrics::prometheus_names::work_handler;
@@ -111,10 +110,6 @@ impl WorkHandlerMetrics {
             "Total number of requests cancelled by work handler",
             metrics_labels,
         )?;
-
-        // The gate admits on this endpoint's behalf, so expose its family here
-        // too. Idempotent: the gate is process-global and every endpoint asks.
-        admission_gate::register_metrics(endpoint.get_metrics_registry());
 
         Ok(Self::new(
             request_counter,
@@ -298,7 +293,7 @@ where
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes).await).is_err() {
+            if let Err(send_err) = publisher.send(resp_bytes).await {
                 send_complete_final = false;
                 if context.is_stopped() {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
@@ -309,10 +304,18 @@ where
                     // Case 1 can happen when client closed the connection after receiving the
                     // complete response from frontend. Hence, send failure can be expected in this
                     // case.
-                    tracing::warn!("Failed to publish response for stream {}", context.id());
+                    tracing::warn!(
+                        error = %send_err,
+                        "Failed to publish response for stream {}",
+                        context.id()
+                    );
                 } else {
                     // Otherwise, this is an error.
-                    tracing::error!("Failed to publish response for stream {}", context.id());
+                    tracing::error!(
+                        error = %send_err,
+                        "Failed to publish response for stream {}",
+                        context.id()
+                    );
                     context.stop_generating();
                 }
                 // Account errors in all cases, including cancellation. Therefore this metric can be
@@ -712,18 +715,12 @@ where
         let request_context = request.context();
         tracing::trace!("calling generate");
         let worker_operation = lifecycle.start_worker_operation();
-        // Route backend generation through the transport-independent admission
-        // boundary. Admission errors follow the existing generate error path.
         let stream = async {
-            admission_gate::global()
-                .admit(
-                    Some(request_context.as_ref()),
-                    self.segment
-                        .get()
-                        .expect("segment not set")
-                        .generate(request)
-                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
-                )
+            self.segment
+                .get()
+                .expect("segment not set")
+                .generate(request)
+                .instrument(lifecycle.start(LifecycleStage::RequestDispatch))
                 .await
         }
         .instrument(worker_operation.clone())

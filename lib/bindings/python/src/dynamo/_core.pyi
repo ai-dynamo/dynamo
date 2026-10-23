@@ -119,6 +119,24 @@ class DistributedRuntime:
         """
         ...
 
+    def register_engine_http_handler(
+        self,
+        name: str,
+        callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    ) -> None:
+        """Register `/engine/{name}/...` on an enabled system server.
+
+        The async callback receives `method`, the relative `path`, and JSON
+        `body` (None for an empty body), and returns `status` and JSON `body`.
+        Registration fails if the name is already registered. No authentication
+        is added; callers must restrict access to the system listener.
+        """
+        ...
+
+    def unregister_engine_http_handler(self, name: str) -> None:
+        """Remove a handler; already dispatched requests may still finish."""
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
@@ -895,6 +913,7 @@ class ModelRuntimeConfig:
     tool_call_parser: str | None
     reasoning_parser: str | None
     tokenizer_backend: str | None
+    structural_tag: dict[str, Any] | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -923,16 +942,8 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
-    def set_structural_tag_mode(self, mode: str) -> None:
-        """Set structural tag mode ("off" or "on")."""
-        ...
-
-    def set_structural_tag_scope(self, scope: str) -> None:
-        """Set structural tag scope ("auto" or "always")."""
-        ...
-
-    def set_structural_tag_schema(self, schema: str) -> None:
-        """Set structural tag schema mode ("auto" or "strict")."""
+    def set_structural_tag(self, structural_tag: dict[str, Any] | None) -> None:
+        """Set the structural-tag policy, or disable it with ``None``."""
         ...
 
     def set_disaggregated_endpoint(
@@ -1380,6 +1391,17 @@ class FpmDirectPublisher:
         ...
 
 
+class FpmHealthSnapshot:
+    @property
+    def snapshot(self) -> dict[tuple[str, int], bytes]: ...
+    @property
+    def unjoined_worker_ids(self) -> list[str]: ...
+    @property
+    def stale_rank_count(self) -> int: ...
+    @property
+    def missing_rank_count(self) -> int: ...
+
+
 class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
@@ -1419,9 +1441,12 @@ class FpmEventSubscriber:
         """
         ...
 
-    def start_tracking(self) -> None:
+    def start_tracking(self, max_age_seconds: float = 15.0) -> None:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
+
+        ``max_age_seconds`` fixes the freshness and cleanup window for this
+        subscription. It must be finite and positive.
 
         Spawns two background tasks:
 
@@ -1451,11 +1476,20 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_recent_stats_with_health(self) -> FpmHealthSnapshot:
+        """Return fresh samples, unjoined IDs, stale count, and missing rank count.
+
+        Age is measured from local receive time, including idle heartbeats.
+        The age limit is set once by ``start_tracking()``.
+        Missing ranks include discovered workers that have not published a sample.
+        """
+        ...
+
     def get_model_cards(self) -> dict[str, str]:
         """
         Snapshot of model deployment cards keyed by worker id.
 
-        The snapshot is filtered against the known-workers set so entries
+        The snapshot is filtered against the active worker lifecycle so entries
         for already-removed workers are not returned.  Values are the raw
         ``ModelDeploymentCard`` serialized as a JSON string; callers parse
         whichever fields they need (e.g. ``runtime_config``,
@@ -1480,13 +1514,18 @@ class HttpService:
     """
 
     def __init__(
-        self, port: Optional[int] = None, *, wait_for_first_item: bool = False
+        self,
+        port: Optional[int] = None,
+        *,
+        wait_for_first_item: bool = False,
+        batch_gateway_url: Optional[str] = None,
     ) -> None:
         """
         Create a new HTTP service.
 
         Args:
             port: Optional port number to bind the service to (default: 8080)
+            batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
             wait_for_first_item: When True, a streaming chat, completions,
                 responses, or Anthropic messages request waits for the engine's
                 first item before the HTTP status is committed, so an exception
@@ -2199,12 +2238,12 @@ class FrontendResponse:
 
     def __init__(self, status_code: int, body: object) -> None: ...
 
-async def run_input(
+def run_input(
     distributed_runtime: DistributedRuntime,
     input: str,
     engine_config: EngineConfig,
     frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
-) -> None:
+) -> asyncio.Future[None]:
     """Start an engine, connect it to an input, and run until stopped.
 
     ``frontend_route_extensions`` supplies additional HTTP routes to the
@@ -2730,7 +2769,9 @@ class KvDcRelay:
         ...
 
 class KvStateAgentHost:
-    def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
+    def __init__(
+        self, endpoint: Endpoint, max_slots: int = 8, slots_per_socket: int = 1
+    ) -> None:
         ...
 
     async def start(self) -> None:
@@ -2852,6 +2893,7 @@ class KvRouter:
         self,
         request: JsonLike,
         response_buffer_size: int = 100,
+        context: Context | None = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate from a preprocessed request dict (PreprocessedRequest format).
@@ -2859,6 +2901,8 @@ class KvRouter:
         Accepts a full request dict with token_ids, model, stop_conditions, etc.
         Set response_buffer_size to 0 for demand-driven direct Python consumption;
         negative values are rejected.
+        Pass context to preserve request metadata, cancellation, and distributed
+        tracing across the Python/Rust boundary.
         Returns an async iterator yielding generation responses.
         """
         ...
@@ -3053,6 +3097,7 @@ class EntrypointArgs:
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
+        batch_gateway_url: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3090,6 +3135,7 @@ class EntrypointArgs:
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
+            batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
         """
         ...
 
@@ -3208,6 +3254,20 @@ class StreamIncomplete(DynamoException):
 
     ...
 
+class WorkerOverloaded(DynamoException):
+    """The worker temporarily cannot admit another request."""
+
+    ...
+
+class WorkerUnavailable(DynamoException):
+    """No worker on the request's route can serve it yet (HTTP 503).
+
+    Raised by `RoutedEngine.generate`, for example while prefill routing is
+    still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
 class SelectionServiceError(DynamoException):
     """
     Raised by `SelectionService` for selector failures that are not malformed
@@ -3229,6 +3289,32 @@ class SelectionServiceError(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    class EngineMetrics:
+        """Metrics handle provided to an engine's registration hook."""
+
+        def register_prometheus_expfmt_callback(
+            self, callback: Callable[[], str]
+        ) -> None: ...
+
+        def register_prometheus_typed_callback(
+            self,
+            callback: Callable[
+                [],
+                list[
+                    tuple[
+                        str,
+                        str,
+                        str,
+                        str,
+                        list[tuple[str, list[tuple[str, str]], float, float | None]],
+                    ]
+                ],
+            ],
+        ) -> None: ...
+
+        @property
+        def auto_labels(self) -> Dict[str, str]: ...
+
     @staticmethod
     def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
         """Run the native SGLang sidecar with CLI-style arguments."""
@@ -3342,9 +3428,7 @@ class backend:
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
             health_check_payload: Optional[Dict[str, Any]] = None,
-            structural_tag_mode: str = ...,
-            structural_tag_scope: str = ...,
-            structural_tag_schema: str = ...,
+            structural_tag: Optional[Dict[str, Any]] = None,
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,

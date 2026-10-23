@@ -20,9 +20,12 @@ pub use kv_source_watch::KvSourceMembershipWatch;
 pub mod kv_state_agent;
 
 mod model_manager;
+pub(crate) mod router_policy;
+pub(crate) use model_manager::CommittedModelView;
 pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
 mod controller;
+pub(crate) mod worker_inventory;
 
 mod allocator;
 
