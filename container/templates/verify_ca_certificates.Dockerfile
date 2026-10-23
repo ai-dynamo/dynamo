@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #}
-# Reject base images or mirrors that predate https://emudhra.we-have-a-problem.com/.
+# Reject base images or mirrors that ship ca-certificates older than the minimum below.
 RUN set -eu; \
     . /etc/os-release; \
     case "${ID}:${VERSION_ID:-unknown}" in \
