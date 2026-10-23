@@ -21,8 +21,8 @@ use crate::pb;
 use crate::pb::control_client::ControlClient;
 use crate::pb::inference_client::InferenceClient;
 
-/// Bound on a `Control` RPC or rejected-request cleanup dispatch, so an
-/// unresponsive server cannot hang startup, cancellation, or rejection.
+/// Bound on a `Control` RPC or cleanup dispatch, so an unresponsive server
+/// cannot hang startup, cancellation, or rejection.
 pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often a still-starting engine is reported while the bootstrap waits.
 const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(30);

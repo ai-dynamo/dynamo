@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
-# `logging::inject_trace_headers_into_map` for the W3C trace metadata and the
+# `logging::get_distributed_tracing_context` for W3C trace metadata and the
 # system server settings a standby rank answers its probes on.
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }

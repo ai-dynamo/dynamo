@@ -12,7 +12,7 @@
 //! silently change the request's meaning, or when the response could not
 //! carry the result back.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use dynamo_backend_common::{
@@ -24,9 +24,6 @@ use crate::client::{engine_shutdown, invalid_argument, protocol_error, status_to
 use crate::handoff;
 use crate::model::{DiscoveredEngine, engine_label};
 use crate::pb;
-
-/// W3C Trace Context headers the hybrid engine reads from request metadata.
-const TRACE_METADATA: [&str; 2] = ["traceparent", "tracestate"];
 
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
@@ -118,12 +115,15 @@ pub(crate) fn build_handoff_cleanup_request(
 
 /// The current span's W3C Trace Context, as `Generate` metadata.
 pub(crate) fn trace_headers() -> Vec<(&'static str, String)> {
-    let mut headers = HashMap::new();
-    dynamo_runtime::logging::inject_trace_headers_into_map(&mut headers);
-    TRACE_METADATA
-        .into_iter()
-        .filter_map(|key| headers.remove(key).map(|value| (key, value)))
-        .collect()
+    let Some(context) = dynamo_runtime::logging::get_distributed_tracing_context() else {
+        return Vec::new();
+    };
+    let mut headers = Vec::with_capacity(2);
+    headers.push(("traceparent", context.create_traceparent()));
+    if let Some(tracestate) = context.tracestate {
+        headers.push(("tracestate", tracestate));
+    }
+    headers
 }
 
 /// -1 and 0 mean "all tokens" in Dynamo, as an unset top_k does in

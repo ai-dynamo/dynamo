@@ -249,27 +249,30 @@ impl LLMEngine for LpxSidecarEngine {
         let request_id = ctx.id().to_string();
         // A request this sidecar rejects is a deterministic 4xx: deliver it as
         // the first stream item so the frontend does not migrate it.
-        let (proto_request, rejection) = match build_generate_request(
+        let (proto_request, rejection, is_cleanup) = match build_generate_request(
             &request,
             &request_id,
             &self.discovered,
         ) {
             Ok(proto_request) => {
-                let proto_request = if let Some(prefill) = &request.prefill_result
+                if let Some(prefill) = &request.prefill_result
                     && ctx.is_stopped()
                 {
-                    build_handoff_cleanup_request(&request.token_ids, prefill, &request_id)?
+                    (
+                        build_handoff_cleanup_request(&request.token_ids, prefill, &request_id)?,
+                        None,
+                        true,
+                    )
                 } else {
-                    proto_request
-                };
-                (proto_request, None)
+                    (proto_request, None, false)
+                }
             }
             Err(error) => {
                 let Some(prefill) = &request.prefill_result else {
                     return Ok(single(Err(error)));
                 };
                 match build_handoff_cleanup_request(&request.token_ids, prefill, &request_id) {
-                    Ok(cleanup) => (cleanup, Some(error)),
+                    Ok(cleanup) => (cleanup, Some(error), true),
                     Err(cleanup_error) => {
                         tracing::warn!(
                             %request_id,
@@ -283,7 +286,8 @@ impl LLMEngine for LpxSidecarEngine {
         };
         let mut state = ResponseState::new(&request, &self.discovered);
         // A decode leg must dispatch even after cancellation to release staged
-        // prefill KV. Cancellation known before dispatch uses a one-token cleanup.
+        // prefill KV. Cancellation known before dispatch uses a one-token cleanup,
+        // and every cleanup dispatch is abandoned after RPC_TIMEOUT.
         // Dropping a hybrid engine's stream only detaches delivery; a request
         // already dispatched runs until its own stopping conditions are met.
         let needs_handoff_dispatch = request.prefill_result.is_some();
@@ -298,7 +302,7 @@ impl LLMEngine for LpxSidecarEngine {
             _ = &mut request_cancellation, if !needs_handoff_dispatch => None,
             // The process is going away; nothing would read the response.
             _ = &mut shutdown_cancellation => None,
-            _ = tokio::time::sleep(client::RPC_TIMEOUT), if rejection.is_some() => {
+            _ = tokio::time::sleep(client::RPC_TIMEOUT), if is_cleanup => {
                 tracing::warn!(
                     %request_id,
                     engine = &*self.discovered.engine_name,

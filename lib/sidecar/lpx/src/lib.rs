@@ -22,9 +22,8 @@ mod standby;
 ///
 /// Both sidecars speak the same vendored contract, and one set of generated
 /// types lets the TensorRT-LLM Mocker server stand in for the LPX engines in
-/// tests without conversions. A change there can only break this crate's
-/// build, never its wire format. Move to a standalone `openengine` protocol
-/// crate once one exists.
+/// tests without conversions. Move to a standalone `openengine` protocol crate
+/// once one exists.
 pub(crate) use dynamo_trtllm_sidecar::proto as pb;
 
 pub use engine::{Launch, LpxSidecarEngine};

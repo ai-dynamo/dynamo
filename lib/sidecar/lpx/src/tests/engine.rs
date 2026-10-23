@@ -232,6 +232,37 @@ async fn a_rejected_decode_leg_returns_its_error_when_cleanup_dispatch_times_out
     assert!(stream.next().await.is_none());
 }
 
+#[tokio::test]
+async fn a_cancelled_decode_leg_finishes_when_cleanup_dispatch_times_out() {
+    let fake = FakeEngine::new(DECODE).with_behavior(Behavior::NeverOpens);
+    let server = FakeServer::start(fake).await;
+    let engine = started(&server, DECODE).await;
+    let context = dynamo_backend_common::testing::mock_context();
+    context.stop_generating();
+
+    tokio::time::pause();
+    let dispatch = open(&engine, decode_request(), context);
+    tokio::pin!(dispatch);
+    let waiting_since = std::time::Instant::now();
+    while server.fake.requests().is_empty() {
+        assert!(
+            waiting_since.elapsed() < Duration::from_secs(5),
+            "Generate was sent"
+        );
+        assert!(futures::poll!(&mut dispatch).is_pending());
+        // Keep the runtime runnable so networking cannot advance paused time.
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::advance(crate::client::RPC_TIMEOUT).await;
+    let mut stream = tokio::time::timeout(Duration::from_secs(1), dispatch)
+        .await
+        .expect("cleanup dispatch stops at its deadline");
+    let terminal = next_within(&mut stream).await.expect("terminal");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    assert!(stream.next().await.is_none());
+}
+
 // ---------------------------------------------------------------------------
 // Abort
 // ---------------------------------------------------------------------------
