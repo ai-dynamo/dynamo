@@ -137,7 +137,3 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
-
-# GPT-OSS reasoning/required-call guidance fixes pending a published parser release.
-[patch.crates-io]
-dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/gpt-oss-reasoning-guidance" }
