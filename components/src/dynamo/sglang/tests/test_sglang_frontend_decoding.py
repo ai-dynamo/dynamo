@@ -447,6 +447,7 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
     handler._image_loader = None
     handler._video_loader = None
     handler._mm_hashes_supported = False
+    handler._mm_routing_labels_supported = False
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
@@ -517,6 +518,7 @@ async def test_aggregated_fd_off_passes_media_url_strings():
 async def test_aggregated_forwards_grouped_mm_hashes_in_sglang_item_order():
     handler = _new_decode_handler(enable_frontend_decoding=False)
     handler._mm_hashes_supported = True
+    handler._mm_routing_labels_supported = False
     captured: Dict[str, Any] = {}
 
     async def fake_async_generate(**kwargs):
@@ -542,6 +544,40 @@ async def test_aggregated_forwards_grouped_mm_hashes_in_sglang_item_order():
         pass
 
     assert captured["mm_hashes"] == ["image-a", "video-a"]
+
+
+@pytest.mark.asyncio
+async def test_aggregated_forwards_routing_labels_instead_of_mm_hashes():
+    """SGLang builds that own multimodal identity get the same grouped hashes
+    as routing labels, and never as caller identity."""
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    handler._mm_routing_labels_supported = True
+    captured: Dict[str, Any] = {}
+
+    async def fake_async_generate(**kwargs):
+        captured.update(kwargs)
+        return _empty_stream()
+
+    handler.engine = SimpleNamespace(async_generate=fake_async_generate)
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": ["https://example.com/a.jpg"],
+            "video_url": ["https://example.com/a.mp4"],
+        },
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                "video": ["video-a"],
+                "image": ["image-a"],
+            }
+        },
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert captured["mm_routing_labels"] == ["image-a", "video-a"]
+    assert "mm_hashes" not in captured
 
 
 @pytest.mark.asyncio

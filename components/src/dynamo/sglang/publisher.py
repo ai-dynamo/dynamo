@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from time import monotonic
 from typing import (
     TYPE_CHECKING,
@@ -34,7 +35,10 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
-from dynamo.sglang._compat import override_server_args
+from dynamo.sglang._compat import (
+    override_server_args,
+    sglang_uses_engine_owned_mm_identity,
+)
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import (
@@ -411,6 +415,12 @@ class DynamoSglangPublisher:
                     "sglang kv_events_config is set but missing 'endpoint'"
                 )
             connect_ip = kv_event_connect_ip(base_ep)
+
+            if sglang_uses_engine_owned_mm_identity():
+                # Event tokens carry SGLang's own multimodal pad values. Tell
+                # the publisher's normalizer to map labeled spans and exclude
+                # the rest instead of indexing them as text.
+                os.environ.setdefault("DYN_KV_EVENTS_ENGINE_OWNED_MM_IDENTITY", "1")
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)

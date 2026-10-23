@@ -13,12 +13,18 @@ use std::sync::atomic::AtomicU32;
 use rmp_serde as rmps;
 use rustc_hash::FxHashMap;
 
-use crate::protocols::{DpRank, PlacementEvent, StorageTier, WorkerWithDpRank};
+use crate::protocols::{
+    DpRank, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, Placement, PlacementEvent,
+    StorageTier, WorkerWithDpRank,
+};
 
 mod convert;
 mod deserialize;
 mod extra_keys;
 mod filter;
+mod mm_labels;
+#[cfg(test)]
+mod mm_labels_tests;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -32,14 +38,50 @@ pub use extra_keys::{
     mark_mm_hash_for_extra_key, parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
+pub use mm_labels::EngineMmStats;
 pub use types::{
-    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
+    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality,
+    MmRoutingSpanWire, RawKvEvent, WIDE_TOKEN_SENTINEL,
 };
 
 use filter::KvCacheEventMetadata;
 
 pub fn decode_event_batch(payload: &[u8]) -> Result<KvEventBatch, rmps::decode::Error> {
     rmps::from_slice(payload)
+}
+
+/// Set when an SGLang source derives multimodal pad values from its own
+/// identity (sgl-project/sglang#43043); see
+/// [`ZmqEventNormalizer::with_engine_owned_mm_identity`].
+/// TODO(#17044): carry this in publisher config and standalone indexer
+/// registration instead of the environment.
+pub const ENGINE_OWNED_MM_IDENTITY_ENV: &str = "DYN_KV_EVENTS_ENGINE_OWNED_MM_IDENTITY";
+
+pub fn engine_owned_mm_identity_from_env() -> bool {
+    std::env::var(ENGINE_OWNED_MM_IDENTITY_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn storage_tier_of(raw: &RawKvEvent) -> Option<StorageTier> {
+    match raw.medium() {
+        None => Some(StorageTier::Device),
+        Some(medium) => StorageTier::from_kv_medium(medium),
+    }
+}
+
+/// A no-op placement event that keeps the event id sequence intact when a
+/// store is dropped entirely.
+fn empty_removal(event_id: u64, worker: WorkerWithDpRank, tier: StorageTier) -> PlacementEvent {
+    PlacementEvent::new(
+        Placement::local_worker(worker.worker_id, worker.dp_rank, tier),
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: Vec::new(),
+            }),
+            dp_rank: worker.dp_rank,
+        },
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +97,9 @@ pub struct ZmqEventNormalizer {
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
+    /// Set for SGLang sources whose multimodal pad values are engine identities
+    /// (sgl-project/sglang#43043). See `mm_labels`.
+    engine_mm: Option<mm_labels::EngineMmState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +154,7 @@ impl ZmqEventNormalizer {
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            engine_mm: None,
         }
     }
 
@@ -120,7 +166,33 @@ impl ZmqEventNormalizer {
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            engine_mm: None,
         }
+    }
+
+    /// Treat event tokens at or above `MM_PAD_SHIFT_VALUE` as engine-owned
+    /// multimodal identities: map labeled spans to Dynamo routing pads, give
+    /// multimodal chains Dynamo-owned ids, and exclude unmapped values.
+    pub fn with_engine_owned_mm_identity(mut self, enabled: bool) -> Self {
+        self.engine_mm = enabled.then(mm_labels::EngineMmState::default);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_engine_mm_capacities(
+        mut self,
+        excluded_capacity: usize,
+        id_capacity: usize,
+    ) -> Self {
+        self.engine_mm = Some(mm_labels::EngineMmState::with_capacities(
+            excluded_capacity,
+            id_capacity,
+        ));
+        self
+    }
+
+    pub fn engine_mm_stats(&self) -> Option<&EngineMmStats> {
+        self.engine_mm.as_ref().map(|state| &state.stats)
     }
 
     /// Set the model's image placeholder token id so vLLM BlockStored events
@@ -212,20 +284,63 @@ impl ZmqEventNormalizer {
     }
 
     pub fn normalize_preprocessed(
-        &self,
-        raw: RawKvEvent,
+        &mut self,
+        mut raw: RawKvEvent,
         event_id: u64,
         worker: WorkerWithDpRank,
     ) -> Option<PlacementEvent> {
-        convert_event(
-            raw,
-            event_id,
-            self.kv_block_size,
-            worker,
-            &self.warning_count,
-            self.image_token_id,
-            self.video_token_id,
-        )
+        let Some(state) = self.engine_mm.as_mut() else {
+            if !mm_labels::truncate_at_wide_tokens(&mut raw) {
+                return Some(empty_removal(event_id, worker, storage_tier_of(&raw)?));
+            }
+            return convert_event(
+                raw,
+                event_id,
+                self.kv_block_size,
+                worker,
+                &self.warning_count,
+                self.image_token_id,
+                self.video_token_id,
+            );
+        };
+
+        // Unknown media fail closed in conversion; keep that behavior.
+        let tier = storage_tier_of(&raw)?;
+        let convert = |raw| {
+            convert_event(
+                raw,
+                event_id,
+                self.kv_block_size,
+                worker,
+                &self.warning_count,
+                None,
+                None,
+            )
+        };
+        match raw {
+            RawKvEvent::BlockStored { .. } => {
+                // An excluded store still yields an event so the event id is
+                // not mistaken for an engine-side drop.
+                let Some(prepared) = state.prepare_store(&mut raw, worker, tier) else {
+                    return Some(empty_removal(event_id, worker, tier));
+                };
+                let mut event = convert(raw)?;
+                if !state.translate_store(&mut event, &prepared, worker, tier) {
+                    return Some(empty_removal(event_id, worker, tier));
+                }
+                Some(event)
+            }
+            RawKvEvent::BlockRemoved { .. } => {
+                let mut event = convert(raw)?;
+                state.translate_remove(&mut event, worker, tier);
+                Some(event)
+            }
+            RawKvEvent::AllBlocksCleared { .. } => {
+                state.clear(worker);
+                convert(raw)
+            }
+            RawKvEvent::Ignored => None,
+        }
     }
 
     pub fn normalize(
@@ -236,6 +351,13 @@ impl ZmqEventNormalizer {
     ) -> Option<PlacementEvent> {
         let raw = self.preprocess(raw, worker)?;
         self.normalize_preprocessed(raw, event_id, worker)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn engine_mm_tracked_ids(&self) -> usize {
+        self.engine_mm
+            .as_ref()
+            .map_or(0, |state| state.tracked_ids())
     }
 
     fn learn_metadata(&mut self, metadata: KvCacheEventMetadata, dp_rank: DpRank) {

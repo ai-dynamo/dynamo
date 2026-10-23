@@ -379,6 +379,33 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def sglang_uses_engine_owned_mm_identity() -> bool:
+    """Whether this SGLang derives multimodal pad values from its own identity.
+
+    sgl-project/sglang#43043 replaced the 30-bit per-item pad value with four
+    wide values (``MultimodalDataItem.pad_values``). Caller ``mm_hashes`` then
+    no longer reproduce Dynamo's routing pad, Kimi rejects them outright, and
+    event token ids exceed 32 bits.
+    """
+    try:
+        # Deferred: schedule_batch imports torch and other SGLang runtime modules.
+        from sglang.srt.managers.schedule_batch import MultimodalDataItem
+    except Exception:
+        return False
+    return "pad_values" in getattr(MultimodalDataItem, "__struct_fields__", ())
+
+
+def supports_mm_routing_labels(engine: Any) -> bool:
+    """Whether async_generate accepts per-item routing labels.
+
+    Labels are routing metadata only: SGLang reports them as spans on its KV
+    events and never uses them for cache identity.
+    """
+    return "mm_routing_labels" in filter_supported_async_generate_kwargs(
+        engine, {"mm_routing_labels": None}
+    )
+
+
 def supports_external_mm_hashes(engine: Any) -> bool:
     """Enable safe caller-provided MM hashes when this SGLang accepts them.
 
@@ -386,7 +413,11 @@ def supports_external_mm_hashes(engine: Any) -> bool:
     already built ``padded_input_ids``. Rebuild that derived field after
     tokenization so the external hash, item pad value, and padded IDs remain
     consistent. The repair is idempotent if upstream already rebuilt them.
+
+    Builds that own multimodal identity never get caller hashes.
     """
+    if sglang_uses_engine_owned_mm_identity():
+        return False
     if "mm_hashes" not in filter_supported_async_generate_kwargs(
         engine, {"mm_hashes": None}
     ):
@@ -503,4 +534,6 @@ __all__ = [
     "sglang_uses_mla_backend",
     "supports_require_reasoning",
     "supports_external_mm_hashes",
+    "supports_mm_routing_labels",
+    "sglang_uses_engine_owned_mm_identity",
 ]

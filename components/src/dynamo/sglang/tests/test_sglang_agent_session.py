@@ -178,6 +178,7 @@ def _new_decode_handler(engine: Any, serving_mode: DisaggregationMode):
     handler._first_token_source = None
     handler._enable_frontend_decoding = False
     handler._mm_hashes_supported = False
+    handler._mm_routing_labels_supported = False
     handler._routed_experts_kwargs = {}
     _stub_generate_dependencies(handler)
     handler._build_sampling_params = lambda request: {"max_new_tokens": 1}

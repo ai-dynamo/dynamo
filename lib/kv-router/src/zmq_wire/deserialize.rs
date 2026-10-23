@@ -7,13 +7,16 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use crate::protocols::BlockExtraInfo;
+use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
 
 use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
 use super::filter::{
     BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField, KvCacheSpecKind,
 };
-use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent};
+use super::types::{
+    BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, MmRoutingSpanWire, RawKvEvent,
+    WIDE_TOKEN_SENTINEL,
+};
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
 /// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
@@ -62,6 +65,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut cache_namespace: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
+        let mut mm_routing_spans: Option<Option<Vec<Option<Vec<MmRoutingSpanWire>>>>> = None;
         let mut locality: Option<Option<Locality>> = None;
         let mut ownership: Option<Option<String>> = None;
         let mut session_id: Option<Option<String>> = None;
@@ -98,6 +102,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 }
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
+                }
+                "mm_routing_spans" => {
+                    mm_routing_spans = Some(map.next_value()?);
                 }
                 "group_idx" => {
                     metadata.group_idx = map.next_value()?;
@@ -137,9 +144,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let cache_namespace = cache_namespace.unwrap_or(None).or_else(|| {
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
                 });
-                let block_mm_infos = block_mm_infos
-                    .unwrap_or(None)
-                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
+                // SGLang routing-label spans take precedence; SGLang never sends
+                // vLLM-style extra_keys multimodal hashes.
+                let block_mm_infos = match mm_routing_spans.unwrap_or(None) {
+                    Some(spans) => Some(mm_routing_spans_to_block_mm_infos(spans)),
+                    None => block_mm_infos
+                        .unwrap_or(None)
+                        .or_else(|| extra_keys_to_block_mm_infos(extra_keys)),
+                };
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
@@ -498,16 +510,52 @@ fn normalize_medium(medium: Option<String>) -> Option<String> {
     medium.filter(|value| !value.is_empty())
 }
 
+fn narrow_token_id(token_id: u64) -> u32 {
+    u32::try_from(token_id).unwrap_or(WIDE_TOKEN_SENTINEL)
+}
+
 fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
     match token_ids {
-        KvTokenIds::Single(tids) => (tids, false),
+        KvTokenIds::Single(tids) => (tids.into_iter().map(narrow_token_id).collect(), false),
         KvTokenIds::Bigram(tids) => {
-            let mut new_tids: Vec<u32> = tids.iter().map(|&(first, _)| first).collect();
-            if !tids.is_empty() {
-                let last_token = tids.last().map(|&(_, second)| second).unwrap();
-                new_tids.push(last_token);
+            let mut new_tids: Vec<u32> = tids
+                .iter()
+                .map(|&(first, _)| narrow_token_id(first))
+                .collect();
+            if let Some(&(_, last_token)) = tids.last() {
+                new_tids.push(narrow_token_id(last_token));
             }
             (new_tids, true)
         }
     }
+}
+
+/// Convert SGLang's per-block `[start, length, label]` spans into the existing
+/// per-block multimodal shape (`mm_hash` plus block-relative offsets). A label
+/// that is not 16 hex digits drops its span, which leaves those positions
+/// unmapped so the normalizer fails closed on them.
+fn mm_routing_spans_to_block_mm_infos(
+    spans: Vec<Option<Vec<MmRoutingSpanWire>>>,
+) -> Vec<Option<BlockExtraInfo>> {
+    spans
+        .into_iter()
+        .map(|block_spans| {
+            let mut mm_objects: Vec<BlockMmObjectInfo> = Vec::new();
+            for (start, length, label) in block_spans.unwrap_or_default() {
+                let Ok(mm_hash) = u64::from_str_radix(&label, 16) else {
+                    tracing::debug!(%label, "Dropping multimodal routing span with invalid label");
+                    continue;
+                };
+                let range = (start as usize, start as usize + length as usize);
+                match mm_objects.iter_mut().find(|obj| obj.mm_hash == mm_hash) {
+                    Some(obj) => obj.offsets.push(range),
+                    None => mm_objects.push(BlockMmObjectInfo {
+                        mm_hash,
+                        offsets: vec![range],
+                    }),
+                }
+            }
+            (!mm_objects.is_empty()).then_some(BlockExtraInfo { mm_objects })
+        })
+        .collect()
 }
