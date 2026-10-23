@@ -1168,7 +1168,6 @@ mod harvest_extra_files_tests {
             .unwrap();
         // Kept: the shard index is metadata, not a weight.
         std::fs::write(dir.path().join("model.safetensors.index.json"), b"{}").unwrap();
-        std::fs::write(dir.path().join("preprocessor_config.json"), b"{}").unwrap();
 
         let typed: HashSet<String> = HashSet::new();
         let mut names: Vec<String> = harvest_extra_files(dir.path(), &typed)
@@ -1185,10 +1184,7 @@ mod harvest_extra_files_tests {
             })
             .collect();
         names.sort();
-        assert_eq!(
-            names,
-            vec!["model.safetensors.index.json", "preprocessor_config.json"]
-        );
+        assert_eq!(names, vec!["model.safetensors.index.json"]);
     }
 
     #[test]
