@@ -260,13 +260,10 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		}
 		return foreignUpdateErrors(fldPath, newSpec.V1Beta2 != nil)
 	}
-	// A native v1beta2 spec is unconstrained by phase: an unchanged spec is always allowed, so
-	// status-preserving writes and defaulting-only updates pass, and any change is fully
-	// validated as if it were new.
+	// A native v1beta2 spec is unconstrained by phase. Stateless validation of the new typed
+	// spec runs on every CREATE and UPDATE: an unchanged spec is no reason to skip it. Ratcheting
+	// belongs to the generated AISimulate schema validation, which will ratchet its own result.
 	if newSpec.V1Beta2 != nil {
-		if apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
-			return nil
-		}
 		return validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec.V1Beta2, fldPath.Child("v1beta2"))
 	}
 

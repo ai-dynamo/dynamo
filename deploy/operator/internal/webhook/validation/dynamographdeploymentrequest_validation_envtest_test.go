@@ -739,6 +739,19 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "v1beta2 stored invalid spec is rejected again on a metadata-only update",
+			oldRequest: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["backends"] = []any{"vllm", "vllm"}
+			}, nil),
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["backends"] = []any{"vllm", "vllm"}
+			}, map[string]any{"updated": "true"}),
+			seedWithoutWebhook: true,
+			gpuDiscovery:       true,
+			discovered:         discoveredH200,
+			wantWebhook:        []string{`spec.backends[1]: Duplicate value: "vllm"`},
+		},
+		{
 			name: "v1beta2 duplicate backends are rejected on create",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["backends"] = []any{"vllm", "vllm"}
