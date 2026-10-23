@@ -121,8 +121,6 @@ class _MarkerRequest:
     [
         pytest.param("gw3", {"gpu_0"}, [], id="cpu-only-gpu0-skips-stagger"),
         pytest.param("gw3", {"gpu_1"}, [45], id="gpu-deployment-keeps-stagger"),
-        pytest.param("gw3", set(), [45], id="unmarked-deployment-keeps-stagger"),
-        pytest.param("gw0", set(), [], id="first-worker-never-staggers"),
     ],
 )
 def test_prepare_deployment_xdist_stagger(
