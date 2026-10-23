@@ -227,9 +227,7 @@ jobs:
         DD_CIVISIBILITY_ENABLED: 'true'
         DD_CIVISIBILITY_AGENTLESS_ENABLED: 'true'
         DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER: github
-        # The container has no usable git metadata, so ddtrace reports no
-        # commit message and skips Test Management (attempt-to-fix needs the
-        # DD_<key> from the commit message). Empty outside push events.
+        # ddtrace reads the attempt-to-fix DD_<key> from this; no git metadata in the container.
         DD_GIT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         PYTEST_ADDOPTS: >
           --ddtrace
