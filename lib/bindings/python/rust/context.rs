@@ -11,7 +11,10 @@
 // `set_status` operations mirror the OTel `Span` API.
 
 use dynamo_backend_common::FirstTokenNotifier;
-use dynamo_llm::protocols::common::ttft::{TTFT_CONTEXT_KEY, TtftSpan, TtftStage, TtftTimings};
+use dynamo_llm::protocols::common::ttft::{
+    MAX_TTFT_BATCH_INTERVALS, TTFT_CONTEXT_KEY, TtftCoarseReason, TtftDegradedReason, TtftSpan,
+    TtftStage, TtftTimings,
+};
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::Context as PipelineContext;
@@ -20,7 +23,7 @@ use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::{Span as OtelSpan, Status, TraceContextExt, Tracer};
 use opentelemetry::{KeyValue, global};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -82,6 +85,16 @@ fn python_ttft_stage(name: &str) -> PyResult<TtftStage> {
     TtftStage::from_python(name).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!("unknown frontend TTFT stage: {name}"))
     })
+}
+
+/// Fixed Python-eligible IDs/names from the same registry used by metrics.
+#[pyfunction]
+pub fn ttft_stage_registry() -> Vec<(usize, &'static str)> {
+    TtftStage::ALL
+        .into_iter()
+        .filter(|stage| stage.python_enabled())
+        .map(|stage| (stage as usize, stage.labels()[0]))
+        .collect()
 }
 
 /// A small RAII context manager; never creates an OpenTelemetry span or log.
@@ -384,6 +397,133 @@ impl Context {
         }
         if let Some(timings) = &self.ttft {
             timings.record_ago(stage, start, end);
+        }
+        Ok(())
+    }
+
+    /// A single same-host Python anchor, expressed as integer nanosecond ages.
+    /// Python validates the local submit/receive window before this call; Rust
+    /// independently validates fixed IDs, bounds and the HTTP timeline window.
+    #[pyo3(signature = (intervals, coarse_reasons=None))]
+    fn record_ttft_batch_ago(
+        &self,
+        intervals: &Bound<'_, PyAny>,
+        coarse_reasons: Option<&Bound<'_, PyAny>>,
+    ) -> bool {
+        let Some(timings) = &self.ttft else {
+            return false;
+        };
+        if timings.is_frozen() {
+            return false;
+        }
+        // Concrete containers have a truthful fixed size; an arbitrary Python
+        // iterable can lie in __len__ and grow without bound during extraction.
+        if !intervals.is_exact_instance_of::<PyList>()
+            && !intervals.is_exact_instance_of::<PyTuple>()
+        {
+            timings.mark_degraded(TtftDegradedReason::InvalidBatch);
+            return false;
+        }
+        let Ok(length) = intervals.len() else {
+            timings.mark_degraded(TtftDegradedReason::InvalidBatch);
+            return false;
+        };
+        if length > MAX_TTFT_BATCH_INTERVALS {
+            timings.mark_degraded(TtftDegradedReason::IntervalLimit);
+            return false;
+        }
+        // Bound conversion before allocating a Vec across the Python boundary.
+        let Ok(intervals) = intervals.extract::<Vec<(usize, u64, u64)>>() else {
+            timings.mark_degraded(TtftDegradedReason::InvalidBatch);
+            return false;
+        };
+        let mut batch = Vec::with_capacity(length);
+        for (id, start_ns, end_ns) in intervals {
+            let Some(stage) = TtftStage::from_python_id(id) else {
+                timings.mark_degraded(TtftDegradedReason::InvalidStage);
+                return false;
+            };
+            if start_ns < end_ns {
+                timings.mark_degraded(TtftDegradedReason::InvalidInterval);
+                return false;
+            }
+            batch.push((
+                stage,
+                std::time::Duration::from_nanos(start_ns),
+                std::time::Duration::from_nanos(end_ns),
+            ));
+        }
+        if let Some(reasons) = coarse_reasons {
+            if (!reasons.is_exact_instance_of::<PyList>()
+                && !reasons.is_exact_instance_of::<PyTuple>())
+                || reasons.len().map_or(true, |len| len > 3)
+            {
+                timings.mark_degraded(TtftDegradedReason::InvalidBatch);
+                return false;
+            }
+            let Ok(reasons) = reasons.extract::<Vec<Bound<'_, PyString>>>() else {
+                timings.mark_degraded(TtftDegradedReason::InvalidBatch);
+                return false;
+            };
+            for reason in reasons {
+                let Ok(reason) = reason.to_cow() else {
+                    timings.mark_degraded(TtftDegradedReason::InvalidBatch);
+                    return false;
+                };
+                let reason = match reason.as_ref() {
+                    "opaque_template" => TtftCoarseReason::OpaqueTemplate,
+                    "unsupported_clock" => TtftCoarseReason::UnsupportedClock,
+                    "missing_coverage" => TtftCoarseReason::MissingCoverage,
+                    _ => {
+                        timings.mark_degraded(TtftDegradedReason::InvalidBatch);
+                        return false;
+                    }
+                };
+                timings.mark_coarse(reason);
+            }
+        }
+        timings.record_batch_ago(&batch)
+    }
+
+    /// Fixed quality codes, never arbitrary strings in Prometheus labels.
+    fn mark_ttft_quality(&self, quality: &str, reason: &str) -> PyResult<()> {
+        if quality == "coarse" {
+            let reason = match reason {
+                "opaque_template" => TtftCoarseReason::OpaqueTemplate,
+                "unsupported_clock" => TtftCoarseReason::UnsupportedClock,
+                "missing_coverage" => TtftCoarseReason::MissingCoverage,
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "unknown TTFT coarse reason",
+                    ));
+                }
+            };
+            if let Some(timings) = &self.ttft {
+                timings.mark_coarse(reason);
+            }
+        } else if quality == "degraded" {
+            let reason = match reason {
+                "interval_limit" => TtftDegradedReason::IntervalLimit,
+                "invalid_interval" => TtftDegradedReason::InvalidInterval,
+                "invalid_batch" => TtftDegradedReason::InvalidBatch,
+                "invalid_stage" => TtftDegradedReason::InvalidStage,
+                "invalid_version" => TtftDegradedReason::InvalidVersion,
+                "clock_mismatch" => TtftDegradedReason::ClockMismatch,
+                "timestamp_overflow" => TtftDegradedReason::TimestampOverflow,
+                "missing_timeline" => TtftDegradedReason::MissingTimeline,
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "unknown TTFT degraded reason",
+                    ));
+                }
+            };
+            if let Some(timings) = &self.ttft {
+                timings.mark_degraded(reason);
+            }
+        } else {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "unknown TTFT quality",
+            ));
         }
         Ok(())
     }
@@ -715,4 +855,49 @@ pub fn callable_accepts_kwarg(
     params_any
         .call_method1("__contains__", (target_name,))?
         .extract::<bool>()
+}
+
+#[cfg(test)]
+mod ttft_batch_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn ttft_batch_rejects_lying_iterables_before_conversion() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let code = std::ffi::CString::new(
+                "class Liar:\n    def __len__(self): return 0\n    def __iter__(self): raise AssertionError('must not iterate')\nvalue = Liar()\n",
+            ).unwrap();
+            let module = PyModule::from_code(py, &code, c"timing_test.py", c"timing_test").unwrap();
+            let mut context = Context::py_new(None, None);
+            context.ttft = Some(Arc::new(TtftTimings::new(Instant::now())));
+            assert!(!context.record_ttft_batch_ago(&module.getattr("value").unwrap(), None));
+            assert_eq!(
+                context.ttft.unwrap().quality().degraded_reason,
+                Some(TtftDegradedReason::InvalidBatch)
+            );
+        });
+    }
+
+    #[test]
+    fn ttft_batch_imports_fixed_ids_and_coarse_flags_once() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let mut context = Context::py_new(None, None);
+            let timings = Arc::new(TtftTimings::new(Instant::now() - Duration::from_secs(1)));
+            context.ttft = Some(timings.clone());
+            let intervals =
+                PyList::new(py, [(TtftStage::TemplateRender as usize, 100_u64, 50_u64)]).unwrap();
+            let reasons = PyTuple::new(py, ["opaque_template"]).unwrap();
+            assert!(context.record_ttft_batch_ago(intervals.as_any(), Some(reasons.as_any())));
+            assert!(timings.quality().degraded_reason.is_none());
+            let result = timings.finish(Instant::now());
+            assert_eq!(
+                result[TtftStage::TemplateRender as usize],
+                Duration::from_nanos(50)
+            );
+            assert!(!context.record_ttft_batch_ago(intervals.as_any(), None));
+        });
+    }
 }

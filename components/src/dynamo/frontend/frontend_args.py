@@ -199,7 +199,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     model_name: Optional[str]
     model_path: Optional[str]
     metrics_prefix: Optional[str] = None
-    ttft_detail: str = "off"
+    ttft_detail: str = "metrics"
 
     kserve_grpc_server: bool
     grpc_metrics_port: int
@@ -606,7 +606,7 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--ttft-detail",
             env_var="DYN_FRONTEND_TTFT_DETAIL",
-            default="off",
+            default="metrics",
             choices=["off", "metrics", "logs", "both"],
             help="Exclusive TTFT detail; logs also require dynamo_frontend::ttft=debug in DYN_LOG.",
         )

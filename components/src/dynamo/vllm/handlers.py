@@ -162,6 +162,11 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+# vLLM fills these extra_args keys from dedicated request fields; never from
+# client-supplied `vllm_xargs`.
+_RESERVED_VLLM_XARGS_KEYS: Final = frozenset(
+    {_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY, "ec_transfer_params"}
+)
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -822,6 +827,18 @@ def build_sampling_params(
         passthrough_sampling_options = extra_args.get("sampling_options")
         if isinstance(passthrough_sampling_options, dict):
             sampling_options.update(passthrough_sampling_options)
+    # `vllm_xargs` becomes SamplingParams.extra_args, as in vLLM's OpenAI server.
+    # Connector inputs stay excluded: only the router hint below may set them.
+    vllm_xargs = sampling_options.pop("vllm_xargs", None)
+    if isinstance(vllm_xargs, dict) and vllm_xargs:
+        sampling_params.extra_args = {
+            **(sampling_params.extra_args or {}),
+            **{
+                key: value
+                for key, value in vllm_xargs.items()
+                if key not in _RESERVED_VLLM_XARGS_KEYS
+            },
+        }
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         json_schema = guided_decoding.get("json")
@@ -3894,12 +3911,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Log with the traceback here — this is the last frame that knows
             # which request and which encoder — then re-raise unchanged.
             #
-            # Deliberately not converted to `InvalidArgument`. The adapters
-            # raise `ValueError`/`TypeError` for genuine input faults, which the
-            # bindings already map to `Backend(InvalidArgument)` → 400 carrying
-            # the message, so the actionable case needs no help. Coercing the
-            # rest would relabel timeouts, CUDA faults, batcher shutdown and
-            # cancellations as client errors, suppressing retries — and since
+            # Deliberately not converted to `InvalidArgument`: adapter
+            # `ValueError`/`TypeError` map to 400, but with a generic
+            # body — only `InvalidArgument` carries its message to the client.
+            # Coercing the rest would relabel timeouts, CUDA faults, batcher shutdown
+            # and cancellations as client errors, suppressing retries — and since
             # `encode()` is co-batched, it could blame a caller for a failure
             # that originated in someone else's request.
             logger.exception("Request %s: CustomEncoder failed", request_id)
@@ -4163,10 +4179,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise InvalidArgument("artifact capture requires an exact token prompt")
             artifact_runtime = None
             if artifact_settings.get("mode") != "inline_base64":
+                # Object-store delivery needs opendal from the optional
+                # artifact-delivery extra, so load it only for these requests.
                 from dynamo.artifacts.runtime import (
                     ArtifactAuthorityClosed,
                     configured_artifact_runtime,
                 )
+                from dynamo.artifacts.storage import ArtifactStorageError
 
                 artifact_runtime = configured_artifact_runtime()
                 if artifact_runtime is None:
@@ -4205,6 +4224,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     raise WorkerOverloaded(str(exc)) from None
                 raise InvalidArgument(str(exc)) from None
+            except RuntimeError as exc:
+                # Storage policy rejects the requested destination before
+                # inference with a credential-safe message. A provider without
+                # conditional creation is a server fault and stays one.
+                if (
+                    artifact_runtime is not None
+                    and isinstance(exc, ArtifactStorageError)
+                    and exc.code in ("invalid_target", "destination_denied", "expired")
+                ):
+                    raise InvalidArgument(str(exc)) from None
+                raise
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight

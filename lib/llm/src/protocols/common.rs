@@ -60,6 +60,7 @@ pub mod input_trigger;
 pub mod llm_backend;
 pub mod metadata_upload;
 pub mod metrics;
+pub(crate) mod observation;
 pub mod postprocessor;
 pub mod preprocessor;
 pub mod timing;

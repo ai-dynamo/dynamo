@@ -14,6 +14,7 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
+        observation::StageObservation,
         preprocessor::MigrationState,
         timing::{RequestPhase, RequestTracker},
         ttft::{TtftSpan, TtftStage, TtftTimings},
@@ -28,10 +29,7 @@ use dynamo_kv_router::{
     scheduling::{AbortCause, RequestLifecycle, queue::BookingHandle},
 };
 use dynamo_runtime::{
-    error::DynamoError,
-    metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
-    pipeline::OccupancyReservation,
-    protocols::annotated::Annotated,
+    error::DynamoError, pipeline::OccupancyReservation, protocols::annotated::Annotated,
 };
 
 pub(super) struct LoraLoadGuard {
@@ -280,7 +278,7 @@ impl CanonicalOutputTracker {
 struct DispatchTimings {
     phase: RequestPhase,
     timings: Option<Arc<TtftTimings>>,
-    backend: Option<TtftSpan>,
+    backend: Option<StageObservation>,
     first_token: Option<TtftSpan>,
     postprocess: Option<TtftSpan>,
 }
@@ -297,14 +295,12 @@ impl DispatchTimings {
     }
 
     fn start(&mut self) {
-        if let Some(timings) = &self.timings {
-            let stage = match self.phase {
-                RequestPhase::Prefill => TtftStage::BackendPrefill,
-                RequestPhase::Decode => TtftStage::BackendDecode,
-                RequestPhase::Aggregated => TtftStage::BackendAggregated,
-            };
-            self.backend = Some(timings.start_span(stage));
-        }
+        let stage = match self.phase {
+            RequestPhase::Prefill => TtftStage::BackendPrefill,
+            RequestPhase::Decode => TtftStage::BackendDecode,
+            RequestPhase::Aggregated => TtftStage::BackendAggregated,
+        };
+        self.backend = Some(StageObservation::new(stage, self.timings.as_ref()));
     }
 
     fn observe_response(&mut self, has_tokens: bool) {
@@ -333,7 +329,9 @@ impl DispatchTimings {
     }
 
     fn finish(&mut self) {
-        self.backend.take();
+        if let Some(backend) = self.backend.as_mut() {
+            backend.end_timing();
+        }
         self.first_token.take();
         // A successful single-token stream can end before Python/HTTP sees it.
         // Preserve forwarding time after the dispatch guard is dropped.
@@ -343,7 +341,9 @@ impl DispatchTimings {
     }
 
     fn abort(&mut self) {
-        self.backend.take();
+        if let Some(backend) = self.backend.as_mut() {
+            backend.end_timing();
+        }
         self.first_token.take();
         // A terminal frame may contain tokens that are withheld then discarded
         // on a migratable error. It must not mask the next attempt's routing/wait.
@@ -358,7 +358,6 @@ struct RequestObservability {
     cumulative_osl: usize,
     metrics_recorded: bool,
     first_token_recorded: bool,
-    dispatch_guard: Option<StageGuard>,
     dispatched: bool,
     ttft: DispatchTimings,
 }
@@ -376,7 +375,6 @@ impl RequestObservability {
             cumulative_osl: 0,
             metrics_recorded: false,
             first_token_recorded: false,
-            dispatch_guard: None,
             dispatched: false,
             ttft: DispatchTimings::new(phase, timings),
         }
@@ -387,7 +385,7 @@ impl RequestObservability {
     }
 
     fn start_dispatch(&mut self, phase_label: &str) {
-        self.dispatch_guard = Some(StageGuard::new(STAGE_DISPATCH, phase_label));
+        debug_assert_eq!(phase_label, self.ttft.phase.as_str());
         self.ttft.start();
     }
 
@@ -416,8 +414,8 @@ impl RequestObservability {
     }
 
     fn observe_response(&mut self, has_tokens: bool) {
-        // End the in-flight dispatch gauge once; later responses see None.
-        self.dispatch_guard.take();
+        // The shared dispatch handle closes the legacy gauge and TTFT parent
+        // on this first response, including tokenless control responses.
         self.ttft.observe_response(has_tokens);
     }
 

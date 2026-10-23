@@ -70,24 +70,30 @@ it first observes a nonzero output token count. The target is `dynamo_frontend::
 `frontend first token`. Requests that end, fail, or are canceled before that observation do not
 emit the event. Later tokens do not emit additional TTFT events.
 
-The event contains the canonical HTTP context `request_id`, `model`, `ttft_ms`, and 17 numeric stage
-durations in milliseconds. Field names use `<stage>_ms` for an empty phase and
-`<stage>_<phase>_ms` otherwise, such as `template_tokenize_ms`, `multimodal_prepare_ms`,
-`route_prefill_ms`, `dispatch_decode_ms`, and
+The event contains the canonical HTTP context `request_id`, `model`, `ttft_ms`, and numeric stage
+durations in milliseconds for every legal stage/phase pair. Field names use `<stage>_ms` for an
+empty phase and `<stage>_<phase>_ms` otherwise, such as `structural_tag_build_ms`,
+`template_render_ms`, `tokenize_ms`, `dispatch_prepare_prefill_ms`, `dispatch_decode_ms`, and
 `backend_overlap_prefill_decode_ms`. All stage/phase combinations are present, including zeros for
 unused stages. In `both` mode these frozen values match the
 [TTFT stage histogram](metrics-catalog.mdx#ttft-stage-durations), and their sum equals `ttft_ms`,
 subject to floating-point rounding.
 
-Detail collection defaults to `off`. To enable events while keeping other logs at INFO, set both
-the detail mode and log target before starting the frontend:
+The event also includes `quality` (`complete`, `coarse`, or `degraded`), `degraded_reason`,
+`coarse_reason`, and `unexpected_overlap`. Reason fields contain fixed diagnostic values or an
+empty value when absent. A degraded result places all time in `unclassified_ms`. The event does
+not contain prompt text, tool schemas, or per-span payloads.
+
+Detail collection defaults to `metrics`, which emits no per-request event even at global DEBUG.
+To enable events alongside metrics while keeping other logs at INFO, set both the detail mode and
+log target before starting the frontend:
 
 ```bash
-export DYN_FRONTEND_TTFT_DETAIL=logs
+export DYN_FRONTEND_TTFT_DETAIL=both
 export DYN_LOG='info,dynamo_frontend::ttft=debug'
 ```
 
-Use `both` instead of `logs` to also emit detail histograms from the same frozen result. With
+Use `logs` instead of `both` to emit events without detail histograms. With
 `logs` or `both` selected, a global DEBUG or TRACE level also enables these events. To disable them while retaining other
 DEBUG logs, set:
 

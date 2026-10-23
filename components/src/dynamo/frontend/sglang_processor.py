@@ -14,7 +14,6 @@ import time
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -26,7 +25,7 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .sglang_prepost import (
     ReasoningParser,
@@ -43,7 +42,13 @@ from .sglang_prepost import (
 )
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
-from .ttft import ttft_context, ttft_stage
+from .ttft import (
+    TimingBatch,
+    WorkerTiming,
+    import_worker_batch,
+    ttft_context,
+    ttft_stage,
+)
 from .usage import response_usage, update_usage_metadata
 from .utils import (
     PreprocessError,
@@ -73,14 +78,28 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
 
 
 def _request_logprobs_count(request: dict[str, Any]) -> int | None:
+    """Map OpenAI chat logprob fields onto ``output_options.logprobs``.
+
+    The result is the number of alternatives per token. ``logprobs: true``
+    without ``top_logprobs`` is ``0``: the sampled token only. A positive
+    ``top_logprobs`` requires ``logprobs: true``, as in OpenAI.
+    """
     logprobs = request.get("logprobs")
     top_logprobs = request.get("top_logprobs")
+    if top_logprobs is not None and (
+        not isinstance(top_logprobs, int)
+        or isinstance(top_logprobs, bool)
+        or top_logprobs < 0
+    ):
+        raise PreprocessError("`top_logprobs` must be an integer >= 0.")
+    if top_logprobs and logprobs is not True:
+        raise PreprocessError(
+            "When using `top_logprobs`, `logprobs` must be set to true."
+        )
     if logprobs is True:
-        return top_logprobs if top_logprobs is not None else 1
+        return top_logprobs if top_logprobs is not None else 0
     if isinstance(logprobs, int) and not isinstance(logprobs, bool):
         return logprobs
-    if top_logprobs not in (None, 0):
-        return top_logprobs
     return None
 
 
@@ -332,26 +351,16 @@ class SglangPreprocessWorkerResult:
     # a reasoning parser in that case so the pool path matches the inline
     # path byte-for-byte.
     effective_reasoning_parser_name: str | None = None
-    # Same-host monotonic timestamps cross the process boundary without
-    # serializing the native request context.
-    template_tokenize_intervals_ns: list[tuple[int, int]] | None = None
 
 
-class _WorkerPreprocessTiming:
-    ttft_enabled = True
+@dataclass
+class SglangTimedPreprocessWorkerResult(SglangPreprocessWorkerResult):
+    """Enabled-only payload; the off result does not serialize a timing field."""
 
-    def __init__(self) -> None:
-        self.intervals_ns: list[tuple[int, int]] = []
+    timing_batch: TimingBatch | None = None
 
-    @contextmanager
-    def start_ttft_stage(self, stage: str):
-        if stage != "template_tokenize":
-            raise ValueError(f"Unsupported TTFT stage: {stage}")
-        start_ns = time.monotonic_ns()
-        try:
-            yield
-        finally:
-            self.intervals_ns.append((start_ns, time.monotonic_ns()))
+
+_WorkerPreprocessTiming = WorkerTiming
 
 
 def _init_worker(
@@ -429,15 +438,19 @@ def _preprocess_worker(
         _w_reasoning_parser_name if _client_wants_separate_reasoning(request) else None
     )
 
-    return SglangPreprocessWorkerResult(
+    result = SglangPreprocessWorkerResult(
         prompt_token_ids=pre.prompt_token_ids,
         dynamo_preproc=dynamo_preproc,
         request=request,
         force_reasoning=pre.force_reasoning,
         effective_reasoning_parser_name=effective_reasoning_parser_name,
         named_zero_arg_tool=pre.named_zero_arg_tool,
-        template_tokenize_intervals_ns=timing.intervals_ns if timing else None,
     )
+    if timing is not None:
+        return SglangTimedPreprocessWorkerResult(
+            **vars(result), timing_batch=timing.batch()
+        )
+    return result
 
 
 def _build_dynamo_preproc(
@@ -740,36 +753,30 @@ class SglangProcessor:
         assert self._worker_semaphore is not None
         assert self.preprocess_pool is not None
         timing_context = ttft_context(context)
-        record_stage = getattr(timing_context, "record_ttft_stage_ago", None)
+        enabled = timing_context is not None
         try:
             with ttft_stage(timing_context, "preprocess"):
                 with ttft_stage(timing_context, "preprocess_queue"):
                     await self._worker_semaphore.acquire()
                 try:
+                    submitted_ns = time.monotonic_ns() if enabled else 0
+                    # Omit the optional argument entirely when disabled, and use
+                    # the base result without any timing payload on that path.
+                    args = (request, request["model"], self.eos_token_ids)
                     future = self.preprocess_pool.submit(
-                        _preprocess_worker,
-                        request,
-                        request["model"],
-                        self.eos_token_ids,
-                        record_stage is not None,
+                        _preprocess_worker, *args, *((True,) if enabled else ())
                     )
                     preproc_result: SglangPreprocessWorkerResult = (
                         await asyncio.wrap_future(future)
                     )
                 finally:
                     self._worker_semaphore.release()
-                if record_stage is not None:
-                    for start_ns, end_ns in (
-                        preproc_result.template_tokenize_intervals_ns or ()
-                    ):
-                        # monotonic_ns is shared across processes on this host.
-                        # Re-anchor immediately before crossing into Rust.
-                        now_ns = time.monotonic_ns()
-                        record_stage(
-                            "template_tokenize",
-                            (now_ns - start_ns) / 1_000_000_000,
-                            (now_ns - end_ns) / 1_000_000_000,
-                        )
+                if enabled:
+                    import_worker_batch(
+                        timing_context,
+                        getattr(preproc_result, "timing_batch", None),
+                        submitted_ns,
+                    )
         except InvalidArgument:
             raise
         except PreprocessError as exc:
@@ -1123,7 +1130,7 @@ class SglangProcessor:
             else:
                 if pending_terminal is not None:
                     yield finalize_terminal(pending_terminal)
-        except (InvalidArgument, Unknown):
+        except (InvalidArgument, Unknown, WorkerUnavailable):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)

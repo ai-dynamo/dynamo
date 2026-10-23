@@ -38,7 +38,7 @@ from .structural_tag_policy import (
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
-from .ttft import ttft_stage
+from .ttft import ttft_renderer_stage, ttft_stage
 from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
@@ -805,12 +805,14 @@ async def preprocess_chat_request(
     # Render first: whether generation starts inside a reasoning block depends
     # on the rendered prompt (e.g. a template that ends the generation prompt
     # with an open think tag), and the tool-call grammar must match it.
-    with ttft_stage(context, "template_tokenize"):
+    with ttft_renderer_stage(context) as renderer_timing:
         _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+        renderer_timing[0] = "prompt_token_ids" in engine_prompt
 
-        if "prompt_token_ids" in engine_prompt:
-            tokens = list(engine_prompt["prompt_token_ids"])
-        else:
+    if "prompt_token_ids" in engine_prompt:
+        tokens = list(engine_prompt["prompt_token_ids"])
+    else:
+        with ttft_stage(context, "tokenize"):
             async_tokenizer = _get_async_tokenizer(tokenizer)
             encoded = await async_tokenizer(
                 engine_prompt["prompt"],
@@ -818,27 +820,28 @@ async def preprocess_chat_request(
             )
             tokens = list(encoded.input_ids)
 
-    tool_guided_decoding = build_tool_call_guided_decoding(
-        request_for_sampling,
-        tool_parser,
-        parser_guided_decoding=parser_guided_decoding,
-        structural_tag_mode=structural_tag_mode,
-        structural_tag_scope=structural_tag_scope,
-        structural_tag_schema=structural_tag_schema,
-        starts_in_reasoning=(
-            structural_tag_mode == "on"
-            and tool_parser is not None
-            and bool(request_for_sampling.tools)
-            and not structural_tag_excludes_reasoning
-            and _prompt_leaves_reasoning_open(
-                tokens,
-                tokenizer=tokenizer,
-                reasoning_parser_class=reasoning_parser_class,
-                chat_template_kwargs=chat_template_kwargs,
-                model_config=model_config,
-            )
-        ),
-    )
+    with ttft_stage(context, "structural_tag_build"):
+        tool_guided_decoding = build_tool_call_guided_decoding(
+            request_for_sampling,
+            tool_parser,
+            parser_guided_decoding=parser_guided_decoding,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
+            starts_in_reasoning=(
+                structural_tag_mode == "on"
+                and tool_parser is not None
+                and bool(request_for_sampling.tools)
+                and not structural_tag_excludes_reasoning
+                and _prompt_leaves_reasoning_open(
+                    tokens,
+                    tokenizer=tokenizer,
+                    reasoning_parser_class=reasoning_parser_class,
+                    chat_template_kwargs=chat_template_kwargs,
+                    model_config=model_config,
+                )
+            ),
+        )
     # A forced tool choice already claims the decoder's single grammar slot, so a
     # caller-set guided_*/structured_outputs constraint over the same token stream
     # cannot also be honored. Reject it (InvalidArgument -> 400) rather than
@@ -1523,9 +1526,10 @@ class StreamingPostProcessor:
 
             # When reasoning ends in this chunk, reset accumulated state.
             # If there is post-reasoning content (e.g. <tool_call> markup),
-            # buffer it for non-streaming extraction rather than feeding it
-            # to the streaming tool parser which cannot handle the combined
-            # reasoning-end + tool-start in a single chunk.
+            # an engine-based tool parser streams it; otherwise buffer it for
+            # non-streaming extraction rather than feeding it to a streaming
+            # tool parser that cannot handle the combined reasoning-end +
+            # tool-start in a single chunk.
             if self.reasoning_parser.engine_based_streaming:
                 reasoning_ended = (
                     self.reasoning_parser.has_engine_confirmed_reasoning_end()
@@ -1551,7 +1555,30 @@ class StreamingPostProcessor:
                 current_token_ids = []
 
                 tool_start_markers = self._tool_start_markers()
-                if post_content and any(
+                if (
+                    post_content
+                    and self._should_parse_tools()
+                    and self.tool_parser is not None
+                    and self.tool_parser.engine_based_streaming
+                ):
+                    # An engine-based tool parser holds back an opener split
+                    # across steps, so the text after the reasoning end goes to
+                    # it with its token IDs. Emitting that text as content here
+                    # leaked a partial opener and lost the tool call.
+                    current_text = post_content
+                    current_token_ids = self.reasoning_parser.extract_content_ids(
+                        delta_token_ids
+                    )
+                    delta_message = self._merge_delta_messages(
+                        self._compose_delta_message(saved_reasoning, None),
+                        self._extract_tool_calls_streaming(
+                            current_text=current_text,
+                            delta_text=current_text,
+                            current_token_ids=current_token_ids,
+                            delta_token_ids=current_token_ids,
+                        ),
+                    )
+                elif post_content and any(
                     marker in post_content for marker in tool_start_markers
                 ):
                     # Tool call markup present — buffer for non-streaming

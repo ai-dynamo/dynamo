@@ -15,7 +15,6 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
-    metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
         ResponseStream, RouterMode, SingleIn, async_trait,
@@ -36,6 +35,7 @@ use crate::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
+        observation::StageObservation,
         preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
         ttft::{TtftSpan, TtftStage},
@@ -593,25 +593,30 @@ impl RoutingHost {
     }
 
     /// The group key for a subagent: a request that carries a parent session id binds under the
-    /// parent's group instead of its own session, so siblings share a worker while the parent
-    /// keeps its own binding. An explicit per-request target stays on the request's own session so
+    /// parent's group for decode, while prefill uses the parent's own binding to reuse its cache.
+    /// An explicit per-request target stays on the request's own session so
     /// it cannot be rejected against, or rebind, the group.
     fn group_binding_id(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         explicit: Option<AffinityTarget>,
+        phase: RequestPhase,
     ) -> Option<Arc<SessionAffinityId>> {
         if explicit.is_some() {
             return None;
         }
-        let parent_session_id = request
-            .content()
-            .agent_context
-            .as_ref()
-            .and_then(|context| context.parent_session_id.as_deref())?;
-        Some(Arc::new(SessionAffinityId::new(
-            subagent_group_affinity_id(parent_session_id),
-        )))
+        let agent = request.content().agent_context.as_ref()?;
+        let parent_session_id = agent.parent_session_id.as_deref()?;
+        let binding_id = if phase == RequestPhase::Prefill {
+            let parent = parent_session_id.trim();
+            if parent.is_empty() || parent == agent.session_id.trim() {
+                return None;
+            }
+            parent.to_owned()
+        } else {
+            subagent_group_affinity_id(parent_session_id)
+        };
+        Some(Arc::new(SessionAffinityId::new(binding_id)))
     }
 
     /// Commit a held session to the dispatched worker; a request without a
@@ -741,7 +746,7 @@ impl RoutingHost {
         };
         let explicit = explicit_target(request.content(), phase)?;
         let session_id = self
-            .group_binding_id(request, explicit)
+            .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
@@ -851,8 +856,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let phase = request.phase();
-        let phase_label = phase.to_string();
-        let (route_guard, ttft_route) = start_route(&request, phase, &phase_label);
+        let route_guard = start_route(&request, phase);
         let (mut selection, mut operation) = self
             .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
@@ -905,10 +909,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
-        drop(route_guard);
+        let dispatch_prepare = route_selection_finished(route_guard, &request, phase);
         let selected_target = route_target(selection.worker);
         let stream = match self
-            .dispatch_selection(request, selection, guard, &budget, ttft_route)
+            .dispatch_selection(request, selection, guard, &budget, dispatch_prepare)
             .await
         {
             Ok(stream) => stream,
@@ -926,26 +930,35 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     }
 }
 
-/// Share route entry without changing the legacy gauge's exit. KV callers
-/// drop the gauge after selection/tracking and carry the timeline span through
-/// dispatch preparation; built-in callers close both at dispatch.
-fn start_route(
-    request: &PreprocessedRequest,
-    phase: RequestPhase,
-    phase_label: &str,
-) -> (StageGuard, Option<TtftSpan>) {
-    let timing = start_ttft_route(request, phase);
-    (StageGuard::new(STAGE_ROUTE, phase_label), timing)
+/// The old route gauge and the diagnostic route share selection/tracking
+/// boundaries. Dispatch preparation is a separate diagnostic child, even where
+/// it overlaps the original dispatch gauge.
+fn start_route(request: &PreprocessedRequest, phase: RequestPhase) -> StageObservation {
+    StageObservation::new(route_stage(phase), request.ttft_timings())
 }
 
-fn start_ttft_route(request: &PreprocessedRequest, phase: RequestPhase) -> Option<TtftSpan> {
-    let timings = request.ttft_timings()?;
-    let stage = match phase {
+fn route_stage(phase: RequestPhase) -> TtftStage {
+    match phase {
         RequestPhase::Prefill => TtftStage::RoutePrefill,
         RequestPhase::Decode => TtftStage::RouteDecode,
         RequestPhase::Aggregated => TtftStage::RouteAggregated,
-    };
-    Some(timings.start_span(stage))
+    }
+}
+
+fn route_selection_finished(
+    route: StageObservation,
+    request: &PreprocessedRequest,
+    phase: RequestPhase,
+) -> Option<TtftSpan> {
+    drop(route);
+    start_dispatch_prepare(request, phase)
+}
+
+fn start_dispatch_prepare(request: &PreprocessedRequest, phase: RequestPhase) -> Option<TtftSpan> {
+    let stage = route_stage(phase).dispatch_prepare()?;
+    request
+        .ttft_timings()
+        .map(|timings| timings.start_span(stage))
 }
 
 enum ResponseItemOutcome {

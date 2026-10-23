@@ -210,8 +210,7 @@ impl RoutingHost {
         }
         self.validate_explicit_worker(request.content(), phase)?;
 
-        let phase_label = phase.to_string();
-        let (route_guard, _ttft_route) = start_route(request, phase, &phase_label);
+        let route_guard = start_route(request, phase);
         let (outcome, _) = self
             .select_with_session_affinity(request, phase, true, &budget, |target| {
                 self.select_request_outcome(
@@ -256,8 +255,7 @@ impl RoutingHost {
         }
 
         let phase = preview.phase;
-        let phase_label = phase.to_string();
-        let (route_guard, _ttft_route) = start_route(request, phase, &phase_label);
+        let route_guard = start_route(request, phase);
         let planned_worker = preview.signals.worker;
         let select = || {
             self.select_with_session_affinity(request, phase, false, &budget, |target| {
@@ -308,7 +306,9 @@ impl RoutingHost {
             budget,
             ..
         } = plan;
-        let ttft_route = start_ttft_route(&request, request.phase());
+        let ttft_route = request
+            .ttft_timings()
+            .map(|timings| timings.start_span(route_stage(request.phase())));
         let selected_target = route_target(selection.worker);
         let guard = match self
             .track_planned_selection(&request, &mut selection, cleanup, &budget)
@@ -317,8 +317,10 @@ impl RoutingHost {
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
+        drop(ttft_route);
+        let dispatch_prepare = start_dispatch_prepare(&request, request.phase());
         let stream = match self
-            .dispatch_selection(request, selection, guard, &budget, ttft_route)
+            .dispatch_selection(request, selection, guard, &budget, dispatch_prepare)
             .await
         {
             Ok(stream) => stream,
@@ -540,7 +542,7 @@ impl RoutingHost {
         selection: WorkerSelection,
         mut guard: RequestGuard,
         budget: &CleanupBudget,
-        ttft_route: Option<TtftSpan>,
+        dispatch_prepare: Option<TtftSpan>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -556,9 +558,9 @@ impl RoutingHost {
         backend_input.kv_hint = selection.kv_hint;
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start(updated_request.content());
-        // Dispatch uses the legacy entry point. Route precedence attributes
-        // dispatch preparation here without moving the existing gauge boundary.
-        drop(ttft_route);
+        // Preserve the legacy dispatch entry above. The diagnostic preparation
+        // child ends here; exclusive dispatch subtracts that overlap.
+        drop(dispatch_prepare);
 
         let dispatch = self
             .inner
@@ -664,8 +666,7 @@ impl RoutingHost {
     {
         let budget = CleanupBudget::default();
         let phase = RequestPhase::Prefill;
-        let phase_label = phase.to_string();
-        let (route_guard, ttft_route) = start_route(&request, phase, &phase_label);
+        let route_guard = start_route(&request, phase);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let (mut selection, mut operation) = self
             .select_with_affinity(&request, phase, is_query_only, &budget)
@@ -685,9 +686,9 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        drop(route_guard);
+        let dispatch_prepare = route_selection_finished(route_guard, &request, phase);
         let stream = match self
-            .dispatch_selection(request, selection, guard, &budget, ttft_route)
+            .dispatch_selection(request, selection, guard, &budget, dispatch_prepare)
             .await
         {
             Ok(stream) => stream,

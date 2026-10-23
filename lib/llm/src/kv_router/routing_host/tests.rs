@@ -4397,7 +4397,7 @@ async fn parent_group_binding_resolves_siblings_to_one_key() {
     let (runtime, host) = affinity_mode_host("subagent-group-binding").await;
 
     let key = |request: &SingleIn<PreprocessedRequest>| {
-        host.group_binding_id(request, None)
+        host.group_binding_id(request, None, RequestPhase::Decode)
             .unwrap_or_else(|| {
                 crate::session_affinity::affinity_id(request)
                     .unwrap()
@@ -4474,6 +4474,72 @@ async fn parent_group_binding_offers_siblings_the_committed_worker() {
     runtime.shutdown();
 }
 
+// A child must reuse its parent's prefill placement without changing decode's sibling group.
+#[tokio::test]
+#[serial_test::serial]
+async fn child_prefill_uses_parent_worker_while_decode_keeps_group_binding() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+    let parent = subagent_request("parent-1", None);
+    let (_, hold) = router
+        .select_with_session_affinity(
+            &parent,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    let mut stream = router
+        .bind_affinity(
+            hold,
+            AffinityTarget::new(7, Some(0)),
+            ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::default(),
+                )])),
+                parent.context(),
+            ),
+        )
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let child = subagent_request("child-1", Some("parent-1"));
+    let (selected, hold) = router
+        .select_with_session_affinity(
+            &child,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected, Some(AffinityTarget::new(7, Some(0))));
+    drop(hold);
+    let (decode, hold) = router
+        .select_with_session_affinity(
+            &child,
+            RequestPhase::Decode,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        decode, None,
+        "decode's sibling group must not inherit the parent binding"
+    );
+    drop(hold);
+    runtime.shutdown();
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
@@ -4531,34 +4597,29 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
 }
 
 #[test]
-fn ttft_route_keeps_legacy_gauge_exit_before_dispatch_preparation() {
+fn ttft_route_selection_transitions_to_dispatch_preparation() {
     use crate::protocols::common::ttft::TtftTimings;
-    use dynamo_runtime::metrics::frontend_perf::STAGE_REQUESTS;
 
     let start = Instant::now();
     let timeline = Arc::new(TtftTimings::new(start));
-    let tracker = Arc::new(RequestTracker::new());
-    tracker.set_ttft(timeline.clone());
     let mut timed_request = request();
-    timed_request.tracker = Some(tracker);
-    // A unique gauge label isolates this lifecycle assertion from parallel tests.
-    let gauge = STAGE_REQUESTS.with_label_values(&[STAGE_ROUTE, "ttft_boundary_test"]);
-    let (route_guard, timing) =
-        start_route(&timed_request, RequestPhase::Decode, "ttft_boundary_test");
-    assert_eq!(gauge.get(), 1);
-    drop(route_guard);
-    assert_eq!(gauge.get(), 0);
-    // The timing remains open after the legacy selection/tracking gauge ends.
-    let end = Instant::now() + Duration::from_secs(1);
+    timed_request.ttft = Some(timeline.clone());
+    let route_guard = start_route(&timed_request, RequestPhase::Decode);
+    let preparation = route_selection_finished(route_guard, &timed_request, RequestPhase::Decode);
+    let preparation_started = Instant::now();
+    // Preparation overlaps the legacy dispatch window. It wins only in the
+    // exclusive view; neither legacy boundary needs to move.
+    let _dispatch = timeline.start_span(TtftStage::BackendDecode);
+    let end = preparation_started + Duration::from_secs(1);
     let stages = timeline.finish(end);
-    assert!(stages[TtftStage::RouteDecode as usize] >= Duration::from_secs(1));
+    assert!(stages[TtftStage::DispatchPrepareDecode as usize] >= Duration::from_secs(1));
+    assert_eq!(stages[TtftStage::BackendDecode as usize], Duration::ZERO);
+    assert!(stages[TtftStage::RouteDecode as usize] <= preparation_started - start);
     assert_eq!(stages.iter().sum::<Duration>(), end - start);
-    drop(timing);
-    assert_eq!(gauge.get(), 0);
+    drop(preparation);
+    assert_eq!(timeline.finish(end + Duration::from_secs(1)), stages);
 
-    let (gauge_guard, timing) = start_route(&request(), RequestPhase::Decode, "ttft_boundary_test");
-    assert!(timing.is_none());
-    assert_eq!(gauge.get(), 1);
-    drop(gauge_guard);
-    assert_eq!(gauge.get(), 0);
+    let untimed_request = request();
+    let route = start_route(&untimed_request, RequestPhase::Decode);
+    assert!(route_selection_finished(route, &untimed_request, RequestPhase::Decode).is_none());
 }

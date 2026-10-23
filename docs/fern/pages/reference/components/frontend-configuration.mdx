@@ -588,19 +588,28 @@ Set `--ttft-detail` or `DYN_FRONTEND_TTFT_DETAIL` before startup. The CLI value 
 
 | Value | Detail histogram | Per-request DEBUG event | Collection |
 | --- | --- | --- | --- |
-| `off` (default) | Disabled | Disabled | None |
-| `metrics` | Enabled | Disabled | One request-local timeline |
+| `off` | Disabled | Disabled | None |
+| `metrics` (default) | Enabled | Disabled | One request-local timeline |
 | `logs` | Disabled | Enabled when `DYN_LOG` permits `dynamo_frontend::ttft` at DEBUG | Only when that target is enabled |
 | `both` | Enabled | Enabled when the target is enabled | One timeline shared by both outputs |
 
-Existing total TTFT, operation histograms, and stage gauges remain enabled with their original
-semantics. The optional detail view partitions each request's TTFT into mutually exclusive
-contributions. To enable both outputs:
+Existing total TTFT, operation histograms, and stage gauges retain their original behavior in
+every mode. Detail metrics collect by default; per-request logs remain disabled even if the
+global log level is DEBUG. The detail view partitions each request's TTFT into mutually exclusive
+contributions. To enable logs alongside metrics:
 
 ```bash
 export DYN_FRONTEND_TTFT_DETAIL=both
 export DYN_LOG='info,dynamo_frontend::ttft=debug'
 ```
+
+Invalid modes fail at startup. The mode is fixed for the lifetime of the frontend; requests are
+not sampled. Startup logs report the selected mode and whether the detail DEBUG target is enabled.
+Only `metrics` and `both` register the detail histogram and diagnostic metric families. In `off`,
+the frontend skips detail timelines, stage clock reads, histogram
+observations, Python timing calls, and process-pool timing results. Small fixed enablement checks
+remain. The histogram bucket variables below configure boundaries only; they do not enable
+collection.
 
 See [TTFT stage durations](../observability/metrics-catalog.mdx#ttft-stage-durations) for boundaries
 and [Per-Request First-Token Log](../observability/logging.mdx#per-request-first-token-log) for fields.
@@ -630,9 +639,12 @@ Rounding can move the top edge either way, so pick a `MAX` that is already two s
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
 
-When detail metrics are enabled, `dynamo_frontend_ttft_stage_seconds` has 17 fixed `stage`/`phase` combinations per model. Each
-combination has the same bucket boundaries. With the default 26 finite boundaries, the `_bucket`,
-`_sum`, and `_count` series total 493 per model, including the `+Inf` bucket. See
+When detail metrics are enabled, `dynamo_frontend_ttft_stage_seconds` exposes only the legal
+`stage`/`phase` pairs in its registry. Each pair has the same bucket boundaries. For `N` pairs and
+`B` finite boundaries, the `_bucket`, `_sum`, and `_count` series total `N * (B + 3)` per model,
+including the `+Inf` bucket. The current registry has 24 pairs, so the default 26 finite boundaries
+produce 696 series per model. The coverage counters add at most 12 fixed global series, independent
+of model count. See
 [TTFT stage durations](../observability/metrics-catalog.mdx#ttft-stage-durations) for the stage
 contract and additive mean queries.
 
@@ -845,7 +857,7 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/embeddings` | Text embeddings |
 | `POST` | `/v1/responses` | Responses API |
 | `POST` | `/v1/responses/input_tokens` | Estimated input token count for the Responses API |
-| `POST` | `/v1/images/generations` | Image generation |
+| `POST` | `/v1/images/generations` | Image generation; the response carries [image accounting](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md#image-accounting) |
 | `POST` | `/v1/images/edits` | Image editing; see [Image API Compatibility](#image-api-compatibility) |
 | `POST` | `/v1/videos/generations` | Video generation |
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |

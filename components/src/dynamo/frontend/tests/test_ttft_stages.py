@@ -32,6 +32,7 @@ class RecordingContext:
     def __init__(self):
         self.events = []
         self.intervals = []
+        self.quality = []
 
     @contextmanager
     def start_ttft_stage(self, stage):
@@ -41,8 +42,12 @@ class RecordingContext:
         finally:
             self.events.append(("end", stage))
 
-    def record_ttft_stage_ago(self, stage, start, end):
-        self.intervals.append((stage, start, end))
+    def record_ttft_batch_ago(self, intervals, coarse_reasons=()):
+        self.intervals.extend(intervals)
+        self.quality.extend(("coarse", reason) for reason in coarse_reasons)
+
+    def mark_ttft_quality(self, quality, reason):
+        self.quality.append((quality, reason))
 
 
 class Tokenizer:
@@ -70,6 +75,22 @@ def frontend_stubs(request):
         __path__=[str(Path(__file__).parents[2] / "common" / "utils")],
     )
     install("dynamo._internal", ModelDeploymentCard=object)
+    # Deliberately synthetic IDs prove the Python transport uses the binding
+    # registry, rather than copying production enum discriminants.
+    names = (
+        "preprocess",
+        "preprocess_queue",
+        "template_tokenize",
+        "template_render",
+        "tokenize",
+        "structural_tag_build",
+        "multimodal_prepare",
+        "mm_routing_build",
+    )
+    install("dynamo._core", ttft_stage_registry=lambda: list(enumerate(names, 100)))
+    from dynamo.frontend import ttft
+
+    ttft.stage_registry.cache_clear()
     install("dynamo.frontend.frontend_args", FrontendConfig=object)
     install(
         "dynamo.llm",
@@ -82,6 +103,7 @@ def frontend_stubs(request):
         HttpError=type("HttpError", (Exception,), {}),
         InvalidArgument=type("InvalidArgument", (Exception,), {}),
         Unknown=type("Unknown", (Exception,), {}),
+        WorkerUnavailable=type("WorkerUnavailable", (Exception,), {}),
     )
     # Restore all frontend modules imported against these stubs after each test.
     for name in (
@@ -146,6 +168,8 @@ def test_sglang_inline_preprocess_and_legacy_context(sglang_modules):
         ("start", "preprocess"),
         ("start", "template_tokenize"),
         ("end", "template_tokenize"),
+        ("start", "structural_tag_build"),
+        ("end", "structural_tag_build"),
         ("end", "preprocess"),
     ]
     assert asyncio.run(collect(None)) == [{"ok": True}]
@@ -186,7 +210,7 @@ def test_sglang_deepseek_custom_encoder_is_timed(
     context = RecordingContext()
 
     def encode_messages(*args, **kwargs):
-        assert context.events[-1] == ("start", "template_tokenize")
+        assert context.events[-1] == ("start", "template_render")
         return "rendered"
 
     install(
@@ -204,8 +228,12 @@ def test_sglang_deepseek_custom_encoder_is_timed(
     )
     assert result.prompt_token_ids == [4, 5]
     assert context.events == [
-        ("start", "template_tokenize"),
-        ("end", "template_tokenize"),
+        ("start", "template_render"),
+        ("end", "template_render"),
+        ("start", "tokenize"),
+        ("end", "tokenize"),
+        ("start", "structural_tag_build"),
+        ("end", "structural_tag_build"),
     ]
 
 
@@ -214,27 +242,34 @@ def test_sglang_worker_returns_picklable_monotonic_intervals(
 ):
     module, _ = sglang_modules
     monkeypatch.setattr(module, "_w_tokenizer", Tokenizer())
-    clock = iter([10_000_000_000, 10_200_000_000])
-    monkeypatch.setattr(
-        module, "time", SimpleNamespace(monotonic_ns=lambda: next(clock))
-    )
+    from dynamo.frontend import ttft
+
+    clock = iter([10_000_000_000, 10_200_000_000, 10_300_000_000, 10_400_000_000])
+    monkeypatch.setattr(ttft.time, "monotonic_ns", lambda: next(clock))
     result = module._preprocess_worker(chat_request(), "test", None, True)
     result = pickle.loads(pickle.dumps(result))
-    assert result.template_tokenize_intervals_ns == [(10_000_000_000, 10_200_000_000)]
-    assert result.prompt_token_ids == [1, 2, 3]
-    assert (
-        module._preprocess_worker(
-            chat_request(), "test", None
-        ).template_tokenize_intervals_ns
-        is None
+    assert result.timing_batch.intervals_ns == (
+        ttft.TimingInterval(
+            ttft.stage_registry()["template_tokenize"], 10_000_000_000, 10_200_000_000
+        ),
+        ttft.TimingInterval(
+            ttft.stage_registry()["structural_tag_build"],
+            10_300_000_000,
+            10_400_000_000,
+        ),
     )
+    assert result.timing_batch.coarse_reasons == ("opaque_template",)
+    assert result.prompt_token_ids == [1, 2, 3]
+    disabled = module._preprocess_worker(chat_request(), "test", None)
+    assert not hasattr(disabled, "timing_batch")
+    assert b"timing_batch" not in pickle.dumps(disabled)
 
 
 def test_sglang_worker_rejects_unsupported_ttft_stage(sglang_modules):
     module, _ = sglang_modules
     timing = module._WorkerPreprocessTiming()
-    with pytest.raises(ValueError, match="Unsupported TTFT stage: preprocess"):
-        with timing.start_ttft_stage("preprocess"):
+    with pytest.raises(ValueError, match="Unsupported TTFT stage: arbitrary"):
+        with timing.start_ttft_stage("arbitrary"):
             pass
     assert timing.intervals_ns == []
 
@@ -242,11 +277,26 @@ def test_sglang_worker_rejects_unsupported_ttft_stage(sglang_modules):
 def test_sglang_pool_reattaches_worker_intervals(sglang_modules, monkeypatch):
     module, _ = sglang_modules
     context = RecordingContext()
-    result = module.SglangPreprocessWorkerResult(
+    from dynamo.frontend import ttft
+
+    result = module.SglangTimedPreprocessWorkerResult(
         prompt_token_ids=[1],
         dynamo_preproc={"sampling_options": {"guided_decoding": None}},
         request=chat_request(),
-        template_tokenize_intervals_ns=[(10_000_000_000, 10_200_000_000)],
+        timing_batch=ttft.TimingBatch(
+            1,
+            ttft.clock_domain(),
+            (
+                ttft.TimingInterval(
+                    ttft.stage_registry()["template_render"],
+                    10_000_000_000,
+                    10_200_000_000,
+                ),
+                ttft.TimingInterval(
+                    ttft.stage_registry()["tokenize"], 10_200_000_000, 10_400_000_000
+                ),
+            ),
+        ),
     )
 
     class Pool:
@@ -258,9 +308,8 @@ def test_sglang_pool_reattaches_worker_intervals(sglang_modules, monkeypatch):
             future.set_result(result)
             return future
 
-    monkeypatch.setattr(
-        module, "time", SimpleNamespace(monotonic_ns=lambda: 11_000_000_000)
-    )
+    clock = iter([9_000_000_000, 11_000_000_000])
+    monkeypatch.setattr(ttft.time, "monotonic_ns", lambda: next(clock))
     processor = make_sglang_processor(module, preprocess_pool=Pool())
 
     async def collect():
@@ -269,7 +318,10 @@ def test_sglang_pool_reattaches_worker_intervals(sglang_modules, monkeypatch):
         ]
 
     assert asyncio.run(collect()) == [{"ok": True}]
-    assert context.intervals == [("template_tokenize", 1.0, 0.8)]
+    assert context.intervals == [
+        (ttft.stage_registry()["template_render"], 1_000_000_000, 800_000_000),
+        (ttft.stage_registry()["tokenize"], 800_000_000, 600_000_000),
+    ]
     assert context.events == [
         ("start", "preprocess"),
         ("start", "preprocess_queue"),
@@ -421,7 +473,6 @@ def test_vllm_template_tokenizer_preserves_tokens_and_closes_on_error(
 
     class Renderer:
         async def render_messages_async(self, messages, params):
-            assert context.events[-1] == ("start", "template_tokenize")
             if fail_render:
                 raise ValueError("render failed")
             return [], {"prompt_token_ids": [1, 2]} if pretokenized else {
@@ -430,7 +481,7 @@ def test_vllm_template_tokenizer_preserves_tokens_and_closes_on_error(
 
     async def tokenize(prompt, **kwargs):
         assert not pretokenized
-        assert context.events[-1] == ("start", "template_tokenize")
+        assert context.events[-1] == ("start", "tokenize")
         return SimpleNamespace(input_ids=[1, 2])
 
     monkeypatch.setattr(prepost, "_get_async_tokenizer", lambda tokenizer: tokenize)
@@ -446,10 +497,19 @@ def test_vllm_template_tokenizer_preserves_tokens_and_closes_on_error(
             asyncio.run(coro)
     else:
         assert asyncio.run(coro).prompt_token_ids == [1, 2]
-    assert context.events == [
-        ("start", "template_tokenize"),
-        ("end", "template_tokenize"),
-    ]
+    from dynamo.frontend import ttft
+
+    label = "template_tokenize" if pretokenized else "template_render"
+    assert context.intervals[0][0] == ttft.stage_registry()[label]
+    assert context.events == (
+        []
+        if fail_render
+        else (
+            ([] if pretokenized else [("start", "tokenize"), ("end", "tokenize")])
+            + [("start", "structural_tag_build"), ("end", "structural_tag_build")]
+        )
+    )
+    assert context.quality == ([("coarse", "opaque_template")] if pretokenized else [])
 
 
 @pytest.mark.parametrize("has_media", [False, True])
@@ -634,14 +694,17 @@ def test_disabled_context_skips_native_calls_and_pool_clocks(
     def unexpected_clock():
         pytest.fail("OFF must not read the pool timing clock")
 
-    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic_ns=unexpected_clock))
+    from dynamo.frontend import ttft
+
+    monkeypatch.setattr(ttft.time, "monotonic_ns", unexpected_clock)
     monkeypatch.setattr(module, "_w_tokenizer", Tokenizer())
 
     class Pool:
         def submit(self, fn, *args):
-            assert args[-1] is False
+            assert len(args) == 3
             result = fn(*args)
-            assert result.template_tokenize_intervals_ns is None
+            assert not hasattr(result, "timing_batch")
+            assert b"timing_batch" not in pickle.dumps(result)
             future = Future()
             future.set_result(result)
             return future
@@ -657,3 +720,234 @@ def test_disabled_context_skips_native_calls_and_pool_clocks(
         ]
 
     assert asyncio.run(collect()) == [{"ok": True}]
+
+
+@pytest.mark.parametrize(
+    "change,reason",
+    [
+        ({"version": 2}, "invalid_version"),
+        ({"version": True}, "invalid_version"),
+        ({"clock_domain": "foreign-clock"}, "clock_mismatch"),
+        ({"truncated": True}, "interval_limit"),
+        ({"invalid": True}, "invalid_batch"),
+        ({"intervals_ns": None}, "invalid_batch"),
+        ({"coarse_reasons": ("unknown",)}, "invalid_batch"),
+        ({"coarse_reasons": ([],)}, "invalid_batch"),
+    ],
+)
+def test_worker_batch_rejects_invalid_metadata(
+    frontend_stubs, monkeypatch, change, reason
+):
+    from dataclasses import replace
+
+    from dynamo.frontend import ttft
+
+    context = RecordingContext()
+    batch = ttft.TimingBatch(1, ttft.clock_domain(), ())
+    monkeypatch.setattr(ttft.time, "monotonic_ns", lambda: 100)
+    ttft.import_worker_batch(context, replace(batch, **change), 10)
+    assert context.intervals == []
+    assert context.quality == [("degraded", reason)]
+
+
+@pytest.mark.parametrize("field", ["intervals_ns", "coarse_reasons"])
+def test_worker_batch_rejects_tuple_subclasses_before_iteration(
+    frontend_stubs, monkeypatch, field
+):
+    from dataclasses import replace
+
+    from dynamo.frontend import ttft
+
+    calls = []
+
+    class LyingTuple(tuple):
+        def __len__(self):
+            calls.append("len")
+            return 0
+
+        def __iter__(self):
+            calls.append("iter")
+            raise AssertionError("malformed timing payload must not be iterated")
+
+    context = RecordingContext()
+    batch = ttft.TimingBatch(1, ttft.clock_domain(), ())
+    payload = LyingTuple(range(ttft.MAX_TIMING_INTERVALS + 1))
+    monkeypatch.setattr(ttft.time, "monotonic_ns", lambda: 100)
+    ttft.import_worker_batch(context, replace(batch, **{field: payload}), 10)
+    assert calls == []
+    assert context.intervals == []
+    assert context.quality == [("degraded", "invalid_batch")]
+
+
+@pytest.mark.parametrize("kind", ["batch", "interval"])
+def test_worker_batch_rejects_dataclass_subclasses_before_field_access(
+    frontend_stubs, monkeypatch, kind
+):
+    from dynamo.frontend import ttft
+
+    calls = []
+
+    class BatchSubclass(ttft.TimingBatch):
+        def __getattribute__(self, name):
+            calls.append(name)
+            raise AssertionError("malformed timing batch must not be inspected")
+
+    class IntervalSubclass(ttft.TimingInterval):
+        def __getattribute__(self, name):
+            calls.append(name)
+            raise AssertionError("malformed timing interval must not be inspected")
+
+    batch = (
+        BatchSubclass(1, ttft.clock_domain(), ())
+        if kind == "batch"
+        else ttft.TimingBatch(1, ttft.clock_domain(), (IntervalSubclass(103, 20, 30),))
+    )
+    context = RecordingContext()
+    monkeypatch.setattr(ttft.time, "monotonic_ns", lambda: 100)
+    ttft.import_worker_batch(context, batch, 10)
+    assert calls == []
+    assert context.intervals == []
+    assert context.quality == [("degraded", "invalid_batch")]
+
+
+@pytest.mark.parametrize(
+    "stage,start,end,reason",
+    [
+        (-1, 20, 30, "invalid_stage"),
+        (True, 20, 30, "invalid_stage"),
+        (103, 30, 20, "invalid_interval"),
+        (103, 9, 20, "invalid_interval"),
+        (103, 20, 101, "invalid_interval"),
+        (103, -1, 30, "timestamp_overflow"),
+        (103, 20, 1 << 65, "timestamp_overflow"),
+        (103, 20.5, 30, "timestamp_overflow"),
+    ],
+)
+def test_worker_batch_rejects_invalid_intervals(
+    frontend_stubs, monkeypatch, stage, start, end, reason
+):
+    from dynamo.frontend import ttft
+
+    context = RecordingContext()
+    batch = ttft.TimingBatch(
+        1, ttft.clock_domain(), (ttft.TimingInterval(stage, start, end),)
+    )
+    monkeypatch.setattr(ttft.time, "monotonic_ns", lambda: 100)
+    ttft.import_worker_batch(context, batch, 10)
+    assert context.intervals == []
+    assert context.quality == [("degraded", reason)]
+
+
+def test_worker_batch_bounds_repeats_and_unsupported_clock(frontend_stubs, monkeypatch):
+    from dataclasses import replace
+
+    from dynamo.frontend import ttft
+
+    context = RecordingContext()
+    interval = ttft.TimingInterval(ttft.stage_registry()["tokenize"], 20, 30)
+    batch = ttft.TimingBatch(1, ttft.clock_domain(), (interval, interval))
+    clock_reads = []
+
+    def now():
+        clock_reads.append(True)
+        return 100
+
+    monkeypatch.setattr(ttft.time, "monotonic_ns", now)
+    ttft.import_worker_batch(context, batch, 10)
+    assert len(clock_reads) == 1
+    assert context.intervals == [(interval.stage_id, 80, 70)] * 2
+    ttft.import_worker_batch(context, replace(batch, intervals_ns=(interval,) * 65), 10)
+    assert context.quality[-1] == ("degraded", "interval_limit")
+    ttft.import_worker_batch(context, replace(batch, clock_domain="unsupported"), 10)
+    assert context.quality[-1] == ("coarse", "unsupported_clock")
+    assert len(context.intervals) == 2
+
+
+def test_worker_recorder_is_bounded_before_clock_reads(frontend_stubs, monkeypatch):
+    from contextlib import ExitStack
+
+    from dynamo.frontend import ttft
+
+    clock_reads = []
+    monkeypatch.setattr(
+        ttft.time, "monotonic_ns", lambda: clock_reads.append(1) or len(clock_reads)
+    )
+    worker = ttft.WorkerTiming()
+    with ExitStack() as stack:
+        for _ in range(70):
+            stack.enter_context(worker.start_ttft_stage("template_render"))
+    assert len(worker.batch().intervals_ns) == 64
+    assert worker.batch().truncated is True
+    assert len(clock_reads) == 128
+
+
+def test_worker_invalid_stage_check_survives_python_optimized(frontend_stubs):
+    import subprocess
+    import sys
+
+    from dynamo.frontend import ttft
+
+    code = """
+import importlib.util
+import sys
+import types
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location('timing_test_module', path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+module.stage_registry = lambda: {'template_render': 19}
+try:
+    with module.WorkerTiming().start_ttft_stage('unknown'):
+        pass
+except ValueError:
+    pass
+else:
+    raise RuntimeError('stage validation disabled by -O')
+"""
+    subprocess.run([sys.executable, "-O", "-c", code, ttft.__file__], check=True)
+
+
+def _same_host_pool_batch(registry):
+    """Actual spawned worker; only the unavailable native registry is stubbed."""
+    import sys
+    import types
+
+    from dynamo.frontend import ttft
+
+    sys.modules["dynamo._core"] = types.SimpleNamespace(
+        ttft_stage_registry=lambda: [
+            (stage_id, name) for name, stage_id in registry.items()
+        ]
+    )
+    ttft.stage_registry.cache_clear()
+    timing = ttft.WorkerTiming()
+    with timing.start_ttft_stage("template_render"):
+        pass
+    with timing.start_ttft_stage("tokenize"):
+        pass
+    return timing.batch()
+
+
+def test_actual_same_host_process_pool_batch(frontend_stubs):
+    import multiprocessing
+    import time
+    from concurrent.futures import ProcessPoolExecutor
+
+    from dynamo.frontend import ttft
+
+    with ProcessPoolExecutor(
+        max_workers=1, mp_context=multiprocessing.get_context("spawn")
+    ) as pool:
+        submitted = time.monotonic_ns()
+        batch = pool.submit(_same_host_pool_batch, ttft.stage_registry()).result(
+            timeout=30
+        )
+    context = RecordingContext()
+    ttft.import_worker_batch(context, batch, submitted)
+    assert context.quality == []
+    assert [interval[0] for interval in context.intervals] == [
+        ttft.stage_registry()["template_render"],
+        ttft.stage_registry()["tokenize"],
+    ]
+    assert all(start >= end >= 0 for _, start, end in context.intervals)

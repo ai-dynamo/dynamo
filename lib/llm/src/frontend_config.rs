@@ -19,8 +19,8 @@ use crate::reasoning_field::ReasoningField;
 /// Optional exclusive TTFT diagnostics. Parsed at service startup, never per stage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TtftDetail {
-    #[default]
     Off,
+    #[default]
     Metrics,
     Logs,
     Both,

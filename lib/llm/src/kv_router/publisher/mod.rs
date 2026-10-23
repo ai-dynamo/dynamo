@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::indexer::{KvIndexerMetrics, LocalKvIndexer};
@@ -52,10 +52,11 @@ pub use multimodal_embedding_cache::{
 use sinks::EventPlanePublisher;
 pub use state_agent::{
     KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
-    KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+    KvStateAgentSockets, KvStateAgentVllmSource, resolve_stable_dp_slot_id,
 };
 pub use state_agent_host::{
-    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, KvStateAgentHost, KvStateAgentHostConfig,
+    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, DEFAULT_KV_STATE_AGENT_SLOTS_PER_SOCKET, KvStateAgentHost,
+    KvStateAgentHostConfig,
 };
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
@@ -77,6 +78,10 @@ pub enum KvEventSourceConfig {
         /// Model video-placeholder token id. `None` leaves video runs on the
         /// engine's native hashing path.
         video_token_id: Option<u32>,
+        /// Source rank when this socket is dedicated to one DP rank.
+        expected_rank: Option<u32>,
+        /// Expected source rank and negotiated heartbeat timeout.
+        liveness: Option<(u32, std::time::Duration)>,
     },
 }
 
@@ -135,6 +140,8 @@ impl KvEventSource {
                 topic,
                 image_token_id,
                 video_token_id,
+                expected_rank,
+                liveness,
             } => {
                 let listener_handle =
                     component
@@ -151,6 +158,8 @@ impl KvEventSource {
                             next_event_id,
                             image_token_id,
                             video_token_id,
+                            expected_rank,
+                            liveness,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =
@@ -207,6 +216,9 @@ pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
+    /// Local pipeline initialization, independent of remote source activity.
+    startup: Option<oneshot::Receiver<()>>,
+    processor_task: tokio::task::JoinHandle<()>,
 }
 
 impl KvEventPublisher {
@@ -363,7 +375,8 @@ impl KvEventPublisher {
 
         tracing::info!("Using event plane for KV event publishing");
         let endpoint_clone = endpoint.clone();
-        component.drt().runtime().secondary().spawn(async move {
+        let (startup_tx, startup) = oneshot::channel();
+        let processor_task = component.drt().runtime().secondary().spawn(async move {
             let event_publisher =
                 match dynamo_runtime::transports::event_plane::EventPublisher::for_endpoint_id(
                     endpoint_clone.drt(),
@@ -449,6 +462,7 @@ impl KvEventPublisher {
                 }
             };
 
+            let _ = startup_tx.send(());
             start_event_processor(
                 EventPlanePublisher(event_publisher),
                 worker_id,
@@ -481,7 +495,32 @@ impl KvEventPublisher {
             worker_id,
             tx,
             next_event_id,
+            startup: Some(startup),
+            processor_task,
         })
+    }
+
+    /// Wait for local publication and discovery initialization, not a remote event.
+    pub async fn ready(&mut self) -> Result<()> {
+        if let Some(startup) = self.startup.take() {
+            tokio::select! {
+                result = startup => result.map_err(|_| anyhow::anyhow!("KV event publisher initialization failed"))?,
+                _ = self.cancellation_token.cancelled() => anyhow::bail!("KV event listener stopped during initialization"),
+            }
+        }
+        anyhow::ensure!(
+            !self.cancellation_token.is_cancelled() && !self.processor_task.is_finished(),
+            "KV event publisher stopped during initialization"
+        );
+        Ok(())
+    }
+
+    /// Observe fatal termination. Ordinary gaps and heartbeat expiry keep listening.
+    pub async fn terminated(&mut self) {
+        tokio::select! {
+            _ = &mut self.processor_task => {},
+            _ = self.cancellation_token.cancelled() => {},
+        }
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
@@ -528,17 +567,31 @@ impl KvEventPublisher {
         &self,
         events: Vec<(KvCacheEvent, StorageTier)>,
     ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
+        self.publish_batch_with_session_ids(
+            events
+                .into_iter()
+                .map(|(event, tier)| (event, tier, None))
+                .collect(),
+        )
+    }
+
+    /// Publishes session-attributed events as one processor input.
+    pub fn publish_batch_with_session_ids(
+        &self,
+        events: Vec<(KvCacheEvent, StorageTier, Option<String>)>,
+    ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
         if events.is_empty() {
             return Ok(());
         }
-
         let events = events
             .into_iter()
-            .map(|(event, storage_tier)| {
-                PlacementEvent::new(
+            .map(|(event, storage_tier, session_id)| {
+                let mut event = PlacementEvent::new(
                     Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
                     event,
-                )
+                );
+                event.session_id = session_id;
+                event
             })
             .collect();
 

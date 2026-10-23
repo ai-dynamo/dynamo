@@ -286,7 +286,7 @@ impl RoutingHost {
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let phase_label = phase.to_string();
-        let (route_guard, ttft_route) = start_route(&request, phase, &phase_label);
+        let route_guard = start_route(&request, phase);
         let explicit = explicit_target(request.content(), phase)?;
         let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
@@ -375,7 +375,6 @@ impl RoutingHost {
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
-        drop(ttft_route);
         guard.start_dispatch(&phase_label);
         guard.record_prefill_start(request.content());
         let dispatch_result = if is_direct && !has_affinity_session {

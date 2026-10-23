@@ -231,9 +231,9 @@ def test_ttft_detail_env_and_explicit_cli_precedence(monkeypatch, mode):
     assert parse_frontend_config(["--ttft-detail", "off"]).ttft_detail == "off"
 
 
-def test_ttft_detail_defaults_off(monkeypatch):
+def test_ttft_detail_defaults_metrics(monkeypatch):
     monkeypatch.delenv("DYN_FRONTEND_TTFT_DETAIL", raising=False)
-    assert parse_frontend_config([]).ttft_detail == "off"
+    assert parse_frontend_config([]).ttft_detail == "metrics"
 
 
 def test_ttft_detail_rejects_invalid_mode(monkeypatch):

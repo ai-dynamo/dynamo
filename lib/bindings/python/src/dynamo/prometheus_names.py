@@ -101,6 +101,12 @@ class frontend_service:
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
     REQUESTS_STARTED_TOTAL = "requests_started_total"
+    # Admitted requests that have not produced an output token.
+    AWAITING_FIRST_TOKEN_REQUESTS = "awaiting_first_token_requests"
+    # Known prompt tokens in inflight requests, labeled by state.
+    INFLIGHT_INPUT_TOKENS = "inflight_input_tokens"
+    # Total known input tokens of admitted requests.
+    INPUT_TOKENS_TOTAL = "input_tokens_total"
     # Total number of terminal semantic request failures.
     FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
@@ -149,6 +155,12 @@ class frontend_service:
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Exclusive contributions to HTTP time to first token, labeled by stage and phase.
     TTFT_STAGE_SECONDS = "ttft_stage_seconds"
+    # Requests with untrustworthy detailed TTFT attribution, labeled by fixed reason.
+    TTFT_DETAIL_DEGRADED_TOTAL = "ttft_detail_degraded_total"
+    # Requests with known coarse TTFT coverage, labeled by fixed reason.
+    TTFT_DETAIL_COARSE_TOTAL = "ttft_detail_coarse_total"
+    # Requests with unexpected overlapping TTFT leaves.
+    TTFT_DETAIL_UNEXPECTED_OVERLAP_TOTAL = "ttft_detail_unexpected_overlap_total"
     # Inter-token latency in seconds
     INTER_TOKEN_LATENCY_SECONDS = "inter_token_latency_seconds"
     # End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
