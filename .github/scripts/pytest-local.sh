@@ -217,7 +217,7 @@ else
   # in neither phase; the paths avoid a second full-repository collection.
   read -ra safe_paths <<< "${SAFE_SUBSET_PATHS:-}"
   # --dist=load, not loadscope: loadscope would keep the whole module on one
-  # worker. 2 workers is the fixed cap for this subset.
+  # worker.
   safe_args=(
     -n 2 --dist=load
     --continue-on-collection-errors -v --tb=short
