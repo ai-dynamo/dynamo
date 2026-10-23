@@ -27,6 +27,7 @@ import logging
 import multiprocessing.shared_memory as shm
 import os
 import struct
+import uuid
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 from queue import Queue
@@ -35,7 +36,6 @@ from typing import Any
 import torch
 from pydantic import BaseModel
 
-from dynamo.common.multimodal.shm_bytes import read_shm_bytes, write_shm_bytes
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
@@ -713,15 +713,17 @@ class MmKwargsShmSender(MmKwargsSender):
         self, idx: int, serialized: bytes
     ) -> tuple[MmKwargsShmItem, shm.SharedMemory]:
         """Write serialized bytes to a fresh shared-memory segment."""
+        name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{idx}"
         with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
-            sm = write_shm_bytes(serialized)
+            sm = shm.SharedMemory(name=name, create=True, size=len(serialized))
+            sm.buf[: len(serialized)] = serialized
         logger.debug(
             "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
             idx,
             len(serialized),
-            sm.name,
+            name,
         )
-        return MmKwargsShmItem(name=sm.name, size=len(serialized)), sm
+        return MmKwargsShmItem(name=name, size=len(serialized)), sm
 
     def _assemble_extra_args(
         self,
@@ -776,7 +778,10 @@ class MmKwargsShmReceiver(MmKwargsReceiver):
 
         for item in metadata.items:
             with _nvtx.annotate("mm_shm:open_and_read", color="cyan"):
-                data = read_shm_bytes(item.name, item.size)
+                sm = shm.SharedMemory(name=item.name, create=False)
+                # One copy into a writable buffer, as in the NIXL receiver.
+                data = bytearray(sm.buf[: item.size])
+                sm.close()
             results.setdefault("__pickled_kwargs_item__", []).append(data)
             logger.debug(
                 "[SHM-Receiver] read %d bytes from shm %s", item.size, item.name

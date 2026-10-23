@@ -5,19 +5,11 @@
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import AsyncExitStack
 from typing import Generator
 
 import pytest
 import requests
-import torch
 
-from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher
-from dynamo.common.multimodal.custom_tensor_nixl import (
-    NixlTensorPublisher,
-    nixl_available,
-)
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
 
@@ -254,62 +246,6 @@ def test_custom_json_uses_the_normal_chat_template(services: int) -> None:
         },
     )
     _assert_stub_answered(response)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("transport", ["shm", "nixl"])
-async def test_reference_resolves_after_frontend_routing_without_bulk_bytes(
-    services: int, transport
-):
-    if transport == "nixl" and not nixl_available():
-        pytest.skip("requires NIXL bindings")
-    # Discover the worker using the existing worker-id response contract.
-    content = [
-        {
-            "type": "custom",
-            "kind": kind,
-            "fields": {kind: value, "metadata": {"revision": 1}},
-        }
-        for kind, value in EXPECTED_PAYLOAD.items()
-    ]
-    probe = _chat(
-        services,
-        {
-            "model": MODEL_NAME,
-            "messages": [{"role": "user", "content": content}],
-            "nvext": {"token_data": [1, 2, 3], "extra_fields": ["worker_id"]},
-            "max_tokens": 4,
-        },
-    )
-    _assert_stub_answered(probe)
-    worker_id = probe.json()["nvext"]["worker_id"]["decode_worker_id"]
-    async with AsyncExitStack() as stack:
-        source = torch.arange(6).reshape(2, 3)
-        if transport == "nixl":
-            producer = await stack.enter_async_context(
-                NixlTensorPublisher(source, worker_id=worker_id)
-            )
-        else:
-            producer = stack.enter_context(
-                ShmTensorPublisher(source, worker_id=worker_id)
-            )
-        part = {
-            "type": "custom",
-            "kind": "chemistry",
-            "fields": {"input": producer.envelope(), "metadata": {"units": "angstrom"}},
-        }
-        body = {
-            "model": MODEL_NAME,
-            "messages": [{"role": "user", "content": [part]}],
-            "nvext": {"token_data": [1, 2, 5], "decode_worker_id": worker_id},
-            "max_tokens": 4,
-        }
-        _assert_stub_answered(await asyncio.to_thread(_chat, services, body))
-        # A reference is never sent to an arbitrary worker if the pin is absent.
-        body["nvext"].pop("decode_worker_id")
-        rejected = await asyncio.to_thread(_chat, services, body)
-        assert rejected.status_code == 400, rejected.text
-        assert "requires nvext.decode_worker_id" in rejected.text
 
 
 def test_builtin_wire_names_reject_custom_content_at_http_admission(services: int):

@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 import base64
-import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,12 +12,6 @@ from PIL import Image
 
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.multimodal import custom_tensor as transport
-from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher, inline_tensor
-from dynamo.common.multimodal.custom_tensor_nixl import (
-    NixlTensorPublisher,
-    nixl_available,
-)
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.vllm.multimodal_utils import request_processor as mod
@@ -44,94 +36,6 @@ def test_custom_wire_key_collisions_are_rejected(kind, mixed):
         items.append({"Url": "https://example.com/media"})
     with pytest.raises(mod.InvalidArgument, match="reserved for built-in"):
         mod._split_multimodal_data({"multi_modal_data": {kind: items}})
-
-
-@pytest.mark.asyncio
-async def test_worker_awaits_async_resolver_and_maps_capacity_errors(monkeypatch):
-    processor = _processor()
-    request = {
-        "token_ids": [1],
-        "multi_modal_data": {"chemistry": [{"Json": {"x": 1}}]},
-    }
-    resolver = AsyncMock(
-        side_effect=mod.CustomTensorCapacityError("capacity exhausted")
-    )
-    monkeypatch.setattr(mod, "resolve_custom_tensors_async", resolver)
-    with pytest.raises(mod.WorkerOverloaded, match="capacity exhausted"):
-        await _prepare_prompt(
-            processor, request, "overloaded", None, DisaggregationMode.AGGREGATED
-        )
-    resolver.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_worker_tensor_preparation_does_not_block_other_async_work(monkeypatch):
-    entered = threading.Event()
-    release = threading.Event()
-    original = transport._resolve_tensor
-
-    def blocked(*args):
-        entered.set()
-        assert release.wait(5), "event loop did not release the resolver"
-        return original(*args)
-
-    monkeypatch.setattr(transport, "_resolve_tensor", blocked)
-    source = torch.arange(8)
-    request = {
-        "token_ids": [1],
-        "multi_modal_data": {"chemistry": [{"Json": {"x": inline_tensor(source)}}]},
-    }
-    task = asyncio.create_task(
-        _prepare_prompt(
-            _processor(), request, "large", None, DisaggregationMode.AGGREGATED
-        )
-    )
-    try:
-        async with asyncio.timeout(3):
-            while not entered.is_set():
-                await asyncio.sleep(0.001)
-        # Represents another streaming task scheduled while tensor work runs.
-        heartbeat = asyncio.create_task(asyncio.sleep(0, result="stream advanced"))
-        assert await heartbeat == "stream advanced"
-        assert not task.done()
-    finally:
-        release.set()
-        result = await asyncio.wait_for(task, 3)
-    assert torch.equal(result.multi_modal_data["chemistry"]["x"], source)
-
-
-@pytest.mark.integration
-@pytest.mark.timeout(60)
-@pytest.mark.asyncio
-async def test_native_nixl_and_inline_equivalence_at_vllm_boundary():
-    if not nixl_available():
-        pytest.skip("requires NIXL bindings")
-    processor = _processor()
-    source = torch.arange(4096, dtype=torch.float32).reshape(64, 64).t()
-
-    async def prepare(envelope):
-        return await _prepare_prompt(
-            processor,
-            {
-                "token_ids": [1, 2, 3],
-                "routing": {"decode_worker_id": 7},
-                "multi_modal_data": {
-                    "chemistry": [{"Json": {"input": envelope, "units": "angstrom"}}]
-                },
-            },
-            "nixl-boundary",
-            None,
-            DisaggregationMode.AGGREGATED,
-        )
-
-    inline = await prepare(inline_tensor(source))
-    async with NixlTensorPublisher(source, worker_id=7, ttl=10) as publisher:
-        reference = await prepare(publisher.envelope())
-    assert torch.equal(
-        reference.prompt["multi_modal_data"]["chemistry"]["input"],
-        inline.prompt["multi_modal_data"]["chemistry"]["input"],
-    )
-    assert reference.prompt["multi_modal_data"]["chemistry"]["units"] == "angstrom"
 
 
 def _processor(
@@ -245,7 +149,13 @@ async def test_backend_multimodal_data_passes_frontend_modality_names_through(
     """
     # A generic family, so the P/D leg is not refused for mRoPE geometry.
     processor = _processor(model="meta-llama/Llama-3.2-1B")
-    payload = {modality: ["opaque"]}
+    payload = {
+        modality: {
+            "values": [None, False, 0],
+            "data_base64": "AA==",
+            "$dynamo_tensor": {"plugin_owned": True},
+        }
+    }
     request = {
         "token_ids": [1, 2, 3],
         "multi_modal_data": {key: [{"Json": value}] for key, value in payload.items()},
@@ -1981,7 +1891,6 @@ async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monke
 
 def _real_kwargs_item(key: str = "pixel_values"):
     """Build a real vLLM ``MultiModalKwargsItem`` for the transfer tests."""
-    import torch
     from vllm.multimodal.inputs import (
         MultiModalBatchedField,
         MultiModalFieldElem,
@@ -2232,8 +2141,6 @@ def test_qwen_handoff_computes_grid_for_pil_images():
 
 
 def test_qwen_handoff_accepts_encoder_embeddings():
-    import torch
-
     processor = _processor()
     result = processor.build_prefill_handoff(
         multi_modal_data={
@@ -2644,61 +2551,3 @@ async def test_json_and_media_engine_key_collision_is_rejected():
         await processor.prepare_input(
             request, "request-1", None, DisaggregationMode.AGGREGATED
         )
-
-
-@pytest.mark.asyncio
-async def test_custom_tensor_modes_are_identical_at_model_boundary():
-    processor = _processor()
-    tensor = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-    with ShmTensorPublisher(tensor, worker_id=7) as producer:
-        prompts = []
-        for envelope in [inline_tensor(tensor), producer.envelope()]:
-            result = await _prepare_prompt(
-                processor,
-                {
-                    "token_ids": [1, 2, 3],
-                    "routing": {"decode_worker_id": 7},
-                    "multi_modal_data": {
-                        "chemistry": [
-                            {"Json": {"input": envelope, "meta": [None, True]}}
-                        ]
-                    },
-                },
-                "request-raw-tensor",
-                None,
-                DisaggregationMode.AGGREGATED,
-            )
-            prompts.append(result.prompt)
-        for prompt in prompts:
-            assert prompt["prompt_token_ids"] == [1, 2, 3]
-            assert torch.equal(prompt["multi_modal_data"]["chemistry"]["input"], tensor)
-            assert prompt["multi_modal_data"]["chemistry"]["meta"] == [None, True]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "change,message",
-    [
-        ({"expires_at": 0.0}, "expired"),
-        ({"placement": "remote-host"}, "placement mismatch"),
-        ({"worker_id": 8}, "pinned worker"),
-    ],
-)
-async def test_custom_reference_failures_are_client_errors(change, message):
-    processor = _processor()
-    with ShmTensorPublisher(torch.ones(1), worker_id=7) as producer:
-        envelope = producer.envelope()
-        envelope["$dynamo_tensor"].update(change)
-        request = {
-            "token_ids": [1, 2, 3],
-            "routing": {"decode_worker_id": 7},
-            "multi_modal_data": {"chemistry": [{"Json": {"input": envelope}}]},
-        }
-        with pytest.raises(mod.InvalidArgument, match=message):
-            await _prepare_prompt(
-                processor,
-                request,
-                "invalid-reference",
-                None,
-                DisaggregationMode.AGGREGATED,
-            )

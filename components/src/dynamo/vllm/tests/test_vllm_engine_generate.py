@@ -440,19 +440,12 @@ def test_tito_adapter_resolves_omitted_max_tokens_from_server_limits():
         (True, "Decode", False),
     ],
 )
-@pytest.mark.parametrize("has_nixl", [False, True])
-def test_json_capability_is_opt_in_and_aggregated_only(
-    enabled, worker_kind, published, has_nixl, monkeypatch
-):
+def test_json_capability_is_opt_in_and_aggregated_only(enabled, worker_kind, published):
     from unittest.mock import Mock
 
     from dynamo.llm import ModelInput, WorkerType
     from dynamo.vllm.engine_generate import publish_json_multimodal_capability
 
-    monkeypatch.setattr(
-        "dynamo.common.multimodal.custom_tensor_nixl.nixl_available",
-        lambda: has_nixl,
-    )
     runtime_config = Mock()
     publish_json_multimodal_capability(
         runtime_config, ModelInput.Tokens, getattr(WorkerType, worker_kind), enabled
@@ -460,12 +453,3 @@ def test_json_capability_is_opt_in_and_aggregated_only(
     assert runtime_config.set_engine_specific.called is published
     if published:
         runtime_config.set_engine_specific.assert_any_call("custom_json_v1", "true")
-        runtime_config.set_engine_specific.assert_any_call(
-            "custom_tensor_shm_v1", "true"
-        )
-    nixl_calls = [
-        call
-        for call in runtime_config.set_engine_specific.call_args_list
-        if call.args[0] == "custom_tensor_nixl_v1"
-    ]
-    assert bool(nixl_calls) is (published and has_nixl)

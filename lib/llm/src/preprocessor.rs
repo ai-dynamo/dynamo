@@ -1634,81 +1634,6 @@ fn custom_transport_error(message: &'static str) -> anyhow::Error {
         .into()
 }
 
-/// Validate transport routing separately from plugin-owned modality semantics.
-fn validate_custom_tensor_routing(
-    value: &serde_json::Value,
-    worker_id: Option<u64>,
-    supports_shm: bool,
-    supports_nixl: bool,
-) -> Result<()> {
-    match value {
-        serde_json::Value::Array(items) => {
-            for item in items {
-                validate_custom_tensor_routing(item, worker_id, supports_shm, supports_nixl)?;
-            }
-        }
-        serde_json::Value::Object(fields) => {
-            if let Some(tensor) = fields.get("$dynamo_tensor") {
-                if fields.len() != 1 {
-                    return Err(custom_transport_error(
-                        "tensor envelope cannot have sibling fields",
-                    ));
-                }
-                match tensor.get("transport").and_then(serde_json::Value::as_str) {
-                    Some("inline") => {}
-                    Some("shm") => {
-                        if !supports_shm {
-                            return Err(custom_transport_error(
-                                "Selected workers do not support custom shared-memory tensors",
-                            ));
-                        }
-                        let target = tensor.get("worker_id").and_then(serde_json::Value::as_u64);
-                        if target.is_none() || target != worker_id {
-                            return Err(custom_transport_error(
-                                "Shared-memory tensor requires nvext.decode_worker_id matching its worker_id",
-                            ));
-                        }
-                        if tensor.get("data_base64").is_some() {
-                            return Err(custom_transport_error(
-                                "reference tensor must not contain inline bytes",
-                            ));
-                        }
-                    }
-                    Some("nixl") => {
-                        if !supports_nixl {
-                            return Err(custom_transport_error(
-                                "Selected workers do not support custom NIXL tensors",
-                            ));
-                        }
-                        let target = tensor.get("worker_id").and_then(serde_json::Value::as_u64);
-                        if target.is_none() || target != worker_id {
-                            return Err(custom_transport_error(
-                                "NIXL tensor requires nvext.decode_worker_id matching its worker_id",
-                            ));
-                        }
-                        if tensor.get("data_base64").is_some() {
-                            return Err(custom_transport_error(
-                                "reference tensor must not contain inline bytes",
-                            ));
-                        }
-                    }
-                    _ => {
-                        return Err(custom_transport_error(
-                            "Unsupported custom tensor transport",
-                        ));
-                    }
-                }
-            } else {
-                for item in fields.values() {
-                    validate_custom_tensor_routing(item, worker_id, supports_shm, supports_nixl)?;
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 fn has_custom_content(request: &impl OAIChatLikeRequest) -> bool {
     request
         .typed_messages()
@@ -3878,24 +3803,6 @@ impl OpenAIPreprocessor {
                     if let Some(part) = content_part.custom_part() {
                         validate_custom_kind(&part.kind)?;
                         let payload = serde_json::Value::Object(part.fields.clone());
-                        let nvext = request.nvext();
-                        if nvext.is_some_and(|ext| {
-                            ext.backend_instance_id.is_some() || ext.prefill_worker_id.is_some()
-                        }) {
-                            return Err(custom_transport_error(
-                                "Custom content does not support backend_instance_id or prefill_worker_id routing overrides",
-                            ));
-                        }
-                        validate_custom_tensor_routing(
-                            &payload,
-                            nvext.and_then(|ext| ext.decode_worker_id),
-                            self.runtime_config.runtime_flag_enabled(
-                                crate::local_model::runtime_config::CUSTOM_SHM_CAPABILITY,
-                            ),
-                            self.runtime_config.runtime_flag_enabled(
-                                crate::local_model::runtime_config::CUSTOM_NIXL_CAPABILITY,
-                            ),
-                        )?;
                         media_map
                             .entry(part.kind.clone())
                             .or_default()
@@ -17500,25 +17407,5 @@ mod custom_content_template_tests {
         // downstream collision checks when mixed with built-in media.
         assert!(validate_custom_kind("image").is_ok());
         assert!(validate_custom_kind("chemistry").is_ok());
-    }
-
-    #[test]
-    fn custom_tensor_routing_is_explicit_and_capability_gated() {
-        let reference = serde_json::json!({"nested":[{"$dynamo_tensor":{
-            "transport":"shm", "worker_id":7
-        }}]});
-        assert!(validate_custom_tensor_routing(&reference, Some(7), true, false).is_ok());
-        assert!(validate_custom_tensor_routing(&reference, None, true, false).is_err());
-        assert!(validate_custom_tensor_routing(&reference, Some(8), true, false).is_err());
-        assert!(validate_custom_tensor_routing(&reference, Some(7), false, false).is_err());
-        let inline = serde_json::json!({"$dynamo_tensor":{"transport":"inline"}});
-        assert!(validate_custom_tensor_routing(&inline, None, false, false).is_ok());
-        let nixl = serde_json::json!({"$dynamo_tensor":{"transport":"nixl", "worker_id":7}});
-        assert!(validate_custom_tensor_routing(&nixl, Some(7), true, false).is_err());
-        assert!(validate_custom_tensor_routing(&nixl, Some(7), false, true).is_ok());
-        assert!(validate_custom_tensor_routing(&nixl, None, false, true).is_err());
-        assert!(validate_custom_tensor_routing(&nixl, Some(8), false, true).is_err());
-        let duplicated = serde_json::json!({"$dynamo_tensor":{"transport":"shm", "worker_id":7, "data_base64":"bulk"}});
-        assert!(validate_custom_tensor_routing(&duplicated, Some(7), true, false).is_err());
     }
 }

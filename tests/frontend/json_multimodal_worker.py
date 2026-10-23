@@ -8,11 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 
-import torch
 import uvloop
 
-from dynamo.common.multimodal.custom_tensor import resolve_custom_tensors_async
-from dynamo.common.multimodal.custom_tensor_nixl import nixl_available
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -52,19 +49,6 @@ def _mismatch(reason: str, received: object) -> _StatusLikeError:
 
 async def generate(request, context):
     received = request.get("multi_modal_data")
-    if request.get("token_ids") == [1, 2, 5]:
-        if "data_base64" in json.dumps(request):
-            raise _mismatch("inline bytes present in reference request", None)
-        resolved = await resolve_custom_tensors_async(
-            received["chemistry"][0]["Json"],
-            worker_id=(request.get("routing") or {}).get("decode_worker_id"),
-        )
-        if not torch.equal(resolved["input"], torch.arange(6).reshape(2, 3)):
-            raise _mismatch("resolved tensor mismatch", None)
-        if resolved["metadata"] != {"units": "angstrom"}:
-            raise _mismatch("custom metadata lost", None)
-        yield {"token_ids": list(RESPONSE_TOKEN_IDS), "finish_reason": "stop"}
-        return
     expected = {
         kind: [{"Json": {kind: value, "metadata": {"revision": 1}}}]
         for kind, value in EXPECTED_PAYLOAD.items()
@@ -105,9 +89,6 @@ async def main():
     endpoint = runtime.endpoint(ENDPOINT_PATH)
     runtime_config = ModelRuntimeConfig()
     runtime_config.set_engine_specific("custom_json_v1", json.dumps(True))
-    runtime_config.set_engine_specific("custom_tensor_shm_v1", json.dumps(True))
-    if nixl_available():
-        runtime_config.set_engine_specific("custom_tensor_nixl_v1", json.dumps(True))
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,

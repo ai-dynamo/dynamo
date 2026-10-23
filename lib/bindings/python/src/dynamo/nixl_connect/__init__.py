@@ -1637,10 +1637,6 @@ class ReadOperation(ActiveOperation):
         local_descriptors : Descriptor | list[Descriptor]
             Local descriptor(s) to to receive the data from the remote worker.
         """
-        # Remote import can fail before ActiveOperation.__init__. Destruction
-        # must remain safe without a transfer handle or registered descriptors.
-        self._xfer_hndl = None
-        self._local_desc_list = []
         if not isinstance(connection, Connection):
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."
@@ -1679,7 +1675,9 @@ class ReadOperation(ActiveOperation):
 
     def __del__(self) -> None:
         super().__del__()
-        logger.debug("dynamo.nixl_connect.ReadOperation: Deleted")
+        logger.debug(
+            f"dynamo.nixl_connect.{self.__class__.__name__}: Deleted {self.__repr__()}"
+        )
 
     def __enter__(self) -> ReadOperation:
         super().__enter__()
@@ -1804,8 +1802,6 @@ class Remote:
         connection: Connection,
         nixl_metadata: bytes | str,
     ) -> None:
-        # A failed loadRemoteMD must not release a reference never acquired.
-        self._released = True
         if not isinstance(connection, Connection):
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."

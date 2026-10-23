@@ -124,120 +124,21 @@ Dynamo concatenates its text parts without another chat template. For token IDs,
 use `nvext.token_data`. Engine token IDs/logprobs remain available through
 `nvext.engine_data` independently of parser-rewritten choice text.
 
-#### Raw Tensor Adapter
+Custom fields remain opaque JSON, including any base64 strings, shape/dtype
+metadata, or plugin-defined reference objects. The model plugin owns their
+validation and decoding. Dynamo does not define an inline tensor format or
+resolve arbitrary tensor references from this HTTP envelope.
 
-Arbitrary JSON does not require tensors. To use Dynamo's raw tensor adapter,
-place a reserved `{"$dynamo_tensor": {...}}` object anywhere inside `fields`.
-The adapter replaces only these objects with CPU PyTorch tensors before the
-model's vLLM processor runs. Other JSON and item boundaries remain intact.
-The reserved object cannot have sibling keys. Tensor descriptors use version 1,
-little-endian bytes, C order, at most 32 non-negative dimensions, and at most
-64 MiB per tensor, 128 MiB of resolved tensor bytes per request, and 32 tensor
-occurrences per request. Repeated references count each time; empty tensors
-also count toward the item limit. Admission validates the complete custom input
-across modalities before decoding, reading, or allocating any tensor storage.
-Supported dtypes are `float16`, `bfloat16`, `float32`,
-`float64`, `int8`, `uint8`, `int16`, `int32`, `int64` and `bool`.
+Existing image/audio/video transfers keep their maintained SHM/NIXL paths.
+Processed vLLM `mm_kwargs` and embedding transfer descriptors are internal
+handoffs, not public HTTP inputs for arbitrary custom tensors. Their serialization,
+staging, copying, and buffer ownership remain unchanged; no zero-copy GPU claim
+is made for custom JSON.
 
-Worker preparation runs off the async event loop in a process-wide pool with
-at most two concurrent requests and no pending work queue. Excess requests
-receive `WorkerOverloaded`. Each admitted request resolves tensors serially.
-Cancelling a waiter retains its capacity slot until the running resolution
-finishes and releases its unconsumed private storage. Cancellation cannot stop
-a Python thread in the middle of a decode or SHM read.
-
-Inline representation (two float32 values):
-
-```json
-{"$dynamo_tensor": {
-  "version": 1, "transport": "inline", "dtype": "float32", "shape": [2],
-  "order": "C", "data_base64": "AACAPwAAAEA="
-}}
-```
-
-For shared-memory references, use the producer API and retain the lease across
-the HTTP request and any retries:
-
-```python
-from dynamo.common.multimodal.custom_tensor import ShmTensorPublisher, inline_tensor
-
-# tensor is a PyTorch tensor; worker_id is the discovered aggregated worker ID.
-with ShmTensorPublisher(tensor, worker_id=worker_id, ttl=60) as lease:
-    part = {"type": "custom", "kind": "chemistry", "fields": {"input": lease.envelope()}}
-    # Send part in messages, with nvext.decode_worker_id = worker_id.
-    # Wait for the response (or handle cancellation/failure) inside this context.
-
-# The equivalent inline input uses {"input": inline_tensor(tensor)}.
-```
-
-The emitted reference contains `version`, `transport: "shm"`, `dtype`, `shape`,
-`order`, `name`, `size`, `placement`, `worker_id`, `expires_at` (Unix seconds),
-and `sha256`. It contains no bulk bytes or inline fallback. Unknown descriptor
-fields, unsupported transports, invalid dimensions, mismatched byte counts,
-placement, checksum, and expired/released references produce explicit errors.
-
-Shared-memory mode requires Linux, the **same host boot, IPC namespace and
-shared-memory mount** for producer and worker, and permission to read the segment.
-Containers require an explicitly shared IPC namespace/mount. The frontend need
-not share that placement: it forwards the descriptor only. Set
-`nvext.decode_worker_id` to the descriptor's worker ID; the frontend rejects a
-missing/mismatched pin and workers without `custom_tensor_shm_v1`. Routing validates
-the worker is discovered; a missing/unavailable target must fail, not select a
-remote replacement. The worker rechecks placement and expiry before reading.
-Header routing overrides that also set `backend_instance_id` are unsupported for
-custom content; use the body field. Request migration is unsupported for these
-leases. Retry against the pinned worker before expiry or create a fresh lease.
-
-The producer owns close/unlink on response, failure and cancellation through the
-context manager. A daemon timer unlinks abandoned leases at TTL (default 60 s,
-maximum 3600 s). Multiple readers/retries are valid while the lease is alive.
-Readers copy to private writable memory and close their mappings before returning;
-producer release cannot invalidate a consumed model input. Process crashes rely
-on Python's producer resource tracker; no worker unlinks producer allocations.
-
-This reuses the shared-memory byte transfer used by processed `mm_kwargs` without
-using that vLLM-specific serializer. GPU producer tensors stage to CPU; noncontiguous
-inputs become contiguous; tensor bytes are copied into SHM, copied into private
-worker storage, then moved by the plugin/engine if GPU input is needed. Inline
-mode adds base64 encoding, JSON serialization and decoding. Neither path claims
-zero-copy GPU transport.
-
-#### Capability and Transport Limits
-
-Selected workers must advertise `custom_json_v1`; missing capability yields an
-explicit request error. Enabled capabilities partition discovery cohorts, including
-LoRA registrations. Custom P/D, encoder disaggregation, speculative prefill,
-custom caching/KVBM, SGLang, TensorRT-LLM and native vLLM sidecars are unsupported.
-Existing typed media paths and their transports remain unchanged.
-
-#### NIXL References
-
-NIXL references use the same maintained sender, receiver, registration and
-completion machinery as embedding transfers. Multimodal aggregated vLLM workers
-with NIXL installed advertise `custom_tensor_nixl_v1`; no additional opt-in is
-required. Discover a compatible worker and pin the request to its ID:
-
-```python
-from dynamo.common.multimodal.custom_tensor_nixl import NixlTensorPublisher
-
-async with NixlTensorPublisher(tensor, worker_id=worker_id, ttl=60) as publisher:
-    part = {"type": "custom", "kind": "chemistry", "fields": {"input": publisher.envelope()}}
-    # Send part with nvext.decode_worker_id = worker_id and check the HTTP response.
-```
-
-The envelope contains `transport: "nixl"`, the tensor spec, byte count, checksum,
-worker ID, expiry, and the maintained transfer descriptor in `serialized_request`.
-Bulk bytes travel through NIXL. Producer tensors stage to contiguous CPU bytes;
-the receiver copies into private model storage before calling `release_tensor`.
-The original shape and dtype are restored, including scalars. Plugins retain all
-other JSON fields and own domain interpretation and any subsequent GPU transfer.
-
-Each reference permits one READ; use a fresh publisher for retries. Expiry is an
-admission check. Source lifetime follows the existing embedding completion
-waiter, including cancellation and failed-reader limitations; no custom abort or
-reclamation protocol is added. Native connectivity and transport availability
-follow the deployment's existing NIXL configuration. Cross-host CPU transfer over
-UCX/TCP is tested; GPU-direct transport is not claimed.
+Selected workers must advertise `custom_json_v1`. Custom P/D, encoder
+disaggregation, speculative prefill, custom caching/KVBM, SGLang, TensorRT-LLM,
+and native vLLM sidecars are unsupported. Extending these paths requires a
+separate qualification of plugin payload identity and lifecycle.
 
 ## Hashing Consistency for KV Events
 
