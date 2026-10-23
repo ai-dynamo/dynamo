@@ -18,14 +18,11 @@ from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version
 
 import pytest
+import requests
 from transformers import AutoTokenizer
 
 from tests.utils.constants import QWEN
-from tests.utils.decision_api import (
-    assert_chat_decode,
-    assert_native_sglang_parity,
-    post_with_capacity_retry,
-)
+from tests.utils.decision_api import assert_chat_decode, assert_native_sglang_parity
 from tests.utils.http_checks import check_health_ready, check_http_ok, models_available
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import reserved_ports
@@ -197,8 +194,8 @@ def test_systemone_scoring_and_chat_overlap(systemone_sglang_server):
             ("decisions", scoring_oai),
             ("chat/completions", chat),
         )[index % 3]
-        response = post_with_capacity_retry(
-            f"{systemone_sglang_server}/v1/{route}", payload
+        response = requests.post(
+            f"{systemone_sglang_server}/v1/{route}", json=payload, timeout=60
         )
         assert response.status_code == 200, response.text
         body = response.json()
@@ -221,5 +218,6 @@ def test_systemone_scoring_and_chat_overlap(systemone_sglang_server):
         else:
             assert_chat_decode(body)
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    # The serialized worker admits one active request and one queued request.
+    with ThreadPoolExecutor(max_workers=2) as executor:
         list(executor.map(invoke, range(24)))
