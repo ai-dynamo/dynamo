@@ -75,8 +75,6 @@ def test_metrics_model_name_falls_back_to_model():
 
 
 def test_vllm_token_budget_matches_rejection_policy():
-    from vllm.version import __version_tuple__
-
     from dynamo.vllm.capacity import publish_vllm_token_budget
 
     runtime_config = SimpleNamespace(set_engine_specific=Mock())
@@ -88,7 +86,7 @@ def test_vllm_token_budget_matches_rejection_policy():
     assert json.loads(value) == {
         "combined_limit": 4096,
         "reject_prompt_overflow": True,
-        "reject_total_overflow": __version_tuple__[:2] < (0, 32),
+        "reject_total_overflow": False,
     }
 
 
