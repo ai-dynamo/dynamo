@@ -125,17 +125,26 @@ def _pillow_requirements() -> dict[str, SpecifierSet]:
     return specs
 
 
+def _template(name: str) -> str:
+    path = ROOT / "container/templates" / name
+    if not path.is_file():
+        pytest.skip(f"{name} is not staged in this component image (.dockerignore)")
+    return path.read_text(encoding="utf-8")
+
+
 def test_pillow_specifiers_match_everywhere() -> None:
-    """Require every Pillow pin, override, and TRT-LLM system-site step to agree."""
+    """Require every Pillow pin and override to agree."""
     specs = _pillow_requirements()
     assert {"requirements.common.txt", "overrides.frontend.txt"} <= specs.keys()
     expected = specs["requirements.common.txt"]
     mismatched = {name: str(spec) for name, spec in specs.items() if spec != expected}
     assert not mismatched, f"Pillow specifiers differ from {expected}: {mismatched}"
 
-    dockerfile = (ROOT / "container/templates/trtllm_runtime.Dockerfile").read_text(
-        encoding="utf-8"
-    )
+
+def test_trtllm_system_pillow_matches_requirements() -> None:
+    """Require the TRT-LLM system-site upgrade and its checks to match the pins."""
+    expected = _pillow_requirements()["requirements.common.txt"]
+    dockerfile = _template("trtllm_runtime.Dockerfile")
     installs = re.findall(r'--upgrade "(pillow[^"]*)"', dockerfile)
     assert [Requirement(item).specifier for item in installs] == [expected]
     bounds = {
@@ -155,9 +164,7 @@ def test_pillow_specifiers_match_everywhere() -> None:
 @pytest.mark.parametrize("image", ["frontend", "planner"])
 def test_pillow_overrides_reach_image_installs(image: str) -> None:
     """Fail when an image stops passing its overrides file to uv."""
-    dockerfile = (ROOT / f"container/templates/{image}.Dockerfile").read_text(
-        encoding="utf-8"
-    )
+    dockerfile = _template(f"{image}.Dockerfile")
     target = f"/tmp/overrides.{image}.txt"
     assert (
         f"source=./container/deps/overrides.{image}.txt,target={target}" in dockerfile
