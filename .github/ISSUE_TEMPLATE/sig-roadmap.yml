@@ -1,12 +1,12 @@
 name: SIG Roadmap
 description: Goals for one SIG for the next quarter
-title: "[Roadmap]: sig-<name> [Q4 2026]"
+title: "[Roadmap]: sig-<name> [Q<N> <YYYY>]"
 labels: ["roadmap"]
 body:
   - type: markdown
     attributes:
       value: |
-        One roadmap issue per SIG per quarter. After you create it, add the SIG's `sig-<name>` label.
+        One roadmap issue per SIG per quarter. Replace `sig-<name>` and `Q<N> <YYYY>` in the title with your SIG and the quarter, for example `[Roadmap]: sig-router [Q1 2027]`. After you create it, add the SIG's `sig-<name>` label.
 
   - type: dropdown
     id: sig
