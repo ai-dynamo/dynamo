@@ -99,7 +99,7 @@ def sweeps(monkeypatch):
     return fake
 
 
-def _scored(score_of, *, num_requests=10, **extra):
+def _scored(score_of, *, num_requests=10, wall_s=0.5, **extra):
     def build(request):
         return SweepResult(
             status="ok",
@@ -108,7 +108,7 @@ def _scored(score_of, *, num_requests=10, **extra):
                 candidate.key(): score_of(candidate, request)
                 for candidate in request.candidates
             },
-            wall_s=0.5,
+            wall_s=wall_s,
             **extra,
         )
 
@@ -328,6 +328,142 @@ async def test_busy_when_the_previous_sweep_is_still_running(sweeps):
 
 def _raise_boom(_request):
     raise RuntimeError("boom")
+
+
+MEASURED = {"decision_latency_seconds": "measured"}
+
+
+@pytest.mark.parametrize(
+    ("retune", "result", "decided_at", "latency"),
+    [
+        ({}, _scored(lambda _c, _r: 1.0, wall_s=30.0), 70.0, 5.0),
+        (
+            {"decision_latency_seconds": 20.0},
+            _scored(lambda _c, _r: 1.0, wall_s=30.0),
+            85.0,
+            20.0,
+        ),
+        (MEASURED, _scored(lambda _c, _r: 1.0, wall_s=0.5), 70.0, 5.0),
+        (MEASURED, _scored(lambda _c, _r: 1.0, wall_s=22.0), 90.0, 22.0),
+        (
+            {**MEASURED, "timeout_seconds": 30.0, "decision_latency_scale": 2.0},
+            _scored(lambda _c, _r: 1.0, wall_s=22.0),
+            110.0,
+            44.0,
+        ),
+        (
+            {**MEASURED, "timeout_seconds": 20.0},
+            _scored(lambda _c, _r: 1.0, wall_s=25.0),
+            85.0,
+            20.0,
+        ),
+        (MEASURED, _raise_boom, 70.0, 5.0),
+    ],
+    ids=[
+        "constant-floor",
+        "constant",
+        "measured-floor",
+        "measured",
+        "measured-scaled",
+        "measured-capped-at-timeout",
+        "measured-raises",
+    ],
+)
+async def test_decision_latency_modes(sweeps, retune, result, decided_at, latency):
+    sweeps.default = result
+    controller = _controller(_s1(**retune))
+
+    ticks = await _run(controller, 115)
+
+    # Launched at L_0 = 65; the old parameters stay until the decision tick.
+    ((now, decision),) = _decisions(ticks)
+    assert (now, decision.launched_at_s, decision.decided_at_s) == (
+        decided_at,
+        65.0,
+        decided_at,
+    )
+    assert decision.decision_latency_s == latency
+    assert decision.to_dict()["decision_latency_s"] == latency
+
+
+async def test_measured_timeout_decides_in_the_next_launch_tick(sweeps):
+    # D == interval with a tick that accumulates rounding error (0.2 s):
+    # the decision must land in the tick that launches the next window,
+    # which must not be skipped as busy.
+    step = 0.2
+    sweeps.default = SweepResult(
+        status="timeout", error="sweep exceeded its deadline", wall_s=INTERVAL
+    )
+    config = _config(
+        "agg",
+        {**MEASURED, "grace_seconds": INTERVAL},
+        enable_load_scaling=False,
+        enable_throughput_scaling=False,
+        scheduling={"scale_interval_seconds": step},
+    )
+    controller = RetuneController(
+        config,
+        RetuneInputs(
+            engine=_engine(),
+            trace_paths=("trace.jsonl",),
+            trace_origin_ms=ORIGIN_MS,
+            arrival_speedup_ratio=1.0,
+        ),
+        WorkerCapabilities(),
+        VirtualClock(),
+        step,
+    )
+    controller.start(0.0)
+    outcomes = []
+    now = 0.0
+    # Accumulate like the engine adapter does (last tick + interval).
+    for _ in range(round(6 * INTERVAL / step)):
+        result = await controller.on_tick(now, _counts(), [])
+        outcomes.extend((d.outcome, d.window_index) for d in result.decisions)
+        now += step
+
+    # Windows launch at 120, 180, ... and each decides at the next launch.
+    assert outcomes == [("timeout", k) for k in range(3)]
+    assert len(sweeps.requests) == 4
+
+
+async def test_measured_non_finite_wall_time_uses_the_timeout(sweeps):
+    sweeps.default = _scored(lambda _c, _r: 1.0, wall_s=float("nan"))
+    controller = _controller(_s1(**MEASURED, timeout_seconds=20.0))
+
+    ticks = await _run(controller, 115)
+
+    ((now, decision),) = _decisions(ticks)
+    assert (now, decision.decision_latency_s) == (85.0, 20.0)
+
+
+async def test_measured_latency_live_decides_after_the_sweep_finishes(sweeps):
+    release = threading.Event()
+    finish = _scored(lambda _c, _r: 1.0, wall_s=12.0)
+
+    def blocking(request):
+        release.wait(30)
+        return finish(request)
+
+    sweeps.default = blocking
+    controller = _controller(_s1(**MEASURED), clock=WallClock())
+    try:
+        launch = await controller.on_tick(65.0, _counts(), [])
+        running = await controller.on_tick(70.0, _counts(), [])
+        release.set()
+        controller._pending.future.result(timeout=30)
+        early = await controller.on_tick(75.0, _counts(), [])
+        harvest = await controller.on_tick(80.0, _counts(), [])
+    finally:
+        release.set()
+        controller.close()
+
+    assert launch.audit_events == ["retune:launch w=0"]
+    # Not done at 70; done at 75 but 65 + 12 s has not passed yet.
+    assert running.decisions == [] and early.decisions == []
+    ((decision),) = harvest.decisions
+    assert (decision.outcome, decision.decided_at_s) == ("kept", 80.0)
+    assert (decision.sweep_wall_s, decision.decision_latency_s) == (12.0, 12.0)
 
 
 @pytest.mark.parametrize(

@@ -17,8 +17,12 @@ Window schedule, with ``s0`` the planner start, ``T = interval_seconds`` and
     ms(s) = trace_origin_ms + s * 1000 * arrival_speedup_ratio
 
 A sweep launched at tick time ``t`` is decided at the first tick at or after
-``t + max(decision_latency_seconds, scale_interval)`` at which it is done, so
-never in its launch tick.
+``t + max(D, scale_interval)`` at which it is done, so never in its launch
+tick. ``D`` is ``decision_latency_seconds``, or for ``measured`` the sweep's
+own ``wall_s`` (capped at the timeout) times ``decision_latency_scale``,
+known once the sweep is done. In replay the old parameters therefore serve
+traffic for the modeled sweep time; live, ``measured`` with scale 1 decides
+on the first tick after the sweep finishes.
 """
 
 from __future__ import annotations
@@ -100,7 +104,9 @@ class _PendingSweep:
     window_end_s: float
     as_of_s: float
     launched_at_s: float
-    ready_at_s: float
+    # Both None while a ``measured`` sweep is still running.
+    decision_latency_s: float | None
+    ready_at_s: float | None
 
 
 class RetuneController:
@@ -238,14 +244,15 @@ class RetuneController:
             decisions.extend(self._handle_feedback(now_s, feedback))
 
         pending = self._pending
-        if (
-            not self._disabled
-            and pending is not None
-            and pending.future.done()
-            and now_s >= pending.ready_at_s
-        ):
-            self._pending = None
-            decisions.append(self._harvest(pending, now_s))
+        if not self._disabled and pending is not None and pending.future.done():
+            if pending.ready_at_s is None:
+                pending.decision_latency_s = self._decision_latency_s(pending.future)
+                pending.ready_at_s = pending.launched_at_s + pending.decision_latency_s
+            # Same tolerance as _due_window: with D == interval the decision
+            # must land in the tick that launches the next window.
+            if now_s + _EPSILON * self._retune.interval_seconds >= pending.ready_at_s:
+                self._pending = None
+                decisions.append(self._harvest(pending, now_s))
 
         due = self._due_window(now_s)
         if due > self._last_k:
@@ -495,6 +502,11 @@ class RetuneController:
         if isinstance(self._clock, VirtualClock):
             # Virtual time is frozen while the sweep runs; wait for it here.
             await asyncio.wait([asyncio.wrap_future(future)])
+        latency = (
+            None
+            if self._retune.decision_latency_seconds == "measured" and not future.done()
+            else self._decision_latency_s(future)
+        )
         self._pending = _PendingSweep(
             request=request,
             future=future,
@@ -502,8 +514,8 @@ class RetuneController:
             window_end_s=end_s,
             as_of_s=as_of_s,
             launched_at_s=now_s,
-            ready_at_s=now_s
-            + max(self._retune.decision_latency_seconds, self._scale_interval_s),
+            decision_latency_s=latency,
+            ready_at_s=None if latency is None else now_s + latency,
         )
         logger.info(
             "retune launched window %d [%s, %s) with %d candidates, replicas %s",
@@ -514,6 +526,21 @@ class RetuneController:
             replicas,
         )
         return None
+
+    def _decision_latency_s(self, future: Future[SweepResult]) -> float:
+        """Delay from launch to decision; ``measured`` needs a done sweep."""
+        latency = self._retune.decision_latency_seconds
+        if latency == "measured":
+            # A sweep that raised has no wall time; it decides one tick later.
+            wall_s = 0.0 if future.exception() is not None else future.result().wall_s
+            if not math.isfinite(wall_s):
+                # NaN would make the decision time unreachable.
+                wall_s = self._retune.effective_timeout_seconds
+            latency = (
+                min(wall_s, self._retune.effective_timeout_seconds)
+                * self._retune.decision_latency_scale
+            )
+        return max(latency, self._scale_interval_s)
 
     def _harvest(self, pending: _PendingSweep, now_s: float) -> RetuneDecision:
         error = pending.future.exception()
@@ -554,6 +581,7 @@ class RetuneController:
                 "best_score": None,
                 "predictor_presweep": result.predictor_presweep,
                 "sweep_wall_s": result.wall_s,
+                "decision_latency_s": pending.decision_latency_s,
             }
             values.update(overrides)
             return RetuneDecision(**values)

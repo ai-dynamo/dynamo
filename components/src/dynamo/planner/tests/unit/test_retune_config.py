@@ -224,6 +224,63 @@ def test_retune_timing_order_is_enforced(overrides):
     assert retune.effective_timeout_seconds == 600
 
 
+def test_measured_decision_latency_is_accepted():
+    retune = RetuneConfig(interval_seconds=600, decision_latency_seconds="measured")
+    assert (retune.decision_latency_seconds, retune.decision_latency_scale) == (
+        "measured",
+        1.0,
+    )
+    scaled = RetuneConfig(
+        interval_seconds=600,
+        timeout_seconds=300,
+        decision_latency_seconds="measured",
+        decision_latency_scale=2.0,
+    )
+    assert scaled.decision_latency_scale == 2.0
+    # An explicit default scale is fine with a fixed latency.
+    fixed = RetuneConfig(
+        interval_seconds=600, decision_latency_seconds=5, decision_latency_scale=1.0
+    )
+    assert fixed.decision_latency_seconds == 5
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        # timeout_seconds defaults to interval_seconds, so 2 * 600 > 600.
+        (
+            {"decision_latency_seconds": "measured", "decision_latency_scale": 2.0},
+            r"decision_latency_scale \* timeout_seconds <= interval_seconds",
+        ),
+        (
+            {
+                "decision_latency_seconds": "measured",
+                "timeout_seconds": 400,
+                "decision_latency_scale": 2.0,
+            },
+            r"decision_latency_scale \* timeout_seconds <= interval_seconds",
+        ),
+        (
+            {"decision_latency_seconds": "measured", "timeout_seconds": 601},
+            r"timeout_seconds <= interval_seconds",
+        ),
+        (
+            {"decision_latency_scale": 2.0},
+            "decision_latency_scale other than 1.0 requires",
+        ),
+        (
+            {"decision_latency_seconds": "measured", "decision_latency_scale": 0},
+            "greater than 0",
+        ),
+        ({"decision_latency_seconds": "wall"}, "'measured'"),
+        ({"decision_latency_seconds": -1.0}, "greater than or equal to 0"),
+    ],
+)
+def test_decision_latency_mode_is_validated(overrides, match):
+    with pytest.raises(ValidationError, match=match):
+        RetuneConfig(interval_seconds=600, **overrides)
+
+
 @pytest.mark.parametrize(
     ("router", "match"),
     [

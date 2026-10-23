@@ -351,7 +351,9 @@ class RetuneDecision:
     ``applied`` or ``rolled_back``. ``predictor_warmup`` is set iff
     ``planner_changes`` replaces the load predictor; hosts warm the new
     predictor with it. ``top`` holds up to five ``(params.key(), score)``
-    pairs, best first.
+    pairs, best first. ``sweep_wall_s`` is the sweep's wall-clock time and
+    ``decision_latency_s`` the delay the decision waited for after launch
+    (at least one tick; ``decided_at_s`` is the tick that observed it).
     """
 
     decision_id: str
@@ -372,6 +374,7 @@ class RetuneDecision:
     predictor_presweep: Optional[dict[str, Any]] = None
     predictor_warmup: Optional[tuple[TrafficObservation, ...]] = None
     sweep_wall_s: Optional[float] = None
+    decision_latency_s: Optional[float] = None
     top: list[tuple[str, float]] = field(default_factory=list)
     reason: Optional[str] = None
 
@@ -418,6 +421,7 @@ class RetuneDecision:
                 None if self.predictor_warmup is None else len(self.predictor_warmup)
             ),
             "sweep_wall_s": self.sweep_wall_s,
+            "decision_latency_s": self.decision_latency_s,
             "top": [[key, score] for key, score in self.top],
             "reason": self.reason,
         }

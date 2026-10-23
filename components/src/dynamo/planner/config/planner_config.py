@@ -904,13 +904,25 @@ class RetuneConfig(BaseModel):
             "(0 when throughput scaling is off)."
         ),
     )
-    decision_latency_seconds: float = Field(
+    decision_latency_seconds: (
+        Annotated[float, Field(ge=0, allow_inf_nan=False)] | Literal["measured"]
+    ) = Field(
         default=0.0,
-        ge=0,
+        description=(
+            "Delay from sweep launch to decision. A number is a fixed delay; "
+            "'measured' is the sweep's own wall-clock time (at most "
+            "timeout_seconds) times decision_latency_scale. The floor is one "
+            "planner tick."
+        ),
+    )
+    decision_latency_scale: float = Field(
+        default=1.0,
+        gt=0,
         allow_inf_nan=False,
         description=(
-            "Minimum delay from sweep launch to decision. The floor is one "
-            "planner tick."
+            "Multiplier on the measured sweep time. A value other than 1 "
+            "requires decision_latency_seconds: measured; above 1 it also "
+            "needs timeout_seconds <= interval_seconds / scale."
         ),
     )
     timeout_seconds: float | None = Field(
@@ -1017,6 +1029,28 @@ class RetuneConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_timing(self) -> "RetuneConfig":
         timeout = self.effective_timeout_seconds
+        if self.decision_latency_seconds == "measured":
+            # A measured latency is at most timeout * scale; keep it within
+            # the window so a decision lands before the next launch.
+            if not (
+                timeout <= self.interval_seconds
+                and self.decision_latency_scale * timeout <= self.interval_seconds
+            ):
+                raise ValueError(
+                    "retune with decision_latency_seconds: measured requires "
+                    "timeout_seconds <= interval_seconds and "
+                    "decision_latency_scale * timeout_seconds <= interval_seconds "
+                    "(timeout_seconds defaults to interval_seconds); got "
+                    f"timeout_seconds={timeout}, decision_latency_scale * "
+                    f"timeout_seconds={self.decision_latency_scale * timeout}, "
+                    f"interval_seconds={self.interval_seconds}"
+                )
+            return self
+        if self.decision_latency_scale != 1.0:
+            raise ValueError(
+                "decision_latency_scale other than 1.0 requires "
+                "decision_latency_seconds: measured"
+            )
         if not (self.decision_latency_seconds <= timeout <= self.interval_seconds):
             raise ValueError(
                 "retune requires decision_latency_seconds <= timeout_seconds "
