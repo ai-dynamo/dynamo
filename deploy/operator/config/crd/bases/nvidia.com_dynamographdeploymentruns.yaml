@@ -95,6 +95,7 @@ spec:
                     type: string
                   minItems: 1
                   type: array
+                  x-kubernetes-list-type: set
                 hardware:
                   description: |-
                     Hardware bounds the accelerator configurations evaluated by the search.
@@ -255,6 +256,9 @@ spec:
                           maxItems: 2
                           minItems: 1
                           type: array
+                          x-kubernetes-validations:
+                            - message: a range needs min < max
+                              rule: size(self) != 2 || self[0] < self[1]
                         numRequestRatio:
                           description: NumRequestRatio sets request count relative to the selected load.
                           exclusiveMinimum: true
