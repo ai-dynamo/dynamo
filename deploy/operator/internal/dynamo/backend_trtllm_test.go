@@ -38,7 +38,7 @@ func TestTRTLLMBackend_RoleTemplatePreservesLaunchAndRetainsPodWiring(t *testing
 		t.Fatal("role-authored TRT-LLM launch must not derive MPI ranks from a role GPU count")
 		return 0, nil
 	}
-	require.NoError(t, backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, containerGPUCount))
+	require.NoError(t, backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, containerGPUCount, false))
 	require.Equal(t, wantCommand, container.Command)
 	require.Equal(t, wantArgs, container.Args)
 	require.Nil(t, container.LivenessProbe)
@@ -48,7 +48,7 @@ func TestTRTLLMBackend_RoleTemplatePreservesLaunchAndRetainsPodWiring(t *testing
 	require.Equal(t, mpiRunSecretName, container.VolumeMounts[0].Name)
 
 	podSpec := &corev1.PodSpec{Containers: []corev1.Container{*container}}
-	backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
+	backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, false)
 	require.Len(t, podSpec.Volumes, 1)
 	require.Equal(t, mpiRunSecretName, podSpec.Volumes[0].Name)
 }
@@ -282,7 +282,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				component,
 				"test-service",
 				tt.multinodeDeployer,
-				staticContainerGPUCount(resolveTestContainerGPUs(t, component)),
+				staticContainerGPUCount(resolveTestContainerGPUs(t, component)), false,
 			))
 
 			validateVolumeMounts(t, container, tt.expectedVolumeMounts)
@@ -493,7 +493,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
 
 			// Call UpdatePodSpec
-			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
+			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer, false)
 
 			// Check volume count
 			if len(podSpec.Volumes) != tt.expectedVolumeCount {
@@ -981,7 +981,7 @@ func TestTRTLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			originalEnvCount := len(container.Env)
 
 			// Call UpdateContainer (single node to avoid multinode logic)
-			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0), false))
 
 			if tt.expectNoEnvVarChanges {
 				// Check that no new environment variables were added

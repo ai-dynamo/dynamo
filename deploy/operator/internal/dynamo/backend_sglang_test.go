@@ -85,7 +85,7 @@ func TestSGLangBackend_RoleTemplateMultinodePreservesUserLaunchArguments(t *test
 		Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
 	})
 
-	require.NoError(t, backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+	require.NoError(t, backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0), false))
 	require.Equal(t, wantCommand, container.Command)
 	require.Equal(t, wantArgs, container.Args)
 	require.Nil(t, container.LivenessProbe)
@@ -306,7 +306,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 
 			require.NoError(t, backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: tt.annotations,
-			}), "test-service", tt.multinodeDeployer, staticContainerGPUCount(0)))
+			}), "test-service", tt.multinodeDeployer, staticContainerGPUCount(0), false))
 
 			if !reflect.DeepEqual(container.Command, tt.expectedCommand) {
 				t.Errorf("UpdateContainer() command = %v, want %v", container.Command, tt.expectedCommand)
@@ -431,7 +431,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			require.NoError(t, backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer, staticContainerGPUCount(0)))
+			require.NoError(t, backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer, staticContainerGPUCount(0), false))
 
 			if !reflect.DeepEqual(container.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
@@ -605,7 +605,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 				StartupProbe:   startupProbe,
 			}
 
-			require.NoError(t, backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer, staticContainerGPUCount(0)))
+			require.NoError(t, backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer, staticContainerGPUCount(0), false))
 
 			if tt.expectProbesRemoved {
 				if container.LivenessProbe != nil {
@@ -709,7 +709,7 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			originalEnvCount := len(container.Env)
 
 			// Call UpdateContainer (single node to avoid multinode logic)
-			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0), false))
 
 			if tt.expectNoEnvVarChanges {
 				// Check that no new environment variables were added
@@ -1027,7 +1027,7 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 				}
 			}
 
-			err := backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, containerGPUCount)
+			err := backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, containerGPUCount, false)
 			if tt.expectedError != "" {
 				t.Log("A range that cannot be declared is reported, not silently truncated")
 				require.ErrorContains(t, err, tt.expectedError)

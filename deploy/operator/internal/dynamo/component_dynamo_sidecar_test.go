@@ -738,3 +738,90 @@ func TestSGLangMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeSidecarSkipsSingleNodeBackendContainerSetup(t *testing.T) {
+	cases := []struct {
+		name      string
+		backend   Backend
+		container corev1.Container
+	}{
+		{
+			name:    "sglang exporter ports",
+			backend: &SGLangBackend{},
+			container: corev1.Container{
+				Name:  "main",
+				Ports: []corev1.ContainerPort{{Name: commonconsts.DynamoNixlPortName, ContainerPort: int32(commonconsts.DynamoNixlPort)}},
+				Env: []corev1.EnvVar{
+					{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"},
+					{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+				},
+			},
+		},
+		{
+			name:    "vllm elastic EP launch",
+			backend: &VLLMBackend{},
+			container: corev1.Container{
+				Name:    "main",
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--enable-elastic-ep", "--data-parallel-backend", "ray"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, nativeSidecar := range []bool{false, true} {
+				t.Run(fmt.Sprintf("nativeSidecar=%t", nativeSidecar), func(t *testing.T) {
+					t.Log("Apply backend setup to the same single-node container in each runtime mode")
+					container := tc.container.DeepCopy()
+					component := &v1beta1.DynamoComponentDeploymentSharedSpec{}
+					err := tc.backend.UpdateContainer(container, 1, RoleMain, component, "agg", &GroveMultinodeDeployer{}, staticContainerGPUCount(2), nativeSidecar)
+					require.NoError(t, err)
+
+					t.Log("Only the combined runtime receives backend container defaults")
+					if nativeSidecar {
+						require.Equal(t, &tc.container, container)
+					} else {
+						require.NotEqual(t, &tc.container, container)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNativeSidecarSkipsBackendPodSetup(t *testing.T) {
+	cases := []struct {
+		name    string
+		backend Backend
+	}{
+		{name: "vllm wait for leader", backend: &VLLMBackend{ParentGraphDeploymentName: "test"}},
+		{name: "trtllm SSH volume", backend: &TRTLLMBackend{MpiRunSecretName: "ssh-key"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, nativeSidecar := range []bool{false, true} {
+				t.Run(fmt.Sprintf("nativeSidecar=%t", nativeSidecar), func(t *testing.T) {
+					t.Log("Apply backend pod setup to a multinode follower without a runtime container")
+					podSpec := &corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:    "main",
+							Image:   "engine:test",
+							Command: []string{"python3", "-m", "dynamo.vllm"},
+							Args:    []string{"--distributed-executor-backend", "mp"},
+						}},
+					}
+					original := podSpec.DeepCopy()
+					component := &v1beta1.DynamoComponentDeploymentSharedSpec{}
+					tc.backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "agg", &GroveMultinodeDeployer{}, nativeSidecar)
+
+					t.Log("Component-wide sidecar mode preserves the authored pod setup")
+					if nativeSidecar {
+						require.Equal(t, original, podSpec)
+					} else {
+						require.NotEqual(t, original, podSpec)
+					}
+				})
+			}
+		})
+	}
+}

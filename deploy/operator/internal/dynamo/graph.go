@@ -1506,21 +1506,23 @@ const (
 )
 
 // Backend interface for modular backend logic
-// Each backend (SGLang, VLLM, etc.) implements this interface
+// Each backend (SGLang, VLLM, etc.) implements this interface.
+// nativeSidecar describes the whole component, including roles without runtime.
+// Each hook decides which backend defaults apply in that mode.
 type Backend interface {
-	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount, nativeSidecar bool) error
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, nativeSidecar bool)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
-func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, _ ContainerGPUCount) error {
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, _ ContainerGPUCount, nativeSidecar bool) error {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 	return nil
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, nativeSidecar bool) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
@@ -1854,11 +1856,10 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-	// Multinode native engines use the same backend adapter and topology bindings.
-	if !nativeSidecar || numberOfNodes > 1 {
-		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
-			return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
-		}
+
+	// Apply backend container setup for the component's runtime mode.
+	if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs, nativeSidecar); err != nil {
+		return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
 	}
 
 	// Cache env remains a backend addition in both worker modes, preserving legacy ordering.
@@ -1910,10 +1911,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
-	// Native sidecar role templates own pod-level engine setup and runtime placement.
-	if !nativeSidecar {
-		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
-	}
+	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer, nativeSidecar)
 
 	// Runtime defaults apply only where a runtime container is actually declared.
 	if nativeSidecar {
