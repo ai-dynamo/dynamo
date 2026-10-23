@@ -72,7 +72,7 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
-For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. Replace their Dynamo image placeholders with frontend and sidecar images built from this revision. These examples pin `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820` for the engine.
+For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820` for the engine.
 
 ## Topologies
 

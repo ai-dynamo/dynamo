@@ -5,7 +5,7 @@
 #
 # Worker pod = two containers:
 #   - main: KV-enabled TensorRT-LLM engine with OpenEngine gRPC, holds the GPU.
-#   - runtime: Dynamo sidecar built from PR #15087, talks over loopback gRPC.
+#   - runtime: published Dynamo sidecar, talks over loopback gRPC.
 #
 # The engine's gRPC has no auth/TLS; safe only because it stays on loopback.
 
@@ -44,7 +44,7 @@ spec:
         containers:
         # Dynamo frontend; operator adds the command.
         - name: main
-          image: <your-registry>/dynamo-frontend:<pr15087-build>
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261023-75d0686@sha256:e237cc1347d8db6af2f84ace9150a59b950b47472ddc9429924d5e4bc5790395
           env:
           - name: DYN_ROUTER_MODE
             value: kv
@@ -156,7 +156,7 @@ spec:
         initContainers:
         # Dynamo runtime starts first and receives discovery env and probes.
         - name: runtime
-          image: <your-registry>/dynamo-sidecar:<pr15087-build>
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
           restartPolicy: Always
           command:
           - dynamo-trtllm-sidecar
