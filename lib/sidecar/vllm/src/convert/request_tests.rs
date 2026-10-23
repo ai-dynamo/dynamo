@@ -56,7 +56,6 @@ fn plugin_request(body: serde_json::Value) -> PreprocessedRequest {
     opened.validation.unwrap();
     (opened.bind)(&Worker {
         model: "served-model",
-        engine_info: &serde_json::Value::Null,
         kv_cache_block_size: 16,
         lora_name: None,
         tower_connector_lora_enabled: false,
