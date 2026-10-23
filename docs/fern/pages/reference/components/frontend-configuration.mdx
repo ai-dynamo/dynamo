@@ -880,7 +880,8 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   When truthy, the frontend skips Dynamo's preflight validation of function parameter schemas
   with explicit `strict: true`. This applies to `/v1/chat/completions`, `/v1/responses` (including
   namespace tools), and strict tools converted from `/v1/messages`. The setting affects all
-  models served by the frontend process. Use this compatibility mode for legacy requests
+  models served by the frontend process. The value is captured during HTTP frontend startup;
+  restart the process after changing it. Use this compatibility mode for legacy requests
   accepted before strict-schema preflight was introduced, including schemas with optional
   properties, open objects, or `oneOf`. Submitted schemas and `strict` declarations remain
   unchanged. The preflight's schema structure, reference, depth, and size checks are skipped;

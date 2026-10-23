@@ -7,12 +7,11 @@ use dynamo_protocols::types::{
     ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_runtime::config::{
-    env_is_truthy,
-    environment_names::llm::{
-        DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
-    },
+    env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 use serde_json::Value;
+
+use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 
 use super::{
     common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
@@ -756,8 +755,7 @@ pub fn validate_tools(
         );
     }
 
-    let skip_strict_schema_validation =
-        !tools.is_empty() && env_is_truthy(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
+    let skip_strict_schema_validation = *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
     for (i, tool) in tools.iter().enumerate() {
         if tool.function.name.len() > MAX_FUNCTION_NAME_LENGTH {
             anyhow::bail!(

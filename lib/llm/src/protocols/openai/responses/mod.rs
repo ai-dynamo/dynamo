@@ -32,10 +32,7 @@ use dynamo_protocols::types::{
     ImageUrl, ReasoningContent, ReasoningEffort as ChatReasoningEffort, ResponseFormat,
     ServiceTier as ChatServiceTier,
 };
-use dynamo_runtime::{
-    config::{env_is_truthy, environment_names::llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION},
-    protocols::annotated::AnnotationsProvider,
-};
+use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -43,6 +40,7 @@ use validator::Validate;
 
 use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
+use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
 /// Request body for `POST /v1/responses`.
@@ -834,6 +832,7 @@ fn convert_tools_and_choice(
     tools: Option<&[Tool]>,
     tool_choice: Option<&ToolChoiceParam>,
     names: &ToolNameMap,
+    skip_strict_schema_validation: bool,
 ) -> anyhow::Result<(
     Option<Vec<ChatCompletionTool>>,
     Option<ChatCompletionToolChoiceOption>,
@@ -842,8 +841,6 @@ fn convert_tools_and_choice(
         .map(|tools| convert_tools(tools, names))
         .transpose()?
         .unwrap_or_default();
-    let skip_strict_schema_validation =
-        !converted_tools.is_empty() && env_is_truthy(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
     for tool in &converted_tools {
         super::strict_schema::validate_strict_function(
             &tool.function,
@@ -1007,6 +1004,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             resp.inner.tools.as_deref(),
             resp.inner.tool_choice.as_ref(),
             &names,
+            *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
         )?;
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
@@ -3043,27 +3041,26 @@ mod tests {
 
     #[test]
     fn test_strict_schema_errors_are_invalid_arguments_before_filtering() {
-        temp_env::with_var_unset(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, || {
-            let tools: Vec<Tool> = serde_json::from_value(serde_json::json!([
-                {"type": "function", "name": "retained"},
-                {"type": "function", "name": "excluded", "strict": true, "parameters": {"type": "object"}}
-            ])).unwrap();
-            let choice = serde_json::from_value(serde_json::json!({
-                "type": "allowed_tools", "mode": "auto",
-                "tools": [{"type": "function", "name": "retained"}]
-            }))
-            .unwrap();
-            let names = ToolNameMap::new(&tools, None);
-            let error = convert_tools_and_choice(Some(&tools), Some(&choice), &names).unwrap_err();
-            assert!(matches!(
-                error.downcast_ref::<ResponsesConversionError>(),
-                Some(ResponsesConversionError::InvalidArgument(_))
-            ));
-            assert_eq!(
-                error.to_string(),
-                "Invalid schema for function 'excluded': In context=#, object schemas require additionalProperties: false"
-            );
-        });
+        let tools: Vec<Tool> = serde_json::from_value(serde_json::json!([
+            {"type": "function", "name": "retained"},
+            {"type": "function", "name": "excluded", "strict": true, "parameters": {"type": "object"}}
+        ])).unwrap();
+        let choice = serde_json::from_value(serde_json::json!({
+            "type": "allowed_tools", "mode": "auto",
+            "tools": [{"type": "function", "name": "retained"}]
+        }))
+        .unwrap();
+        let names = ToolNameMap::new(&tools, None);
+        let error =
+            convert_tools_and_choice(Some(&tools), Some(&choice), &names, false).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ResponsesConversionError>(),
+            Some(ResponsesConversionError::InvalidArgument(_))
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Invalid schema for function 'excluded': In context=#, object schemas require additionalProperties: false"
+        );
     }
 
     #[test]
@@ -3091,7 +3088,7 @@ mod tests {
             }
             let names = ToolNameMap::new(&tools, None);
             let (converted, _) =
-                convert_tools_and_choice(Some(&tools), Some(&choice), &names).unwrap();
+                convert_tools_and_choice(Some(&tools), Some(&choice), &names, false).unwrap();
             let converted = converted.unwrap();
             assert_eq!(converted.len(), 1);
             assert_eq!(converted[0].function.name, "retained");

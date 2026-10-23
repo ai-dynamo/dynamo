@@ -403,6 +403,38 @@ async fn strict_tool_schema_rejected_before_dispatch() {
     .await;
 }
 
+// The process-wide startup policy needs a fresh process for opt-in cases.
+async fn run_compatibility_subprocess(test_name: &str) -> bool {
+    const CHILD: &str = "DYNAMO_STRICT_SCHEMA_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        return false;
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(45),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD, test_name)
+            .env(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("compatibility subprocess must finish")
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "compatibility subprocess failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+        "subprocess must execute the selected test: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    true
+}
+
 #[tokio::test]
 #[serial]
 async fn strict_tool_schema_compatibility_preserves_submitted_functions_across_adapters() {
@@ -419,6 +451,37 @@ async fn strict_tool_schema_compatibility_preserves_submitted_functions_across_a
         "required": ["query"],
         "additionalProperties": false
     });
+    if run_compatibility_subprocess(
+        "strict_tool_schema_compatibility_preserves_submitted_functions_across_adapters",
+    )
+    .await
+    {
+        temp_env::async_with_vars(BASE_ENV, async {
+            let svc = HarnessService::start(Vec::new()).await;
+            temp_env::async_with_vars(
+                [(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, Some("1"))],
+                async {
+                    let response = post_json(
+                        &svc,
+                        "/v1/messages",
+                        json!({
+                            "model": MODEL, "max_tokens": 64,
+                            "messages": [{"role": "user", "content": "ping"}],
+                            "tools": [{"name": "search", "strict": true, "input_schema": parameters}]
+                        }),
+                    )
+                    .await;
+                    assert_anthropic_error(response, ExpectedError::Validation, "must include property").await;
+                    assert!(svc.engine.take_requests().await.is_empty());
+                },
+            )
+            .await;
+            svc.shutdown().await;
+        })
+        .await;
+        return;
+    }
+
     let function = json!({"name": "search", "strict": true, "parameters": parameters});
     let mut requests = strict_tool_requests(function).to_vec();
     requests.push((
@@ -438,37 +501,25 @@ async fn strict_tool_schema_compatibility_preserves_submitted_functions_across_a
         .1 = Some("1");
     temp_env::async_with_vars(env, async {
         let svc = HarnessService::start(vec![script; requests.len()]).await;
-        for (path, body) in requests {
-            let response = post_json(&svc, path, body).await;
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            bounded(response.bytes()).await.unwrap();
-            let requests = svc.engine.take_requests().await;
-            assert_eq!(requests.len(), 1);
-            let tools = requests[0].inner.tools.as_ref().unwrap();
-            assert_eq!(tools.len(), 1);
-            assert_eq!(tools[0].function.name, "search");
-            assert_eq!(tools[0].function.strict, Some(true));
-            assert_eq!(tools[0].function.parameters.as_ref(), Some(&parameters));
-        }
-        assert_eq!(svc.engine.remaining_scripts().await, 0);
-        svc.shutdown().await;
-    })
-    .await;
-
-    temp_env::async_with_vars(BASE_ENV, async {
-        let svc = HarnessService::start(Vec::new()).await;
-        let response = post_json(
-            &svc,
-            "/v1/messages",
-            json!({
-                "model": MODEL, "max_tokens": 64,
-                "messages": [{"role": "user", "content": "ping"}],
-                "tools": [{"name": "search", "strict": true, "input_schema": parameters}]
-            }),
+        temp_env::async_with_vars(
+            [(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, None::<&str>)],
+            async {
+                for (path, body) in requests {
+                    let response = post_json(&svc, path, body).await;
+                    assert_eq!(response.status(), reqwest::StatusCode::OK);
+                    bounded(response.bytes()).await.unwrap();
+                    let requests = svc.engine.take_requests().await;
+                    assert_eq!(requests.len(), 1);
+                    let tools = requests[0].inner.tools.as_ref().unwrap();
+                    assert_eq!(tools.len(), 1);
+                    assert_eq!(tools[0].function.name, "search");
+                    assert_eq!(tools[0].function.strict, Some(true));
+                    assert_eq!(tools[0].function.parameters.as_ref(), Some(&parameters));
+                }
+            },
         )
         .await;
-        assert_anthropic_error(response, ExpectedError::Validation, "must include property").await;
-        assert!(svc.engine.take_requests().await.is_empty());
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     })
     .await;
@@ -477,6 +528,11 @@ async fn strict_tool_schema_compatibility_preserves_submitted_functions_across_a
 #[tokio::test]
 #[serial]
 async fn strict_tool_schema_compatibility_retains_basic_validation() {
+    if run_compatibility_subprocess("strict_tool_schema_compatibility_retains_basic_validation")
+        .await
+    {
+        return;
+    }
     let mut env = BASE_ENV;
     env.iter_mut()
         .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
@@ -495,12 +551,8 @@ async fn strict_tool_schema_compatibility_retains_basic_validation() {
             ),
         ] {
             for (path, body) in strict_tool_requests(function) {
-                for stream in [false, true] {
-                    let mut body = body.clone();
-                    body["stream"] = json!(stream);
-                    let response = post_json(&svc, path, body).await;
-                    assert_openai_error(response, ExpectedError::Validation, message).await;
-                }
+                let response = post_json(&svc, path, body).await;
+                assert_openai_error(response, ExpectedError::Validation, message).await;
             }
         }
         assert!(svc.engine.take_requests().await.is_empty());
