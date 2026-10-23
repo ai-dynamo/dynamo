@@ -90,7 +90,7 @@ fn build_samples() -> Result<Vec<CompletionSample>, String> {
 
     samples.push(CompletionSample::new(
         "should have prompt, model, and top_p fields",
-        |builder| builder.top_p(validate::MIN_TOP_P_EXCLUSIVE),
+        |builder| builder.top_p(validate::MAX_TOP_P),
     )?);
 
     samples.push(CompletionSample::new(
