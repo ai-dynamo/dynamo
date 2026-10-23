@@ -2,21 +2,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated KV-aware serving through two OpenEngine gRPC servers (2 GPUs).
+# Aggregated KV-aware serving (2 GPUs).
 
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-# Resolved relative to this script, not via $DYNAMO_HOME: some runtime images
-# (e.g. vllm_runtime.Dockerfile) bake DYNAMO_HOME to a minimal install path
-# with no examples/ directory, which would silently override this and break
-# sourcing. Matches examples/backends/trtllm/launch/agg.sh's own approach.
-# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
-# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
-# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/common.sh"    # trtllm_ensure_openengine_bindings, trtllm_resolve_context_length
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/common.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -84,9 +80,7 @@ TRTLLM_WORKER2_KV_EVENT_PORT="${TRTLLM_WORKER2_KV_EVENT_PORT:-5558}"
 TRTLLM_WORKER1_GPU="${TRTLLM_WORKER1_GPU:-0}"
 TRTLLM_WORKER2_GPU="${TRTLLM_WORKER2_GPU:-1}"
 
-# `--extra_llm_api_options` (alias `--config`) is last-wins, not additive, so a
-# forwarded copy would drop the guided-decoding backend and a required or named
-# tool_choice would fail again. Refuse it rather than silently losing the setting.
+# Reject config overrides that would replace required engine settings.
 for arg in "${EXTRA_ARGS[@]}"; do
     case "$arg" in
         --extra_llm_api_options|--extra_llm_api_options=*|--config|--config=*)
@@ -123,8 +117,6 @@ for worker in 1 2; do
     config_var="TRTLLM_EXTRA_CONFIG_${worker}"
     system_var="DYN_SYSTEM_PORT${worker}"
     system_port="${!system_var:-$((8080 + worker))}"
-    # Keep unauthenticated OpenEngine gRPC on loopback. Its ZMQ publisher is
-    # also local to this host and the sidecar discovers it over gRPC.
     CUDA_VISIBLE_DEVICES="${!gpu_var}" \
     "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL" \
         --grpc --grpc-protocol openengine --openengine-enable-load-metrics \

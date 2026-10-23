@@ -2,25 +2,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Disaggregated KV-aware serving through four OpenEngine gRPC servers (4 GPUs).
-#
-# KV cache moves prefill -> decode engine-to-engine over the cache transceiver,
-# not through the sidecars. Dynamo carries only the handoff: the prefill worker
-# returns a `KvSessionRef` and the decode worker replays it.
+# Disaggregated KV-aware serving (2 prefill, 2 decode GPUs).
 
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-# Resolved relative to this script, not via $DYNAMO_HOME, for the reason agg.sh
-# states: some runtime images bake DYNAMO_HOME to a minimal install path with no
-# examples/ directory, and `${DYNAMO_HOME:-...}` lets that baked value win and
-# silently break sourcing.
-# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
-# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
-# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$SCRIPT_DIR/common.sh"    # trtllm_ensure_openengine_bindings, trtllm_resolve_context_length
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/common.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -78,8 +70,7 @@ TRTLLM_CACHE_TRANSCEIVER_BACKEND="${TRTLLM_CACHE_TRANSCEIVER_BACKEND:-NIXL}"
 trtllm_resolve_context_length "${EXTRA_ARGS[@]}"
 trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"
 
-# A forwarded --config would replace the role-specific cache transceiver and
-# KV publisher settings instead of merging with them.
+# Reject config overrides that would replace required engine settings.
 for arg in "${EXTRA_ARGS[@]}"; do
     case "$arg" in
         --extra_llm_api_options|--extra_llm_api_options=*|--config|--config=*)
