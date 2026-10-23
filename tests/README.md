@@ -157,8 +157,7 @@ GPU tests requiring `gpu_1` or more should carry a component marker
 cross-cutting tests) or `smoke`. Selective CI keeps smoke tests, tests matching
 changed feature markers, tests from changed test files, and unclassified tests.
 Selection starts in shadow mode; only `GPU_TEST_SELECTION_MODE=selective`
-enables deselection. The `ci:full-tests` PR label forces full framework lanes.
-Review additions to the smoke set with a CI owner.
+enables deselection. Review additions to the smoke set with a CI owner.
 
 ### Example (vLLM)
 ```python

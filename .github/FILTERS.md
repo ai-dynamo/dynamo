@@ -32,7 +32,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 > Sidecar source and proto files also match `rust`, so the existing workspace Rust checks cover sidecar tests before the image is built and published.
 > `docs` gates the Docs Lint, Fern Configuration Check, Docs Website Composition Check, and Fern Broken Links Check jobs in `pre-merge.yml`.
 > `examples` gates Recipe Check.
-> Pre-merge GPU `test_selection` consumes the complete changed-file list without changing these filter or coverage reports. It defaults to shadow mode; the PR label `ci:full-tests` forces full GPU coverage.
+> Pre-merge GPU `test_selection` consumes the complete changed-file list without changing these filter or coverage reports. It defaults to shadow mode.
 
 > [!TODO]
 > The sidecar image also consumes root Cargo files, shared libraries, and composite actions.

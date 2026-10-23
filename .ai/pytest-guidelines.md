@@ -283,9 +283,8 @@ cross-cutting tests) or an explicit `smoke` marker. In selective mode, each
 framework lane keeps smoke tests, tests matching changed feature markers,
 tests from changed test files, and tests with no selected feature marker.
 Selection defaults to shadow mode; only the exact repository variable value
-`GPU_TEST_SELECTION_MODE=selective` enables deselection. Adding `ci:full-tests`
-to the PR labels forces full framework coverage. Smoke cases are CI sentinels:
-review additions with a CI owner.
+`GPU_TEST_SELECTION_MODE=selective` enables deselection. Smoke cases are CI
+sentinels: review additions with a CI owner.
 
 ### Scheduling marker guidance
 

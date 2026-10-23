@@ -9,7 +9,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,11 +21,6 @@ from codeowners_match import match  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = ROOT / ".github/codeowners/areas.yaml"
 FRAMEWORKS = ("vllm", "sglang", "trtllm")
-FULL_TEST_LABEL = "ci:full-tests"
-
-
-class LabelLookupError(RuntimeError):
-    pass
 
 
 def load_policy(path: Path = DEFAULT_POLICY) -> dict[str, Any]:
@@ -293,9 +287,7 @@ def select_changed_files(
     *,
     event: str,
     pr: int | None,
-    labels: list[str] | None = None,
     mode: str = "shadow",
-    force_full_reason: str | None = None,
     ref: str = "",
     pr_event: bool | None = None,
 ) -> dict[str, Any]:
@@ -317,10 +309,6 @@ def select_changed_files(
         full_reasons.add("non-pr-event")
     elif pr is None:
         full_reasons.add("missing-pr-number")
-    if force_full_reason:
-        full_reasons.add(force_full_reason)
-    if labels is not None and FULL_TEST_LABEL in labels:
-        full_reasons.add(FULL_TEST_LABEL)
 
     feature_markers = _feature_marker_universe(policy)
     selected_frameworks: dict[str, dict[str, Any]] = {}
@@ -372,28 +360,6 @@ def _pull_request_number(ref: str, payload: dict | None) -> int | None:
     if match_ref:
         return int(match_ref.group(1))
     return None
-
-
-def lookup_labels(repo: str, pr: int) -> list[str]:
-    if not repo:
-        raise LabelLookupError("GITHUB_REPOSITORY is not set")
-    try:
-        result = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{repo}/issues/{pr}/labels",
-                "--paginate",
-                "--jq",
-                ".[].name",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise LabelLookupError("GitHub label lookup failed") from exc
-    return [line for line in result.stdout.splitlines() if line]
 
 
 def load_event_payload(path: str) -> dict | None:
@@ -550,9 +516,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME", ""))
     parser.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
-    parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument("--pr", type=int)
-    parser.add_argument("--label", action="append")
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     parser.add_argument("--summary-file", type=Path)
     parser.add_argument("--github-output", type=Path)
@@ -575,24 +539,12 @@ def main(argv: list[str] | None = None) -> int:
         if pr is None:
             pr = _pull_request_number(args.ref, payload)
         policy = load_policy(args.policy)
-        force_full_reason = None
-        labels = args.label
-        if is_pull_request_event(event, args.ref):
-            if pr is None:
-                force_full_reason = "missing-pr-number"
-            elif labels is None:
-                try:
-                    labels = lookup_labels(args.repo, pr)
-                except LabelLookupError:
-                    force_full_reason = "label-lookup-failed"
         selection = select_changed_files(
             changed_files,
             policy,
             event=event,
             pr=pr,
-            labels=labels,
             mode=normalized_mode,
-            force_full_reason=force_full_reason,
             ref=args.ref,
             pr_event=is_pull_request_event(event, args.ref),
         )

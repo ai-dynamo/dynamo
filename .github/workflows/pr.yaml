@@ -22,10 +22,6 @@ jobs:
   # ============================================================================
   changed-files:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      issues: read
-      pull-requests: read
     outputs:
       core: ${{ steps.changes.outputs.core }}
       dev_images: ${{ steps.changes.outputs.dev_images }}
@@ -127,7 +123,6 @@ jobs:
         env:
           CHANGED_FILES_FILE: ${{ steps.changes.outputs.all_files_json }}
           DYNAMO_CI_TEST_SELECTION_MODE: ${{ vars.GPU_TEST_SELECTION_MODE || 'shadow' }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           python3 .github/codeowners/select_tests.py \
             --changed-files-file "$CHANGED_FILES_FILE" \
