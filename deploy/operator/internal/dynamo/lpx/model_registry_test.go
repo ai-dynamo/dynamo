@@ -20,7 +20,6 @@ import (
 
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 	"github.com/stretchr/testify/require"
-	"k8s.io/utils/ptr"
 )
 
 func TestRegistryBuildURL(t *testing.T) {
@@ -57,7 +56,6 @@ func TestRegistryBuildURL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -302,7 +300,6 @@ func TestGCSModelRegistrySnapshot_StreamFailures(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -371,7 +368,7 @@ func TestRegistryEnsureDownloadedReturnsFirstStatus(t *testing.T) {
 				stream: &fakeModelDownloadStream{
 					update: &modelpb.ModelStatusUpdate{
 						Status:  tt.status,
-						Message: ptr.To(tt.message),
+						Message: new(tt.message),
 					},
 				},
 			}
@@ -435,8 +432,8 @@ func TestRegistryEnsureCheckpointDownloaded(t *testing.T) {
 		wantDownloaded bool
 		wantErr        string
 	}{
-		{name: "downloaded", status: modelpb.ModelStatus_DOWNLOADED, resolved: ptr.To(revision), wantDownloaded: true},
-		{name: "downloading", status: modelpb.ModelStatus_DOWNLOADING, resolved: ptr.To(revision)},
+		{name: "downloaded", status: modelpb.ModelStatus_DOWNLOADED, resolved: new(revision), wantDownloaded: true},
+		{name: "downloading", status: modelpb.ModelStatus_DOWNLOADING, resolved: new(revision)},
 		{
 			name:    "server without revision support",
 			status:  modelpb.ModelStatus_DOWNLOADED,
@@ -445,7 +442,7 @@ func TestRegistryEnsureCheckpointDownloaded(t *testing.T) {
 		{
 			name:     "different resolved revision",
 			status:   modelpb.ModelStatus_DOWNLOADED,
-			resolved: ptr.To("0000000000000000000000000000000000000000"),
+			resolved: new("0000000000000000000000000000000000000000"),
 			wantErr:  `resolved "openai/gpt-oss-20b" to revision "0000000000000000000000000000000000000000", want "` + revision + `"`,
 		},
 	}
@@ -457,7 +454,7 @@ func TestRegistryEnsureCheckpointDownloaded(t *testing.T) {
 				stream: &fakeModelDownloadStream{
 					update: &modelpb.ModelStatusUpdate{
 						Status:           tt.status,
-						Message:          ptr.To(tt.message),
+						Message:          new(tt.message),
 						ResolvedRevision: tt.resolved,
 					},
 				},
