@@ -31,27 +31,31 @@ impl StreamAggregable for NvImagesResponse {
     /// are cleared when a later chunk disagrees, so the response never claims
     /// a value that does not hold for every image.
     fn merge(&mut self, next: Self) {
-        if self.inner.usage.is_none() {
-            self.inner.usage = next.inner.usage;
+        if self.usage.is_none() {
+            self.usage = next.usage;
         }
         if let Some(next) = next.nvext {
             self.nvext.get_or_insert_with(Default::default).merge(next);
         }
 
-        if next.inner.data.is_empty() {
+        if next.data.is_empty() {
             return;
         }
 
-        if self.inner.data.is_empty() {
-            self.inner.created = next.inner.created;
-            self.inner.output_format = next.inner.output_format;
-            self.inner.size = next.inner.size;
+        if self.data.is_empty() {
+            self.created = next.created;
+            self.background = next.background;
+            self.output_format = next.output_format;
+            self.size = next.size;
+            self.quality = next.quality;
         } else {
-            merge_if_consistent(&mut self.inner.output_format, next.inner.output_format);
-            merge_if_consistent(&mut self.inner.size, next.inner.size);
+            merge_if_consistent(&mut self.background, next.background);
+            merge_if_consistent(&mut self.output_format, next.output_format);
+            merge_if_consistent(&mut self.size, next.size);
+            merge_if_consistent(&mut self.quality, next.quality);
         }
 
-        self.inner.data.extend(next.inner.data);
+        self.data.extend(next.data);
     }
 }
 
@@ -67,7 +71,7 @@ impl NvImagesResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::openai::images::{ImageAccounting, ImagesResponseNvExt};
+    use crate::protocols::openai::images::{ImageAccounting, ImageUsage, ImagesResponseNvExt};
     use futures::stream;
 
     fn response(
@@ -164,25 +168,24 @@ mod tests {
 
     #[test]
     fn merge_folds_accounting_across_chunks() {
-        let token_usage: dynamo_protocols::types::ImageGenUsage =
-            serde_json::from_value(serde_json::json!({
-                "input_tokens": 3, "output_tokens": 4, "total_tokens": 7,
-                "input_tokens_details": {"text_tokens": 3, "image_tokens": 0}
-            }))
-            .unwrap();
+        let token_usage: ImageUsage = serde_json::from_value(serde_json::json!({
+            "input_tokens": 3, "output_tokens": 4, "total_tokens": 7,
+            "input_tokens_details": {"text_tokens": 3, "image_tokens": 0}
+        }))
+        .unwrap();
 
         // Chunks that agree: output counts add up, the request-side fields hold.
         let mut first = response(100, Some("png"), Some("37x19"), "first");
         first.nvext = Some(accounting(1, Some(4)));
-        first.inner.usage = Some(token_usage.clone());
+        first.usage = Some(token_usage.clone());
         let mut second = response(101, Some("png"), Some("37x19"), "second");
         second.nvext = Some(accounting(2, Some(4)));
-        second.inner.usage = Some(token_usage.clone());
+        second.usage = Some(token_usage.clone());
         first.merge(second);
         assert_eq!(first.nvext, Some(accounting(3, Some(4))));
-        assert_eq!(first.inner.data.len(), 2);
+        assert_eq!(first.data.len(), 2);
         // Token usage is the first reported value, not a sum.
-        assert_eq!(first.inner.usage, Some(token_usage));
+        assert_eq!(first.usage, Some(token_usage));
 
         // A chunk without accounting leaves it unchanged.
         first.merge(NvImagesResponse::empty());
@@ -202,7 +205,7 @@ mod tests {
         terminal.nvext = Some(accounting(2, Some(4)));
         empty.merge(terminal);
         assert_eq!(empty.nvext, Some(accounting(2, Some(4))));
-        assert!(empty.inner.data.is_empty());
-        assert!(empty.inner.usage.is_none());
+        assert!(empty.data.is_empty());
+        assert!(empty.usage.is_none());
     }
 }

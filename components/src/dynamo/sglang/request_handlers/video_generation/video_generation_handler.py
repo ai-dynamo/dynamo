@@ -15,14 +15,10 @@ import torch
 from dynamo._core import Context
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import (
-    CreateVideoRequest,
-    VideoData,
-    VideoGenerationResponse,
-    VideoNvExt,
-)
+from dynamo.sglang.media_protocol import SGLangCreateVideoRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
@@ -97,25 +93,20 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             logger.debug(f"Video generation request with trace: {trace_header}")
 
         try:
-            req = CreateVideoRequest(**request)
-            nvext = req.nvext or VideoNvExt()
+            # The SGLang model fills in the defaults for the fields the
+            # request leaves unset. An explicit value is kept as sent.
+            req = SGLangCreateVideoRequest(**request)
+            nvext = req.nvext
 
             logger.info(
                 f"Video generation request: model={req.model}, "
                 f"size={req.size}, steps={nvext.num_inference_steps}"
             )
 
-            # Parse size
-            if req.size is None:
-                raise ValueError("Size is required")
             width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
-            if nvext.fps is None:
-                raise ValueError("FPS is required")
             if nvext.num_frames is None:
-                if req.seconds is None:
-                    raise ValueError("Seconds is required")
                 num_frames = nvext.fps * req.seconds
             else:
                 num_frames = nvext.num_frames
@@ -124,8 +115,6 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             context_id = context.id()
             if context_id is None:
                 raise ValueError("Context ID is required")
-            if nvext.num_inference_steps is None:
-                raise ValueError("Num inference steps is required")
             output_format = req.output_format or "mp4"
             if output_format != "mp4":
                 raise ValueError(
@@ -146,7 +135,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             video_data = []
-            response_format = req.response_format or "b64_json"
+            response_format = req.response_format
             if response_format == "url":
                 url = await self._upload_to_fs(video_bytes, context_id)
                 video_data.append(VideoData(output_format=output_format, url=url))
@@ -160,7 +149,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
             inference_time = time.time() - start_time
 
-            response = VideoGenerationResponse(
+            response = NvVideosResponse(
                 id=f"video-{context.id()}",
                 model=req.model,
                 created=int(time.time()),
@@ -173,7 +162,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         except Exception as e:
             logger.error(f"Error in video generation: {e}", exc_info=True)
             # Return error response
-            error_response = VideoGenerationResponse(
+            error_response = NvVideosResponse(
                 id=f"video-{context.id()}",
                 model=request.get("model", "unknown"),
                 created=int(time.time()),

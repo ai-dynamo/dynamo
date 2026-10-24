@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from pydantic import ValidationError
 
 from dynamo.common.protocols.image_protocol import (
     ImageData,
@@ -246,14 +247,6 @@ class TestImageData:
 
 class TestNvImagesResponse:
     """Tests for NvImagesResponse protocol type."""
-
-    def test_default_values(self):
-        """Test default values for completed response."""
-        response = NvImagesResponse(
-            created=1234567890,
-        )
-        assert response.created == 1234567890
-        assert response.data == []
 
     def test_with_image_data(self):
         """Test response with image data."""
@@ -755,11 +748,19 @@ class TestImageHandlerResponseFormats:
         assert len(results[0]["data"]) == 1
         assert mock_upload.call_count == 1
 
+    @pytest.mark.parametrize("default", [0, 11])
+    def test_config_rejects_default_num_images_out_of_range(self, default):
+        """The default used when a request omits `n` obeys the same [1, 10]
+        rule as `n` itself."""
+        with pytest.raises(ValueError, match="default_num_images_per_prompt"):
+            DiffusionConfig(default_num_images_per_prompt=default)
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("n", [0, -1, 11, 100])
     async def test_n_out_of_range_is_rejected(self, tmp_path, n):
-        """Requests with n < 1 or n > 10 (OpenAI's documented range) raise
-        ValueError before the engine is called."""
+        """Requests with n < 1 or n > 10 (OpenAI's documented range) are
+        rejected by the shared request model, as the frontend rejects them,
+        before the engine is called."""
         handler = self._make_handler(tmp_path, default_num_images_per_prompt=1)
         handler.engine.generate = MagicMock()  # Should never be called.
 
@@ -769,9 +770,7 @@ class TestImageHandlerResponseFormats:
             "n": n,
         }
 
-        with pytest.raises(
-            ValueError, match=r"num_images_per_prompt must be in \[1, 10\]"
-        ):
+        with pytest.raises(ValidationError, match="n"):
             async for _ in handler.generate(request, MagicMock()):
                 pass
 

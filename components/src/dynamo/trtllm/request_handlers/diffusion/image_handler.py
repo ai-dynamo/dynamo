@@ -155,14 +155,11 @@ class ImageGenerationHandler(BaseGenerativeHandler):
 
         # Parse parameters
         width, height = self._parse_size(req.size)
+        # The shared model bounds a request's `n` to 1..10 as the frontend
+        # does; DiffusionConfig bounds the default the same way.
         num_images_per_prompt = (
             req.n if req.n is not None else self.config.default_num_images_per_prompt
         )
-        if not 1 <= num_images_per_prompt <= 10:
-            raise ValueError(
-                f"num_images_per_prompt must be in [1, 10], got "
-                f"{num_images_per_prompt}."
-            )
         num_inference_steps = (
             nvext.num_inference_steps
             if nvext.num_inference_steps is not None

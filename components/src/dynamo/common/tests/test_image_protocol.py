@@ -4,8 +4,15 @@
 """Unit tests for dynamo.common.protocols.image_protocol module."""
 
 import pytest
+from pydantic import ValidationError
 
-from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
+from dynamo.common.protocols.image_protocol import (
+    ImageData,
+    ImageTokenDetails,
+    ImageUsage,
+    NvCreateImageRequest,
+    NvImagesResponse,
+)
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 
 pytestmark = [
@@ -34,7 +41,12 @@ def test_images_response_keeps_the_generation_parameters():
         output_format="png",
         size="1024x1024",
         quality="high",
-        usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        usage=ImageUsage(
+            input_tokens=10,
+            output_tokens=20,
+            total_tokens=30,
+            input_tokens_details=ImageTokenDetails(text_tokens=10, image_tokens=0),
+        ),
     )
 
     assert response.model_dump(exclude_none=True) == {
@@ -44,7 +56,12 @@ def test_images_response_keeps_the_generation_parameters():
         "output_format": "png",
         "size": "1024x1024",
         "quality": "high",
-        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "total_tokens": 30,
+            "input_tokens_details": {"text_tokens": 10, "image_tokens": 0},
+        },
     }
 
 
@@ -63,3 +80,46 @@ def test_image_request_parsing_preserves_output_format_and_unsupported_controls(
     assert request.output_format == "jpeg"
     assert request.quality == "high"
     assert request.background == "transparent"
+
+
+def test_images_response_rejects_usage_without_input_token_details():
+    # The frontend requires the field, so the worker fails first.
+    with pytest.raises(ValidationError):
+        NvImagesResponse(
+            created=0,
+            data=[],
+            usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+
+
+def test_image_request_rejects_a_value_outside_the_enum():
+    # The frontend rejects the value too. The model matches the frontend.
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="a cat", quality="ultra")
+
+
+@pytest.mark.parametrize("n", [0, 11])
+def test_image_request_rejects_n_outside_supported_range(n):
+    # The frontend rejects the value too. The model matches the frontend.
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="a cat", n=n)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("output_compression", 101), ("partial_images", 4)],
+)
+def test_image_request_rejects_a_value_above_the_api_maximum(field, value):
+    # The frontend rejects the value too. The model matches the frontend.
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="a cat", **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("output_compression", 100), ("partial_images", 3)],
+)
+def test_image_request_accepts_the_api_maximum(field, value):
+    request = NvCreateImageRequest(prompt="a cat", **{field: value})
+
+    assert getattr(request, field) == value
