@@ -26,12 +26,13 @@ use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
-use super::selector::{WorkerSelectionInput, WorkerSelector};
+use super::selector::{WorkerInputs, WorkerSelectionInput, WorkerSelector, worker_input_rows};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
+use crate::plugins::worker_selection::WorkerInputRows;
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
@@ -866,15 +867,16 @@ impl<
         }
     }
 
-    /// Build the classifier's input. Uses `request.isl_tokens` — the
-    /// routing-token basis the queue's bucketing, limits, and DRR cost already
-    /// use — so a pass-through classifier is behavior-identical to no
+    /// Build the classifier's input and the rows for its declared worker inputs. Uses
+    /// `request.isl_tokens` — the routing-token basis the queue's bucketing, limits, and DRR
+    /// cost already use — so a pass-through classifier is behavior-identical to no
     /// classifier.
     pub(crate) fn build_classify_request(
         &self,
         request: &SchedulingRequest,
         ingress_at: Instant,
-    ) -> ClassifyRequest {
+        worker_inputs: WorkerInputs,
+    ) -> (ClassifyRequest, WorkerInputRows) {
         let available = self
             .available_worker_provider
             .as_ref()
@@ -896,7 +898,15 @@ impl<
         if let Some(session_context) = request.session_context.clone() {
             classification = classification.with_session_context(session_context);
         }
-        classification
+        let rows = if worker_inputs == WorkerInputs::NONE {
+            WorkerInputRows::empty()
+        } else {
+            let eligibility = request
+                .eligibility()
+                .with_available_workers(available.as_deref());
+            worker_input_rows(&workers, request, eligibility, worker_inputs)
+        };
+        (classification, rows)
     }
 
     /// Enqueue a request with `due_at` for actor-expiry tests.
@@ -2074,6 +2084,7 @@ mod tests {
 
     use super::*;
     use crate::kv_hints::KvTransferCandidates;
+    use crate::plugins::worker_selection::WorkerCandidates;
     use crate::protocols::{
         ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult, WorkerWithDpRank,
     };
@@ -2763,7 +2774,11 @@ mod tests {
 
         struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
         impl RequestClassifier for InspectHashes {
-            fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            fn classify(
+                &mut self,
+                request: ClassifyRequest,
+                _workers: WorkerCandidates<'_>,
+            ) -> ClassifyFuture {
                 let expected = self.0.clone();
                 let pin = self.1;
                 Box::pin(async move {
@@ -2782,10 +2797,11 @@ mod tests {
             let (mut request, _rx) = make_request("prefix-input", 193);
             request.token_seq = hashes.clone();
             request.pinned_worker = Some(pin);
-            let classified = queue.build_classify_request(&request, Instant::now());
+            let (classified, workers) =
+                queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
             assert_eq!(request.token_seq, hashes);
             let mut classifier = InspectHashes(hashes, pin);
-            let pending = classifier.classify(classified);
+            let pending = workers.read(|workers| classifier.classify(classified, workers));
             // The independently pollable future must not borrow actor-owned data.
             request.token_seq = Some(vec![99]);
             request.pinned_worker = None;
@@ -2807,7 +2823,11 @@ mod tests {
 
         struct Park;
         impl RequestClassifier for Park {
-            fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            fn classify(
+                &mut self,
+                request: ClassifyRequest,
+                _workers: WorkerCandidates<'_>,
+            ) -> ClassifyFuture {
                 Box::pin(async move {
                     std::future::pending::<()>().await;
                     Ok(black_box(request))
@@ -2850,8 +2870,12 @@ mod tests {
             for _ in 0..repeats {
                 let start = WallClock::now();
                 for (request, _) in &sources {
-                    let input = queue.build_classify_request(black_box(request), ingress_at);
-                    let mut future = classifier.classify(input);
+                    let (input, workers) = queue.build_classify_request(
+                        black_box(request),
+                        ingress_at,
+                        WorkerInputs::NONE,
+                    );
+                    let mut future = workers.read(|workers| classifier.classify(input, workers));
                     assert!(future.as_mut().poll(&mut cx).is_pending());
                     futures.push(future);
                 }
@@ -2912,7 +2936,9 @@ policy_classes:
         request.policy_class = Some("latency".to_string());
         let ingress_at = Instant::now();
         let due_at = ingress_at + Duration::from_secs(20);
-        let mut classified = queue.build_classify_request(&request, ingress_at);
+        let mut classified = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
         assert_eq!(classified.ingress_at(), ingress_at);
         classified.set_policy_class("bulk");
         classified.set_due_at(due_at);
@@ -2928,21 +2954,27 @@ policy_classes:
         assert_eq!(metadata.snapshot.scheduling_cost_tokens, 7);
         assert_eq!(metadata.due_at, Some(due_at));
 
-        let mut invalid = queue.build_classify_request(&request, ingress_at);
+        let mut invalid = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
         invalid.set_policy_class("missing");
         assert!(matches!(
             queue.validate_classification(&mut request, invalid, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
 
-        let mut physical = queue.build_classify_request(&request, ingress_at);
+        let mut physical = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
         physical.set_policy_class("latency_cached");
         assert!(matches!(
             queue.validate_classification(&mut request, physical, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
 
-        let mut zero_cost = queue.build_classify_request(&request, ingress_at);
+        let mut zero_cost = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
         zero_cost.set_scheduling_cost_tokens(0);
         assert!(matches!(
             queue.validate_classification(&mut request, zero_cost, ingress_at),
@@ -2958,14 +2990,18 @@ policy_classes:
         let pin = WorkerWithDpRank::new(0, 0);
         let now = Instant::now();
 
-        let mut classified = queue.build_classify_request(&request, now);
+        let mut classified = queue
+            .build_classify_request(&request, now, WorkerInputs::NONE)
+            .0;
         classified.set_worker_selection_target(worker);
         queue
             .validate_classification(&mut request, classified, now)
             .unwrap();
         assert_eq!(request.affinity_target, Some(worker.into()));
 
-        let mut classified = queue.build_classify_request(&request, now);
+        let mut classified = queue
+            .build_classify_request(&request, now, WorkerInputs::NONE)
+            .0;
         classified.clear_worker_selection_target();
         queue
             .validate_classification(&mut request, classified, now)
@@ -2973,7 +3009,9 @@ policy_classes:
         assert!(request.affinity_target.is_none());
 
         request.pinned_worker = Some(pin);
-        let mut classified = queue.build_classify_request(&request, now);
+        let mut classified = queue
+            .build_classify_request(&request, now, WorkerInputs::NONE)
+            .0;
         assert_eq!(classified.pinned_worker(), Some(pin));
         classified.set_worker_selection_target(worker);
         queue
@@ -2983,7 +3021,9 @@ policy_classes:
         assert!(request.affinity_target.is_none());
         request.pinned_worker = None;
         request.allowed_worker_ids = Some(HashSet::from([0]));
-        let mut classified = queue.build_classify_request(&request, now);
+        let mut classified = queue
+            .build_classify_request(&request, now, WorkerInputs::NONE)
+            .0;
         classified.set_worker_selection_target(worker);
         queue
             .validate_classification(&mut request, classified, now)
@@ -3023,7 +3063,9 @@ policy_classes:
             .insert(WorkerWithDpRank::new(0, 0), 32);
 
         let ingress_at = Instant::now();
-        let classified = queue.build_classify_request(&request, ingress_at);
+        let classified = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
 
         // The only cache-bearing worker disappears while the classification is
         // pending; enqueue-time state governs, so the request buckets as
@@ -3163,7 +3205,9 @@ policy_classes:
         let mut receivers = Vec::new();
         for (name, hash) in [("stalled", 41), ("swept", 42)] {
             let (queued, queued_rx) = make_request(name, isl);
-            let mut classified = queue.build_classify_request(&queued, ingress_at);
+            let mut classified = queue
+                .build_classify_request(&queued, ingress_at, WorkerInputs::NONE)
+                .0;
             classified.set_due_at(due_at);
             queue
                 .enqueue_admitted_with_block_hashes_and_lease(
@@ -4683,7 +4727,8 @@ policy_classes:
         );
         assert_eq!(
             queue
-                .build_classify_request(&request, Instant::now())
+                .build_classify_request(&request, Instant::now(), WorkerInputs::NONE)
+                .0
                 .scheduling_cost_tokens(),
             224
         );
@@ -4698,7 +4743,8 @@ policy_classes:
         );
         assert_eq!(
             queue
-                .build_classify_request(&request, Instant::now())
+                .build_classify_request(&request, Instant::now(), WorkerInputs::NONE)
+                .0
                 .scheduling_cost_tokens(),
             256
         );

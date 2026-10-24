@@ -78,6 +78,7 @@ use std::time::Duration;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
 
@@ -86,7 +87,7 @@ struct QueueBudget {
 }
 
 impl RequestClassifier for QueueBudget {
-    fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(&mut self, mut request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
         let deadline = request.ingress_at() + self.budget;
         Box::pin(async move {
             if Instant::now() >= deadline {
@@ -230,7 +231,47 @@ Each entry returned by `workers()` is a `RequestClassifierWorker`:
 | `worker()` | Worker ID and data-parallel rank, returned as `WorkerWithDpRank` |
 | `total_kv_blocks()` | Advertised total KV-block capacity for this rank, or `None` when unavailable; this is not the number of free blocks |
 
-Classifiers do not currently receive the per-worker cache and load views exposed to worker-selection plugins through `WorkerInputs`.
+### Worker Inputs
+
+A classifier can read the per-worker cache and load data that [worker-selection plugins](custom-worker-selection.mdx) receive. Declare the groups in `required_worker_inputs`; `classify` receives them as `workers`:
+
+```rust
+use dynamo_kv_router::plugins::request_classifier::{
+    ClassifyFuture, ClassifyRequest, RequestClassifier,
+};
+use dynamo_kv_router::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
+
+struct LoadAwareClass {
+    max_active_requests: usize,
+}
+
+impl RequestClassifier for LoadAwareClass {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::LOAD
+    }
+
+    fn classify(&mut self, mut request: ClassifyRequest, workers: WorkerCandidates<'_>) -> ClassifyFuture {
+        // Count only observed loads, and require at least one.
+        let mut loads = workers
+            .iter()
+            .filter_map(|worker| worker.load())
+            .filter(|load| load.is_available())
+            .peekable();
+        let saturated = loads.peek().is_some()
+            && loads.all(|load| load.active_requests() >= self.max_active_requests);
+        if saturated {
+            request.set_policy_class("batch");
+        }
+        Box::pin(async move { Ok(request) })
+    }
+}
+```
+
+Dynamo builds these rows with the same code that worker selection uses, so `CACHE`, `LOAD`, and `PREFERRED_TAINT` have the same meaning in both plugins. Dynamo reads `required_worker_inputs` once, when it installs the classifier. With the default `WorkerInputs::NONE`, Dynamo builds no rows and `workers` is empty.
+
+- Rows cover each worker rank that is eligible for the request, including overloaded workers. Row order is unspecified.
+- `workers` is a snapshot taken for this `classify` call and is lent only for its duration. Dynamo frees the rows when `classify` returns, so a deferred classification holds none of them. Copy into the returned future whatever it needs, and do not treat that copy as current load when the request is admitted later.
+- Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
 
 ### Admission Decisions
 

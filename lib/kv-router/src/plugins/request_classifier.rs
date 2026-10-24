@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use dynamo_tokens::SequenceHash;
 use tokio::time::Instant;
 
+use crate::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
 use crate::scheduling::{SessionContext, policy_queue::QueueSnapshot};
 
@@ -270,7 +271,7 @@ pub type ClassifyFuture =
 /// }
 ///
 /// impl RequestClassifier for Pauser {
-///     fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+///     fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
 ///         // Clone the handle into the future; `self` cannot be borrowed.
 ///         let state = Arc::clone(&self.state);
 ///         Box::pin(async move {
@@ -293,7 +294,29 @@ pub type ClassifyFuture =
 /// the request ends; events still queued at router shutdown are dropped.
 #[async_trait]
 pub trait RequestClassifier: Send + 'static {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    /// Declare the worker-signal groups the `workers` view passed to [`Self::classify`]
+    /// carries. The host reads this once at install and builds rows only when it is not
+    /// [`WorkerInputs::NONE`].
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::NONE
+    }
+
+    /// `workers` covers every worker rank eligible for this request under its pin, allowed
+    /// workers, availability, and routing constraints, in unspecified order, with the groups
+    /// [`Self::required_worker_inputs`] declares; it is empty when that is
+    /// [`WorkerInputs::NONE`]. Overloaded workers are included. Values come from the row
+    /// builder worker selection uses, so each group means the same thing here as in a filter
+    /// or scorer.
+    ///
+    /// The view is a snapshot taken for this call and is lent only for its duration: the host
+    /// frees the rows when `classify` returns, so a deferred classification does not hold them.
+    /// Copy into the returned future anything it needs. Worker selection takes its own
+    /// snapshot when it later picks a worker, so it can pick a different worker.
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         Box::pin(async move { Ok(request) })
     }
 
