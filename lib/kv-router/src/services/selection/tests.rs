@@ -583,10 +583,12 @@ fn prompt_carrying_requests_read_top_level_prompt_fields() {
         "worker_id": 7,
         "token_ids": [1, 2, 3],
         "cache_salt": "tenant-a",
+        "is_eagle": true,
     });
     let assert_prompt = |prompt: &PromptRequest| {
         assert_eq!(prompt.token_ids.as_deref(), Some(&[1, 2, 3][..]));
         assert_eq!(prompt.cache_namespace.as_deref(), Some("tenant-a"));
+        assert_eq!(prompt.is_eagle, Some(true));
     };
 
     let select: SelectRequest = serde_json::from_value(body.clone()).unwrap();

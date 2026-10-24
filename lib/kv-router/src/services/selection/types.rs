@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::kv_hints::KvHint;
@@ -43,6 +45,7 @@ macro_rules! inline_prompt_wire {
             lora_name: Option<String>,
             #[serde(default, rename = "cache_salt")]
             cache_namespace: Option<String>,
+            #[serde(default, deserialize_with = "strict_bool")]
             is_eagle: Option<bool>,
         }
 
@@ -66,6 +69,35 @@ macro_rules! inline_prompt_wire {
         }
     };
 }
+
+/// A boolean or null, nothing else. A typed `bool` field would let pythonize coerce any
+/// truthy object, so `"is_eagle": "false"` would enable Eagle hashing.
+fn strict_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    struct StrictBool;
+
+    impl Visitor<'_> for StrictBool {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a boolean or null")
+        }
+
+        fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+            Ok(Some(value))
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StrictBool)
+}
+
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_model_name() -> String {
