@@ -13698,6 +13698,65 @@ mod tests {
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
+    #[derive(Default)]
+    struct StopConditionsCapture(std::sync::Mutex<Option<StopConditions>>);
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for StopConditionsCapture
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            *self.0.lock().unwrap() = Some(request.stop_conditions.clone());
+            Err(anyhow::anyhow!("captured"))
+        }
+    }
+
+    /// `/v1/completions` forwards an omitted or `null` `max_tokens` as `None`,
+    /// even when a token budget is published, so the backend applies its default.
+    #[tokio::test]
+    async fn test_completion_operator_forwards_omitted_max_tokens_as_none() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.context_length = Some(100);
+        mdc.runtime_config
+            .set_engine_specific(TOKEN_BUDGET_RUNTIME_KEY, token_budget(100, true, true))
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for body in [
+            serde_json::json!({"model": "test-model", "prompt": [1, 2, 3], "max_tokens": null}),
+            serde_json::json!({"model": "test-model", "prompt": [1, 2, 3]}),
+        ] {
+            let request: NvCreateCompletionRequest = serde_json::from_value(body.clone()).unwrap();
+            let capture = Arc::new(StopConditionsCapture::default());
+            let next: Arc<
+                dyn AsyncEngine<
+                        SingleIn<PreprocessedRequest>,
+                        ManyOut<Annotated<BackendOutput>>,
+                        Error,
+                    >,
+            > = capture.clone();
+
+            let result =
+                Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                    .await;
+            assert!(result.is_err(), "capture backend always fails: {body}");
+            let stop_conditions = capture
+                .0
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| panic!("request was not dispatched: {body}"));
+            assert_eq!(stop_conditions.max_tokens, None, "request: {body}");
+        }
+    }
+
     #[tokio::test]
     async fn chat_operator_rejects_invalid_legacy_jail_request_before_dispatch() {
         let mut mdc = ModelDeploymentCard::load_from_disk(

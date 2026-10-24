@@ -949,6 +949,8 @@ def build_sampling_params(
     # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
     # directly from the request output_options (lib/llm/src/backend.rs).
 
+    # Bound the resolved backend default without turning omission into a request
+    # for the entire remaining context. None delegates the limit to vLLM.
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
@@ -959,12 +961,13 @@ def build_sampling_params(
                 f"max_tokens={provided_max_tokens} cannot be greater than "
                 f"max_model_len={model_max_len}. Please request fewer output tokens."
             )
-        sampling_params.max_tokens = get_max_tokens(
-            max_model_len=model_max_len,
-            max_tokens=provided_max_tokens,
-            input_length=input_length,
-            default_sampling_params=default_sampling_params,
-        )
+        if sampling_params.max_tokens is not None:
+            sampling_params.max_tokens = get_max_tokens(
+                max_model_len=model_max_len,
+                max_tokens=sampling_params.max_tokens,
+                input_length=input_length,
+                default_sampling_params=default_sampling_params,
+            )
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
