@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.global_planner.capacity_manager import PoolSpec
-from dynamo.global_planner.kubernetes_capacity_manager import KubernetesCapacityManager
+from dynamo.global_planner.kubernetes_capacity_manager import (
+    KubernetesCapacityManager,
+    compute_dynamo_namespace,
+)
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.errors import GPUShapeUnavailableError
 
@@ -98,25 +101,40 @@ def _install_connector(cm, key, spec, parent_dgd_name="my-dgd"):
 # ---------------------------------------------------------------------------- #
 
 
-def test_managed_deployment_names_explicit():
-    cm = KubernetesCapacityManager("my-ns")
-    assert cm._managed_deployment_names({"my-ns-model-a", "my-ns-model-b"}) == {
-        "model-a",
-        "model-b",
-    }
+def test_compute_dynamo_namespace_short_value_unchanged():
+    assert compute_dynamo_namespace("my-ns", "model.a") == "my-ns-model-a"
+    # 36 + 1 + 26 = 63 bytes: still within the label value limit.
+    assert (
+        compute_dynamo_namespace(
+            "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", "gaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        == "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaaaaaaaaaaaaaaaaaaa"
+    )
 
 
-def test_managed_deployment_names_implicit():
-    cm = KubernetesCapacityManager("my-ns")
-    assert cm._managed_deployment_names(None) is None
-
-
-def test_managed_deployment_names_mismatched_prefix():
-    cm = KubernetesCapacityManager("my-ns")
-    # Only the caller matching the cluster prefix contributes a deployment name.
-    assert cm._managed_deployment_names({"other-ns-model-a", "my-ns-model-b"}) == {
-        "model-b"
-    }
+@pytest.mark.parametrize(
+    "deployment_name, expected",
+    [
+        (
+            "gaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaa-27479653da05e5b6",
+        ),
+        (
+            "gggggggggggggggggggggggggggggg.v1",
+            "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-ggggggggg-f10edfd42a3d1379",
+        ),
+        (
+            "gggggggggggggggggggggggggggggg-v1",
+            "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-ggggggggg-5e504c90d7339d87",
+        ),
+    ],
+)
+def test_compute_dynamo_namespace_matches_operator_for_long_value(
+    deployment_name, expected
+):
+    # Golden values from deploy/operator/api/dynamo_namespace_test.go also
+    # distinguish dotted and hyphenated names before normalization.
+    assert compute_dynamo_namespace("n" * 36, deployment_name) == expected
 
 
 # ---------------------------------------------------------------------------- #
@@ -150,6 +168,57 @@ def test_discover_explicit_mode():
         assert "default/model-a" in cm.connectors
         assert "default/model-b" not in cm.connectors
         assert mock_connector_cls.call_count == 1
+
+
+def test_discover_explicit_mode_long_deployment_name():
+    namespace = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+    long_name = "gaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    cm = KubernetesCapacityManager(namespace)
+    with (
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesAPI"
+        ) as mock_kube_cls,
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"
+        ) as mock_connector_cls,
+    ):
+        mock_kube = MagicMock()
+        mock_kube_cls.return_value = mock_kube
+        mock_kube.list_graph_deployments.return_value = [
+            {"metadata": {"name": long_name}},
+            {"metadata": {"name": "other"}},
+        ]
+        mock_connector_cls.return_value = MagicMock()
+
+        # The operator shortened this DGD's Dynamo namespace, so the DGD name
+        # cannot be recovered by removing the namespace prefix.
+        discovered = cm.discover(
+            {"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn-gaaaaaaaa-27479653da05e5b6"}
+        )
+
+        assert discovered == [long_name]
+        assert f"{namespace}/{long_name}" in cm.connectors
+        assert mock_connector_cls.call_count == 1
+
+
+def test_discover_explicit_mode_ignores_other_namespace_prefix():
+    cm = KubernetesCapacityManager("my-ns")
+    with (
+        patch(
+            "dynamo.global_planner.kubernetes_capacity_manager.KubernetesAPI"
+        ) as mock_kube_cls,
+        patch("dynamo.global_planner.kubernetes_capacity_manager.KubernetesConnector"),
+    ):
+        mock_kube = MagicMock()
+        mock_kube_cls.return_value = mock_kube
+        mock_kube.list_graph_deployments.return_value = [
+            {"metadata": {"name": "model-a"}},
+            {"metadata": {"name": "model-b"}},
+        ]
+
+        discovered = cm.discover({"other-ns-model-a", "my-ns-model-b"})
+
+        assert discovered == ["model-b"]
 
 
 def test_discover_implicit_mode():
