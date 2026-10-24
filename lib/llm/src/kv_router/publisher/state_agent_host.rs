@@ -601,7 +601,7 @@ fn slot_endpoint_name(owner: CacheOwnerId) -> String {
         "slot_{}_{}_{}_{}",
         domain.cache_semantics(),
         domain.routing_scope(),
-        pool.dc_id(),
+        pool.cluster_id(),
         owner.slot()
     )
 }
@@ -795,7 +795,7 @@ fn host_discovery_id(instance_id: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use dynamo_kv_router::protocols::{RouterHintSourceMetadata, WorkerWithDpRank};
@@ -840,7 +840,7 @@ mod tests {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
         )
@@ -1057,7 +1057,7 @@ mod tests {
     fn slot_endpoint_name_includes_pool_identity() {
         let first = owner(4);
         let second = CacheOwnerId::new(
-            PoolId::new(first.pool().indexer_domain(), DcId::new(4)),
+            PoolId::new(first.pool().indexer_domain(), ClusterId::new(4)),
             first.slot(),
         );
 

@@ -206,7 +206,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::identity::{
-        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
@@ -240,7 +240,12 @@ mod tests {
             CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
             RoutingScopeId::new([3; 16], IdentitySource::Explicit),
         );
-        ProducerIdentity::new(PoolId::new(domain, DcId::new(2)), 4, generation, format)
+        ProducerIdentity::new(
+            PoolId::new(domain, ClusterId::new(2)),
+            4,
+            generation,
+            format,
+        )
     }
 
     fn lease(epoch: u64) -> LaneLease {
