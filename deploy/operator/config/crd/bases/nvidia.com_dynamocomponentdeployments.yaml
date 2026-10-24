@@ -20628,10 +20628,11 @@ spec:
                     system port, and probe defaults.
                     Users must declare podTemplate.spec.initContainers[name=runtime]; the operator merges defaults into it but does not create it. It must have a non-empty
                     image and restartPolicy: Always.
-                    This mode supports worker, prefill, and decode components only. Multinode,
-                    enabled checkpoint, GPU memory service, and failover are rejected because
-                    they are not currently supported in this mode. Support for these features
-                    is planned for a future release.
+                    This mode supports worker, prefill, and decode components only. Multinode sidecars require
+                    backendFramework: sglang and complete leader and worker roles[].podTemplate definitions
+                    instead of this shared template. The leader must declare runtime; users own engine
+                    commands, topology arguments, and sidecar placement in both roles.
+                    Enabled checkpoint, GPU memory service, and failover are not supported in sidecar mode.
                     Graph-level env applies to podTemplate.spec.containers[name=main] and
                     podTemplate.spec.initContainers[name=runtime]; compilationCache and shared memory
                     remain on podTemplate.spec.containers[name=main]. All other containers are
@@ -37001,7 +37002,8 @@ spec:
                     RuntimeVersionOverride declares the Dynamo runtime compatibility version in
                     podTemplate.spec.containers[name=main].image by default, or
                     podTemplate.spec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present.
-                    With role PodTemplates, it applies to the main image in every selected template.
+                    With role PodTemplates, it applies to each declared runtime sidecar image in sidecar mode,
+                    or to the main image in every selected template otherwise. Native engine images are excluded.
                     DGD admission requires it when any selected runtime image has no parseable semantic-version tag;
                     controller-generated DCDs may omit it.
                     Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical

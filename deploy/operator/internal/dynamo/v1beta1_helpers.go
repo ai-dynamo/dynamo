@@ -15,6 +15,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // ComponentPodTemplates returns every authored complete PodTemplate source.
@@ -194,12 +195,7 @@ func GetDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpec) *c
 	if component == nil || component.PodTemplate == nil {
 		return nil
 	}
-	for i := range component.PodTemplate.Spec.InitContainers {
-		if component.PodTemplate.Spec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
-			return &component.PodTemplate.Spec.InitContainers[i]
-		}
-	}
-	return nil
+	return findRuntimeInitContainer(&component.PodTemplate.Spec)
 }
 
 // GetComponentDynamoSidecar returns the component's runtime declaration, including
@@ -213,11 +209,7 @@ func GetComponentDynamoSidecar(component *v1beta1.DynamoComponentDeploymentShare
 		for i := range component.Roles {
 			role := &component.Roles[i]
 			if role.Name == v1beta1.ComponentRoleLeader && role.PodTemplate != nil {
-				for j := range role.PodTemplate.Spec.InitContainers {
-					if role.PodTemplate.Spec.InitContainers[j].Name == commonconsts.RuntimeContainerName {
-						return &role.PodTemplate.Spec.InitContainers[j]
-					}
-				}
+				return findRuntimeInitContainer(&role.PodTemplate.Spec)
 			}
 		}
 	}
@@ -584,4 +576,26 @@ func mergeLowPriorityMetadata(dst, src map[string]string) map[string]string {
 		}
 	}
 	return dst
+}
+
+// lowerComponentForRole validates sidecar declarations before selecting a role.
+// It preserves component-wide mode for native workers that have no runtime container.
+// component must not be nil. The returned component is an independent copy.
+func lowerComponentForRole(component *v1beta1.DynamoComponentDeploymentSharedSpec, role Role, backend BackendFramework) (*v1beta1.DynamoComponentDeploymentSharedSpec, roleLaunchOwnership, bool, error) {
+	// Validate the authored component while both role declarations are available.
+	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backend)); len(errs) > 0 {
+		return nil, roleLaunchOwnedByOperator, false, errs.ToAggregate()
+	}
+
+	// Select launch ownership and sidecar mode before removing the other role.
+	ownership := roleLaunchOwnedByOperator
+	if HasRolePodTemplates(component) {
+		ownership = roleLaunchOwnedByPodTemplate
+	}
+	nativeSidecar := GetComponentDynamoSidecar(component) != nil
+	effective, err := EffectiveComponentForRole(component, role)
+	if err != nil {
+		return nil, ownership, nativeSidecar, fmt.Errorf("failed to resolve component role %q: %w", role, err)
+	}
+	return effective, ownership, nativeSidecar, nil
 }

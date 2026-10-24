@@ -83,15 +83,15 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 
 	// Existing incompatibilities apply to the component regardless of template source.
 	if component.Experimental != nil {
-		detail := "is not currently supported for " + detail + "; support is planned for a future release"
+		unsupportedDetail := "is not currently supported for " + detail + "; support is planned for a future release"
 		if component.Experimental.Checkpoint != nil && component.Experimental.Checkpoint.Enabled {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "enabled"), detail))
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "enabled"), unsupportedDetail))
 		}
 		if component.Experimental.GPUMemoryService != nil {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "gpuMemoryService"), detail))
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "gpuMemoryService"), unsupportedDetail))
 		}
 		if component.Experimental.Failover != nil {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), detail))
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), unsupportedDetail))
 		}
 	}
 	return allErrs

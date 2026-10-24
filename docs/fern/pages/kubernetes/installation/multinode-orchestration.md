@@ -101,6 +101,11 @@ and provide one template for both `leader` and `worker`. `multinode.nodeCount` r
 truth for cardinality: admission defaults the leader to one Pod and the worker role to
 `nodeCount - 1` Pods.
 
+SGLang native sidecars require these complete role templates and explicit
+`backendFramework: sglang`. The leader template declares the `runtime` init
+container. A TP worker runs only the engine; an attention-DP worker also declares
+`runtime` to relay its local KV events. See the [SGLang sidecar examples](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/sglang/deploy).
+
 The following vLLM component runs one leader and one worker on different node pools. Each Pod uses
 one GPU, and the two Pods form one TP-2 engine:
 

@@ -304,11 +304,11 @@ podTemplate:
         restartPolicy: Always
 ```
 
-For SGLang multinode sidecar deployments, set `backendFramework: sglang` and supply complete leader and worker role `podTemplate` definitions. A component-level `podTemplate` is rejected for this mode. Define the engine commands, topology arguments, and sidecar placement in each role. The operator does not parse engine flags to infer sidecar placement.
+SGLang multinode sidecar deployments require explicit `backendFramework: sglang` and complete `leader` and `worker` role templates. The leader declares `runtime`; the worker declares it only when its engine ranks publish KV events. A component-level `podTemplate` is rejected. Engine commands, topology arguments, and sidecar placement are user-owned.
 
-For DGDs with an operator origin version of 1.6.0 or later, the operator injects `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` for use in authored commands and arguments. Dynamo defaults apply only to declared `runtime` containers; engine images are not interpreted as Dynamo runtime versions. Combined-runtime deployments continue to support component templates and operator-generated multinode arguments, with the existing origin-version gate.
+For DGDs created with operator version 1.6.0 or later, `main` and each declared `runtime` receive `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. Runtime discovery, identity, system-port, and probe defaults target `runtime`. Engine images are excluded from Dynamo runtime-version checks. Deployments that run the engine and Dynamo together in `main` retain shared-template support and generated multinode arguments.
 
-Shared memory, compilation cache, provider startup ordering, and group management follow the existing multinode behavior. Worker `main` probes are removed; a worker's `runtime` keeps its independent sidecar probes. Prefill and decode components each render their own engine group. DP-attention requires an engine with follower gRPC metadata and a sidecar that understands that engine's attention-DP rank metadata.
+Shared memory, compilation cache, provider startup ordering, and group management retain their existing behavior. Multinode native engines receive NIXL exporter ports in `main`. Worker `main` probes are removed; worker `runtime` probes remain independent. See the [SGLang sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md) for topology requirements and examples.
 
 Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
 
