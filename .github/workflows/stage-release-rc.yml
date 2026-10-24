@@ -181,13 +181,14 @@ jobs:
           TIP=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['object']['sha'])" "${RUNNER_TEMP}/ref.json")
           # Post-merge CI skips docs-only pushes (paths-ignore), so the tip may have no
           # images. Stage the most recent commit post-merge CI actually ran on (the tip
-          # itself when it ran, e.g. after a manual dispatch); fall back to the tip if
+          # itself when it ran); push runs only, since a manual dispatch skips the
+          # dynamo-runtime and planner builds; fall back to the tip if
           # the lookup fails or finds nothing, and let await-post-merge report it.
           SHA="${TIP}"
           if BUILT=$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
                 -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?branch=${CI_BRANCH}&exclude_pull_requests=true&per_page=1" \
+                "https://api.github.com/repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?branch=${CI_BRANCH}&event=push&exclude_pull_requests=true&per_page=1" \
               | jq -r '.workflow_runs[0].head_sha // empty') && [ -n "${BUILT}" ]; then
             SHA="${BUILT}"
           else
