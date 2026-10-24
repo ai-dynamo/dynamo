@@ -112,6 +112,7 @@ runs:
         REF_NAME: ${{ github.ref_name }}
         REPOSITORY: ${{ github.repository }}
         HEAD_SHA: ${{ github.sha }}
+        EVENT_NAME: ${{ github.event_name }}
       run: |
         # How changed-file detection works (callers use fetch-depth: 1):
         #
@@ -139,6 +140,14 @@ runs:
           # Expose the PR's target branch for the OSRB compliance-diff baseline
           # selection (main vs release/*). See resolve_diff_base.py.
           echo "base_ref=$BASE" >> "$GITHUB_OUTPUT"
+        elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+          # Manual branch tests compare the complete branch against main,
+          # rather than only its latest commit, so repeated runs select the same tests.
+          BASE_SHA=$(gh api "repos/${REPOSITORY}/compare/main...${HEAD_SHA}" \
+            --jq '.merge_base_commit.sha')
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "base_ref=main" >> "$GITHUB_OUTPUT"
         else
           echo "base_sha=" >> "$GITHUB_OUTPUT"
           echo "base_ref=" >> "$GITHUB_OUTPUT"

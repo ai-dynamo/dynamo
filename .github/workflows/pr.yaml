@@ -4,14 +4,15 @@
 name: PR
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - "pull-request/[0-9]+"
 
 concurrency:
-  # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
-  group: docker-build-test-${{ github.ref_name }}
-  cancel-in-progress: true
+  # Manual runs can overlap; newer PR pushes still cancel older pushes.
+  group: docker-build-test-${{ github.ref_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
