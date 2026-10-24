@@ -19,6 +19,16 @@ on:
         description: 'Backend the test image was built with (dynamo, sglang, triton, trtllm, vllm); labels test metadata and coverage/Allure artifacts'
         required: true
         type: string
+      test_selection:
+        description: 'Compact changed-path test-selection decision from the PR changed-files job'
+        required: false
+        type: string
+        default: ''
+      test_selection_mode:
+        description: 'Test selection mode; only exact selective enables deselection'
+        required: false
+        type: string
+        default: 'shadow'
       test_type:
         description: 'Test type (e.g. single-gpu, multi-gpu)'
         required: true
@@ -442,6 +452,8 @@ jobs:
           TEST_TYPE: pre_merge_gpu_parallel
           PLATFORM_ARCH: ${{ matrix.platform }}
           DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+          DYNAMO_CI_TEST_SELECTION: ${{ inputs.test_selection }}
+          DYNAMO_CI_TEST_SELECTION_MODE: ${{ inputs.test_selection_mode }}
           ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
           # PARALLEL_MODE=auto + MAX_VRAM_GIB hands off to the VRAM-aware
           # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
@@ -485,6 +497,8 @@ jobs:
           TEST_TYPE: pre_merge_gpu
           PLATFORM_ARCH: ${{ matrix.platform }}
           DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+          DYNAMO_CI_TEST_SELECTION: ${{ inputs.test_selection }}
+          DYNAMO_CI_TEST_SELECTION_MODE: ${{ inputs.test_selection_mode }}
           ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
           PARALLEL_MODE: 'none'
           GPU_TESTS: 'true'
@@ -508,6 +522,14 @@ jobs:
         with:
           name: allure-results-${{ inputs.framework }}-pre_merge_gpu-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
           path: test-results/allure-results/
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Upload GPU test-selection reports
+        if: ${{ always() && inputs.test_selection != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ci-test-selection-reports-${{ inputs.framework }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/ci_test_selection_pre_merge_gpu*.json
           retention-days: 7
           if-no-files-found: ignore
       # conftest.py's autouse `logger` fixture writes each test's full log to

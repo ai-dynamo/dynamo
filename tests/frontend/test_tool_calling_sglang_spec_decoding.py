@@ -35,7 +35,7 @@ DRAFT_MODEL_NAME = "GavinLucky/SGLang-EAGLE3-Qwen3-0.6B-SpecForge"
 
 pytestmark = [
     pytest.mark.sglang,
-    pytest.mark.core,
+    pytest.mark.frontend,
     pytest.mark.e2e,
     pytest.mark.gpu_1,
     pytest.mark.integration,
