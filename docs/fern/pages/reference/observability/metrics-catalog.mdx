@@ -547,6 +547,50 @@ Emitted by the endpoint picker (EPP) when routing through the Gateway API Infere
 
 Requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
 
+<ParamField path="dynamo_epp_stage_duration_seconds" type="histogram">
+  Time one routed request spends in each EPP stage, labeled by `stage` (see the table below). Together, `receive_body`, `pick`, `rewrite` and `first_response` split the EPP's part of a request's time to first token.
+</ParamField>
+
+<ParamField path="dynamo_epp_request_body_bytes" type="histogram">
+  Size of each routed request body, labeled `body="received"` for the body the gateway streamed from the client and `body="forwarded"` for the body the EPP returns for the worker. Injecting `nvext.token_data` makes the forwarded body larger than the received one.
+</ParamField>
+
+<ParamField path="dynamo_epp_prompt_tokens" type="histogram">
+  Prompt tokens the EPP routed each request on.
+</ParamField>
+
+<ParamField path="dynamo_epp_picks_in_flight" type="gauge">
+  Requests currently inside the worker pick: being parsed, tokenized or waiting for a worker.
+</ParamField>
+
+<ParamField path="dynamo_epp_runtime_workers" type="gauge">
+  Worker threads of the EPP's async runtime, sampled at scrape time.
+</ParamField>
+
+<ParamField path="dynamo_epp_runtime_alive_tasks" type="gauge">
+  Tasks alive in the EPP's async runtime, sampled at scrape time.
+</ParamField>
+
+<ParamField path="dynamo_epp_runtime_global_queue_depth" type="gauge">
+  Ready tasks waiting in the async runtime's global queue, sampled at scrape time. A value that stays above zero means every worker thread is busy, so other requests' body and token chunks wait for one.
+</ParamField>
+
+The `stage` label of `dynamo_epp_stage_duration_seconds`:
+
+| Stage | Measures |
+|---|---|
+| `receive_body` | From the request headers to the end of the request body: the gateway streaming the client's body to the EPP |
+| `parse` | Parsing the request body into the typed request |
+| `template` | Rendering the chat template, for chat requests |
+| `tokenize` | Tokenizing the rendered prompt, or a text `/v1/completions` prompt |
+| `select` | Choosing the prefill and decode workers, including router queueing |
+| `book` | Registering the request with the router's load bookkeeping |
+| `pick` | The whole worker pick: `parse` through `book` and the waits between them |
+| `rewrite` | Rewriting the forwarded body: injecting `nvext.token_data`, stripping `nvext`, setting the cache salt |
+| `first_response` | From the routing decision to the first non-empty response chunk: the gateway, sidecar and worker producing the first token |
+
+`parse` through `book` are recorded when the EPP discovers Dynamo workers. In standalone mode, which tokenizes through a render service, only `receive_body`, `pick`, `rewrite` and `first_response` are recorded. Every series carries the same `model` label as `dynamo_epp_cached_tokens`.
+
 ## Related
 
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to these metrics.

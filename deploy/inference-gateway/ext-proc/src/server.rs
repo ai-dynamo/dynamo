@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -19,6 +20,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
+use crate::metrics::{self, Stage};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
 };
@@ -84,6 +86,11 @@ struct RequestContext {
 
     /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
     sse_usage_buf: Vec<u8>,
+
+    /// When the request headers arrived, for [`Stage::ReceiveBody`].
+    headers_received_at: Option<Instant>,
+    /// When the routing decision was ready, for [`Stage::FirstResponse`].
+    routed_at: Option<Instant>,
 }
 
 impl RequestContext {
@@ -113,6 +120,8 @@ impl RequestContext {
             resp_trailer_resp: None,
             parsed_usage: None,
             sse_usage_buf: Vec::new(),
+            headers_received_at: None,
+            routed_at: None,
         }
     }
 
@@ -217,6 +226,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
     /// Handle request headers phase.
     fn handle_request_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
+        ctx.headers_received_at = Some(Instant::now());
         // Collect headers and resolve the request ID for every request,
         // including header-only (end_of_stream) requests such as GET /v1/models.
         // The body-less case is routed later via `handle_header_only_request`,
@@ -298,10 +308,14 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             candidate_subset,
         };
 
-        let result = picker
-            .pick(&req_info, endpoints)
-            .await
-            .map_err(ExtProcError::from_pick_error)?;
+        let picked = {
+            let _in_flight = metrics::pick_in_flight();
+            let started = Instant::now();
+            let picked = picker.pick(&req_info, endpoints).await;
+            metrics::observe_stage(Stage::Pick, started.elapsed());
+            picked
+        };
+        let result = picked.map_err(ExtProcError::from_pick_error)?;
 
         ctx.body_routed = true;
         ctx.booking_id = result.reservation_id.clone();
@@ -339,12 +353,15 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             || result.token_ids.is_some()
             || cache_salt.is_some()
         {
-            match rewrite_forwarded_body(
+            let started = Instant::now();
+            let rewritten = rewrite_forwarded_body(
                 &raw_body,
                 result.strip_nvext,
                 result.token_ids.as_deref(),
                 cache_salt,
-            ) {
+            );
+            metrics::observe_stage(Stage::Rewrite, started.elapsed());
+            match rewritten {
                 Ok(modified) => {
                     tracing::trace!(
                         request_id = %ctx.request_id,
@@ -364,12 +381,15 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             raw_body.clone()
         };
 
+        metrics::observe_body_bytes(metrics::Body::Received, raw_body.len());
+        metrics::observe_body_bytes(metrics::Body::Forwarded, forwarded_body.len());
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
         tracing::debug!(
             has_header_resp = ctx.req_header_resp.is_some(),
             body_resp_count = ctx.req_body_resp.len(),
             "[MUTATION] Responses prepared, waiting for drain"
         );
+        ctx.routed_at = Some(Instant::now());
 
         Ok(())
     }
@@ -622,6 +642,9 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             body_buf.extend_from_slice(&body.body);
 
                             if body.end_of_stream {
+                                if let Some(received) = ctx.headers_received_at {
+                                    metrics::observe_stage(Stage::ReceiveBody, received.elapsed());
+                                }
                                 // Freeze the accumulated body once into `Bytes`
                                 // (moves the Vec, no copy); downstream sharing is
                                 // by cheap refcount clone.
@@ -675,6 +698,9 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 && !body.body.is_empty()
                             {
                                 ctx.prefill_complete_signaled = true;
+                                if let Some(routed) = ctx.routed_at.take() {
+                                    metrics::observe_stage(Stage::FirstResponse, routed.elapsed());
+                                }
                                 // Hand back the picker's own booking id (falls
                                 // back to request_id if it booked nothing).
                                 let booking_id = ctx
@@ -761,7 +787,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                     .unwrap_or_else(|| ctx.request_id.clone());
                 let usage = ctx.parsed_usage.take();
                 if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
-                    crate::metrics::observe_cached_tokens(cached_tokens);
+                    metrics::observe_cached_tokens(cached_tokens);
                 }
                 picker
                     .on_request_complete_with_usage(&booking_id, usage)
@@ -858,65 +884,27 @@ fn validate_protocol_config(
 /// Rewrite the request body for the backend: drop the client's `nvext`
 /// (`strip_nvext`), add `nvext.token_data` (`token_ids`), and set the tagged
 /// top-level `cache_salt` (`cache_salt`), in that order.
+///
+/// The body is never parsed into a `Value` tree. Untouched top-level members
+/// are borrowed and re-emitted byte for byte, only `nvext` is parsed when
+/// tokens are injected, and the token ids are written straight from the
+/// slice. A tree costs an allocation per message part and per token: for a
+/// 64K-token prompt that was most of the rewrite's time.
 fn rewrite_forwarded_body(
     body: &[u8],
     strip_nvext: bool,
     token_ids: Option<&[u32]>,
     cache_salt: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
-    let Some(token_ids) = token_ids else {
-        return rewrite_top_level(body, strip_nvext, cache_salt);
-    };
-
-    // token_data lives inside `nvext`, so this path needs the parsed tree.
-    let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
-
-    let obj = parsed
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("body is not a JSON object"))?;
-
-    if strip_nvext {
-        obj.remove("nvext");
-    }
-
-    let nvext = obj
-        .entry("nvext")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-
-    let nvext_obj = nvext
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
-
-    nvext_obj.insert(
-        "token_data".to_string(),
-        serde_json::Value::Array(
-            token_ids
-                .iter()
-                .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
-                .collect(),
-        ),
-    );
-
-    if let Some(cache_salt) = cache_salt {
-        obj.insert(
-            "cache_salt".to_string(),
-            serde_json::Value::String(tagged_cache_salt(cache_salt)),
-        );
-    }
-
-    Ok(serde_json::to_vec(&parsed)?)
-}
-
-/// Strip-and-salt without parsing the body into a `Value` tree: untouched
-/// top-level members are borrowed and re-emitted byte-for-byte.
-fn rewrite_top_level(
-    body: &[u8],
-    strip_nvext: bool,
-    cache_salt: Option<&str>,
-) -> anyhow::Result<Vec<u8>> {
     let mut members: BTreeMap<String, &RawValue> = serde_json::from_slice(body)?;
     if strip_nvext {
         members.remove("nvext");
+    }
+    let nvext = token_ids
+        .map(|ids| nvext_with_token_data(members.get("nvext").copied(), ids))
+        .transpose()?;
+    if let Some(nvext) = &nvext {
+        members.insert("nvext".to_string(), nvext);
     }
     let salt = cache_salt
         .map(|salt| serde_json::value::to_raw_value(&tagged_cache_salt(salt)))
@@ -925,6 +913,24 @@ fn rewrite_top_level(
         members.insert("cache_salt".to_string(), salt);
     }
     Ok(serde_json::to_vec(&members)?)
+}
+
+/// `nvext` with `token_data` set to `token_ids`, keeping its other fields
+/// byte for byte.
+fn nvext_with_token_data(
+    nvext: Option<&RawValue>,
+    token_ids: &[u32],
+) -> anyhow::Result<Box<RawValue>> {
+    let mut fields: BTreeMap<String, Box<RawValue>> = match nvext {
+        Some(raw) => serde_json::from_str(raw.get())
+            .map_err(|_| anyhow::anyhow!("nvext is not a JSON object"))?,
+        None => BTreeMap::new(),
+    };
+    fields.insert(
+        "token_data".to_string(),
+        serde_json::value::to_raw_value(token_ids)?,
+    );
+    Ok(serde_json::value::to_raw_value(&fields)?)
 }
 
 fn tagged_cache_salt(cache_salt: &str) -> String {
@@ -1786,10 +1792,10 @@ mod tests {
     /// Untouched values keep their exact bytes (whitespace, escapes, number
     /// formatting) and escaped keys survive; members come out in key order.
     #[test]
-    fn rewrite_top_level_copies_other_members_verbatim() {
+    fn rewrite_forwarded_body_copies_other_members_verbatim() {
         let body = r#"{ "model" : "m", "messages": [ {"role":"user","content":"café \"q\""} ],"nvext":{"agent_hints":{"osl":32}}, "temperature": 1.0e0, "k\"y": true , "cache_salt": "client"}"#;
 
-        let out = rewrite_top_level(body.as_bytes(), true, Some("tenant-a")).unwrap();
+        let out = rewrite_forwarded_body(body.as_bytes(), true, None, Some("tenant-a")).unwrap();
 
         assert_eq!(
             std::str::from_utf8(&out).unwrap(),
@@ -1797,9 +1803,85 @@ mod tests {
         );
     }
 
+    /// Injecting tokens keeps the same guarantee: other top-level members and
+    /// the other `nvext` fields keep their exact bytes, and a client
+    /// `token_data` is replaced.
     #[test]
-    fn rewrite_top_level_rejects_non_object_body() {
-        assert!(rewrite_top_level(br#"["not", "an", "object"]"#, true, None).is_err());
-        assert!(rewrite_top_level(br#"not json"#, true, None).is_err());
+    fn rewrite_forwarded_body_injects_tokens_without_reformatting() {
+        let body = r#"{ "model" : "m", "messages": [ {"role":"user","content":"café \"q\""} ], "nvext": { "agent_hints": {"osl": 32}, "token_data": [9, 9] }, "seed": 18446744073709551616 }"#;
+
+        let out =
+            rewrite_forwarded_body(body.as_bytes(), false, Some(&[1, 22, 333]), None).unwrap();
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            r#"{"messages":[ {"role":"user","content":"café \"q\""} ],"model":"m","nvext":{"agent_hints":{"osl": 32},"token_data":[1,22,333]},"seed":18446744073709551616}"#
+        );
+    }
+
+    /// The rewrite produces the same JSON as the `Value`-tree rewrite it
+    /// replaced, for every combination of inputs it serves.
+    #[test]
+    fn rewrite_forwarded_body_matches_a_value_tree_rewrite() {
+        fn by_tree(
+            body: &[u8],
+            strip_nvext: bool,
+            token_ids: Option<&[u32]>,
+            cache_salt: Option<&str>,
+        ) -> Option<serde_json::Value> {
+            let mut parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
+            let obj = parsed.as_object_mut()?;
+            if strip_nvext {
+                obj.remove("nvext");
+            }
+            if let Some(ids) = token_ids {
+                let nvext = obj
+                    .entry("nvext")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()?;
+                nvext.insert("token_data".to_string(), serde_json::json!(ids));
+            }
+            if let Some(salt) = cache_salt {
+                obj.insert("cache_salt".to_string(), tagged_cache_salt(salt).into());
+            }
+            Some(parsed)
+        }
+
+        let bodies: [&[u8]; 7] = [
+            br#"{}"#,
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#,
+            br#"{"model":"m","nvext":{"extra_fields":["engine_data"],"cache_salt":"body"}}"#,
+            br#"{"model":"m","nvext":{"token_data":[7]},"cache_salt":"client"}"#,
+            br#"{"model":"m","nvext":null}"#,
+            br#"{"model":"m","nvext":"bad"}"#,
+            br#"["not","an","object"]"#,
+        ];
+        let token_choices: [Option<&[u32]>; 3] = [None, Some(&[]), Some(&[5, 151_000, 0])];
+        for body in bodies {
+            for strip_nvext in [false, true] {
+                for token_ids in token_choices {
+                    for cache_salt in [None, Some("tenant")] {
+                        let ours = rewrite_forwarded_body(body, strip_nvext, token_ids, cache_salt)
+                            .ok()
+                            .map(|out| serde_json::from_slice::<serde_json::Value>(&out).unwrap());
+                        let tree = by_tree(body, strip_nvext, token_ids, cache_salt);
+                        assert_eq!(
+                            ours,
+                            tree,
+                            "body={} strip={strip_nvext} tokens={token_ids:?} salt={cache_salt:?}",
+                            String::from_utf8_lossy(body)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rewrite_forwarded_body_rejects_non_object_body() {
+        for body in [br#"["not", "an", "object"]"#.as_slice(), br#"not json"#] {
+            assert!(rewrite_forwarded_body(body, true, None, None).is_err());
+            assert!(rewrite_forwarded_body(body, false, Some(&[1]), None).is_err());
+        }
     }
 }
