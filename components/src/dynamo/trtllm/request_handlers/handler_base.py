@@ -718,25 +718,27 @@ class HandlerBase(BaseGenerativeHandler):
         ):
             return params_dict
 
+        # Only a complete portable handoff permits media-free decode.
+        if not params_dict.get("multimodal_input") or not all(
+            isinstance(handle := params_dict.get(key), dict)
+            and handle.get("method_key") == 4
+            and isinstance(handle.get("data"), str)
+            for key in ("mrope_position_ids_handle", "mrope_position_deltas_handle")
+        ):
+            return params_dict
+
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response
         # Note: max_tokens is already handled by Rust frontend's PrefillRouter
         prefill_metadata = {}
 
-        # Pack prompt info for DECODE to skip re-processing
-        # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
-        # Use processed_input['prompt'] (from process_openai_request) which is the actual
-        # multimodal prompt used by TRT-LLM, not res.prompt which might be raw
-        if (
-            processed_input
-            and isinstance(processed_input, dict)
-            and processed_input.get("prompt")
-        ):
-            prefill_metadata["_prefill_prompt"] = processed_input["prompt"]
-        elif res.prompt:
-            prefill_metadata["_prefill_prompt"] = res.prompt
         if res.prompt_token_ids:
             prefill_metadata["_prefill_prompt_token_ids"] = list(res.prompt_token_ids)
+            prefill_metadata["_decode_without_media"] = True
+        else:
+            raise ValueError(
+                "Multimodal prefill did not return expanded prompt token IDs"
+            )
 
         # EPD-specific: use encoder's prompt if available
         if "_epd_processed_prompt" in request and res.prompt:
@@ -881,18 +883,18 @@ class HandlerBase(BaseGenerativeHandler):
         # DECODE mode: Use prefill metadata to skip re-processing multimodal content
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         has_prefill_metadata = epd_metadata and (
-            epd_metadata.get("_prefill_prompt")
+            epd_metadata.get("_prefill_prompt_token_ids")
+            or epd_metadata.get("_epd_prompt_token_ids")
+            or epd_metadata.get("_prefill_prompt")
             or epd_metadata.get("_epd_processed_prompt")
         )
 
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
             and has_prefill_metadata
+            and epd_metadata.get("_decode_without_media")
         ):
             # Use prompt/token_ids from PREFILL, skip image re-processing
-            prefill_prompt = epd_metadata.get("_prefill_prompt") or epd_metadata.get(
-                "_epd_processed_prompt"
-            )
             prefill_token_ids = epd_metadata.get(
                 "_prefill_prompt_token_ids"
             ) or epd_metadata.get("_epd_prompt_token_ids")
@@ -903,10 +905,9 @@ class HandlerBase(BaseGenerativeHandler):
             # - Simple P→D (image URL): PREFILL used multi_modal_data
             is_epd_flow = epd_metadata.get("_epd_processed_prompt") is not None
 
-            processed_input = {
-                "prompt": prefill_prompt,
-                "prompt_token_ids": prefill_token_ids,
-            }
+            if not prefill_token_ids:
+                raise ValueError("Prefill handoff is missing expanded prompt token IDs")
+            processed_input = {"prompt_token_ids": prefill_token_ids}
             if is_epd_flow:
                 processed_input["multi_modal_embeddings"] = None
             else:
