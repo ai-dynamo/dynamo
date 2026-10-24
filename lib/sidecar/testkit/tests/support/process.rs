@@ -238,15 +238,12 @@ impl Frontend {
         }
     }
 
-    pub fn generate(&self, model: &str, id: &str, is_streaming: bool) -> reqwest::RequestBuilder {
-        self.client
-            .post(&self.url)
-            .header("x-dynamo-request-id", id)
-            .json(&serde_json::json!({
-                "model": model, "prompt": "hello", "max_tokens": 3,
-                "stream": is_streaming, "temperature": 0, "ignore_eos": true,
-                "nvext": {"extra_fields": ["completion_token_ids"]},
-            }))
+    pub fn generate(&self, model: &str, is_streaming: bool) -> reqwest::RequestBuilder {
+        self.client.post(&self.url).json(&serde_json::json!({
+            "model": model, "prompt": "hello", "max_tokens": 3,
+            "stream": is_streaming, "temperature": 0, "ignore_eos": true,
+            "nvext": {"extra_fields": ["completion_token_ids"]},
+        }))
     }
 
     pub async fn shutdown(mut self) {
