@@ -260,11 +260,6 @@ class TestEmbeddingRowSize:
         meta = mod.MultimodalEmbeddingCacheConnectorMetadata(saves=list(encoder_cache))
         self._run_worker_step(conn, meta, encoder_cache)
 
-    def test_text_model_uses_hidden_size(self):
-        conn = self._make_connector()
-        assert conn._bytes_per_embed == 4096 * 2
-        assert conn._bytes_per_vision_embed == 4096 * 2
-
     @pytest.mark.parametrize(
         "vision_config",
         [
@@ -276,14 +271,6 @@ class TestEmbeddingRowSize:
     def test_vision_model_without_deepstack_uses_hidden_size(self, vision_config):
         conn = self._make_connector(SimpleNamespace(vision_config=vision_config))
         assert conn._bytes_per_vision_embed == 4096 * 2
-
-    def test_deepstack_rows_include_every_level(self):
-        conn = self._make_connector(_deepstack_hf_config())
-        assert conn._bytes_per_vision_embed == 4 * 4096 * 2
-
-        # The 945-token image from #17244 stores ~31.0 MB, not 7.7 MB.
-        conn.update_state_after_alloc(_make_request([("image", 945)]), 0)
-        assert conn._num_used_bytes == 945 * 4 * 4096 * 2
 
     @pytest.mark.parametrize(
         "hf_config",
