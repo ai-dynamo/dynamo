@@ -7,6 +7,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -1898,6 +1899,8 @@ def test_fpm_utility_name_matches_the_installed_method():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot_mode", [False, True])
+@pytest.mark.parametrize("serve_fails", [False, True])
 @pytest.mark.parametrize(
     ("embedding_frontend_tokenization", "expected_model_input"),
     [(False, ModelInput.Text), (True, ModelInput.Tokens)],
@@ -1905,11 +1908,16 @@ def test_fpm_utility_name_matches_the_installed_method():
 async def test_embedding_worker_registration_and_cleanup(
     embedding_frontend_tokenization: bool,
     expected_model_input: ModelInput,
+    snapshot_mode: bool,
+    serve_fails: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cleanup_order: list[str] = []
     endpoint = Mock()
     endpoint.connection_id.return_value = "embedding-worker-id"
     endpoint.serve_endpoint = AsyncMock(return_value=None)
+    if serve_fails:
+        endpoint.serve_endpoint.side_effect = RuntimeError("embedding serve failed")
     runtime = Mock()
     runtime.endpoint.return_value = endpoint
 
@@ -1919,14 +1927,22 @@ async def test_embedding_worker_registration_and_cleanup(
     engine_cleanup_resource.cleanup.side_effect = lambda: cleanup_order.append(
         "resource"
     )
-    setup_vllm_engine = Mock(
-        return_value=(
-            engine_client,
-            Mock(),
-            Mock(),
-            engine_cleanup_resource,
-            Mock(),
-        )
+    vllm_config = Mock()
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        engine_cleanup_resource,
+        Mock(),
+    )
+    stat_logger = Mock()
+    snapshot_engine: SnapshotEngineSetupResult | None = (
+        (engine_setup, stat_logger) if snapshot_mode else None
+    )
+    setup_vllm_engine = Mock(return_value=engine_setup)
+    stat_logger_factory = Mock(return_value=stat_logger)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory", stat_logger_factory
     )
     register_vllm_model = AsyncMock(return_value=None)
     factory = WorkerFactory(
@@ -1949,19 +1965,55 @@ async def test_embedding_worker_registration_and_cleanup(
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
 
-    with patch(
-        "dynamo.vllm.worker_factory.EmbeddingWorkerHandler",
-        return_value=handler,
-    ):
-        await factory._create_embedding_worker(
+    handler_cls = Mock(return_value=handler)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.EmbeddingWorkerHandler", handler_cls
+    )
+    monkeypatch.setenv("DYN_FPM_WORKER_ID", "captured-worker-id")
+
+    # Exercise public dispatch as well as the worker setup: dropping the
+    # snapshot argument at either boundary must fail this regression.
+    if serve_fails:
+        with pytest.raises(RuntimeError, match="embedding serve failed"):
+            await factory.create(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
+            )
+    else:
+        await factory.create(
             runtime,
             config,
             shutdown_event,
             shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
         )
 
+    if snapshot_mode:
+        setup_vllm_engine.assert_not_called()
+        stat_logger_factory.assert_not_called()
+        stat_logger.bind_endpoint.assert_called_once_with(endpoint)
+        assert os.environ["DYN_FPM_WORKER_ID"] == "embedding-worker-id"
+    else:
+        stat_logger_factory.assert_called_once_with(
+            endpoint=endpoint, embedding_worker=True
+        )
+        setup_vllm_engine.assert_called_once_with(
+            config, stat_logger, fpm_worker_id="embedding-worker-id"
+        )
+        stat_logger.bind_endpoint.assert_not_called()
+    handler_cls.assert_called_once_with(
+        runtime=runtime,
+        engine=engine_client,
+        config=config,
+        shutdown_event=shutdown_event,
+    )
     register_vllm_model.assert_awaited_once()
     assert register_vllm_model.await_args.args[0] == expected_model_input
+    assert register_vllm_model.await_args.args[4] is engine_client
+    assert register_vllm_model.await_args.args[5] is vllm_config
     assert cleanup_order == ["handler", "client", "resource"]
     assert shutdown_endpoints == [endpoint]
 
