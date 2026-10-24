@@ -360,6 +360,7 @@ jobs:
       diff_current_branch: ${{ github.ref_name }}
       diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
       diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    secrets: inherit
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)

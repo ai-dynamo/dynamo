@@ -82,6 +82,18 @@ FROM builder-base AS sidecar-builder
 ARG TARGETARCH
 ARG CARGO_CYCLONEDX_VERSION=0.5.9
 
+# sccache configuration (matches other Dynamo image builds)
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_REGION=""
+
+# Install sccache using the shared helper
+COPY container/use-sccache.sh /tmp/use-sccache.sh
+RUN if [ "$USE_SCCACHE" = "true" ]; then /tmp/use-sccache.sh install; fi
+
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
+
 # Build all three sidecars and their compliance inventory in one RUN. BuildKit
 # takes one of its max-parallelism slots before a RUN waits for a
 # sharing=locked cache mount, so every separate RUN on these caches can hold a
@@ -102,9 +114,12 @@ ARG CARGO_CYCLONEDX_VERSION=0.5.9
 #
 # Development and build-only dependencies cannot be linked into these binaries
 # and are omitted from the SBOMs.
+# sccache wraps only the sidecar `cargo build` calls, not the cargo-cyclonedx install.
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-tools-${TARGETARCH},target=/tmp/cargo-tools,sharing=locked \
+    --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     set -e; \
     RUSTARCH=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
         amd64) echo "x86_64-unknown-linux-gnu" ;; \
@@ -113,12 +128,16 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
     esac); \
     CARGO_TARGET_DIR=/tmp/cargo-tools \
         cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"; \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token; \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-rust-sidecar-${TARGETARCH}}"; \
+    if [ "$USE_SCCACHE" = "true" ]; then eval $(/tmp/use-sccache.sh setup-env); fi; \
     mkdir -p /out/bin /out/sidecar-sboms /out/rust-licenses; \
     for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar; do \
         cargo build --release --locked -p "${pkg}"; \
         strip "target/release/${pkg}"; \
         install -D "target/release/${pkg}" "/out/bin/${pkg}"; \
     done; \
+    if [ "$USE_SCCACHE" = "true" ]; then /tmp/use-sccache.sh show-stats "dynamo-sidecars" || true; fi; \
     for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar; do \
         manifest="lib/sidecar/${pkg#dynamo-}"; \
         manifest="${manifest%-sidecar}/Cargo.toml"; \

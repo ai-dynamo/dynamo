@@ -193,6 +193,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-sidecar' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-sidecar-{0}', github.sha) || '' }}
+    secrets: inherit
 
   # ============================================================================
   # BUILD JOBS

@@ -260,6 +260,7 @@ jobs:
       build_timeout_minutes: 90
       diff_event_context: nightly
       image_tag_suffix: '-nightly'
+    secrets: inherit
 
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI

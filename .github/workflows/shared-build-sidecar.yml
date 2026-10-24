@@ -50,6 +50,9 @@ on:
         required: false
         type: string
         default: ''
+    secrets:
+      SCCACHE_S3_BUCKET:
+        required: false
     outputs:
       target_tag_plain:
         description: 'Plain sidecar image tag prefix'
@@ -137,7 +140,8 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: true
           no_load: true
-          use_sccache: false
+          use_sccache: true
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
 
       - name: Refresh BuildKit builder
         uses: $/.github/actions/builder-refresher
@@ -164,13 +168,32 @@ jobs:
       - name: Extract sidecar binaries (amd64)
         id: binary-artifact
         shell: bash
+        env:
+          SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
         run: |
           set -euo pipefail
           mkdir -p sidecar-binaries
+          # Match docker-remote-build's sccache build-args so sidecar-builder cache-hits.
+          EXTRA_ARGS="--build-arg USE_SCCACHE=true"
+          EXTRA_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_S3_BUCKET}"
+          EXTRA_ARGS+=" --build-arg SCCACHE_REGION=${AWS_DEFAULT_REGION}"
+          # Forward IRSA secrets as compliance-extract does, for a cache-missed rebuild.
+          SECRET_ARGS=""
+          if [ -n "${SCCACHE_S3_BUCKET:-}" ]; then
+            TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+            if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+              SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
+              SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
+            else
+              echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+            fi
+          fi
           docker buildx build \
             --target sidecar-binaries \
             --platform linux/amd64 \
             -f lib/sidecar/Dockerfile \
+            $EXTRA_ARGS $SECRET_ARGS \
             --output type=local,dest=sidecar-binaries \
             .
           name="dynamo-sidecar-binaries-${GITHUB_SHA}"
@@ -239,5 +262,7 @@ jobs:
           platform: linux/amd64,linux/arm64
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          sccache_region: ${{ vars.AWS_DEFAULT_REGION }}
           git_sha: ${{ github.sha }}
           artifact_retention_days: ${{ inputs.artifact_retention_days }}
