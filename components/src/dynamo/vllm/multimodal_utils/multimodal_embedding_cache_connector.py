@@ -46,6 +46,24 @@ def _get_device(vllm_config: "VllmConfig") -> str:
     return "cuda"
 
 
+def _encoder_output_width(vllm_config: "VllmConfig") -> int:
+    """Width of one encoder-cache embedding row.
+
+    DeepStack models (e.g. Qwen3-VL) concatenate one feature map per
+    DeepStack level onto each visual token, so a stored row is
+    out_hidden_size * (1 + len(deepstack_visual_indexes)) wide instead of
+    the text hidden size.
+    """
+    model_config = vllm_config.model_config
+    vision_config = getattr(model_config.hf_config, "vision_config", None)
+    deepstack_visual_indexes = (
+        getattr(vision_config, "deepstack_visual_indexes", None) or []
+    )
+    if not deepstack_visual_indexes:
+        return model_config.get_hidden_size()
+    return vision_config.out_hidden_size * (1 + len(deepstack_visual_indexes))
+
+
 @dataclass
 class MultimodalEmbeddingCacheConnectorMetadata(ECConnectorMetadata):
     """Commands from scheduler to worker for CPU embedding cache management."""
@@ -196,11 +214,10 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
         # --- Scheduler-side: logical LRU for CPU embedding cache ---
         # Mirrors EncoderCacheManager but for the CPU tier, tracking bytes.
-        hidden_size = vllm_config.model_config.get_hidden_size()
         dtype_bytes = torch.tensor(
             [], dtype=vllm_config.model_config.dtype
         ).element_size()
-        self._bytes_per_embed = hidden_size * dtype_bytes
+        self._bytes_per_embed = _encoder_output_width(vllm_config) * dtype_bytes
         self._capacity_bytes = int(capacity_gb * 1024**3)
 
         self._cache_order: OrderedDict[str, int] = OrderedDict()  # hash → size_bytes
@@ -243,6 +260,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
         # --- Worker-side: dumb CPU tensor store ---
         self._cpu_store: dict[str, torch.Tensor] = {}
+        self._warned_row_bytes = False
 
         logger.info(
             "DynamoMultimodalEmbeddingCacheConnector initialized: "
@@ -396,4 +414,18 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 mm_hash,
             )
             return
-        self._cpu_store[mm_hash] = encoder_cache[mm_hash].cpu()
+        embedding = encoder_cache[mm_hash].cpu()
+        self._cpu_store[mm_hash] = embedding
+
+        # The scheduler budgets from model config; flag models whose stored
+        # rows differ so capacity_gb is not silently exceeded.
+        row_bytes = embedding.shape[-1] * embedding.element_size()
+        if row_bytes != self._bytes_per_embed and not self._warned_row_bytes:
+            self._warned_row_bytes = True
+            logger.warning(
+                "Embedding cache budgets %d bytes per embedding, but encoder "
+                "output rows are %d bytes; host memory use will not match "
+                "multimodal_embedding_cache_capacity_gb.",
+                self._bytes_per_embed,
+                row_bytes,
+            )

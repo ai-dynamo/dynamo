@@ -20,15 +20,29 @@ pytestmark = [
 ]
 
 
-def _make_vllm_config(capacity_gb: float = 1.0) -> MagicMock:
+def _make_vllm_config(
+    capacity_gb: float = 1.0, hf_config: SimpleNamespace | None = None
+) -> MagicMock:
     config = MagicMock()
     config.ec_transfer_config.ec_connector_extra_config = {
         "multimodal_embedding_cache_capacity_gb": capacity_gb,
     }
     config.model_config.get_hidden_size.return_value = 4096
+    config.model_config.hf_config = (
+        SimpleNamespace() if hf_config is None else hf_config
+    )
     config.model_config.dtype = torch.float16
     config.parallel_config.data_parallel_rank = 0
     return config
+
+
+def _deepstack_hf_config() -> SimpleNamespace:
+    # Qwen3-VL-235B-A22B: out_hidden_size 4096, three DeepStack levels.
+    return SimpleNamespace(
+        vision_config=SimpleNamespace(
+            out_hidden_size=4096, deepstack_visual_indexes=[8, 16, 24]
+        )
+    )
 
 
 def _make_request(hashes_and_embeds: list[tuple[str, int]]) -> MagicMock:
@@ -209,6 +223,79 @@ class TestSchedulerSideLRU:
         assert meta.saves == []
         assert meta.loads == []
         assert "huge_hash" not in conn._cache_order
+
+
+class TestEmbeddingRowSize:
+    """The per-embedding byte budget must match the encoder-cache row width."""
+
+    def _make_connector(self, hf_config: SimpleNamespace | None = None):
+        with patch.object(mod.ECConnectorBase, "__init__", return_value=None):
+            return mod.DynamoMultimodalEmbeddingCacheConnector(
+                vllm_config=_make_vllm_config(hf_config=hf_config),
+                role=MagicMock(),
+            )
+
+    def _save_all(self, conn, encoder_cache: dict[str, torch.Tensor]) -> None:
+        meta = mod.MultimodalEmbeddingCacheConnectorMetadata(saves=list(encoder_cache))
+        with patch.object(conn, "_get_connector_metadata", return_value=meta):
+            for mm_hash in encoder_cache:
+                conn.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
+
+    def test_text_model_uses_hidden_size(self):
+        assert self._make_connector()._bytes_per_embed == 4096 * 2
+
+    @pytest.mark.parametrize(
+        "vision_config",
+        [
+            SimpleNamespace(out_hidden_size=4096),
+            SimpleNamespace(out_hidden_size=4096, deepstack_visual_indexes=[]),
+        ],
+        ids=["no_deepstack_attr", "empty_deepstack"],
+    )
+    def test_vision_model_without_deepstack_uses_hidden_size(self, vision_config):
+        conn = self._make_connector(SimpleNamespace(vision_config=vision_config))
+        assert conn._bytes_per_embed == 4096 * 2
+
+    def test_deepstack_rows_include_every_level(self):
+        conn = self._make_connector(_deepstack_hf_config())
+        assert conn._bytes_per_embed == 4 * 4096 * 2
+
+        # The 945-token image from #17244 stores ~31.0 MB, not 7.7 MB.
+        conn.update_state_after_alloc(_make_request([("image", 945)]), 0)
+        assert conn._num_used_bytes == 945 * 4 * 4096 * 2
+
+    def test_deepstack_capacity_bounds_stored_bytes(self):
+        conn = self._make_connector(_deepstack_hf_config())
+        image_bytes = 945 * 4 * 4096 * 2
+        conn._capacity_bytes = 2 * image_bytes
+
+        for mm_hash in ("a", "b", "c"):
+            conn.update_state_after_alloc(_make_request([(mm_hash, 945)]), 0)
+        meta = conn.build_connector_meta(MagicMock())
+
+        assert meta.evicts == ["a"]
+        assert conn._num_used_bytes == 2 * image_bytes
+
+    def test_matching_rows_do_not_warn(self):
+        conn = self._make_connector(_deepstack_hf_config())
+        rows = torch.zeros(3, 4 * 4096, dtype=torch.float16)
+
+        with patch.object(mod.logger, "warning") as warn:
+            self._save_all(conn, {"a": rows})
+
+        warn.assert_not_called()
+        assert conn._cpu_store["a"].shape == (3, 4 * 4096)
+
+    def test_wider_rows_than_budget_warn_once(self):
+        conn = self._make_connector()
+        rows = torch.zeros(3, 4 * 4096, dtype=torch.float16)
+
+        with patch.object(mod.logger, "warning") as warn:
+            self._save_all(conn, {"a": rows, "b": rows.clone()})
+
+        warn.assert_called_once()
+        assert warn.call_args[0][1:] == (4096 * 2, 4 * 4096 * 2)
+        assert set(conn._cpu_store) == {"a", "b"}
 
 
 class TestSchedulerMetrics:
