@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Opaque transport for SGLang's native streaming `/generate` API.
+//! Opaque transport for SGLang's native `/generate` API.
 
 use std::{collections::HashMap, io, time::Duration};
 
@@ -67,7 +67,19 @@ pub(crate) fn request(
 
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
     body.insert("rid".into(), Value::String(request_id.to_string()));
-    body.insert("stream".into(), Value::Bool(true));
+    if mode.is_prefill()
+        && body.get("return_flat_raw_output_top_logprobs") == Some(&Value::Bool(true))
+    {
+        // The HTTP headers must arrive before publishing the KV handoff.
+        body.remove("return_flat_raw_output_top_logprobs");
+        if body.get("return_flat_raw_top_logprobs") != Some(&Value::Bool(true)) {
+            body.remove("return_flat_raw_top_logprobs_b64");
+        }
+    }
+    // SGLang only supports output-flat logprobs on its unary response.
+    if body.get("return_flat_raw_output_top_logprobs") != Some(&Value::Bool(true)) {
+        body.insert("stream".into(), Value::Bool(true));
+    }
 
     let routing = request.routing.as_ref();
     if let Some(priority) = routing.and_then(|routing| routing.priority) {
@@ -159,6 +171,7 @@ struct AbortGuard<'a> {
     opening: Option<BoxFuture<'static, Result<Response, DynamoError>>>,
     stream: BoxStream<'static, Result<String, LinesCodecError>>,
     needs_first_token: bool,
+    is_unary: bool,
     first_token: Option<FirstTokenNotifier>,
 }
 
@@ -174,10 +187,12 @@ impl Drop for AbortGuard<'_> {
         let mut opening = self.opening.take();
         let mut stream = std::mem::replace(&mut self.stream, Box::pin(futures::stream::empty()));
         let needs_first_token = self.needs_first_token;
+        let is_unary = self.is_unary;
         let first_token = self.first_token.clone();
         runtime.spawn(async move {
-            // Decode must finish receiving KV before abort can release its destination pages.
-            if needs_first_token {
+            // Streaming decode must receive KV before aborting. Unary decode has
+            // no first-token response; SGLang owns draining its aborted KV transfer.
+            if needs_first_token || is_unary {
                 let drain = async {
                     if let Some(pending) = opening.as_mut() {
                         let response = pending.await;
@@ -205,18 +220,34 @@ impl Drop for AbortGuard<'_> {
                         if response_is_terminal(&response) {
                             return false;
                         }
-                        if has_output {
+                        if has_output && !is_unary {
                             return true;
                         }
                     }
                 };
-                match tokio::time::timeout(native_http.decode_drain_timeout, drain).await {
+                futures::pin_mut!(drain);
+                let wait = async {
+                    loop {
+                        tokio::select! {
+                            result = &mut drain => break result,
+                            _ = async {
+                                // A successful abort can race ahead of registration.
+                                // Retain /generate and retry until its terminal response.
+                                if let Err(error) = native_http.abort(&request_id, native_http.abort_timeout).await {
+                                    tracing::debug!(%request_id, %error, "failed to abort SGLang native unary request");
+                                }
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }, if is_unary => {}
+                        }
+                    }
+                };
+                match tokio::time::timeout(native_http.decode_drain_timeout, wait).await {
                     Ok(true) => {}
                     Ok(false) => return,
                     Err(_) => tracing::warn!(
                         %request_id,
                         timeout_secs = native_http.decode_drain_timeout.as_secs(),
-                        "SGLang native decode produced no output before the drain deadline; forcing abort"
+                        "SGLang native request did not drain before the deadline; forcing abort"
                     ),
                 }
             }
@@ -337,10 +368,15 @@ impl NativeHttp {
     }
 
     async fn open(self, body: Value) -> Result<Response, DynamoError> {
+        let accept = if body.get("stream") == Some(&Value::Bool(true)) {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
         let response = self
             .client
             .post(self.endpoint.with_path("/generate"))
-            .header(header::ACCEPT, "text/event-stream")
+            .header(header::ACCEPT, accept)
             .json(&body)
             .send()
             .await
@@ -365,6 +401,7 @@ impl NativeHttp {
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
         Box::pin(async_stream::stream! {
             let is_prefill = request.is_prefill;
+            let is_unary = request.body.get("stream") != Some(&Value::Bool(true));
             let keep_prefill_output = request.keep_prefill_output;
             let mut prefill_handoff = request.prefill_handoff;
             let stopped_ctx = ctx.inner_arc();
@@ -377,6 +414,7 @@ impl NativeHttp {
                 opening: Some(Box::pin(self.clone().open(request.body))),
                 stream: Box::pin(futures::stream::empty()),
                 needs_first_token: request.is_decode,
+                is_unary,
                 first_token: ctx.first_token_notifier().cloned(),
             };
             tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint.with_path("/generate"), "sending native request to SGLang HTTP");
@@ -506,6 +544,36 @@ fn response_stream(
     response: Response,
     max_event_bytes: usize,
 ) -> BoxStream<'static, Result<String, LinesCodecError>> {
+    if response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(';').next() == Some("application/json"))
+    {
+        // Adapt the bounded unary body to the same response decoder as SSE.
+        return Box::pin(async_stream::stream! {
+            let chunks = response.bytes_stream();
+            futures::pin_mut!(chunks);
+            let mut body = Vec::new();
+            while let Some(chunk) = chunks.next().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        yield Err(LinesCodecError::Io(io::Error::other(error)));
+                        return;
+                    }
+                };
+                if chunk.len() > max_event_bytes.saturating_sub(body.len()) {
+                    yield Err(LinesCodecError::MaxLineLengthExceeded);
+                    return;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            yield String::from_utf8(body)
+                .map(|body| format!("data: {body}"))
+                .map_err(|error| LinesCodecError::Io(io::Error::other(error)));
+        });
+    }
     let bytes = response.bytes_stream().map_err(io::Error::other);
     let reader = StreamReader::new(bytes);
     Box::pin(FramedRead::new(
@@ -731,6 +799,15 @@ mod tests {
     }
 
     async fn serve_once(body: String, status: &str) -> (u16, tokio::task::JoinHandle<()>) {
+        serve_once_with_content_type(body, status, "text/event-stream").await
+    }
+
+    async fn serve_once_with_content_type(
+        body: String,
+        status: &str,
+        content_type: &str,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let content_type = content_type.to_string();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let status = status.to_string();
@@ -739,7 +816,7 @@ mod tests {
             let mut request = [0_u8; 4096];
             let _ = socket.read(&mut request).await.unwrap();
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
@@ -930,6 +1007,42 @@ mod tests {
             error.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
+    }
+
+    #[test]
+    fn prefill_output_flat_keeps_streaming_and_prompt_encoding() {
+        for prompt_flat in [false, true] {
+            let mut canonical = canonical_request();
+            canonical.extra_args = Some(json!({"sglang_tito": {
+                "stream": false,
+                "return_flat_raw_output_top_logprobs": true,
+                "return_flat_raw_top_logprobs": prompt_flat,
+                "return_flat_raw_top_logprobs_b64": true
+            }}));
+            let native = request(
+                &canonical,
+                "request",
+                DisaggregationMode::Prefill,
+                Some("prefill"),
+                Some(5000),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(native.body["stream"], true);
+            assert!(
+                native
+                    .body
+                    .get("return_flat_raw_output_top_logprobs")
+                    .is_none()
+            );
+            assert_eq!(
+                native
+                    .body
+                    .get("return_flat_raw_top_logprobs_b64")
+                    .and_then(serde_json::Value::as_bool),
+                prompt_flat.then_some(true),
+            );
+        }
     }
 
     #[test]
@@ -1229,6 +1342,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_unary_output_flat_logprobs_preserve_response_and_size_limit() {
+        let response = json!({
+            "output_ids": [101, 102],
+            "meta_info": {
+                "finish_reason": {"type": "length", "length": 2},
+                "output_top_logprobs_val_flat": [-0.1, -0.2, -0.3, -0.4],
+                "output_top_logprobs_idx_flat": [101, 201, 102, 202],
+                "output_top_logprobs_shape": [2, 2]
+            }
+        });
+        for limit in [MAX_EVENT_BYTES, 16] {
+            let mut canonical = canonical_request();
+            canonical.extra_args = Some(json!({"sglang_tito": {
+                "stream": false,
+                "return_logprob": true,
+                "top_logprobs_num": 2,
+                "return_flat_raw_output_top_logprobs": true
+            }}));
+            let native = request(
+                &canonical,
+                "request",
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(native.body["stream"], false);
+            assert_eq!(native.body["return_flat_raw_output_top_logprobs"], true);
+            let (port, server) = serve_once_with_content_type(
+                serde_json::to_string_pretty(&response).unwrap(),
+                "200 OK",
+                "application/json",
+            )
+            .await;
+            let mut http = native_http(port);
+            http.max_event_bytes = limit;
+            let mut stream = http.generate(
+                native,
+                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+                CancellationToken::new(),
+            );
+            let output = stream.next().await.unwrap();
+            if limit == MAX_EVENT_BYTES {
+                let output = output.unwrap();
+                assert_eq!(output.token_ids, [101, 102]);
+                assert_eq!(output.engine_data.unwrap()["sglang_response"], response);
+                assert!(stream.next().await.is_none());
+            } else {
+                assert!(
+                    output
+                        .unwrap_err()
+                        .to_string()
+                        .contains("exceeded 16 bytes")
+                );
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn native_stream_rejects_invalid_output_ids() {
         let body = "data: {\"output_ids\":[-1],\"meta_info\":{\"finish_reason\":null}}\n\n";
         let (port, server) = serve_once(body.to_string(), "200 OK").await;
@@ -1477,53 +1651,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_decode_forces_abort_after_drain_deadline() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            // Never answer /generate, like a hung prefill or KV transfer.
-            let (mut generate, _) = listener.accept().await.unwrap();
-            let _ = generate.read(&mut [0_u8; 4096]).await.unwrap();
-            request_seen_tx.send(()).unwrap();
-            let (mut abort, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 4096];
-            let read = abort.read(&mut request).await.unwrap();
-            abort
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    async fn dropped_decode_preserves_streaming_drain_and_retries_unary_abort() {
+        for (streaming, ignore_first_abort) in [(true, false), (false, false), (false, true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut generate, _) = listener.accept().await.unwrap();
+                let _ = generate.read(&mut [0_u8; 4096]).await.unwrap();
+                request_seen_tx.send(()).unwrap();
+                // No /generate headers: a stalled streaming KV transfer, or unary
+                // generation. Simulate an abort racing ahead of registration.
+                for _ in 0..if ignore_first_abort { 2 } else { 1 } {
+                    let (mut abort, _) = listener.accept().await.unwrap();
+                    let mut request = [0_u8; 4096];
+                    let read = abort.read(&mut request).await.unwrap();
+                    assert!(
+                        String::from_utf8_lossy(&request[..read])
+                            .starts_with("POST /abort_request")
+                    );
+                    abort
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                }
+                if !streaming {
+                    let body =
+                        r#"{"output_ids":[],"meta_info":{"finish_reason":{"type":"abort"}}}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    generate.write_all(response.as_bytes()).await.unwrap();
+                    generate.read_to_end(&mut Vec::new()).await.unwrap();
+                }
+            });
+            let drain_timeout = if streaming {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_secs(10)
+            };
+            let native = NativeHttp {
+                decode_drain_timeout: drain_timeout,
+                ..native_http(port)
+            };
+            let mut stream = native.generate(
+                NativeRequest {
+                    body: json!({"input_ids": [1], "stream": streaming,
+                        "return_flat_raw_output_top_logprobs": !streaming}),
+                    is_prefill: false,
+                    is_decode: true,
+                    prefill_handoff: None,
+                    keep_prefill_output: false,
+                },
+                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+                CancellationToken::new(),
+            );
+            tokio::select! {
+                result = request_seen_rx => result.unwrap(),
+                output = stream.next() => panic!("decode returned before completion: {output:?}"),
+            }
+            let dropped_at = tokio::time::Instant::now();
+            drop(stream);
+            tokio::time::timeout(Duration::from_secs(2), server)
                 .await
+                .expect("abort waited for the unary response or drain deadline")
                 .unwrap();
-            drop(generate);
-            String::from_utf8_lossy(&request[..read]).into_owned()
-        });
-
-        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
-        let native = NativeHttp {
-            decode_drain_timeout: Duration::from_millis(50),
-            ..native_http(port)
-        };
-        let mut stream = native.generate(
-            NativeRequest {
-                body: json!({"input_ids": [1], "stream": true}),
-                is_prefill: false,
-                is_decode: true,
-                prefill_handoff: None,
-                keep_prefill_output: false,
-            },
-            ctx,
-            CancellationToken::new(),
-        );
-        tokio::select! {
-            result = request_seen_rx => result.unwrap(),
-            output = stream.next() => panic!("decode returned before the backend responded: {output:?}"),
+            if streaming {
+                assert!(dropped_at.elapsed() >= drain_timeout);
+            }
         }
-        drop(stream);
-
-        let abort = tokio::time::timeout(Duration::from_secs(1), server)
-            .await
-            .expect("abort was not sent after the drain deadline")
-            .unwrap();
-        assert!(abort.starts_with("POST /abort_request"), "{abort}");
     }
 
     #[test]
