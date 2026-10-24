@@ -95,6 +95,16 @@ spec:
           - --router-mode
           - direct
           env:
+          # Every Frontend subscribes to the load reports (kv_metrics) of every
+          # worker, one ZMQ socket each, though only busy thresholds use them,
+          # and this sidecar sets none and sends only to its own worker. With a
+          # sidecar per worker, at 2048 workers each sidecar hit libzmq's 1,023
+          # sockets and its 4 GiB limit. Broker mode, with no broker deployed,
+          # makes that subscription fail at startup; the Frontend runs on without
+          # it, and requests do not use the event plane. Only here: the EPP needs
+          # the event plane for KV events. Remove once #17237 ships.
+          - name: DYN_ZMQ_BROKER_ENABLED
+            value: "true"
           - name: HF_HOME
             value: /opt/models
           - name: HF_HUB_OFFLINE

@@ -306,6 +306,16 @@ Keep these limits in mind when reading the results:
   watches every worker's discovery record in the namespace. The traffic at startup therefore grows
   with the square of the number of pods. `deploy` adds `RAMP_STEP` workers (512) at a time. Lower it
   if the API server throttles.
+- **The sidecars skip the workers' load reports.** Every Frontend subscribes to the load reports
+  (`kv_metrics`) of every worker, one ZMQ socket each, though only busy thresholds use them. With a
+  sidecar in every worker pod, that grows with the square of the workers. At 2048 workers each
+  sidecar hit libzmq's limit of 1,023 sockets and grew to 3.3–3.7 GiB. Its 4 GiB limit killed it
+  again and again, and the pods, which use far more memory than they request, overloaded their
+  nodes. `b-epp.yaml` therefore sets `DYN_ZMQ_BROKER_ENABLED=true` on the sidecar only. With no ZMQ
+  broker deployed, the subscription fails at startup and the Frontend runs without load reports,
+  which a direct-mode sidecar without thresholds does not use. This departs from `gaie/agg.yaml`
+  until [#17237](https://github.com/ai-dynamo/dynamo/pull/17237) ships: it opens the subscription
+  only once a threshold is set.
 - **Changing a deployed arm.** `deploy` ramps only the worker count. A change to a deployed arm's
   images, resources or mocker settings makes the operator replace every worker at once, without the
   ramp. Tear the arm down before you deploy it with a changed spec.

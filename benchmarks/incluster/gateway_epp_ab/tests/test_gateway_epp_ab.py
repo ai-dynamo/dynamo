@@ -112,6 +112,27 @@ def test_sidecar_runs_the_frontend_image_in_direct_mode(arm_a, arm_b):
     assert sidecar["args"] == ["-m", "dynamo.frontend", "--router-mode", "direct"]
 
 
+def test_only_the_sidecar_skips_the_workers_load_reports(arm_a, arm_b):
+    # With no broker deployed, broker mode makes the sidecar's subscription to
+    # every worker's load reports fail (b-epp.yaml explains). The routers and
+    # the workers need the event plane for KV events.
+    broker = "DYN_ZMQ_BROKER_ENABLED"
+    worker = component(by_kind(arm_b, "DynamoGraphDeployment"), "decode")
+    sidecar = containers(worker)[worker["frontendSidecar"]]
+    assert {"name": broker, "value": "true"} in sidecar["env"]
+    others = {
+        "frontend": containers(
+            component(by_kind(arm_a, "DynamoGraphDeployment"), "frontend")
+        )["main"],
+        "epp": containers(component(by_kind(arm_b, "DynamoGraphDeployment"), "epp"))[
+            "main"
+        ],
+        "mocker": containers(worker)["main"],
+    }
+    for name, container in others.items():
+        assert all(e["name"] != broker for e in container["env"]), name
+
+
 @pytest.mark.parametrize("arm", ["a-frontend.yaml", "b-epp.yaml"])
 def test_each_arm_runs_2048_qwen_mockers(arm):
     worker = component(by_kind(load_docs(arm), "DynamoGraphDeployment"), "decode")
