@@ -9,6 +9,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
+use crate::plugins::kv_hint::{KvHintPolicyConfig, RawKvHintPolicyConfig};
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::RequestClassifierConfig;
@@ -260,6 +261,7 @@ pub struct RouterPolicyConfig {
     models: HashMap<String, PolicyProfile>,
     worker_selection: Option<WorkerSelectionConfig>,
     request_classifier: Option<RequestClassifierConfig>,
+    kv_hint_policy: Option<KvHintPolicyConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -317,6 +319,11 @@ impl RouterPolicyConfig {
         self.request_classifier.as_ref()
     }
 
+    /// Returns the process-wide KV-hint policy plugin configuration, if present.
+    pub fn kv_hint_policy(&self) -> Option<&KvHintPolicyConfig> {
+        self.kv_hint_policy.as_ref()
+    }
+
     /// Whether this document configures queue policy profiles.
     pub fn has_routing_profiles(&self) -> bool {
         self.root.is_some() || !self.models.is_empty()
@@ -334,6 +341,7 @@ struct RawRouterPolicyConfig {
     models: HashMap<String, RawPolicyProfile>,
     worker_selection: Option<RawWorkerSelectionConfig>,
     request_classifier: Option<RawRequestClassifierConfig>,
+    kv_hint_policy: Option<RawKvHintPolicyConfig>,
 }
 
 impl RawRouterPolicyConfig {
@@ -386,14 +394,19 @@ impl RawRouterPolicyConfig {
             .request_classifier
             .map(|config| config.resolve())
             .transpose()?;
+        let kv_hint_policy = self
+            .kv_hint_policy
+            .map(|config| config.resolve())
+            .transpose()?;
         if self.router.is_none()
             && root.is_none()
             && models.is_empty()
             && worker_selection.is_none()
             && request_classifier.is_none()
+            && kv_hint_policy.is_none()
         {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define router settings, a root profile, at least one model profile, worker_selection, or request_classifier".to_string(),
+                "router policy config must define router settings, a root profile, at least one model profile, worker_selection, request_classifier, or kv_hint_policy".to_string(),
             ));
         }
 
@@ -403,6 +416,7 @@ impl RawRouterPolicyConfig {
             models,
             worker_selection,
             request_classifier,
+            kv_hint_policy,
         })
     }
 }
@@ -760,6 +774,23 @@ request_classifier:
     }
 
     #[test]
+    fn kv_hint_policy_only_config_preserves_parameter_mapping() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+kv_hint_policy:
+  type: retention
+  parameters:
+    max_fraction: 0.25
+"#,
+        )
+        .unwrap();
+
+        let policy = config.kv_hint_policy().unwrap();
+        assert_eq!(policy.policy_type(), "retention");
+        assert!(matches!(policy.parameters(), serde_yaml::Value::Mapping(_)));
+    }
+
+    #[test]
     fn rejects_invalid_request_classifier_config() {
         for yaml in [
             r#"
@@ -773,6 +804,30 @@ request_classifier:
 "#,
             r#"
 request_classifier:
+  type: ""
+"#,
+        ] {
+            assert!(
+                RouterPolicyConfig::from_yaml(yaml).is_err(),
+                "unexpectedly accepted {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_kv_hint_policy_config() {
+        for yaml in [
+            r#"
+kv_hint_policy:
+  type: default
+"#,
+            r#"
+kv_hint_policy:
+  type: retention
+  parameters: 1
+"#,
+            r#"
+kv_hint_policy:
   type: ""
 "#,
         ] {

@@ -49,6 +49,11 @@ impl RouterPluginBuilder {
                 "request_classifier is configured but not installed; supply a resolved RouterPlugins bundle"
             );
         }
+        if config.kv_hint_policy_config()?.is_some() && !self.plugins.has_kv_hint_policy() {
+            anyhow::bail!(
+                "kv_hint_policy is configured but not installed; supply a resolved RouterPlugins bundle"
+            );
+        }
         Ok(())
     }
 
@@ -66,6 +71,16 @@ impl RouterPluginBuilder {
     pub(crate) fn install(&self, router: &KvRouter) -> anyhow::Result<()> {
         if let Some(factory) = self.plugins.request_classifier() {
             router.install_request_classifier(factory(router.request_classifier_context()))?;
+        }
+        if let Some(policy) = self.plugins.construct_kv_hint_policy(
+            &router.kv_router_config,
+            router.worker_type,
+            dynamo_kv_router::RoutingPartitionRef::new(
+                &router.tracking_model_name,
+                dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+            ),
+        )? {
+            router.install_kv_hint_policy(policy)?;
         }
         Ok(())
     }
