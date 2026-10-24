@@ -87,6 +87,36 @@ fn publish_overloaded_instances_if_needed(
     true
 }
 
+/// Subscribe to the endpoint's KV metrics over the configured event transport.
+/// This is optional; cleanup of TTFT and ITL metrics continues without it.
+async fn subscribe_kv_metrics(
+    endpoint: &dynamo_runtime::component::Endpoint,
+    subscribed: &AtomicBool,
+) -> Option<KvMetricsSubscriber> {
+    match KvMetricsSubscriber::for_endpoint(endpoint).await {
+        Ok(subscriber) => {
+            subscribed.store(true, Ordering::Release);
+            Some(subscriber)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Resolve once any load threshold is set.
+async fn wait_until_configured(configured: &mut tokio::sync::watch::Receiver<bool>) {
+    let handle_alive = configured.wait_for(|configured| *configured).await.is_ok();
+    if !handle_alive {
+        // No threshold can be set once every handle is gone.
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Configuration for worker load thresholds used in overload detection.
 ///
 /// All thresholds are opt-in. An unset (`None`) field means the corresponding
@@ -142,32 +172,58 @@ impl LoadThresholdConfig {
 
 /// Shared threshold configuration for independently owned routing load contexts.
 #[derive(Clone)]
-pub struct LoadThresholdHandle(Arc<std::sync::RwLock<LoadThresholdConfig>>);
+pub struct LoadThresholdHandle(Arc<LoadThresholds>);
+
+struct LoadThresholds {
+    config: std::sync::RwLock<LoadThresholdConfig>,
+    /// Whether any threshold is set. `update` never clears a threshold, so this
+    /// only ever turns from false to true.
+    configured: tokio::sync::watch::Sender<bool>,
+}
 
 impl LoadThresholdHandle {
     pub fn new(config: LoadThresholdConfig) -> Self {
-        Self(Arc::new(std::sync::RwLock::new(config)))
+        let (configured, _) = tokio::sync::watch::channel(config.is_configured());
+        Self(Arc::new(LoadThresholds {
+            config: std::sync::RwLock::new(config),
+            configured,
+        }))
     }
 
     pub fn get(&self) -> LoadThresholdConfig {
-        self.0.read().unwrap().clone()
+        self.0.config.read().unwrap().clone()
     }
 
     pub fn update(&self, config: &LoadThresholdConfig) {
-        let mut current = self.0.write().unwrap();
-        if let Some(value) = config.active_decode_blocks_threshold {
-            current.active_decode_blocks_threshold = Some(value);
-        }
-        if let Some(value) = config.active_prefill_tokens_threshold {
-            current.active_prefill_tokens_threshold = Some(value);
-        }
-        if let Some(value) = config.active_prefill_tokens_threshold_frac {
-            current.active_prefill_tokens_threshold_frac = Some(value);
+        let configured = {
+            let mut current = self.0.config.write().unwrap();
+            if let Some(value) = config.active_decode_blocks_threshold {
+                current.active_decode_blocks_threshold = Some(value);
+            }
+            if let Some(value) = config.active_prefill_tokens_threshold {
+                current.active_prefill_tokens_threshold = Some(value);
+            }
+            if let Some(value) = config.active_prefill_tokens_threshold_frac {
+                current.active_prefill_tokens_threshold_frac = Some(value);
+            }
+            current.is_configured()
+        };
+        // Only ever set it to true: a concurrent update that read the config
+        // before a threshold was set must not overwrite true with false.
+        if configured {
+            self.0
+                .configured
+                .send_if_modified(|was_configured| !std::mem::replace(was_configured, true));
         }
     }
 
     pub fn is_configured(&self) -> bool {
-        self.0.read().unwrap().is_configured()
+        self.0.config.read().unwrap().is_configured()
+    }
+
+    /// Watch whether any threshold is set, to learn when the first one is.
+    pub(crate) fn watch_configured(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.0.configured.subscribe()
     }
 }
 
@@ -623,6 +679,8 @@ pub struct KvWorkerMonitor {
     started: Arc<AtomicBool>,
     start_lock: Arc<tokio::sync::Mutex<()>>,
     lifecycle: Arc<MonitorLifecycle>,
+    /// Set once the KV metrics subscription is open.
+    kv_metrics_subscribed: Arc<AtomicBool>,
 }
 
 struct MonitorLifecycle {
@@ -657,7 +715,13 @@ impl KvWorkerMonitor {
                 cancellation_token,
                 task_guard,
             }),
+            kv_metrics_subscribed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subscribes_to_kv_metrics(&self) -> bool {
+        self.kv_metrics_subscribed.load(Ordering::Acquire)
     }
 
     /// Returns true iff the user explicitly configured at least one threshold.
@@ -751,17 +815,21 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 }
             };
 
-        // Subscribe to KV metrics over the configured event transport. This is
-        // optional; cleanup of TTFT and ITL metrics continues without it.
-        let kv_metrics_rx = match KvMetricsSubscriber::for_endpoint(endpoint).await {
-            Ok(sub) => Some(sub),
-            Err(e) => {
-                tracing::warn!(
-                    "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
-                    e
-                );
-                None
-            }
+        // KV metrics feed only threshold-based overload detection, and the
+        // subscription connects to every worker of the endpoint. Open it once a
+        // threshold is set, at startup or later through `/busy_threshold`, so a
+        // frontend without thresholds (such as a direct-mode sidecar in front of
+        // one worker) does not connect to all of them.
+        let mut thresholds_configured_rx = self.thresholds.watch_configured();
+        let kv_metrics_deferred = !*thresholds_configured_rx.borrow_and_update();
+        let kv_metrics_rx = if kv_metrics_deferred {
+            tracing::debug!(
+                endpoint = %endpoint.id(),
+                "KvWorkerMonitor: no load threshold set, deferring the KV metrics subscription"
+            );
+            None
+        } else {
+            subscribe_kv_metrics(endpoint, &self.kv_metrics_subscribed).await
         };
 
         let mut instances_rx = self.client.instance_avail_watcher();
@@ -778,6 +846,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let thresholds = self.thresholds.clone();
         let started = self.started.clone();
         let task_guard = self.lifecycle.task_guard.clone();
+        let kv_metrics_subscribed = self.kv_metrics_subscribed.clone();
 
         // Spawn background monitoring task
         self.started.store(true, Ordering::Release);
@@ -793,6 +862,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
             let _started_guard = StartedGuard(started);
             let mut kv_metrics_rx = kv_metrics_rx;
+            let mut kv_metrics_deferred = kv_metrics_deferred;
             let mut runtime_configs_rx = runtime_configs_rx;
             let mut known_workers: HashSet<u64> = instances_rx.borrow().iter().copied().collect();
 
@@ -811,6 +881,17 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 };
 
                 tokio::select! {
+                    // A threshold was set after startup: open the deferred subscription.
+                    _ = wait_until_configured(&mut thresholds_configured_rx), if kv_metrics_deferred => {
+                        kv_metrics_deferred = false;
+                        tracing::info!(
+                            source = ?source,
+                            "KvWorkerMonitor: load threshold set, subscribing to KV metrics"
+                        );
+                        kv_metrics_rx =
+                            subscribe_kv_metrics(&client.endpoint, &kv_metrics_subscribed).await;
+                    }
+
                     _ = cancellation_token.cancelled() => {
                         tracing::debug!("Worker monitoring cancelled");
                         let runtime_configs = runtime_configs_rx.borrow();
@@ -1136,9 +1217,10 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadObservation, LoadThresholdConfig, OverloadedWorkerTracker, RemoteActiveLoadSnapshot,
-        WORKER_LOAD_METRICS, WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
-        overload_reconciliation_needed, publish_overloaded_instances_if_needed,
+        LoadObservation, LoadThresholdConfig, LoadThresholdHandle, OverloadedWorkerTracker,
+        RemoteActiveLoadSnapshot, WORKER_LOAD_METRICS, WorkerLoadState, cleanup_worker_metrics,
+        collect_overloaded_workers, overload_reconciliation_needed,
+        publish_overloaded_instances_if_needed,
     };
     use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
     use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
@@ -1320,6 +1402,34 @@ mod tests {
             active_prefill_tokens_threshold_frac: Some(0.9),
         };
         assert!(config.is_configured());
+    }
+
+    #[test]
+    fn load_threshold_handle_reports_the_first_configured_threshold_once() {
+        let handle = LoadThresholdHandle::new(LoadThresholdConfig::default());
+        let mut configured = handle.watch_configured();
+        assert!(!*configured.borrow_and_update());
+
+        handle.update(&LoadThresholdConfig::default());
+        assert!(!configured.has_changed().unwrap());
+
+        handle.update(&LoadThresholdConfig {
+            active_prefill_tokens_threshold: Some(4096),
+            ..Default::default()
+        });
+        assert!(configured.has_changed().unwrap());
+        assert!(*configured.borrow_and_update());
+
+        handle.update(&LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.5),
+            ..Default::default()
+        });
+        assert!(!configured.has_changed().unwrap());
+        assert!(
+            *LoadThresholdHandle::new(handle.get())
+                .watch_configured()
+                .borrow()
+        );
     }
 
     #[test]
