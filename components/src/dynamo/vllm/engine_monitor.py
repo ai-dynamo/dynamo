@@ -7,6 +7,7 @@ import math
 import os
 import signal
 import traceback
+from types import TracebackType
 
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 class VllmEngineMonitor:
     """
     Monitors the health of the vLLM engine and initiates a shutdown if the engine is dead.
+
+    An async context scopes monitoring during post-restore election and waits for
+    its tasks to stop before the serving handler installs its own monitor.
     """
 
     def __init__(
@@ -53,6 +57,29 @@ class VllmEngineMonitor:
     def __del__(self):
         self._monitor_task.cancel()
         self._stats_task.cancel()
+
+    async def __aenter__(self) -> "VllmEngineMonitor":
+        return self
+
+    async def __aexit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc_value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        await self.stop()
+
+    async def stop(self) -> None:
+        """Cancel and await both tasks without hiding a background failure."""
+        tasks = (self._monitor_task, self._stats_task)
+        for task in tasks:
+            task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                raise result
 
     def _shutdown_engine(self):
         """

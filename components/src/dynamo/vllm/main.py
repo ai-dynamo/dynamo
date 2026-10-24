@@ -85,6 +85,7 @@ from .embedding_worker_processes import (
     start_embedding_parent_watchdog,
 )
 from .engine_generate import publish_engine_generate_capability
+from .engine_monitor import VllmEngineMonitor
 from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -280,7 +281,10 @@ async def worker(argv: list[str] | None = None) -> None:
     if snapshot_controller is not None:
         # The flock lives on the open fd, not on any Python reference; the
         # kernel releases it when the process exits.
-        await elect_and_wake(snapshot_controller.pause_controller, runtime)
+        async with VllmEngineMonitor(
+            runtime, snapshot_controller.engine[0][0], shutdown_event
+        ):
+            await elect_and_wake(snapshot_controller.pause_controller, runtime)
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
