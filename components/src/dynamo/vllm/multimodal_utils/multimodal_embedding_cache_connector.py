@@ -46,39 +46,6 @@ def _get_device(vllm_config: "VllmConfig") -> str:
     return "cuda"
 
 
-_VISION_MODALITIES = frozenset({"image", "video"})
-
-# Models whose cached image/video embeddings include the DeepStack maps. A
-# config can list deepstack_visual_indexes that vLLM drops (BailingMoeV3VL).
-_DEEPSTACK_ARCHITECTURES = frozenset(
-    {
-        "Qwen3VLForConditionalGeneration",
-        "Qwen3VLMoeForConditionalGeneration",
-        "Qwen3OmniMoeForConditionalGeneration",
-    }
-)
-
-
-def _deepstack_vision_width(model_config) -> int | None:
-    """Row width of DeepStack image/video embeddings, or None if not DeepStack.
-
-    DeepStack models append one feature map per DeepStack level to each
-    visual token.
-    """
-    if _DEEPSTACK_ARCHITECTURES.isdisjoint(model_config.architectures):
-        return None
-    hf_config = model_config.hf_config
-    # Qwen3-Omni keeps its vision config under thinker_config.
-    for config in (hf_config, getattr(hf_config, "thinker_config", None)):
-        vision_config = getattr(config, "vision_config", None)
-        deepstack_visual_indexes = getattr(
-            vision_config, "deepstack_visual_indexes", None
-        )
-        if deepstack_visual_indexes:
-            return vision_config.out_hidden_size * (1 + len(deepstack_visual_indexes))
-    return None
-
-
 @dataclass
 class MultimodalEmbeddingCacheConnectorMetadata(ECConnectorMetadata):
     """Commands from scheduler to worker for CPU embedding cache management."""
@@ -229,16 +196,17 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
         # --- Scheduler-side: logical LRU for CPU embedding cache ---
         # Mirrors EncoderCacheManager but for the CPU tier, tracking bytes.
+        hidden_size = vllm_config.model_config.get_hidden_size()
         dtype_bytes = torch.tensor(
             [], dtype=vllm_config.model_config.dtype
         ).element_size()
-        self._bytes_per_embed = vllm_config.model_config.get_hidden_size() * dtype_bytes
-        vision_width = _deepstack_vision_width(vllm_config.model_config)
-        self._bytes_per_vision_embed = (
-            self._bytes_per_embed
-            if vision_width is None
-            else vision_width * dtype_bytes
-        )
+        self._bytes_per_embed = hidden_size * dtype_bytes
+        # vLLM >= 0.32 measures each modality's encoder output width at startup;
+        # DeepStack models (e.g. Qwen3-VL) emit rows wider than the hidden size.
+        measured_widths = getattr(transfer_config, "mm_encoder_output_widths", {})
+        self._bytes_per_embed_by_modality = {
+            modality: width * dtype_bytes for modality, width in measured_widths.items()
+        }
         self._capacity_bytes = int(capacity_gb * 1024**3)
 
         self._cache_order: OrderedDict[str, int] = OrderedDict()  # hash → size_bytes
@@ -281,16 +249,15 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
         # --- Worker-side: dumb CPU tensor store ---
         self._cpu_store: dict[str, torch.Tensor] = {}
-        self._warned_row_bytes = False
 
         logger.info(
             "DynamoMultimodalEmbeddingCacheConnector initialized: "
             "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d, "
-            "bytes_per_vision_embed=%d",
+            "bytes_per_embed_by_modality=%s",
             capacity_gb,
             self._capacity_bytes,
             self._bytes_per_embed,
-            self._bytes_per_vision_embed,
+            self._bytes_per_embed_by_modality,
         )
 
     # ==============================
@@ -339,10 +306,8 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         feature = request.mm_features[index]
         mm_hash: str = feature.identifier
         num_embeds: int = request.get_num_encoder_embeds(index)
-        bytes_per_embed = (
-            self._bytes_per_vision_embed
-            if feature.modality in _VISION_MODALITIES
-            else self._bytes_per_embed
+        bytes_per_embed = self._bytes_per_embed_by_modality.get(
+            feature.modality, self._bytes_per_embed
         )
         size_bytes: int = num_embeds * bytes_per_embed
 
@@ -445,18 +410,4 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
                 mm_hash,
             )
             return
-        embedding = encoder_cache[mm_hash].cpu()
-        self._cpu_store[mm_hash] = embedding
-
-        # The scheduler sizes entries from model config; check against the real row.
-        row_bytes = embedding.shape[-1] * embedding.element_size()
-        budgets = (self._bytes_per_embed, self._bytes_per_vision_embed)
-        if row_bytes not in budgets and not self._warned_row_bytes:
-            self._warned_row_bytes = True
-            logger.warning(
-                "Embedding cache budgets %d bytes per embedding (%d for image "
-                "and video), but encoder output rows are %d bytes; host memory "
-                "use will not match multimodal_embedding_cache_capacity_gb.",
-                *budgets,
-                row_bytes,
-            )
+        self._cpu_store[mm_hash] = encoder_cache[mm_hash].cpu()

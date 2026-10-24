@@ -21,40 +21,21 @@ pytestmark = [
 
 
 def _make_vllm_config(
-    capacity_gb: float = 1.0,
-    hf_config: SimpleNamespace | None = None,
-    architecture: str | None = None,
+    capacity_gb: float = 1.0, encoder_output_widths: dict[str, int] | None = None
 ) -> MagicMock:
     config = MagicMock()
     config.ec_transfer_config.ec_connector_extra_config = {
         "multimodal_embedding_cache_capacity_gb": capacity_gb,
     }
+    config.ec_transfer_config.mm_encoder_output_widths = encoder_output_widths or {}
     config.model_config.get_hidden_size.return_value = 4096
-    config.model_config.hf_config = (
-        SimpleNamespace() if hf_config is None else hf_config
-    )
-    config.model_config.architectures = [architecture] if architecture else []
     config.model_config.dtype = torch.float16
     config.parallel_config.data_parallel_rank = 0
     return config
 
 
-def _deepstack_hf_config() -> SimpleNamespace:
-    # Qwen3-VL-235B-A22B: out_hidden_size 4096, three DeepStack levels.
-    return SimpleNamespace(
-        vision_config=SimpleNamespace(
-            out_hidden_size=4096, deepstack_visual_indexes=[8, 16, 24]
-        )
-    )
-
-
-def _omni_hf_config() -> SimpleNamespace:
-    # Qwen3-Omni keeps its DeepStack vision config under the thinker.
-    return SimpleNamespace(thinker_config=_deepstack_hf_config())
-
-
-_QWEN3_VL = "Qwen3VLMoeForConditionalGeneration"
-_QWEN3_OMNI = "Qwen3OmniMoeForConditionalGeneration"
+# What vLLM measures for a DeepStack model with three levels (e.g. Qwen3-VL).
+_DEEPSTACK_WIDTHS = {"image": 4 * 4096, "video": 4 * 4096}
 
 
 def _make_request(
@@ -241,15 +222,11 @@ class TestSchedulerSideLRU:
 
 
 class TestEmbeddingRowSize:
-    def _make_connector(
-        self,
-        hf_config: SimpleNamespace | None = None,
-        architecture: str | None = None,
-    ):
+    def _make_connector(self, encoder_output_widths: dict[str, int]):
         with patch.object(mod.ECConnectorBase, "__init__", return_value=None):
             return mod.DynamoMultimodalEmbeddingCacheConnector(
                 vllm_config=_make_vllm_config(
-                    hf_config=hf_config, architecture=architecture
+                    encoder_output_widths=encoder_output_widths
                 ),
                 role=MagicMock(),
             )
@@ -267,38 +244,8 @@ class TestEmbeddingRowSize:
             for mm_hash in encoder_cache:
                 conn.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
 
-    def _save_all(self, conn, encoder_cache: dict[str, torch.Tensor]) -> None:
-        meta = mod.MultimodalEmbeddingCacheConnectorMetadata(saves=list(encoder_cache))
-        self._run_worker_step(conn, meta, encoder_cache)
-
-    @pytest.mark.parametrize(
-        "vision_config",
-        [
-            SimpleNamespace(out_hidden_size=4096),
-            SimpleNamespace(out_hidden_size=4096, deepstack_visual_indexes=[]),
-        ],
-        ids=["no_deepstack_attr", "empty_deepstack"],
-    )
-    def test_vision_model_without_deepstack_uses_hidden_size(self, vision_config):
-        conn = self._make_connector(
-            SimpleNamespace(vision_config=vision_config), _QWEN3_VL
-        )
-        assert conn._bytes_per_vision_embed == 4096 * 2
-
-    def test_unlisted_architecture_ignores_config_deepstack(self):
-        # vLLM's BailingMoeV3VL clears the config's DeepStack levels.
-        conn = self._make_connector(
-            _deepstack_hf_config(), "BailingMoeV3VLForConditionalGeneration"
-        )
-        assert conn._bytes_per_vision_embed == 4096 * 2
-
-    @pytest.mark.parametrize(
-        ("hf_config", "architecture"),
-        [(_deepstack_hf_config(), _QWEN3_VL), (_omni_hf_config(), _QWEN3_OMNI)],
-        ids=["qwen3_vl", "qwen3_omni"],
-    )
-    def test_budget_follows_modality(self, hf_config, architecture):
-        conn = self._make_connector(hf_config, architecture)
+    def test_budget_uses_measured_width_per_modality(self):
+        conn = self._make_connector(_DEEPSTACK_WIDTHS)
         for mm_hash, modality in (("i", "image"), ("v", "video"), ("a", "audio")):
             conn.update_state_after_alloc(
                 _make_request([(mm_hash, 10)], modality=modality), 0
@@ -311,7 +258,7 @@ class TestEmbeddingRowSize:
         }
 
     def test_deepstack_capacity_bounds_stored_bytes(self):
-        conn = self._make_connector(_deepstack_hf_config(), _QWEN3_VL)
+        conn = self._make_connector(_DEEPSTACK_WIDTHS)
         image_bytes = 10 * 4 * 4096 * 2
         conn._capacity_bytes = 2 * image_bytes
 
@@ -333,30 +280,6 @@ class TestEmbeddingRowSize:
 
         assert set(conn._cpu_store) == {"b", "c"}
         assert sum(t.nbytes for t in conn._cpu_store.values()) == 2 * image_bytes
-
-    def test_matching_rows_do_not_warn(self):
-        conn = self._make_connector(_omni_hf_config(), _QWEN3_OMNI)
-        encoder_cache = {
-            "image": torch.zeros(3, 4 * 4096, dtype=torch.float16),
-            "audio": torch.zeros(3, 4096, dtype=torch.float16),
-        }
-
-        with patch.object(mod.logger, "warning") as warn:
-            self._save_all(conn, encoder_cache)
-
-        warn.assert_not_called()
-        assert set(conn._cpu_store) == {"image", "audio"}
-
-    def test_wider_rows_than_budget_warn_once(self):
-        conn = self._make_connector()
-        rows = torch.zeros(3, 4 * 4096, dtype=torch.float16)
-
-        with patch.object(mod.logger, "warning") as warn:
-            self._save_all(conn, {"a": rows, "b": rows.clone()})
-
-        warn.assert_called_once()
-        assert warn.call_args[0][1:] == (4096 * 2, 4096 * 2, 4 * 4096 * 2)
-        assert set(conn._cpu_store) == {"a", "b"}
 
 
 class TestSchedulerMetrics:
