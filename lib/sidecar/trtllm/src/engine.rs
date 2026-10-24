@@ -17,18 +17,25 @@ use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, ModelLimits, TrtllmClient};
+use crate::client::{self, ModelInfoResponse, ModelLimits, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request_with_routing};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
+const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+struct FailedDiscovery {
+    error: DynamoError,
+    retry_at: Instant,
+}
+
 const LOAD_STALENESS_LIMIT: Duration = Duration::from_secs(30);
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
@@ -60,6 +67,8 @@ pub struct TrtllmSidecarEngine {
     /// Connection and limits may be discovered in the cancellable sidecar bootstrap.
     connection: OnceCell<(TrtllmClient, ModelLimits)>,
     started: OnceCell<()>,
+    rediscovered_limits: OnceCell<ModelLimits>,
+    discovery_failure: AsyncMutex<Option<FailedDiscovery>>,
     routing: OnceCell<RoutingState>,
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
@@ -81,6 +90,8 @@ impl TrtllmSidecarEngine {
             subagent_affinity_auth_key: None,
             connection: OnceCell::new(),
             started: OnceCell::new(),
+            rediscovered_limits: OnceCell::new(),
+            discovery_failure: AsyncMutex::new(None),
             routing: OnceCell::new(),
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
@@ -227,6 +238,65 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
+    async fn limits_for_request(
+        &self,
+        client: &TrtllmClient,
+        initial: ModelLimits,
+        request: &PreprocessedRequest,
+    ) -> Result<ModelLimits, DynamoError> {
+        if let Some(limits) = self.rediscovered_limits.get() {
+            return Ok(*limits);
+        }
+        let has_images = request.multi_modal_data.as_ref().is_some_and(|media| {
+            media
+                .get("image_url")
+                .is_some_and(|images| !images.is_empty())
+        });
+        if !has_images || initial.supports_image.is_some() {
+            return Ok(initial);
+        }
+
+        // Serialize attempts and retain failures through the retry delay, so waiters
+        // share a failed RPC instead of each spending another RPC timeout.
+        let arrived_at = Instant::now();
+        let mut failure = self.discovery_failure.lock().await;
+        if let Some(failure) = &*failure
+            && arrived_at < failure.retry_at
+        {
+            return Err(failure.error.clone());
+        }
+        let result: Result<ModelLimits, DynamoError> = self
+            .rediscovered_limits
+            .get_or_try_init(|| async {
+                match client.model_limits(&self.model.source).await? {
+                    ModelInfoResponse::Available(mut reported) => {
+                        if let Some(engine_context_length) = reported.context_length
+                            && Some(engine_context_length) != initial.context_length
+                        {
+                            tracing::warn!(
+                                configured_context_length = ?initial.context_length,
+                                engine_context_length,
+                                "--context-length disagrees with the context length TensorRT-LLM \
+                                 reported; using the configured --context-length"
+                            );
+                        }
+                        reported.context_length = initial.context_length;
+                        Ok(reported)
+                    }
+                    ModelInfoResponse::Unsupported(_) => Ok(ModelLimits {
+                        supports_image: Some(false),
+                        ..initial
+                    }),
+                }
+            })
+            .await
+            .copied();
+        *failure = result.as_ref().err().map(|error| FailedDiscovery {
+            error: error.clone(),
+            retry_at: Instant::now() + DISCOVERY_RETRY_DELAY,
+        });
+        result
+    }
 
     pub(crate) async fn bootstrap(
         (engine, config): (Self, WorkerConfig),
@@ -278,20 +348,26 @@ impl TrtllmSidecarEngine {
             // `Watch`). Do not grow a second readiness protocol here.
             Some(configured) => {
                 let reported = match client.model_limits(&model.source).await {
-                    Ok(reported) => reported,
+                    Ok(ModelInfoResponse::Available(reported)) => reported,
+                    Ok(ModelInfoResponse::Unsupported(status)) => {
+                        tracing::warn!(
+                            code = ?status.code(),
+                            message = status.message(),
+                            configured_context_length = configured,
+                            "Control.GetModelInfo is unavailable; using the configured \
+                             --context-length"
+                        );
+                        ModelLimits {
+                            supports_image: Some(false),
+                            ..Default::default()
+                        }
+                    }
                     Err(error) => {
-                        // Tolerated because some OpenEngine servicer builds ship
-                        // without Control, which is what --context-length exists
-                        // for. UNIMPLEMENTED also fits an engine left on the
-                        // default --grpc-protocol smg, where Generate will fail
-                        // too -- name both so the log points at the real fix.
                         tracing::warn!(
                             %error,
                             configured_context_length = configured,
-                            "Control.GetModelInfo failed; using the configured \
-                             --context-length. If this is UNIMPLEMENTED, the engine either \
-                             ships no Control service or was started without \
-                             --grpc-protocol openengine"
+                            "Control.GetModelInfo failed transiently; using the configured \
+                             --context-length and deferring media capability discovery"
                         );
                         ModelLimits::default()
                     }
@@ -475,14 +551,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             .routing
             .get()
             .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
-        let proto_request = build_generate_request_with_routing(
-            &request,
-            &request_id,
-            &self.model.source,
-            Some(*limits),
-            self.mode,
-            use_dp_targeting,
-        )?;
         let target_dp_rank = request.routing.as_ref().and_then(|routing| {
             if self.mode.is_prefill() {
                 routing.prefill_dp_rank.or(routing.dp_rank)
@@ -507,6 +575,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     .as_deref()
                     .map(str::trim)
                     .filter(|parent| !parent.is_empty() && *parent != agent.session_id.trim())
+                    .map(str::to_owned)
             })
         } else {
             None
@@ -539,6 +608,25 @@ impl LLMEngine for TrtllmSidecarEngine {
         let shutdown = self.cancel.child_token();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
+        let limits = tokio::select! {
+            biased;
+            _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
+            _ = &mut shutdown_cancellation => None,
+            result = self.limits_for_request(client, *limits, &request) => Some(result?),
+        };
+        let Some(limits) = limits else {
+            let output = cancelled(&state);
+            return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
+        };
+        let proto_request = build_generate_request_with_routing(
+            request,
+            &request_id,
+            &self.model.source,
+            Some(limits),
+            self.mode,
+            use_dp_targeting,
+        )?;
+
         // The same deferral applies here, not just to the streaming loop below.
         // `generate` sends the request and then awaits response headers, so
         // losing this race can drop a request the engine has already accepted
@@ -553,7 +641,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             result = client.generate(
                 proto_request,
                 target_dp_rank,
-                parent_affinity.zip(self.subagent_affinity_auth_key.as_deref()),
+                parent_affinity.as_deref().zip(self.subagent_affinity_auth_key.as_deref()),
             ) => Some(result?),
         };
         let Some(mut stream) = stream else {
