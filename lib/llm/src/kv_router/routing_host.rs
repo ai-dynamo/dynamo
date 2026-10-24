@@ -29,14 +29,16 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
+    kv_router::{
+        KvRouter, RouteRequest, metrics::RouterRequestMetrics, to_worker_selection_session_context,
+    },
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
-        preprocessor::owned_abort_error,
+        preprocessor::{RoutingHints, owned_abort_error},
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
@@ -308,11 +310,19 @@ pub struct RoutingHost {
 }
 
 /// An admitted KV route awaiting dispatch.
-pub(crate) struct RoutePlan {
+///
+/// The plan owns its booking. A host that dispatches sends it with
+/// `dispatch_kv_plan`; a host that only selects (the gateway endpoint picker)
+/// keeps the booking with [`RoutePlan::into_booking`] or
+/// [`RoutePlan::detach_booking`]. Dropping an unused plan releases the booking.
+pub struct RoutePlan {
     pub(crate) signals: RoutePlanSignals,
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
     affinity: Option<Hold>,
+    /// The phase the plan was admitted for. Dispatch tracks under this phase
+    /// rather than re-deriving it from the request.
+    phase: RequestPhase,
     /// Carried forward from the [`RoutePreview`] this plan was admitted from, so
     /// preview, admission and dispatch draw on one budget instead of three.
     budget: CleanupBudget,
@@ -352,7 +362,62 @@ impl RoutePlanSignals {
     }
 }
 
+/// The booking of an admitted route that this host will not dispatch.
+///
+/// Dropping it releases the booking without waiting; [`RouteBooking::release`]
+/// waits for the scheduler to acknowledge the release.
+pub struct RouteBooking {
+    cleanup: KvRequestCleanup,
+}
+
+impl RouteBooking {
+    pub async fn release(self) {
+        self.cleanup.finish().await;
+    }
+}
+
 impl RoutePlan {
+    /// The worker and DP rank this plan admitted.
+    pub fn worker(&self) -> WorkerWithDpRank {
+        self.selection.worker
+    }
+
+    pub(crate) fn target(&self) -> AffinityTarget {
+        route_target(self.selection.worker)
+    }
+
+    /// Keep the booking without dispatching. A classifier lifecycle, which only
+    /// a dispatching host can follow, is aborted.
+    pub fn into_booking(self) -> RouteBooking {
+        RouteBooking {
+            cleanup: self.cleanup,
+        }
+    }
+
+    /// Keep the booking under the plan's request id without dispatching. It is
+    /// released by `KvRouter::free` with that id, or when its lease expires. A
+    /// classifier lifecycle, which only a dispatching host can follow, is aborted.
+    pub fn detach_booking(self) {
+        self.cleanup.detach();
+    }
+
+    /// Release the booking and wait for the scheduler to acknowledge it.
+    pub async fn release(self) {
+        self.abort_with_error(None).await;
+    }
+
+    /// Release a plan that will not be dispatched: abort its classifier
+    /// lifecycle, if any, and free its booking.
+    pub(crate) async fn abort_with_error(
+        mut self,
+        error: Option<&dynamo_kv_router::scheduling::AbortCause>,
+    ) {
+        if let Some(lifecycle) = self.selection.request_lifecycle.as_deref_mut() {
+            lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
+        }
+        self.cleanup.finish().await;
+    }
+
     #[cfg(test)]
     pub(crate) fn cleanup_budget_remaining(&self) -> std::time::Duration {
         self.budget.remaining()
@@ -597,14 +662,14 @@ impl RoutingHost {
     /// it cannot be rejected against, or rebind, the group.
     fn group_binding_id(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         explicit: Option<AffinityTarget>,
         phase: RequestPhase,
     ) -> Option<Arc<SessionAffinityId>> {
         if explicit.is_some() {
             return None;
         }
-        let agent = request.content().agent_context.as_ref()?;
+        let agent = request.agent_context()?;
         let parent_session_id = agent.parent_session_id.as_deref()?;
         let binding_id = if phase == RequestPhase::Prefill {
             let parent = parent_session_id.trim();
@@ -636,10 +701,10 @@ impl RoutingHost {
     /// or when dispatching: a worker disappearing later is a service failure.
     fn validate_explicit_worker(
         &self,
-        request: &PreprocessedRequest,
+        routing: Option<&RoutingHints>,
         phase: RequestPhase,
     ) -> Result<(), Error> {
-        let Some(routing) = request.routing.as_ref() else {
+        let Some(routing) = routing else {
             return Ok(());
         };
         let target = match phase {
@@ -726,7 +791,7 @@ impl RoutingHost {
 
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         budget: &CleanupBudget,
@@ -736,14 +801,14 @@ impl RoutingHost {
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
     {
-        let staged_kv = StagedKv::for_request(request.content());
+        let staged_kv = StagedKv::for_route(request);
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
-        let Some(session_id) = affinity_id(request)? else {
+        let Some(session_id) = request.session_affinity_id()? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target(request.content(), phase)?;
+        let explicit = explicit_target(request.routing_hints(), phase)?;
         let session_id = self
             .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);
@@ -752,7 +817,7 @@ impl RoutingHost {
             return Ok((select(target).await?, None));
         }
 
-        let request_context = request.context();
+        let request_context = request.engine_context();
         let operation = self
             .acquire_affinity_slot(
                 affinity,

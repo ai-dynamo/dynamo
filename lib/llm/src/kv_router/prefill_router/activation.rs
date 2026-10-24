@@ -680,8 +680,8 @@ mod tests {
     use crate::discovery::CommittedWorkerSetTarget;
     use crate::entrypoint::RouterConfig;
     use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+    use crate::kv_router::route_request::TestRouteRequest;
     use dynamo_kv_router::config::KvRouterConfig;
-    use dynamo_kv_router::protocols::RoutingConstraints;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::{DiscoverySpec, EventTransportKind},
@@ -987,18 +987,7 @@ mod tests {
             assert_eq!(prefilled_worker(&router).await, 0);
         }
         let reservation = router
-            .reserve_prefill_worker(
-                "committed-prefill",
-                &[1; 128],
-                None,
-                None,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                RoutingConstraints::default(),
-            )
+            .reserve_prefill_worker(&TestRouteRequest::new("committed-prefill", &[1; 128]))
             .await
             .unwrap();
         assert_eq!(reservation.worker_id(), ids[0]);
@@ -1010,18 +999,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let reservation = router
-                    .reserve_prefill_worker(
-                        "admitted-probe",
-                        &[1; 128],
-                        None,
-                        None,
-                        None,
-                        0.0,
-                        0,
-                        None,
-                        None,
-                        RoutingConstraints::default(),
-                    )
+                    .reserve_prefill_worker(&TestRouteRequest::new("admitted-probe", &[1; 128]))
                     .await
                     .expect("prefill reservation must remain routable");
                 let worker_id = reservation.worker_id();

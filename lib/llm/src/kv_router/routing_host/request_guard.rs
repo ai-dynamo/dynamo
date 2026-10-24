@@ -472,6 +472,14 @@ impl KvRequestCleanup {
             lifecycle.finish().await;
         }
     }
+
+    /// Keep the booking under the request id, to be released by
+    /// `KvRouter::free` or lease expiry rather than by this cleanup.
+    pub(super) fn detach(mut self) {
+        if let Some(lifecycle) = self.lifecycle.take() {
+            lifecycle.detach();
+        }
+    }
 }
 
 /// Policy-specific state released by the host's common request lifecycle.

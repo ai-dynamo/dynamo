@@ -4273,7 +4273,8 @@ async fn explicit_worker_validation_preserves_precedence_and_discovery_membershi
             serde_json::from_value(value.clone()).unwrap();
         let mut content = request();
         content.routing = Some(serde_json::from_value(value).unwrap());
-        host.validate_explicit_worker(&content, phase).unwrap();
+        host.validate_explicit_worker(content.routing.as_ref(), phase)
+            .unwrap();
     }
     for (field, phase) in [
         ("decode_worker_id", RequestPhase::Aggregated),
@@ -4286,7 +4287,9 @@ async fn explicit_worker_validation_preserves_precedence_and_discovery_membershi
             }))
             .unwrap(),
         );
-        let error = host.validate_explicit_worker(&content, phase).unwrap_err();
+        let error = host
+            .validate_explicit_worker(content.routing.as_ref(), phase)
+            .unwrap_err();
         assert_eq!(
             error.downcast_ref::<DynamoError>().unwrap().message(),
             format!("nvext.{field}=42 does not identify a known worker")

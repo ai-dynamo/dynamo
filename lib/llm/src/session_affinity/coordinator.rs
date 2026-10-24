@@ -322,11 +322,12 @@ pub fn affinity_id(
         .map_err(|message| invalid_argument(format!("invalid session affinity context: {message}")))
 }
 
+/// The worker a caller named for `phase` in its routing hints, if any.
 pub fn explicit_target(
-    request: &PreprocessedRequest,
+    routing: Option<&crate::protocols::common::preprocessor::RoutingHints>,
     phase: RequestPhase,
 ) -> Result<Option<AffinityTarget>, Error> {
-    let Some(routing) = request.routing.as_ref() else {
+    let Some(routing) = routing else {
         return Ok(None);
     };
     let (worker_id, dp_rank) = match phase {

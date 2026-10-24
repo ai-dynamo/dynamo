@@ -287,7 +287,7 @@ impl RoutingHost {
     {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let explicit = explicit_target(request.content(), phase)?;
+        let explicit = explicit_target(request.routing.as_ref(), phase)?;
         let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
         if is_direct && explicit.is_none() && !has_affinity_session {
@@ -322,7 +322,7 @@ impl RoutingHost {
                 None,
             )
         } else {
-            self.validate_explicit_worker(request.content(), phase)?;
+            self.validate_explicit_worker(request.routing.as_ref(), phase)?;
             self.select_with_session_affinity(&request, phase, is_query_only, &budget, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,
