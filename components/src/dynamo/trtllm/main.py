@@ -139,7 +139,7 @@ async def worker(argv: list[str] | None = None):
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
         drain_callback = _make_drain_callback(engine_holder)
 
-    install_signal_handlers(
+    wait_for_shutdown = install_signal_handlers(
         loop,
         runtime,
         shutdown_endpoints,
@@ -148,13 +148,19 @@ async def worker(argv: list[str] | None = None):
     )
 
     logging.info(f"Initializing the worker with config: {config}")
-    await init_worker(
-        runtime,
-        config,
-        shutdown_event,
-        shutdown_endpoints,
-        engine_holder=engine_holder,
-    )
+    try:
+        await init_worker(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            engine_holder=engine_holder,
+        )
+    finally:
+        # `init_worker` returns as soon as `shutdown_event` is set, which the
+        # shutdown sequence does *before* awaiting the runtime teardown. Without
+        # this join the loop closes here and the teardown is destroyed pending.
+        await wait_for_shutdown()
 
 
 def main():

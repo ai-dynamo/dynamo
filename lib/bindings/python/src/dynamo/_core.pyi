@@ -109,7 +109,24 @@ class DistributedRuntime:
 
     def shutdown(self) -> None:
         """
-        Shutdown the runtime by triggering the cancellation token
+        Start runtime teardown and return immediately.
+
+        The three-phase sequence is spawned, so a caller that exits straight
+        after can terminate before it runs, skipping the endpoint in-flight
+        drain. Prefer `shutdown_and_wait()` when the process is about to exit.
+        """
+        ...
+
+    async def shutdown_and_wait(self, timeout_secs: Optional[float] = None) -> None:
+        """
+        Await runtime teardown: resolves once the in-flight drain has finished,
+        transport teardown has been signalled, and the tasks whose cleanup is
+        that signal have been joined — including the etcd keep-alive task that
+        issues `lease.revoke()`, so the instance is not left registered.
+
+        timeout_secs bounds the entire wait, defaulting to the worker shutdown
+        timeout. Up to five seconds (at most half the budget) is reserved for
+        transport teardown. A later caller can shorten an active drain deadline.
         """
         ...
 

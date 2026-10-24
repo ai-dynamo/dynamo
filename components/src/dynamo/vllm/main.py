@@ -284,7 +284,7 @@ async def worker(argv: list[str] | None = None) -> None:
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
-    install_signal_handlers(
+    wait_for_shutdown = install_signal_handlers(
         loop,
         runtime,
         shutdown_endpoints,
@@ -312,11 +312,15 @@ async def worker(argv: list[str] | None = None) -> None:
         )
     finally:
         try:
-            await close_worker_resources()
+            # Join teardown before asyncio.run closes the loop.
+            await wait_for_shutdown()
         finally:
-            # Accepted generations can finalize after the pre-shutdown hook.
-            if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
-                await close_configured_artifact_runtime()
+            try:
+                await close_worker_resources()
+            finally:
+                # Accepted generations can finalize after the pre-shutdown hook.
+                if os.environ.get("DYNAMO_ARTIFACT_CONFIG"):
+                    await close_configured_artifact_runtime()
 
     logger.debug("Worker function completed, exiting...")
 

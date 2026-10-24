@@ -19,6 +19,9 @@ pub async fn create_lease(
     ttl: u64,
     runtime: Runtime,
 ) -> anyhow::Result<u64> {
+    // Enroll before granting a lease: teardown must also await construction
+    // that races cancellation, not just already-running keep-alive tasks.
+    let teardown_guard = runtime.teardown_guard()?;
     let token = runtime.primary_token();
     if token.is_cancelled() {
         anyhow::bail!("lease creation cancelled");
@@ -43,6 +46,7 @@ pub async fn create_lease(
     let child = token.child_token();
 
     tokio::spawn(async move {
+        let _teardown_guard = teardown_guard;
         match keep_alive(connector, id, ttl, child).await {
             Ok(_) => tracing::trace!("keep alive task exited successfully"),
             Err(e) => {

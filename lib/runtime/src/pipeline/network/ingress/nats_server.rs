@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Multiplexed NATS server that handles multiple endpoints
@@ -33,6 +34,10 @@ pub struct NatsMultiplexedServer {
 struct EndpointTask {
     cancel_token: CancellationToken,
     join_handle: tokio::task::JoinHandle<()>,
+    /// Shared with the running `PushEndpoint`. `unregister_endpoint` sets it
+    /// before cancelling, so the endpoint's in-flight drain and the caller
+    /// waiting on this task spend the same bound.
+    drain_timeout: Arc<std::sync::OnceLock<Duration>>,
 }
 
 /// Subject suffix within a NATS service group; the group supplies the namespace and component.
@@ -136,10 +141,13 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         let endpoint_cancel_clone = endpoint_cancel.clone();
 
         // Build the push endpoint
+        let drain_timeout_cell: Arc<std::sync::OnceLock<Duration>> =
+            Arc::new(std::sync::OnceLock::new());
         let push_endpoint = PushEndpoint::builder()
             .service_handler(service_handler)
             .cancellation_token(endpoint_cancel_clone)
             .graceful_shutdown(true)
+            .drain_timeout(drain_timeout_cell.clone())
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build NATS push endpoint: {}", e))?;
 
@@ -188,13 +196,19 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             EndpointTask {
                 cancel_token: endpoint_cancel,
                 join_handle,
+                drain_timeout: drain_timeout_cell,
             },
         );
 
         Ok(())
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+    async fn unregister_endpoint(
+        &self,
+        endpoint_name: &str,
+        instance_id: u64,
+        drain_timeout: Duration,
+    ) -> Result<()> {
         let endpoint_id = {
             let mut matches = self.handlers.iter().filter(|entry| {
                 entry.key().0.name == endpoint_name && entry.key().1 == instance_id
@@ -207,7 +221,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             endpoint_id
         };
         if let Some(endpoint_id) = endpoint_id {
-            self.unregister_endpoint_instance(&endpoint_id, instance_id)
+            self.unregister_endpoint_instance(&endpoint_id, instance_id, drain_timeout)
                 .await?;
         }
         Ok(())
@@ -217,6 +231,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         &self,
         endpoint_id: &EndpointId,
         instance_id: u64,
+        drain_timeout: Duration,
     ) -> Result<()> {
         let endpoint_name = &endpoint_id.name;
         let endpoint_with_id = instance_subject(endpoint_name, instance_id);
@@ -226,6 +241,10 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
                 endpoint_with_id = %endpoint_with_id,
                 "Unregistering NATS endpoint"
             );
+            // Published before the cancel that starts the drain, so the
+            // endpoint reads it rather than falling back to the default.
+            let _ = task.drain_timeout.set(drain_timeout);
+
             // Cancel the token to trigger graceful shutdown
             task.cancel_token.cancel();
 

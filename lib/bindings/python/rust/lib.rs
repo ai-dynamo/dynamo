@@ -1526,8 +1526,37 @@ impl DistributedRuntime {
         })
     }
 
+    /// Start runtime teardown and return immediately.
+    ///
+    /// The three-phase sequence is spawned, so a caller that exits straight
+    /// after can terminate before it runs, skipping the endpoint inflight
+    /// drain. Prefer `shutdown_and_wait()` when the process is about to exit.
     fn shutdown(&self) {
         self.inner.shutdown();
+    }
+
+    /// Awaitable runtime teardown: resolves once the transports have actually
+    /// been torn down. The caller's remaining budget bounds the entire wait,
+    /// reserving time for transport teardown after draining requests.
+    #[pyo3(signature = (timeout_secs=None))]
+    fn shutdown_and_wait<'p>(
+        &self,
+        py: Python<'p>,
+        timeout_secs: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let budget = timeout_secs
+            .map(std::time::Duration::try_from_secs_f64)
+            .transpose()
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
+            .unwrap_or_else(dynamo_runtime::worker::graceful_shutdown_timeout);
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner
+                .shutdown_with_budget(budget)
+                .await
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(())
+        })
     }
 
     fn event_loop(&self) -> PyObject {
