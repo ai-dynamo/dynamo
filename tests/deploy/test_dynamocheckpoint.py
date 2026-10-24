@@ -69,6 +69,9 @@ MODEL_READY_ATTEMPT_TIMEOUTS = [60.0, 30.0, 10.0, 10.0, 10.0, 10.0]
 CHECKPOINT_READY_TIMEOUT = 300
 RESTORE_READY_TIMEOUT = 300
 DECODE_SCALE_TIMEOUT = 60
+# Slack past a pod's terminationGracePeriodSeconds for SIGKILL and the
+# vCluster syncer to remove the terminated pod object.
+POD_DELETION_MARGIN = 60
 RESTORED_DEPLOYMENT_READY_TIMEOUT = 180
 # Phase caps are deliberately non-additive: successful phases normally finish
 # well below their individual ceilings. TEST_TIMEOUT is the global 28-minute
@@ -481,6 +484,15 @@ def _runtime_decode_pods(
     return [pod for pod in pods if not _is_snapshot_job_source(pod)]
 
 
+def _termination_grace_period_s(pods: list[Any]) -> int:
+    # Kubernetes applies 30s when terminationGracePeriodSeconds is unset.
+    def grace_period(pod: Any) -> int:
+        value = pod.raw.get("spec", {}).get("terminationGracePeriodSeconds")
+        return 30 if value is None else int(value)
+
+    return max((grace_period(pod) for pod in pods), default=0)
+
+
 async def _wait_for_restored_decode_pod(
     deployment: ManagedDeployment,
     backend: CheckpointBackendConfig,
@@ -564,12 +576,14 @@ async def _wait_for_decode_runtime_pod_count(
     deployment: ManagedDeployment,
     backend: CheckpointBackendConfig,
     expected: int,
+    *,
+    timeout_s: int = DECODE_SCALE_TIMEOUT,
 ) -> list[Any]:
     return await _wait_for(
         f"{expected} {backend.name} decode runtime pod(s)",
         lambda: _runtime_decode_pods(deployment, backend),
         lambda pods: len(pods) == expected,
-        timeout_s=DECODE_SCALE_TIMEOUT,
+        timeout_s=timeout_s,
         interval_s=2,
     )
 
@@ -698,6 +712,7 @@ async def test_dgd_checkpoint_restore_deploy(
         base_url = f"http://localhost:{port_forward.local_port}"
 
         old_pod_names: set[str] | None = None
+        initial_pods: list[Any] = []
         if backend.checkpoint_startup_policy is None:
             initial_pods = await _wait_for_decode_runtime_pod_count(
                 deployment, backend, expected=1
@@ -711,7 +726,13 @@ async def test_dgd_checkpoint_restore_deploy(
         if old_pod_names is not None:
             logger.info("Scaling Immediate decode worker down after capture")
             await _scale_decode_component(deployment, backend, replicas=0)
-            await _wait_for_decode_runtime_pod_count(deployment, backend, expected=0)
+            await _wait_for_decode_runtime_pod_count(
+                deployment,
+                backend,
+                expected=0,
+                timeout_s=_termination_grace_period_s(initial_pods)
+                + POD_DELETION_MARGIN,
+            )
             logger.info("Scaling Immediate decode worker up to trigger restore")
             await _scale_decode_component(deployment, backend, replicas=1)
 
