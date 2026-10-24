@@ -2243,11 +2243,16 @@ def run_input(
     input: str,
     engine_config: EngineConfig,
     frontend_route_extensions: Optional[Sequence[FrontendRoute]] = None,
+    forward_routes: Optional[Sequence[str]] = None,
 ) -> asyncio.Future[None]:
     """Start an engine, connect it to an input, and run until stopped.
 
     ``frontend_route_extensions`` supplies additional HTTP routes to the
     frontend (HTTP input only); see ``FrontendRoute``.
+
+    ``forward_routes`` lists ``PREFIX=URL`` entries the HTTP frontend
+    reverse-proxies to upstream servers (HTTP input only). ``None`` falls back
+    to ``DYN_HTTP_FORWARD_ROUTES``.
     """
     ...
 

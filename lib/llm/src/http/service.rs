@@ -28,6 +28,7 @@ mod write_timeout;
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
+mod forward;
 pub mod frontend_extension;
 pub mod generate;
 pub mod health;
