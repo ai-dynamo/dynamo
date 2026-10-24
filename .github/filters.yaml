@@ -195,6 +195,8 @@ core:
   # TokenSpeed Docker images and backend-specific build/test jobs.
   - 'components/src/dynamo/tokenspeed/**'
   - 'examples/backends/tokenspeed/**'
+  - 'components/src/dynamo/deepinfer/**'
+  - 'examples/backends/deepinfer/**'
   - 'components/src/dynamo/squeeze_evolve/**'
   - '*.toml'
   - '*.lock'

@@ -249,7 +249,13 @@ areas:
   - components/src/dynamo/common/memory/
   - components/src/dynamo/common/tests/
   - components/src/dynamo/common/utils/
+  - components/src/dynamo/deepinfer/
+  - components/src/dynamo/deepinfer/kv_cache/
+  - components/src/dynamo/deepinfer/testing/
+  - components/src/dynamo/deepinfer/tests/
   - components/src/dynamo/experimental/
+  - examples/backends/deepinfer/
+  - examples/backends/deepinfer/cpu_affinity/
   - examples/backends/sample/
   - examples/common/
   - examples/custom_backend/

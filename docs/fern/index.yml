@@ -529,6 +529,11 @@ navigation:
               - section: Backends
                 collapsed: open-by-default
                 contents:
+                  - section: DeepInfer
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/deepinfer/overview.md
                   - section: SGLang
                     collapsed: true
                     contents:
