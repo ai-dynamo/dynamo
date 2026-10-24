@@ -93,7 +93,7 @@ jobs:
           echo "image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${target_tag_plain}${IMAGE_TAG_SUFFIX}" >> "${GITHUB_OUTPUT}"
 
       - name: Initialize Dynamo Builder
-        uses: $/.github/actions/init-dynamo-builder
+        uses: ai-dynamo/.github/.github/actions/init-dynamo-builder@e8cb76eeca91bbac2ab5c2702bd8bd629b20dd3a  # ai-dynamo/.github#9
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: general

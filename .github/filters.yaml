@@ -161,7 +161,6 @@ ci: &ci
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/pytest-local.sh'
-  - '.github/scripts/route_buildkit.sh'
   - 'container/Dockerfile.test'
 
 core:
