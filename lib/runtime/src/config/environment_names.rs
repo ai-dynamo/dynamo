@@ -100,6 +100,52 @@ pub mod logging {
         /// Headers for logs specifically. Replaces OTEL_EXPORTER_OTLP_HEADERS when set.
         pub const OTEL_EXPORTER_OTLP_LOGS_HEADERS: &str = "OTEL_EXPORTER_OTLP_LOGS_HEADERS";
 
+        /// Path to a PEM-encoded CA bundle used to verify the OTLP collector's
+        /// server certificate. When unset, the exporter trusts the embedded
+        /// webpki roots (Mozilla's CA bundle). Per-signal
+        /// `OTEL_EXPORTER_OTLP_{TRACES,LOGS}_CERTIFICATE` override this.
+        pub const OTEL_EXPORTER_OTLP_CERTIFICATE: &str = "OTEL_EXPORTER_OTLP_CERTIFICATE";
+
+        /// CA bundle for tracing export. Falls back to OTEL_EXPORTER_OTLP_CERTIFICATE.
+        pub const OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE: &str =
+            "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE";
+
+        /// CA bundle for log export. Falls back to OTEL_EXPORTER_OTLP_CERTIFICATE.
+        pub const OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE: &str = "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE";
+
+        /// PEM-encoded client certificate presented to the collector for mutual TLS.
+        /// Must be paired with `OTEL_EXPORTER_OTLP_CLIENT_KEY`.
+        pub const OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE: &str =
+            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE";
+
+        /// Client certificate for tracing export. Falls back to OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE.
+        pub const OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE: &str =
+            "OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE";
+
+        /// Client certificate for log export. Falls back to OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE.
+        pub const OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE: &str =
+            "OTEL_EXPORTER_OTLP_LOGS_CLIENT_CERTIFICATE";
+
+        /// PEM-encoded private key for the OTLP client certificate.
+        pub const OTEL_EXPORTER_OTLP_CLIENT_KEY: &str = "OTEL_EXPORTER_OTLP_CLIENT_KEY";
+
+        /// Client private key for tracing export. Falls back to OTEL_EXPORTER_OTLP_CLIENT_KEY.
+        pub const OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY: &str =
+            "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY";
+
+        /// Max time in millis for an OTLP export (traces & logs) before giving up.
+        /// Per-signal `OTEL_EXPORTER_OTLP_{TRACES,LOGS}_TIMEOUT` override this.
+        pub const OTEL_EXPORTER_OTLP_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_TIMEOUT";
+
+        /// Export timeout for traces. Falls back to OTEL_EXPORTER_OTLP_TIMEOUT.
+        pub const OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT";
+
+        /// Export timeout for logs. Falls back to OTEL_EXPORTER_OTLP_TIMEOUT.
+        pub const OTEL_EXPORTER_OTLP_LOGS_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_LOGS_TIMEOUT";
+
+        /// Client private key for log export. Falls back to OTEL_EXPORTER_OTLP_CLIENT_KEY.
+        pub const OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY: &str = "OTEL_EXPORTER_OTLP_LOGS_CLIENT_KEY";
+
         /// Resource attributes applied to every exported signal, as `key=value`
         /// pairs separated by commas.
         pub const OTEL_RESOURCE_ATTRIBUTES: &str = "OTEL_RESOURCE_ATTRIBUTES";

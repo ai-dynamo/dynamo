@@ -128,6 +128,9 @@ reqwest = { version = "0.12.24", default-features = false, features = [
     "json",
     "stream",
     "rustls-tls",
+    # Used to build a blocking OTLP HTTP client when mTLS is configured —
+    # BatchSpanProcessor exports on an SDK-owned thread without a Tokio reactor.
+    "blocking",
 ] }
 rmp-serde = { version = "1" }
 serde_bytes = { version = "0.11" }
@@ -167,6 +170,15 @@ opentelemetry-otlp = { version = "0.31.0", features = [
     "grpc-tonic",
     "http-proto",
     "reqwest-rustls",
+    # Span/log exporters run on an SDK-owned thread (BatchSpanProcessor), so
+    # the HTTP transport must be a blocking client, not async reqwest.
+    "reqwest-blocking-client",
+    # TLS support for the gRPC exporter and webpki root CAs. We choose
+    # webpki-roots (Mozilla's static bundle) over tls-native-roots so the
+    # exporter works identically in Kubernetes images where the OS CA
+    # bundle may not be installed.
+    "tls",
+    "tls-webpki-roots",
 ] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
 opentelemetry-proto = { version = "0.31.0", default-features = false, features = [
