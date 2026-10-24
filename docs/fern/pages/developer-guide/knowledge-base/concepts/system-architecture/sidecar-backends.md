@@ -106,7 +106,10 @@ life of the pod. Declaring the `runtime` init container enables sidecar mode in
 the Dynamo operator, which gives the sidecar `/live` and `/health` probes on
 port `9090`. These probes do not track engine loading, so keep the engine's own
 probes on `main`. Sidecar mode supports worker, prefill, and decode components;
-multinode deployments are not yet supported.
+SGLang multinode deployments require explicit leader and worker role PodTemplates
+and `backendFramework: sglang`. The leader declares `runtime`; worker placement
+depends on the engine topology. Other backends do not yet support operator-managed
+multinode sidecars. See the [SGLang guide](../../modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes).
 
 ## Topologies
 
