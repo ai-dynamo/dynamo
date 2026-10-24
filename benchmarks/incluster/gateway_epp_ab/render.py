@@ -70,8 +70,9 @@ def render_arm(
                 spec = component["podTemplate"]["spec"]
                 if component["type"] in ROUTER_TYPES:
                     router_image = args.frontend_image
-                    if component["type"] == "epp" and args.epp_image:
-                        router_image = args.epp_image
+                    if component["type"] == "epp":
+                        router_image = args.epp_image or args.frontend_image
+                        set_epp_replicas(component, args.epp_replicas)
                     images = {"main": router_image}
                 else:
                     component["replicas"] = args.replicas
@@ -94,6 +95,18 @@ def render_arm(
         else:
             raise SystemExit(f"unexpected {obj['kind']} in an arm manifest")
     return objects
+
+
+def set_epp_replicas(component: dict[str, Any], replicas: int) -> None:
+    """Run `replicas` EPPs. More than one share their load bookkeeping through
+    router replica sync, so each still sees every routed request."""
+    component["replicas"] = replicas
+    if replicas > 1:
+        for container in component["podTemplate"]["spec"]["containers"]:
+            if container["name"] == "main":
+                container.setdefault("env", []).append(
+                    {"name": "DYN_ROUTER_REPLICA_SYNC", "value": "true"}
+                )
 
 
 def render_job(
@@ -211,6 +224,7 @@ def main(argv: list[str] | None = None) -> None:
     arm.add_argument(
         "--epp-image", default="", help="arm B's EPP; empty means --frontend-image"
     )
+    arm.add_argument("--epp-replicas", type=int, default=1, help="arm B's EPPs")
     arm.add_argument(
         "--runtime-version", default="", help="Dynamo version of the images"
     )

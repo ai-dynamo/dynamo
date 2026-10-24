@@ -365,6 +365,7 @@ Keep these limits in mind when reading the results:
 | `DYNAMO_VERSION` | `1.5.1` | tag of the default images |
 | `FRONTEND_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION` | Frontend, EPP and sidecar; 1.5 images lack the latency fixes |
 | `WORKER_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION` | mocker workers |
+| `EPP_REPLICAS` | `1` | arm B's EPPs. Above 1 the harness sets `DYN_ROUTER_REPLICA_SYNC=true` on them, so they share their load bookkeeping and each still sees every routed request |
 | `EPP_IMAGE` | empty, meaning `FRONTEND_IMAGE` | arm B's EPP only, for comparing EPP builds: a frontend image or a `dynamo-epp` image. The sidecars and arm A keep `FRONTEND_IMAGE`, and aiperf runs from `FRONTEND_IMAGE` unless `AIPERF_IMAGE` is set |
 | `RUNTIME_VERSION` | none | Dynamo version of both images, for tags without one, such as nightly tags; the operator then requires it |
 | `AIPERF_IMAGE` | the image of the arm's Frontend or EPP; `FRONTEND_IMAGE` when `EPP_IMAGE` is set | the aiperf Job; the frontend image ships aiperf. Pin it to keep one aiperf version across the builds you compare |

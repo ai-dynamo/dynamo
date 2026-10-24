@@ -35,6 +35,8 @@ WORKER_IMAGE=${WORKER_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VER
 # Empty means FRONTEND_IMAGE. Set it to run arm B's EPP from another build, such
 # as a dynamo-epp image, while the sidecars and arm A keep FRONTEND_IMAGE.
 EPP_IMAGE=${EPP_IMAGE:-}
+# Arm B's EPPs. Above 1 they share their load bookkeeping (router replica sync).
+EPP_REPLICAS=${EPP_REPLICAS:-1}
 # The Dynamo version of those images, for tags the operator cannot read a
 # version from, such as nightly tags.
 RUNTIME_VERSION=${RUNTIME_VERSION:-}
@@ -73,7 +75,7 @@ BURST_PHASE_STARTS=${BURST_PHASE_STARTS:-1}
 
 # Every setting above. deploy and bench record them with the arm's results.
 SETTINGS=(
-  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP MAX_WORKERS_PER_NODE DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE EPP_IMAGE RUNTIME_VERSION
+  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP MAX_WORKERS_PER_NODE DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE EPP_IMAGE EPP_REPLICAS RUNTIME_VERSION
   AIPERF_IMAGE MODEL_CACHE_PVC IMAGE_PULL_SECRET GATEWAY_NAME GATEWAY_NAMESPACE READY_TIMEOUT SETTLE_SECONDS
   BENCH_TIMEOUT ORDER KEEP SESSIONS DURATION_S ROUNDS DATASET MAX_CONTEXT TRACES COOLDOWN_S SEED
   SMOKE_TIMEOUT_S SAMPLE_WORKERS SERVER_METRICS_FORMATS BURST_PHASE_STARTS
@@ -114,7 +116,7 @@ job_pod() { k get pods -l "job-name=$(dgd_of "$1")-aiperf" -o jsonpath='{.items[
 
 validate_settings() {
   local name value values
-  for name in WORKERS DURATION_S ROUNDS MAX_CONTEXT READY_TIMEOUT BENCH_TIMEOUT; do
+  for name in WORKERS EPP_REPLICAS DURATION_S ROUNDS MAX_CONTEXT READY_TIMEOUT BENCH_TIMEOUT; do
     [[ ${!name} =~ ^[1-9][0-9]*$ ]] || invalid "$name must be a positive integer, not '${!name}'"
   done
   for name in RAMP_STEP MAX_WORKERS_PER_NODE COOLDOWN_S SEED SETTLE_SECONDS SMOKE_TIMEOUT_S SAMPLE_WORKERS; do
@@ -179,7 +181,7 @@ render_arm() {
   k create --dry-run=client -o json -f "$HERE/$(label_of "$1").yaml" |
     python3 "$HERE/render.py" arm --replicas "$2" \
       --frontend-image "$FRONTEND_IMAGE" --worker-image "$WORKER_IMAGE" \
-      --epp-image "$EPP_IMAGE" \
+      --epp-image "$EPP_IMAGE" --epp-replicas "$EPP_REPLICAS" \
       --runtime-version "$RUNTIME_VERSION" \
       --model-cache-pvc "$MODEL_CACHE_PVC" --image-pull-secret "$IMAGE_PULL_SECRET" \
       --gateway-name "$GATEWAY_NAME" --gateway-namespace "$GATEWAY_NAMESPACE" \

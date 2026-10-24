@@ -217,6 +217,7 @@ def render_args(**overrides):
         frontend_image="registry.test/frontend:x",
         worker_image="registry.test/planner:x",
         epp_image="",
+        epp_replicas=1,
         runtime_version="",
         model_cache_pvc="shared-cache",
         image_pull_secret="pull-secret",
@@ -242,6 +243,19 @@ def test_render_arm_runs_only_the_epp_from_epp_image(arm_a, arm_b):
     assert containers(worker)["sidecar-frontend"]["image"] == "registry.test/frontend:x"
     frontend = component(dgd_a, "frontend")
     assert containers(frontend)["main"]["image"] == "registry.test/frontend:x"
+
+
+@pytest.mark.parametrize("replicas", [1, 2])
+def test_render_arm_scales_the_epp_with_replica_sync(arm_b, replicas):
+    # Several EPPs must share load bookkeeping, or each routes on half of it.
+    args = render_args(epp_replicas=replicas)
+    dgd = by_kind(
+        render.render_arm(copy.deepcopy(arm_b), args), "DynamoGraphDeployment"
+    )
+    epp = component(dgd, "epp")
+    assert epp["replicas"] == replicas
+    sync = {"name": "DYN_ROUTER_REPLICA_SYNC", "value": "true"}
+    assert (sync in containers(epp)["main"]["env"]) == (replicas > 1)
 
 
 @pytest.mark.parametrize("version", ["", "1.6.0"])
