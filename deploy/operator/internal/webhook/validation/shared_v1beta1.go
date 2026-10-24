@@ -89,6 +89,14 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 
+	// Reject the declarative opt-in until its DGD workload pathway is implemented.
+	if spec.EngineGroup != nil {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("engineGroup"),
+			"DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept",
+		))
+	}
+
 	// Enforce Grove-only availability semantics before validating later fields.
 	if spec.MinAvailable != nil && !options.grovePathway {
 		allErrs = append(allErrs, field.Forbidden(
