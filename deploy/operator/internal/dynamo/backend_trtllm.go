@@ -130,11 +130,11 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		}
 		originalCommand = strings.Join(quotedParts, " ")
 	} else if len(container.Args) > 0 {
-		// Shell command (sh -c): args contains the full command
-		originalCommand = strings.Join(container.Args, " ")
+		// Shell command (sh -c): preserve the script inside the outer single quotes.
+		originalCommand = strings.ReplaceAll(strings.Join(container.Args, " "), "'", "'\\''")
 	} else if len(container.Command) > 0 {
-		// Fallback: just command
-		originalCommand = strings.Join(container.Command, " ")
+		// Fallback: preserve the command inside the outer single quotes.
+		originalCommand = strings.ReplaceAll(strings.Join(container.Command, " "), "'", "'\\''")
 	}
 
 	// Setup SSH and run mpirun command

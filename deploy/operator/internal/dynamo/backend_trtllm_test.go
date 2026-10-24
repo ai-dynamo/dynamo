@@ -1,6 +1,9 @@
 package dynamo
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -149,6 +152,81 @@ func TestShellQuoteForBashC_InLeaderCommand(t *testing.T) {
 	// Verify the command is wrapped in bash -c with trtllm-llmapi-launch
 	if !strings.Contains(cmd, "bash -c 'trtllm-llmapi-launch") {
 		t.Errorf("command should contain bash -c 'trtllm-llmapi-launch wrapper.\nGot: %s", cmd)
+	}
+}
+
+func TestTRTLLMBackend_LeaderShellArgv(t *testing.T) {
+	t.Log("Install a launcher stub that records exact argv without MPI or GPUs")
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "trtllm-llmapi-launch"), []byte("#!/bin/sh\nfor arg do printf '%s\\0' \"$arg\"; done\n"), 0755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("X", "outer-shell-value")
+
+	// Exercise raw scripts and unchanged paths through the generated shell wrapper.
+	jsonOverride := `{"kv_cache_config":{"free_gpu_memory_fraction": 0.24}}`
+	tests := []struct {
+		name            string
+		command, args   []string
+		want            []string
+		wantOuterScript string
+	}{
+		{
+			name:    "shell_json_override",
+			command: []string{"/bin/sh", "-c"},
+			args:    []string{`python3 -m dynamo.trtllm --override-engine-args '` + jsonOverride + `'`},
+			want:    []string{"python3", "-m", "dynamo.trtllm", "--override-engine-args", jsonOverride},
+		},
+		{
+			name:    "shell_quoted_name_and_later_args",
+			command: []string{"/bin/sh", "-c"},
+			args:    []string{`python3 -m dynamo.trtllm --served-model-name 'deepseek r1' --disaggregation-mode decode`},
+			want:    []string{"python3", "-m", "dynamo.trtllm", "--served-model-name", "deepseek r1", "--disaggregation-mode", "decode"},
+		},
+		{
+			name:    "shell_expansion_and_operators_control",
+			command: []string{"/bin/sh", "-c"},
+			args:    []string{`python3; X=1; echo "$X" | grep -qx 1 && trtllm-llmapi-launch "$X" "\$X" "" "deepseek r1"; false && trtllm-llmapi-launch unexpected; true`},
+			want:    []string{"python3", "1", "$X", "", "deepseek r1"},
+		},
+		{
+			name:            "command_only_outer_quoting",
+			command:         []string{"/bin/sh", "-c", `python3 -m dynamo.trtllm --served-model-name 'deepseek r1' --disaggregation-mode decode`},
+			want:            []string{"/bin/sh", "-c", "python3", "-m", "dynamo.trtllm", "--served-model-name", "deepseek r1", "--disaggregation-mode", "decode"},
+			wantOuterScript: `trtllm-llmapi-launch /bin/sh -c python3 -m dynamo.trtllm --served-model-name 'deepseek r1' --disaggregation-mode decode`,
+		},
+		{
+			name:    "direct_python_argv_control",
+			command: []string{"python3", "-m", "dynamo.trtllm"},
+			args:    []string{"--override-engine-args", jsonOverride, "--served-model-name", "deepseek r1", "--model-path", "it's/$X"},
+			want:    []string{"python3", "-m", "dynamo.trtllm", "--override-engine-args", jsonOverride, "--served-model-name", "deepseek r1", "--model-path", "it's/$X"},
+		},
+		{name: "empty_shell_script_control", command: []string{"/bin/sh", "-c"}, args: []string{""}},
+		{name: "absent_command_and_args_control"},
+	}
+
+	// Keep generation and execution together so every case exercises the real backend.
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Generate the multinode leader command and isolate its bash wrapper")
+			container := &corev1.Container{Command: tt.command, Args: tt.args}
+			backend := &TRTLLMBackend{}
+			backend.setupLeaderContainer(container, 2, "dec", &GroveMultinodeDeployer{}, 1)
+			_, wrapper, found := strings.Cut(container.Args[0], "bash -c ")
+			require.True(t, found)
+			wrapper = "bash -c " + wrapper
+
+			t.Log("Run the generated wrapper through a real sh and assert every argv byte")
+			output, err := exec.Command("sh", "-c", wrapper).CombinedOutput()
+			require.NoError(t, err, "shell output: %s", output)
+			require.Equal(t, strings.Join(append(tt.want, ""), "\x00"), string(output))
+
+			t.Log("For command-only input, also inspect the script delivered by the outer shell")
+			if tt.wantOuterScript != "" {
+				output, err := exec.Command("sh", "-c", "set -- "+wrapper+`; printf '%s\0' "$@"`).CombinedOutput()
+				require.NoError(t, err, "outer shell output: %s", output)
+				require.Equal(t, "bash\x00-c\x00"+tt.wantOuterScript+"\x00", string(output))
+			}
+		})
 	}
 }
 
