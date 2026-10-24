@@ -24,6 +24,7 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
+from vllm.utils.import_utils import import_plugin
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
@@ -1553,6 +1554,22 @@ class VllmProcessor:
                     )
 
 
+def _import_parser_plugin(plugin: str) -> None:
+    """Import a parser plugin file to register a corresponding parser class"""
+    try:
+        module = import_plugin(plugin)
+    except Exception as exc:
+        # Any other errors except for `ModuleNotFoundError` happened.
+        raise RuntimeError(f"Failed to import vLLM parser plugin: {plugin!r}") from exc
+    if module is None:
+        # Inside of `import_plugin()`, `ModuleNotFoundError` happened
+        # and a module can't be loaded even with `import_from_path()`.
+        raise RuntimeError(
+            f"Failed to import vLLM parser plugin: {plugin!r}; "
+            "see the preceding vLLM log for details"
+        )
+
+
 class EngineFactory:
     def __init__(
         self,
@@ -1572,6 +1589,12 @@ class EngineFactory:
                     raw_stream_interval,
                     self.stream_interval,
                 )
+
+        # Import given plugin parser files.
+        if plugin_path := getattr(flags, "reasoning_parser_plugin", None):
+            _import_parser_plugin(plugin_path)
+        if plugin_path := getattr(flags, "tool_parser_plugin", None):
+            _import_parser_plugin(plugin_path)
 
     async def chat_engine_factory(
         self,
