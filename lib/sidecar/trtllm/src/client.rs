@@ -12,7 +12,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::time::{Instant, sleep_until, timeout_at};
 
-use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
+use dynamo_backend_common::{DynamoError, ErrorType};
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
     connection_timeout,
@@ -20,7 +20,7 @@ use dynamo_sidecar_common::{
 use tonic::transport::Channel;
 
 pub(crate) use dynamo_sidecar_common::{
-    cancelled, engine_shutdown, invalid_argument, status_to_dynamo,
+    cancelled, engine_error, engine_shutdown, invalid_argument, status_to_dynamo,
 };
 
 use crate::proto as pb;
@@ -362,13 +362,4 @@ fn is_request_itself_wrong(status: &tonic::Status) -> bool {
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("TensorRT-LLM", message)
-}
-
-/// A generation failure the engine reported in-band via an `EngineError` event
-/// (as opposed to a transport/validation gRPC status).
-pub(crate) fn engine_error(message: impl Into<String>) -> DynamoError {
-    DynamoError::builder()
-        .error_type(ErrorType::Backend(BackendError::Unknown))
-        .message(message)
-        .build()
 }

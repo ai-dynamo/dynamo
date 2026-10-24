@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, ComponentSnapshot, DisaggregationMode, DynamoError, EngineConfig,
     GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    MetricsBindings, MetricsCtx, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
+    MetricsBindings, MetricsCtx, PreprocessedRequest, WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{
-    EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
+    GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
@@ -109,10 +109,6 @@ impl TrtllmSidecarEngine {
         }
     }
 
-    pub fn from_env() -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::from_parsed(<Args as clap::Parser>::parse())
-    }
-
     pub fn from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), DynamoError> {
         Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo)
     }
@@ -124,34 +120,6 @@ impl TrtllmSidecarEngine {
     pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
         Self::from_parsed(args).map_err(Into::into)
-    }
-
-    /// Parse CLI arguments before starting the sidecar runtime.
-    pub fn from_cli() -> Result<
-        (
-            RuntimeConfig,
-            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
-        ),
-        DynamoError,
-    > {
-        let parsed = Self::from_parsed(<Args as clap::Parser>::parse())?;
-        Ok((parsed.1.runtime.clone(), Self::bootstrap(parsed)))
-    }
-
-    /// Parse embedded launcher arguments now, then discover metadata after the
-    /// shared sidecar runner has started probes and connected the runtime.
-    pub fn try_from_args_async(
-        argv: Vec<String>,
-    ) -> Result<
-        (
-            RuntimeConfig,
-            impl std::future::Future<Output = EngineBootstrapResult<Self>>,
-        ),
-        SidecarStartupError,
-    > {
-        let args = <Args as clap::Parser>::try_parse_from(argv)?;
-        let initialized = Self::from_parsed(args)?;
-        Ok((initialized.1.runtime.clone(), Self::bootstrap(initialized)))
     }
 
     pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -199,11 +167,9 @@ impl TrtllmSidecarEngine {
             // Every disaggregated role registers under its own component so
             // the frontend can target each separately; only an aggregated
             // worker uses the operator-configured one.
-            component: if mode == DisaggregationMode::Aggregated {
-                args.sidecar.common.component
-            } else {
-                mode.discovery_component().to_string()
-            },
+            component: mode
+                .registration_component(&args.sidecar.common.component)
+                .to_string(),
             endpoint: args.sidecar.common.endpoint,
             endpoint_types: args.sidecar.common.endpoint_types,
             custom_jinja_template: args.sidecar.common.custom_jinja_template,

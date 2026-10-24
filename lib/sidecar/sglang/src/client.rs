@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
-use dynamo_backend_common::{BackendError, DisaggregationMode, DynamoError, ErrorType};
+use dynamo_backend_common::{DisaggregationMode, DynamoError};
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
+    cannot_connect, connection_timeout, engine_error, invalid_argument, startup_deadline,
+    status_to_dynamo,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -262,7 +264,7 @@ pub(crate) async fn bootstrap_discover(
     transport: &GrpcTransportConfig,
     bootstrap: bool,
 ) -> Result<StartupDiscovery, DynamoError> {
-    let deadline = Instant::now() + transport.startup_deadline;
+    let deadline = startup_deadline(transport.startup_deadline)?;
     let mut client = connect(endpoint, transport, deadline, bootstrap).await?;
     let server_info = get_server_info(&mut client, deadline).await?;
     if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
@@ -371,7 +373,7 @@ async fn discover_with_server_info(
     deadline: Instant,
 ) -> Result<Discovery, DynamoError> {
     if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
-        return Err(invalid_arg(
+        return Err(invalid_argument(
             "inference discovery requires node_rank=0; followers expose only GetServerInfo",
         ));
     }
@@ -456,7 +458,7 @@ fn parse_discovery(
         .and_then(Value::as_bool)
         != Some(true)
     {
-        return Err(invalid_arg(
+        return Err(invalid_argument(
             "SGLang sidecar requires incremental streaming output; restart the SGLang server \
              with --incremental-streaming-output to prevent duplicated tokens and inflated \
              completion-token counts",
@@ -472,7 +474,7 @@ fn parse_discovery(
         model.model_path
     };
     if model_path.trim().is_empty() {
-        return Err(protocol_error(
+        return Err(engine_error(
             "SGLang GetModelInfo returned an empty model_path",
         ));
     }
@@ -523,17 +525,17 @@ pub(crate) fn discovery_mode(server_info: &Value) -> Result<DisaggregationMode, 
         "null" | "agg" | "aggregated" => Ok(DisaggregationMode::Aggregated),
         "prefill" => Ok(DisaggregationMode::Prefill),
         "decode" => Ok(DisaggregationMode::Decode),
-        mode => Err(protocol_error(format!(
+        mode => Err(engine_error(format!(
             "unsupported SGLang disaggregation_mode `{mode}`"
         ))),
     }
 }
 
 fn parse_json_object(label: &str, raw: &str) -> Result<Value, DynamoError> {
-    let value: Value = serde_json::from_str(raw)
-        .map_err(|err| protocol_error(format!("invalid {label}: {err}")))?;
+    let value: Value =
+        serde_json::from_str(raw).map_err(|err| engine_error(format!("invalid {label}: {err}")))?;
     if !value.is_object() {
-        return Err(protocol_error(format!("{label} must be a JSON object")));
+        return Err(engine_error(format!("{label} must be a JSON object")));
     }
     Ok(value)
 }
@@ -551,62 +553,6 @@ pub(crate) fn json_u32(value: &Value, key: &str) -> Option<u32> {
     json_u64(value, key).and_then(|number| u32::try_from(number).ok())
 }
 
-fn backend(kind: BackendError, message: impl Into<String>) -> DynamoError {
-    DynamoError::builder()
-        .error_type(ErrorType::Backend(kind))
-        .message(message)
-        .build()
-}
-
-pub fn invalid_arg(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::InvalidArgument, message)
-}
-
-/// The frontend returns `message` to the client, so it takes only fixed request-validation text.
-pub(crate) fn invalid_request(message: &'static str) -> DynamoError {
-    DynamoError::builder()
-        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
-        .message(message)
-        .public_message(message)
-        .build()
-}
-
-pub fn engine_shutdown(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::EngineShutdown, message)
-}
-
-pub fn cannot_connect(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::CannotConnect, message)
-}
-
-pub(crate) fn connection_timeout(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::ConnectionTimeout, message)
-}
-
-pub(crate) fn cancelled(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::Cancelled, message)
-}
-
-pub fn protocol_error(message: impl Into<String>) -> DynamoError {
-    backend(BackendError::Unknown, message)
-}
-
-pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
-    let kind = match status.code() {
-        tonic::Code::InvalidArgument | tonic::Code::NotFound | tonic::Code::OutOfRange => {
-            BackendError::InvalidArgument
-        }
-        tonic::Code::Unavailable => BackendError::CannotConnect,
-        tonic::Code::Cancelled => BackendError::Cancelled,
-        tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
-        _ => BackendError::Unknown,
-    };
-    backend(
-        kind,
-        format!("{rpc}: {} ({:?})", status.message(), status.code()),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -619,7 +565,7 @@ mod tests {
 
     use super::{
         NodeMetadata, client_from_channel, discover, discovery_mode, json_u32, json_u64,
-        parse_discovery, rpc_with_deadline, status_to_dynamo, worker_group_id_from_addresses,
+        parse_discovery, rpc_with_deadline, worker_group_id_from_addresses,
     };
     use crate::proto as pb;
 
@@ -1038,28 +984,6 @@ mod tests {
             .unwrap();
             assert_eq!(info.served_model_name.as_deref(), Some("first-alias"));
             assert_eq!(info.max_model_len, expected);
-        }
-    }
-
-    #[test]
-    fn rpc_status_mapping_preserves_error_kind_and_context() {
-        for (code, kind) in [
-            (tonic::Code::InvalidArgument, BackendError::InvalidArgument),
-            (tonic::Code::NotFound, BackendError::InvalidArgument),
-            (tonic::Code::OutOfRange, BackendError::InvalidArgument),
-            (tonic::Code::Unavailable, BackendError::CannotConnect),
-            (tonic::Code::Cancelled, BackendError::Cancelled),
-            (
-                tonic::Code::DeadlineExceeded,
-                BackendError::ConnectionTimeout,
-            ),
-            (tonic::Code::Internal, BackendError::Unknown),
-        ] {
-            let error =
-                status_to_dynamo("GetModelInfo", tonic::Status::new(code, "native failure"));
-            assert_eq!(error.error_type(), ErrorType::Backend(kind));
-            assert!(error.to_string().contains("GetModelInfo: native failure"));
-            assert!(error.to_string().contains(&format!("{code:?}")));
         }
     }
 

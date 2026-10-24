@@ -3,11 +3,11 @@
 
 use dynamo_backend_common::testing::mock_context;
 use dynamo_backend_common::{
-    BackendError, DisaggregationMode, DynamoError, FinishReason, GenerateContext, LLMEngine,
-    LLMEngineOutput, PreprocessedRequest,
+    BackendError, DisaggregationMode, DynamoError, ErrorType, FinishReason, GenerateContext,
+    LLMEngine, LLMEngineOutput, PreprocessedRequest,
 };
 use dynamo_llm::protocols::common::preprocessor::PrefillResult;
-use dynamo_sidecar_testkit::assert::{failure, terminal};
+use dynamo_sidecar_testkit::assert::{failure, failure_with, terminal};
 use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{
     Controller, Event, OpenAction, Protocol, RequestHandle, RequestPlan, StreamAction, StreamFault,
@@ -920,7 +920,7 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
                 if matches!(cancellation, Cancellation::Explicit) {
                     ctx.stop_generating();
                     outputs.push(bounded("HTTP cancelled response", stream.next()).await.unwrap());
-                    failure(outputs, &tokens, BackendError::Cancelled);
+                    failure_with(outputs, &tokens, ErrorType::Cancelled);
                 }
                 drop(stream);
                 http.wait_aborted(ctx.id()).await;
@@ -1123,10 +1123,10 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                 assert!(poll!(stream.next()).is_pending());
                 if matches!(cancellation, Cancellation::Explicit) {
                     ctx.stop_generating();
-                    failure(
+                    failure_with(
                         vec![bounded("HTTP decode cancellation", stream.next()).await.unwrap()],
                         &[],
-                        BackendError::Cancelled,
+                        ErrorType::Cancelled,
                     );
                 }
                 drop(stream);

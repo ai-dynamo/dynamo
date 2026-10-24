@@ -1138,7 +1138,7 @@ async fn a_cancelled_decode_dispatch_is_not_abandoned_mid_flight() {
 #[tokio::test]
 async fn bootstrap_discovers_once_but_requires_start_before_serving() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
-    let bootstrap = TrtllmSidecarEngine::try_from_args_async(vec![
+    let parsed = TrtllmSidecarEngine::from_args(vec![
         "dynamo-trtllm-sidecar".into(),
         "--grpc-endpoint".into(),
         server.endpoint.clone(),
@@ -1146,7 +1146,7 @@ async fn bootstrap_discovers_once_but_requires_start_before_serving() {
         "model-source".into(),
     ])
     .unwrap();
-    let (engine, _) = bootstrap.1.await.unwrap();
+    let (engine, _) = TrtllmSidecarEngine::bootstrap(parsed).await.unwrap();
     assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
     let context = dynamo_backend_common::testing::mock_context();
     let result = engine

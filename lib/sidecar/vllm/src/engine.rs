@@ -249,10 +249,9 @@ impl VllmSidecarEngine {
             // Disaggregated workers register under fixed role components so the
             // frontend can route the disaggregated handoff; aggregated keeps the
             // operator-configured component (`--component` / `DYN_COMPONENT`).
-            component: match mode {
-                DisaggregationMode::Aggregated => args.sidecar.common.component,
-                _ => mode.discovery_component().to_string(),
-            },
+            component: mode
+                .registration_component(&args.sidecar.common.component)
+                .to_string(),
             endpoint: args.sidecar.common.endpoint,
             endpoint_types: args.sidecar.common.endpoint_types,
             custom_jinja_template: args.sidecar.common.custom_jinja_template,
