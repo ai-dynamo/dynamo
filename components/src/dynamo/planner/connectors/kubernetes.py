@@ -33,6 +33,7 @@ from dynamo.planner.connectors.clients.kubernetes_api import (
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
     PLANNER_WRITER_FENCE_ANNOTATION,
+    REQUEST_TIMEOUT,
     KubernetesAPI,
 )
 from dynamo.planner.connectors.mdc import (
@@ -636,6 +637,7 @@ class KubernetesConnector(PlannerConnector):
                 version=DYNAMO_WORKER_METADATA_API_VERSION,
                 namespace=self.kube_api.current_namespace,
                 plural="dynamoworkermetadatas",
+                _request_timeout=REQUEST_TIMEOUT,
             )
             return result.get("items", [])
         except ApiException as e:
