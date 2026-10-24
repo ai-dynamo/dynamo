@@ -21,7 +21,9 @@ pytestmark = [
 
 
 def _make_vllm_config(
-    capacity_gb: float = 1.0, hf_config: SimpleNamespace | None = None
+    capacity_gb: float = 1.0,
+    hf_config: SimpleNamespace | None = None,
+    architecture: str | None = None,
 ) -> MagicMock:
     config = MagicMock()
     config.ec_transfer_config.ec_connector_extra_config = {
@@ -31,6 +33,7 @@ def _make_vllm_config(
     config.model_config.hf_config = (
         SimpleNamespace() if hf_config is None else hf_config
     )
+    config.model_config.architectures = [architecture] if architecture else []
     config.model_config.dtype = torch.float16
     config.parallel_config.data_parallel_rank = 0
     return config
@@ -48,6 +51,10 @@ def _deepstack_hf_config() -> SimpleNamespace:
 def _omni_hf_config() -> SimpleNamespace:
     # Qwen3-Omni keeps its DeepStack vision config under the thinker.
     return SimpleNamespace(thinker_config=_deepstack_hf_config())
+
+
+_QWEN3_VL = "Qwen3VLMoeForConditionalGeneration"
+_QWEN3_OMNI = "Qwen3OmniMoeForConditionalGeneration"
 
 
 def _make_request(
@@ -234,12 +241,16 @@ class TestSchedulerSideLRU:
 
 
 class TestEmbeddingRowSize:
-    """The per-embedding byte budget must match the encoder-cache row width."""
-
-    def _make_connector(self, hf_config: SimpleNamespace | None = None):
+    def _make_connector(
+        self,
+        hf_config: SimpleNamespace | None = None,
+        architecture: str | None = None,
+    ):
         with patch.object(mod.ECConnectorBase, "__init__", return_value=None):
             return mod.DynamoMultimodalEmbeddingCacheConnector(
-                vllm_config=_make_vllm_config(hf_config=hf_config),
+                vllm_config=_make_vllm_config(
+                    hf_config=hf_config, architecture=architecture
+                ),
                 role=MagicMock(),
             )
 
@@ -269,22 +280,30 @@ class TestEmbeddingRowSize:
         ids=["no_deepstack_attr", "empty_deepstack"],
     )
     def test_vision_model_without_deepstack_uses_hidden_size(self, vision_config):
-        conn = self._make_connector(SimpleNamespace(vision_config=vision_config))
+        conn = self._make_connector(
+            SimpleNamespace(vision_config=vision_config), _QWEN3_VL
+        )
+        assert conn._bytes_per_vision_embed == 4096 * 2
+
+    def test_unlisted_architecture_ignores_config_deepstack(self):
+        # vLLM's BailingMoeV3VL clears the config's DeepStack levels.
+        conn = self._make_connector(
+            _deepstack_hf_config(), "BailingMoeV3VLForConditionalGeneration"
+        )
         assert conn._bytes_per_vision_embed == 4096 * 2
 
     @pytest.mark.parametrize(
-        "hf_config",
-        [_deepstack_hf_config(), _omni_hf_config()],
+        ("hf_config", "architecture"),
+        [(_deepstack_hf_config(), _QWEN3_VL), (_omni_hf_config(), _QWEN3_OMNI)],
         ids=["qwen3_vl", "qwen3_omni"],
     )
-    def test_budget_follows_modality(self, hf_config):
-        conn = self._make_connector(hf_config)
+    def test_budget_follows_modality(self, hf_config, architecture):
+        conn = self._make_connector(hf_config, architecture)
         for mm_hash, modality in (("i", "image"), ("v", "video"), ("a", "audio")):
             conn.update_state_after_alloc(
                 _make_request([(mm_hash, 10)], modality=modality), 0
             )
 
-        # Image and video rows carry the DeepStack levels; audio rows do not.
         assert dict(conn._cache_order) == {
             "i": 10 * 4 * 4096 * 2,
             "v": 10 * 4 * 4096 * 2,
@@ -292,7 +311,7 @@ class TestEmbeddingRowSize:
         }
 
     def test_deepstack_capacity_bounds_stored_bytes(self):
-        conn = self._make_connector(_deepstack_hf_config())
+        conn = self._make_connector(_deepstack_hf_config(), _QWEN3_VL)
         image_bytes = 10 * 4 * 4096 * 2
         conn._capacity_bytes = 2 * image_bytes
 
@@ -316,7 +335,7 @@ class TestEmbeddingRowSize:
         assert sum(t.nbytes for t in conn._cpu_store.values()) == 2 * image_bytes
 
     def test_matching_rows_do_not_warn(self):
-        conn = self._make_connector(_omni_hf_config())
+        conn = self._make_connector(_omni_hf_config(), _QWEN3_OMNI)
         encoder_cache = {
             "image": torch.zeros(3, 4 * 4096, dtype=torch.float16),
             "audio": torch.zeros(3, 4096, dtype=torch.float16),

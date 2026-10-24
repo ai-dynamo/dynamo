@@ -48,13 +48,26 @@ def _get_device(vllm_config: "VllmConfig") -> str:
 
 _VISION_MODALITIES = frozenset({"image", "video"})
 
+# Models whose cached image/video embeddings include the DeepStack maps. A
+# config can list deepstack_visual_indexes that vLLM drops (BailingMoeV3VL).
+_DEEPSTACK_ARCHITECTURES = frozenset(
+    {
+        "Qwen3VLForConditionalGeneration",
+        "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3OmniMoeForConditionalGeneration",
+    }
+)
 
-def _deepstack_vision_width(hf_config) -> int | None:
+
+def _deepstack_vision_width(model_config) -> int | None:
     """Row width of DeepStack image/video embeddings, or None if not DeepStack.
 
     DeepStack models append one feature map per DeepStack level to each
     visual token.
     """
+    if _DEEPSTACK_ARCHITECTURES.isdisjoint(model_config.architectures):
+        return None
+    hf_config = model_config.hf_config
     # Qwen3-Omni keeps its vision config under thinker_config.
     for config in (hf_config, getattr(hf_config, "thinker_config", None)):
         vision_config = getattr(config, "vision_config", None)
@@ -220,7 +233,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             [], dtype=vllm_config.model_config.dtype
         ).element_size()
         self._bytes_per_embed = vllm_config.model_config.get_hidden_size() * dtype_bytes
-        vision_width = _deepstack_vision_width(vllm_config.model_config.hf_config)
+        vision_width = _deepstack_vision_width(vllm_config.model_config)
         self._bytes_per_vision_embed = (
             self._bytes_per_embed
             if vision_width is None
