@@ -1436,10 +1436,6 @@ jobs:
       run: rustup component add llvm-tools-preview
     - name: Install cargo-llvm-cov
       run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
-    # Have an explicit step to build tests first to separate time spent on build vs execution.
-    - name: Compile Tests
-      working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --no-run
     - name: Run Unit Tests with Coverage
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests.
