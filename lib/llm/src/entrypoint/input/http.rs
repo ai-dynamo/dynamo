@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
+    backend::ExecutionContext,
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
@@ -15,6 +16,7 @@ use crate::{
     },
     kv_router::plugins::RouterPluginBuilder,
     local_model::runtime_config::TokenizerBackend,
+    model_card::ModelDeploymentCard,
     model_type::ModelType,
     namespace::NamespaceFilter,
     types::openai::{
@@ -290,24 +292,7 @@ async fn run_with_router_plugins(
             ..
         } => {
             let http_service = http_service_builder.build()?;
-            let manager = http_service.model_manager();
-            let checksum = model.card().mdcsum();
-
-            let tokenizer = model.card().tokenizer()?;
-            let chat_pipeline = common::build_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone(), tokenizer.clone())
-            .await?;
-            manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
-
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
-            manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
-            enable_in_process_model_endpoints(&http_service)?;
+            serve_in_process_tokens(&http_service, model.card(), inner_engine).await?;
             http_service
         }
     };
@@ -328,6 +313,33 @@ async fn run_with_router_plugins(
 
     run_result?;
     Ok(())
+}
+
+/// Serve a token engine's chat and completions from `http_service`, running
+/// the frontend's preprocessor, parsers and detokenizer in this process.
+pub(crate) async fn serve_in_process_tokens(
+    http_service: &HttpService,
+    card: &ModelDeploymentCard,
+    engine: ExecutionContext,
+) -> anyhow::Result<()> {
+    let manager = http_service.model_manager();
+    let checksum = card.mdcsum();
+
+    let tokenizer = card.tokenizer()?;
+    let chat_pipeline = common::build_pipeline::<
+        NvCreateChatCompletionRequest,
+        NvCreateChatCompletionStreamResponse,
+    >(card, engine.clone(), tokenizer.clone())
+    .await?;
+    manager.add_chat_completions_model(&card.display_name, checksum, chat_pipeline)?;
+
+    let cmpl_pipeline = common::build_pipeline::<
+        NvCreateCompletionRequest,
+        NvCreateCompletionResponse,
+    >(card, engine, tokenizer)
+    .await?;
+    manager.add_completions_model(&card.display_name, checksum, cmpl_pipeline)?;
+    enable_in_process_model_endpoints(http_service)
 }
 
 fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Result<()> {
