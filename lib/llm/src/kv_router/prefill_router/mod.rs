@@ -144,6 +144,22 @@ fn into_decode_request(
             worker_id,
             worker_link,
         } => {
+            if result
+                .disaggregated_params
+                .pointer("/_epd_metadata/_decode_without_media")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                req.multi_modal_data = None;
+                req.multi_modal_uuids = None;
+                if let Some(extra) = req
+                    .extra_args
+                    .as_mut()
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    extra.remove("messages");
+                }
+            }
             req.prefill_result = Some(result);
             req.migration_link = worker_link;
             req.routing_mut().prefill_worker_id = Some(worker_id);
@@ -1186,6 +1202,37 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("prefill connection lost"));
+        }
+    }
+
+    #[test]
+    fn decode_media_is_removed_only_after_a_token_handoff() {
+        for portable in [false, true] {
+            let mut request = query_only_request();
+            request.multi_modal_data = Some(std::collections::HashMap::new());
+            request.extra_args = Some(serde_json::json!({
+                "messages": [{"role": "user", "content": "data:image/png;base64,AAAA"}],
+                "sampling_options": {"temperature": 0}
+            }));
+            let result = PrefillResult {
+                disaggregated_params: serde_json::json!({
+                    "_epd_metadata": {"_decode_without_media": portable,
+                                      "_prefill_prompt_token_ids": [1, 2, 3]}
+                }),
+                prompt_tokens_details: None,
+            };
+            let decode = into_decode_request(
+                request,
+                PrefillOutcome::Completed {
+                    result,
+                    worker_id: 12,
+                    worker_link: None,
+                },
+            );
+            assert_eq!(decode.multi_modal_data.is_none(), portable);
+            let extra = decode.extra_args.unwrap();
+            assert_eq!(extra.get("messages").is_none(), portable);
+            assert_eq!(extra["sampling_options"]["temperature"], 0);
         }
     }
 
