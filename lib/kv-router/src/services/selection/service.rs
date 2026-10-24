@@ -406,10 +406,12 @@ impl SelectionService {
             .await
     }
 
+    /// Apply an optional peer binding, then book load unless `skip_load_booking` is set.
+    /// Affinity is retained even if booking fails; skipped bookings return `None`.
     pub async fn create_reservation(
         &self,
         req: ReservationRequest,
-    ) -> Result<ReservationResponse, SelectionError> {
+    ) -> Result<Option<ReservationResponse>, SelectionError> {
         self.core.create_reservation(req).await
     }
 

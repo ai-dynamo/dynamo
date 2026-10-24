@@ -21,6 +21,7 @@ use crate::scheduling::{AdvisoryWorkerLoad, QueueRejection, SchedulingResponse, 
 
 use super::super::error::SelectionError;
 use super::super::input::PromptView;
+use crate::services::common::replica_sync::AffinityBindingEvent;
 
 /// Every input to one selection. Fields are independent: `session_context`
 /// feeds worker selection, `session` says what the core does with the session
@@ -138,6 +139,8 @@ pub struct Selected {
     pub sequence_hashes: Option<Vec<SequenceHash>>,
     pub track_prefill_tokens: bool,
     pub effective_prefill_tokens: usize,
+    /// The versioned session assignment committed by this booking, if any.
+    pub session_binding: Option<AffinityBindingEvent>,
     pub kv_hint: Option<KvHint>,
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
     pub shared_cache_hits: Option<SharedCacheHits>,

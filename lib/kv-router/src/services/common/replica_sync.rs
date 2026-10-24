@@ -37,7 +37,7 @@ const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
 
 /// One replicated session binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AffinityBindingEvent {
+pub struct AffinityBindingEvent {
     #[serde(flatten)]
     pub partition: RoutingPartitionId,
     pub session_id: String,

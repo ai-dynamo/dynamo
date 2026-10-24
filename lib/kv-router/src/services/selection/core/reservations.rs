@@ -25,6 +25,7 @@ struct ReservationBooking {
     /// Public block hashes to record into an approximate indexer once booked.
     routing_hashes: Option<Vec<LocalBlockHash>>,
     session_id: Option<String>,
+    affinity_lease: Option<AffinityLease>,
 }
 
 /// `selection_id` -> the booking it holds.
@@ -171,21 +172,52 @@ fn forget_reservation_if(
 impl SelectionCore {
     pub async fn create_reservation(
         &self,
-        req: ReservationRequest,
-    ) -> Result<ReservationResponse, SelectionError> {
+        mut req: ReservationRequest,
+    ) -> Result<Option<ReservationResponse>, SelectionError> {
         self.ensure_running()?;
+        // Apply the peer's session affinity even if load booking is skipped or fails.
+        // Successful bookings retain a lease to keep affinity alive until completion.
+        let affinity_lease = if let Some(binding) = req.session_binding.take() {
+            let key = RoutingPartitionId::new(&req.model_name, &req.routing_group);
+            if binding.partition != key {
+                return Err(SelectionError::BadRequest(
+                    "session binding must belong to the reservation's routing partition"
+                        .to_string(),
+                ));
+            }
+            let session_id = binding.session_id.clone();
+            let target = binding.target();
+            let version = binding.version();
+            self.dispatch_affinity_event(binding);
+            if req.skip_load_booking {
+                None
+            } else {
+                self.entry(&key).and_then(|entry| {
+                    entry
+                        .affinity
+                        .get()?
+                        .acquire_mirrored_reservation_lease(session_id, target, version)
+                })
+            }
+        } else {
+            None
+        };
+        if req.skip_load_booking {
+            return Ok(None);
+        }
         tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
                 Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown))
             }
-            result = self.create_reservation_inner(req) => result,
+            result = self.create_reservation_inner(req, affinity_lease) => result.map(Some),
         }
     }
 
     async fn create_reservation_inner(
         &self,
         req: ReservationRequest,
+        affinity_lease: Option<AffinityLease>,
     ) -> Result<ReservationResponse, SelectionError> {
         let key = RoutingPartitionId::new(req.model_name.clone(), req.routing_group.clone());
 
@@ -193,7 +225,9 @@ impl SelectionCore {
         // any cached selection for the id so a later replay can't book stale state.
         if let Some(worker_id) = req.worker_id {
             self.selection_cache.discard(&key, &req.selection_id);
-            return self.reserve_explicit(key, worker_id, req).await;
+            return self
+                .reserve_explicit(key, worker_id, req, affinity_lease)
+                .await;
         }
 
         // Replay form: peek, book, and consume only once the booking lands. A
@@ -209,7 +243,10 @@ impl SelectionCore {
                 req.selection_id
             )));
         };
-        let response = match self.book_cached_selection(pending, &req).await {
+        let response = match self
+            .book_cached_selection(pending, &req, affinity_lease)
+            .await
+        {
             Ok(response) => response,
             // The session moved: the cached worker can never be booked for it.
             Err(SelectionError::BadRequest(message)) => {
@@ -230,6 +267,7 @@ impl SelectionCore {
         &self,
         pending: Arc<PendingSelection>,
         req: &ReservationRequest,
+        affinity_lease: Option<AffinityLease>,
     ) -> Result<ReservationResponse, SelectionError> {
         let (entry, endpoint, prefill_load_hint) = self.resolve_cached_booking(&pending)?;
         let track_prefill_tokens = pending.track_prefill_tokens;
@@ -247,6 +285,7 @@ impl SelectionCore {
                 lora_name: pending.lora_name.clone(),
                 routing_hashes: pending.routing_hashes.clone(),
                 session_id: pending.session_id.clone(),
+                affinity_lease,
             },
         )
         .await
@@ -299,6 +338,7 @@ impl SelectionCore {
         key: RoutingPartitionId,
         worker_id: WorkerId,
         req: ReservationRequest,
+        affinity_lease: Option<AffinityLease>,
     ) -> Result<ReservationResponse, SelectionError> {
         let entry = self.ready_entry(&key)?;
         let normalized = req.prompt.view().normalize_for_reservation(
@@ -355,6 +395,7 @@ impl SelectionCore {
                 lora_name: req.prompt.lora_name,
                 routing_hashes,
                 session_id: None,
+                affinity_lease,
             },
         )
         .await
@@ -380,6 +421,7 @@ impl SelectionCore {
             lora_name,
             routing_hashes,
             session_id,
+            affinity_lease,
         } = booking;
 
         let claim = self.claim_reservation(&selection_id, &key)?;
@@ -387,7 +429,7 @@ impl SelectionCore {
         // initializer that may itself be waiting for this worker's capacity.
         let session = match (session_id.as_deref(), entry.affinity.get()) {
             (Some(session_id), Some(table)) => self
-                .hold_session(table, session_id, &key)
+                .hold_session(table, session_id, &key, None)
                 .await?
                 .map(|hold| (table, session_id, hold)),
             _ => None,
@@ -410,7 +452,7 @@ impl SelectionCore {
             Some((table, session_id, hold)) => {
                 self.commit_session(table, hold, session_id, worker, &key)?
             }
-            None => None,
+            None => affinity_lease,
         };
         if let Some(hashes) = routing_hashes {
             self.record_routing_decision(&entry, worker, hashes).await;

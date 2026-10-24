@@ -129,7 +129,8 @@ async fn create_reservation(
         Err(error) => return json_rejection(error),
     };
     match state.service.create_reservation(req).await {
-        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Ok(Some(response)) => (StatusCode::CREATED, Json(response)).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error.into_response(),
     }
 }
