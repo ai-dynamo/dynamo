@@ -4,19 +4,13 @@
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll, ready};
 
 use anyhow::{Result, anyhow};
-#[cfg(feature = "standalone-indexer")]
-use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
-#[cfg(feature = "standalone-indexer")]
-use tokio::sync::Mutex;
 
 pub(crate) type MultipartMessage = Vec<Vec<u8>>;
-#[cfg(feature = "standalone-indexer")]
-pub(crate) type SharedSocket = Arc<Mutex<ZmqSocket>>;
 
 const ZMQ_RCVTIMEOUT_MS: i32 = 100;
 const ZMQ_SNDTIMEOUT_MS: i32 = 0;
@@ -33,22 +27,21 @@ const IO_THREADS_ENV: &str = "DYN_ZMQ_IO_THREADS";
 const DEFAULT_IO_THREADS: i32 = 4;
 
 /// Process-wide ZMQ contexts. A context owns an I/O thread pool and a reaper thread, so a
-/// context per socket costs two threads per KV-event source; one SUB and one replay DEALER
-/// per worker rank made thousands of threads at large worker counts.
+/// context per socket cost two threads per socket: thousands at large worker counts.
 ///
 /// libzmq caps a context at `ZMQ_MAX_SOCKETS` (1023, which the `zmq` crate cannot raise),
 /// and a closed socket keeps its slot until the context's reaper thread has freed it. So the
 /// pool lets libzmq decide: a socket goes to the first context that accepts it, and the pool
 /// adds a context only when every existing one refuses with `EMFILE`.
 struct ContextPool {
-    contexts: std::sync::Mutex<Vec<zmq::Context>>,
+    contexts: Mutex<Vec<zmq::Context>>,
     io_threads: i32,
 }
 
 impl ContextPool {
     fn new(io_threads: i32) -> Self {
         Self {
-            contexts: std::sync::Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
             io_threads,
         }
     }
@@ -298,20 +291,20 @@ pub(crate) fn create_sub_socket_topics(topics: &[&[u8]]) -> Result<ZmqSocket> {
 }
 
 #[cfg(feature = "standalone-indexer")]
-pub(crate) fn connect_sub_socket(endpoint: &str) -> Result<SharedSocket> {
+pub(crate) fn connect_sub_socket(endpoint: &str) -> Result<ZmqSocket> {
     let socket = create_sub_socket(b"")?;
     socket.connect(endpoint)?;
-    Ok(Arc::new(Mutex::new(socket)))
+    Ok(socket)
 }
 
 #[cfg(feature = "standalone-indexer")]
-pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<SharedSocket> {
-    Ok(Arc::new(Mutex::new(build_socket(zmq::DEALER, |socket| {
+pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<ZmqSocket> {
+    build_socket(zmq::DEALER, |socket| {
         configure_bidirectional_socket(socket)?;
         set_ipv6_for(socket, endpoint)?;
         socket.connect(endpoint)?;
         Ok(())
-    })?)))
+    })
 }
 
 #[cfg(any(
@@ -328,18 +321,6 @@ pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
     set_ipv6_for(&socket, endpoint)?;
     socket.bind(endpoint)?;
     ZmqSocket::new(socket)
-}
-
-#[cfg(feature = "standalone-indexer")]
-pub(crate) async fn recv_multipart(socket: &SharedSocket) -> Result<MultipartMessage> {
-    let mut socket = socket.lock().await;
-    socket.recv_multipart().await
-}
-
-#[cfg(feature = "standalone-indexer")]
-pub(crate) async fn send_multipart(socket: &SharedSocket, frames: MultipartMessage) -> Result<()> {
-    let mut socket = socket.lock().await;
-    socket.send_multipart(frames).await
 }
 
 pub(crate) fn validate_endpoint(endpoint: &str) -> Result<()> {

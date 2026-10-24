@@ -14,8 +14,7 @@ use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
 use super::backend::Indexer;
 use super::registry::ListenerRecord;
 use crate::services::common::zmq::{
-    MultipartMessage, SharedSocket, connect_dealer_socket, connect_sub_socket, recv_multipart,
-    send_multipart,
+    MultipartMessage, ZmqSocket, connect_dealer_socket, connect_sub_socket,
 };
 
 const WATERMARK_UNSET: u64 = u64::MAX;
@@ -149,7 +148,7 @@ struct ListenerLoop {
     dp_rank: u32,
     indexer: Indexer,
     cancel: CancellationToken,
-    live_socket: SharedSocket,
+    live_socket: ZmqSocket,
     /// Dialed per replay: an idle DEALER per worker rank would hold a ZMQ socket for each
     /// source for its whole life, while replays only happen at startup and on gaps.
     replay_endpoint: Option<String>,
@@ -166,7 +165,7 @@ impl ListenerLoop {
         block_size: u32,
         indexer: Indexer,
         cancel: CancellationToken,
-        live_socket: SharedSocket,
+        live_socket: ZmqSocket,
         replay_endpoint: Option<String>,
         watermark: Arc<AtomicU64>,
     ) -> Self {
@@ -205,12 +204,21 @@ impl ListenerLoop {
             );
             return Ok(0);
         };
-        let Some(replay_socket) =
-            connect_replay_socket(self.worker_id, self.dp_rank, replay_endpoint, &self.cancel)
-        else {
+        if self.cancel.is_cancelled() {
             return Ok(0);
+        }
+        let mut replay_socket = match connect_dealer_socket(replay_endpoint) {
+            Ok(socket) => socket,
+            Err(error) => {
+                tracing::error!(
+                    self.worker_id,
+                    self.dp_rank,
+                    error = %error,
+                    "Failed to connect replay socket to {replay_endpoint}"
+                );
+                return Ok(0);
+            }
         };
-        let replay_socket = &replay_socket;
 
         let worker_id = self.worker_id;
         let dp_rank = self.dp_rank;
@@ -218,7 +226,7 @@ impl ListenerLoop {
         let watermark = &self.watermark;
 
         let req_frames = vec![Vec::new(), start_seq.to_be_bytes().to_vec()];
-        if let Err(error) = send_multipart(replay_socket, req_frames).await {
+        if let Err(error) = replay_socket.send_multipart(req_frames).await {
             tracing::error!(worker_id, dp_rank, error = %error, "Failed to send replay request");
             return Ok(0);
         }
@@ -227,7 +235,7 @@ impl ListenerLoop {
         loop {
             let msg = tokio::select! {
                 _ = self.cancel.cancelled() => break,
-                result = recv_multipart(replay_socket) => {
+                result = replay_socket.recv_multipart() => {
                     match result {
                         Ok(msg) => msg,
                         Err(error) => {
@@ -424,7 +432,7 @@ impl ListenerLoop {
                     return Ok(());
                 }
 
-                result = recv_multipart(&self.live_socket) => {
+                result = self.live_socket.recv_multipart() => {
                     match result {
                         Ok(msg) => msg,
                         Err(error) => {
@@ -525,38 +533,6 @@ async fn run_listener(
     )
     .run()
     .await
-}
-
-fn connect_replay_socket(
-    worker_id: WorkerId,
-    dp_rank: u32,
-    endpoint: &str,
-    cancel: &CancellationToken,
-) -> Option<SharedSocket> {
-    if cancel.is_cancelled() {
-        return None;
-    }
-
-    match connect_dealer_socket(endpoint) {
-        Ok(socket) => {
-            tracing::info!(
-                worker_id,
-                dp_rank,
-                replay_endpoint = endpoint,
-                "Replay socket connected"
-            );
-            Some(socket)
-        }
-        Err(error) => {
-            tracing::error!(
-                worker_id,
-                dp_rank,
-                error = %error,
-                "Failed to connect replay socket to {endpoint}"
-            );
-            None
-        }
-    }
 }
 
 #[cfg(test)]
