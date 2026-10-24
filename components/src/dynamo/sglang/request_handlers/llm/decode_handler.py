@@ -443,7 +443,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             external_trace_header=context.trace_headers()
             if self.enable_trace
             else None,
-            routed_dp_rank=routing.get("dp_rank"),
+            routed_dp_rank=(
+                None
+                if getattr(self.config.server_args, "elastic_ep_allocation_index", None)
+                is not None
+                else routing.get("dp_rank")
+            ),
             lora_path=self._resolve_lora(request),
         )
         return native_generate_stream(self.engine, native_request)
@@ -523,7 +528,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
-            dp_rank = routing.get("dp_rank")
+            dp_rank = (
+                None
+                if getattr(self.config.server_args, "elastic_ep_allocation_index", None)
+                is not None
+                else routing.get("dp_rank")
+            )
 
             # Decode re-extracts the media so its token layout matches prefill's
             # and the transferred KV lines up.
@@ -604,7 +614,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
-            dp_rank = routing.get("dp_rank")
+            dp_rank = (
+                None
+                if getattr(self.config.server_args, "elastic_ep_allocation_index", None)
+                is not None
+                else routing.get("dp_rank")
+            )
 
             mm_hashes_kwargs: Dict[str, Any] = {}
             if self._mm_hashes_supported:

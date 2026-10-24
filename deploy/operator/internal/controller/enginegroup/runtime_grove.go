@@ -25,6 +25,8 @@ type groveRuntimeProvider struct {
 func (p *groveRuntimeProvider) Resolve(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup) (Runtime, error) {
 	// Never let one backend consume another backend's identities or control protocol.
 	switch group.Labels[consts.KubeLabelDynamoEngineGroupRuntime] {
+	case consts.KubeLabelDynamoEngineGroupSGLang:
+		return (&sglangRuntimeProvider{client: p.Client, httpClient: p.HTTP}).Resolve(ctx, group)
 	default:
 		return Runtime{}, fmt.Errorf("%w: unsupported Engine Group runtime %q", ErrRuntimeUnavailable,
 			group.Labels[consts.KubeLabelDynamoEngineGroupRuntime])

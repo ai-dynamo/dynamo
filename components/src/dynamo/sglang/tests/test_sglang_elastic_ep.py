@@ -22,6 +22,7 @@ from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -39,8 +40,9 @@ def _stub_sglang_io_struct(monkeypatch):
     io_struct = types.ModuleType("sglang.srt.managers.io_struct")
 
     class ScaleElasticEPReqInput:
-        def __init__(self, new_ep_size):
+        def __init__(self, new_ep_size, **correlation):
             self.new_ep_size = new_ep_size
+            self.__dict__.update(correlation)
 
     io_struct.ScaleElasticEPReqInput = ScaleElasticEPReqInput
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)
@@ -95,6 +97,40 @@ def _make_handler(
     # None is fine here since the route's handler is never invoked in these tests.
     handler.generate_endpoint = None
     return handler
+
+
+@pytest.mark.asyncio
+async def test_scale_elastic_ep_preserves_native_correlation():
+    handler = _make_handler(
+        scale_result=SimpleNamespace(
+            success=True,
+            message="accepted",
+            old_ep_size=8,
+            new_ep_size=12,
+            pending_ep_size=12,
+            operation_id="grow-8-12",
+            instance_id="runtime-1",
+            scale_phase="joining",
+            terminal=False,
+            effective_ep_size=8,
+            conflict=False,
+        )
+    )
+    result = await handler.scale_elastic_ep(
+        {
+            "new_ep_size": 12,
+            "operation_id": "grow-8-12",
+            "expected_instance_id": "runtime-1",
+            "expected_joining_allocation_ids": ["pod-2"],
+        }
+    )
+    request = handler.engine.tokenizer_manager.scale_elastic_ep.await_args.args[0]
+    assert request.operation_id == "grow-8-12"
+    assert request.expected_instance_id == "runtime-1"
+    assert request.expected_joining_allocation_ids == ["pod-2"]
+    assert result["operation_id"] == "grow-8-12"
+    assert result["pending_ep_size"] == 12
+    assert result["terminal"] is False
 
 
 @pytest.mark.asyncio

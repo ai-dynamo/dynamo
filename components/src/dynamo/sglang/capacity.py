@@ -18,21 +18,33 @@ class RuntimeCapacity:
     data_parallel_size: int
 
 
+def attention_dp_size(server_args: Any) -> int:
+    """Resolve attention DP across the current and previous SGLang argument forms."""
+    width = getattr(server_args, "attn_dp_size", 1) or 1
+    if width > 1:
+        return width
+    if getattr(server_args, "enable_dp_attention", False):
+        return getattr(server_args, "dp_size", 1) or 1
+    return 1
+
+
 def local_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
-    nnodes = getattr(server_args, "nnodes", 1) or 1
-    node_rank = getattr(server_args, "node_rank", 0) or 0
+    # Native automatic bootstrap preserves the physical allocation index after resolving initial/joiner roles.
+    allocation_index = getattr(server_args, "elastic_ep_allocation_index", None)
+    allocation_width = getattr(server_args, "elastic_ep_allocation_width", None)
+    if allocation_index is not None and allocation_width:
+        start = allocation_index * allocation_width
+        return start, start + allocation_width
 
-    if not enable_dp_attention:
-        return 0, dp_size
+    # Modern SGLang separates attention DP from independent engine replicas.
+    attention_dp = attention_dp_size(server_args)
+    if attention_dp > 1:
+        nodes = getattr(server_args, "nnodes", 1) or 1
+        rank = getattr(server_args, "node_rank", 0) or 0
+        local = attention_dp // nodes
+        return rank * local, (rank + 1) * local
 
-    if dp_size > 1:
-        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-        start_dp_rank = node_rank * local_dp_size
-        return start_dp_rank, start_dp_rank + local_dp_size
-
-    return 0, 1
+    return 0, getattr(server_args, "dp_size", 1) or 1
 
 
 def publishes_kv_events(server_args: Any) -> bool:
@@ -47,18 +59,25 @@ def publishes_kv_events(server_args: Any) -> bool:
     distinct rank. Only the leader owns the single logical rank in multinode
     TP-only mode.
     """
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    if getattr(server_args, "elastic_ep_allocation_index", None) is not None:
+        return True
     nnodes = getattr(server_args, "nnodes", 1) or 1
     node_rank = getattr(server_args, "node_rank", 0) or 0
 
-    if enable_dp_attention and dp_size > 1:
+    if attention_dp_size(server_args) > 1:
         return True
 
     return not (nnodes > 1 and node_rank > 0)
 
 
 def model_card_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
+    # Elastic SGLang owns admission and round-robin scheduling behind one stable primary endpoint.
+    # Publishing a fixed startup rank range would prevent appended ranks from receiving traffic.
+    if getattr(server_args, "elastic_ep_allocation_index", None) is not None:
+        return 0, 1
+    attention_dp = attention_dp_size(server_args)
+    if attention_dp > 1:
+        return 0, attention_dp
     dp_size = getattr(server_args, "dp_size", 1) or 1
     return 0, dp_size
 
@@ -68,9 +87,8 @@ def per_rank_max_running_requests(server_args: Any) -> int | None:
     if max_running_requests is None:
         return None
 
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
-    if dp_size <= 1 or not enable_dp_attention:
+    dp_size = attention_dp_size(server_args)
+    if dp_size <= 1:
         return max_running_requests
 
     return max_running_requests // dp_size

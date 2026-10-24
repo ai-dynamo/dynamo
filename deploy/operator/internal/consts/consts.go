@@ -98,12 +98,16 @@ const (
 	KubeLabelDynamoEngineGroupWorldIndex  = "nvidia.com/dynamo-engine-group-world-index"
 	KubeLabelDynamoEngineGroupRuntime     = "nvidia.com/dynamo-engine-group-runtime"
 	KubeLabelDynamoScaleRepresentative    = "nvidia.com/dynamo-scale-representative"
+	KubeLabelDynamoEngineGroupSGLang      = "sglang-elastic-ep"
 	KubeLabelDynamoScaleRepresentativeYes = "true"
 	// EngineGroupRetainedReadinessGate steers Grove scale-in only after native retirement is proven.
 	EngineGroupRetainedReadinessGate = "dynamo.nvidia.com/retained"
 
 	// Engine Group annotations carry runtime endpoints that cannot be selected
 	// with Kubernetes labels. The DGD binds a generated world to the exact Grove clique UID.
+	KubeAnnotationDynamoEngineGroupControlPort  = "nvidia.com/dynamo-engine-group-control-port"
+	KubeAnnotationDynamoEngineGroupVerifyURL    = "nvidia.com/dynamo-engine-group-verify-url"
+	KubeAnnotationDynamoEngineGroupVerifyModel  = "nvidia.com/dynamo-engine-group-verify-model"
 	KubeAnnotationDynamoEngineGroupPodClique    = "nvidia.com/dynamo-engine-group-pod-clique"
 	KubeAnnotationDynamoEngineGroupPodCliqueUID = "nvidia.com/dynamo-engine-group-pod-clique-uid"
 	KubeAnnotationDynamoEngineGroupProfile      = "nvidia.com/dynamo-engine-group-profile"

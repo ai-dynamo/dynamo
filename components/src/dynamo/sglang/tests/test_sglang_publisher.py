@@ -22,6 +22,7 @@ from dynamo.sglang.publisher import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -110,6 +111,21 @@ def test_sglang_worker_group_id_matches_across_node_ranks(monkeypatch):
     assert get_sglang_worker_group_id(node0_args) == get_sglang_worker_group_id(
         node1_args
     )
+
+
+def test_elastic_worker_group_id_survives_single_allocation_growth(
+    monkeypatch, unused_tcp_port
+):
+    monkeypatch.setattr(disagg_mod, "_network_address_cls", lambda: FakeNetworkAddress)
+    address = f"world.test:{unused_tcp_port}"
+    primary = SimpleNamespace(
+        nnodes=1, node_rank=0, elastic_ep_allocation_index=0, dist_init_addr=address
+    )
+    joiner = SimpleNamespace(
+        nnodes=2, node_rank=1, elastic_ep_allocation_index=1, dist_init_addr=address
+    )
+    assert get_sglang_worker_group_id(primary) is not None
+    assert get_sglang_worker_group_id(primary) == get_sglang_worker_group_id(joiner)
 
 
 def test_sglang_worker_group_id_differs_by_dist_init_addr(monkeypatch):

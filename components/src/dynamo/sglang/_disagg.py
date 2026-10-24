@@ -125,7 +125,10 @@ def compute_bootstrap_address(
 def get_sglang_worker_group_id(server_args) -> Optional[str]:
     """Return the shared SGLang multi-node worker group id."""
     nnodes = getattr(server_args, "nnodes", 1) or 1
-    if nnodes <= 1:
+    if (
+        nnodes <= 1
+        and getattr(server_args, "elastic_ep_allocation_index", None) is None
+    ):
         return None
 
     dist_init_addr = getattr(server_args, "dist_init_addr", None)
