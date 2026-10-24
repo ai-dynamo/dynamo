@@ -23,6 +23,7 @@ use mooncake_shared::{
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
 const PRE_RUN_QUIESCENCE_MS: u64 = 5_000;
@@ -129,6 +130,16 @@ struct Args {
     /// benchmark input. Each trial builds a fresh indexer.
     #[clap(long, default_value = "1")]
     benchmark_runs: usize,
+
+    /// Keep live per-rank resident block counts on the event threads, as when a
+    /// selection policy reads `RESIDENT_BLOCKS` (concurrent-radix-tree-compressed only).
+    #[clap(long)]
+    track_resident_blocks: bool,
+
+    /// Also read every resident block counter in a loop from a thread pinned to this
+    /// CPU, as selections do. Implies `--track-resident-blocks`.
+    #[clap(long)]
+    resident_blocks_reader_cpu: Option<usize>,
 
     /// Indexer backend to benchmark. Defaults to concurrent-radix-tree-compressed
     /// with `--num-event-workers` event threads.
@@ -270,6 +281,11 @@ async fn run_open_loop_for_config(
     let metrics = || Some(Arc::new(KvIndexerMetrics::new_unregistered()));
     let open_config = parse_open_loop_config(args)?;
     pin_current_thread_to_cpus(&open_config.backend_cpus)?;
+    let track_resident_blocks =
+        args.track_resident_blocks || args.resident_blocks_reader_cpu.is_some();
+    if track_resident_blocks && config.kind != MooncakeIndexerKind::ConcurrentRadixTreeCompressed {
+        anyhow::bail!("resident block tracking applies only to concurrent-radix-tree-compressed");
+    }
 
     match config.kind {
         MooncakeIndexerKind::NestedMap => {
@@ -288,7 +304,41 @@ async fn run_open_loop_for_config(
                 args.common.block_size,
                 metrics(),
             ));
-            run_backend(config.short_name(), indexer, trial, open_config).await
+            let counts = track_resident_blocks.then(|| indexer.bench_track_resident_blocks());
+            let stop = Arc::new(AtomicBool::new(false));
+            let reader = counts
+                .zip(args.resident_blocks_reader_cpu)
+                .map(|(counts, cpu)| {
+                    let stop = stop.clone();
+                    let (pinned_tx, pinned_rx) = std::sync::mpsc::sync_channel(1);
+                    let handle = std::thread::spawn(move || {
+                        let pinned = pin_current_thread_to_cpus(&[cpu]);
+                        let failed = pinned.is_err();
+                        let _ = pinned_tx.send(pinned);
+                        if failed {
+                            return;
+                        }
+                        while !stop.load(Ordering::Relaxed) {
+                            std::hint::black_box(counts.bench_sum());
+                        }
+                    });
+                    (handle, pinned_rx)
+                });
+            // Don't start the trial until the reader is pinned, so a failed pin
+            // aborts here instead of producing a run with no reader.
+            if let Some((_, pinned_rx)) = &reader {
+                pinned_rx.recv().map_err(|_| {
+                    anyhow::anyhow!("resident block reader exited before pinning")
+                })??;
+            }
+            let result = run_backend(config.short_name(), indexer, trial, open_config).await;
+            stop.store(true, Ordering::Relaxed);
+            if let Some((handle, _)) = reader {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("resident block reader panicked"))?;
+            }
+            result
         }
         MooncakeIndexerKind::RadixTree | MooncakeIndexerKind::BranchShardedCrtc => {
             anyhow::bail!(

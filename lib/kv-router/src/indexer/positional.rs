@@ -322,6 +322,8 @@ impl SyncIndexer for PositionalIndexer {
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }
+                // Only the device-tier primary tracks resident blocks.
+                WorkerTask::TrackResidentBlocks(_) => {}
                 WorkerTask::Terminate => {
                     break;
                 }

@@ -10,6 +10,7 @@ use super::{
     MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 
+use crate::indexer::ResidentBlockCountsHandle;
 use crate::protocols::{
     SelectionTrace, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerSelectionResult,
 };
@@ -63,6 +64,7 @@ pub struct WorkerSelectionPolicy {
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
     exclusive_affinity: bool,
+    resident_blocks: Option<ResidentBlockCountsHandle>,
     runtime: Option<Box<RuntimePolicyState>>,
 }
 
@@ -114,6 +116,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            resident_blocks: None,
             runtime: None,
             state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
@@ -136,6 +139,28 @@ impl WorkerSelectionPolicy {
     pub fn with_exclusive_affinity(mut self, exclusive: bool) -> Self {
         self.exclusive_affinity = exclusive;
         self
+    }
+
+    /// Read per-rank resident block counts from `counts`. Routing hosts call this only for a
+    /// policy that declares [`WorkerInputs::RESIDENT_BLOCKS`].
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn with_resident_block_counts(mut self, counts: ResidentBlockCountsHandle) -> Self {
+        self.resident_blocks = Some(counts);
+        self
+    }
+
+    /// Attach fixed per-rank resident block counts for benchmarking the read path, with a writer
+    /// that stores to them the way event threads do.
+    #[cfg(feature = "bench")]
+    pub fn with_fixed_resident_block_counts(
+        self,
+        counts: impl IntoIterator<Item = (crate::protocols::WorkerWithDpRank, u64)>,
+    ) -> (Self, ResidentBlockCountsWriter) {
+        let counts = ResidentBlockCountsHandle::fixed(counts);
+        (
+            self.with_resident_block_counts(counts.clone()),
+            ResidentBlockCountsWriter(counts),
+        )
     }
 
     /// Opt in to runtime parameter updates with a pure replacement builder.
@@ -185,11 +210,13 @@ impl WorkerSelectionPolicy {
         }
         let response = state.config();
         replacement.runtime = Some(Box::new(state));
+        // The host attached the counts to this instance; the replacement keeps reading them.
+        replacement.resident_blocks = self.resident_blocks.take();
         *self = replacement;
         Ok(response)
     }
 
-    fn input_requirements(&self) -> WorkerInputs {
+    pub(crate) fn input_requirements(&self) -> WorkerInputs {
         match &self.state {
             #[cfg(any(test, feature = "bench"))]
             WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
@@ -210,6 +237,7 @@ impl WorkerSelectionPolicy {
         Self {
             worker_label,
             exclusive_affinity: false,
+            resident_blocks: None,
             runtime: None,
             state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
@@ -447,6 +475,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
                 WorkerSelectionPolicyStateRef::Composed(state)
             }
         };
+        // Held here so the per-selection snapshot borrows it and stays plain data.
+        let resident_blocks = self
+            .resident_blocks
+            .as_ref()
+            .map(ResidentBlockCountsHandle::load);
         select_worker_with_policy(
             self.worker_label,
             state,
@@ -454,8 +487,22 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             request,
             eligibility,
             block_size,
+            resident_blocks.as_deref().map(|counts| &**counts),
             trace,
         )
+    }
+}
+
+/// Stores to the counters from [`WorkerSelectionPolicy::with_fixed_resident_block_counts`], for
+/// benchmarking reads while event threads write.
+#[cfg(feature = "bench")]
+pub struct ResidentBlockCountsWriter(ResidentBlockCountsHandle);
+
+#[cfg(feature = "bench")]
+impl ResidentBlockCountsWriter {
+    /// Sets every counter to `blocks`.
+    pub fn store_all(&self, blocks: u64) {
+        self.0.store_all(blocks);
     }
 }
 
@@ -863,6 +910,233 @@ mod tests {
         // Eligibility checks required taints once. The preference multiplier must not perform a
         // second lookup when no policy component declares it.
         assert_eq!(workers[&0].taint_reads.get(), 1);
+    }
+
+    #[test]
+    fn resident_blocks_reach_only_declaring_components() {
+        use crate::indexer::ResidentBlockCountsHandle;
+
+        // Worker 8 is tracked with no blocks, which reads as 0 rather than None. Worker ids differ
+        // from row indices, so a row-for-worker mix-up fails.
+        fn held(worker: WorkerWithDpRank) -> u64 {
+            if worker.worker_id == 3 { 12 } else { 0 }
+        }
+
+        struct ResidencyProbe(WorkerInputs);
+
+        impl ResidencyProbe {
+            fn check(&self, candidate: WorkerCandidate<'_>) {
+                let expected = self
+                    .0
+                    .contains(WorkerInputs::RESIDENT_BLOCKS)
+                    .then_some(held(candidate.worker()));
+                assert_eq!(candidate.resident_blocks(), expected);
+            }
+        }
+
+        impl WorkerFilter for ResidencyProbe {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.0
+            }
+
+            fn keep(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                self.check(candidate);
+                Ok(true)
+            }
+        }
+
+        impl WorkerScorer for ResidencyProbe {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.0
+            }
+
+            fn score(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    self.check(candidate);
+                    *cost = 0.0;
+                }
+                Ok(())
+            }
+        }
+
+        /// Picks the fewest resident blocks; an undeclared picker reads None and takes row 0.
+        struct ResidencyPicker(WorkerInputs);
+
+        impl WorkerPicker for ResidencyPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.0
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let rows = input.candidates().len();
+                assert_eq!(input.resident_blocks(rows), None);
+                let declared = self.0.contains(WorkerInputs::RESIDENT_BLOCKS);
+                for (row, candidate) in input.candidates().iter().enumerate() {
+                    let expected = declared.then_some(held(candidate.worker()));
+                    assert_eq!(input.resident_blocks(row), expected);
+                }
+                Ok((0..rows)
+                    .min_by_key(|&row| input.resident_blocks(row).unwrap_or(0))
+                    .unwrap())
+            }
+        }
+
+        let workers = HashMap::from([
+            (3, TaintedWorkerConfig::default()),
+            (8, TaintedWorkerConfig::default()),
+        ]);
+        let request = base_request(16);
+        let counts = ResidentBlockCountsHandle::fixed([
+            (WorkerWithDpRank::new(3, 0), 12),
+            (WorkerWithDpRank::new(8, 0), 0),
+        ]);
+        let probes = || -> Vec<Box<ResidencyProbe>> {
+            vec![
+                Box::new(ResidencyProbe(WorkerInputs::RESIDENT_BLOCKS)),
+                Box::new(ResidencyProbe(WorkerInputs::NONE)),
+            ]
+        };
+        for picker_inputs in [WorkerInputs::RESIDENT_BLOCKS, WorkerInputs::NONE] {
+            let policy = WorkerSelectionPolicy::new_with_filters(
+                KvRouterConfig::default(),
+                "test",
+                probes()
+                    .into_iter()
+                    .map(|probe| probe as Box<dyn WorkerFilter>)
+                    .collect(),
+                probes()
+                    .into_iter()
+                    .map(|probe| probe as Box<dyn WorkerScorer>)
+                    .collect(),
+                Box::new(ResidencyPicker(picker_inputs)),
+            )
+            .with_resident_block_counts(counts.clone());
+
+            let selected = policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap();
+            if picker_inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+                assert_eq!(selected.worker, WorkerWithDpRank::new(8, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn resident_blocks_are_none_without_published_counts() {
+        use crate::indexer::ResidentBlockCountsHandle;
+
+        struct ExpectNoCounts;
+
+        impl WorkerPicker for ExpectNoCounts {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::RESIDENT_BLOCKS
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert_eq!(input.resident_blocks(0), None);
+                Ok(0)
+            }
+        }
+
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let request = base_request(16);
+        let policy = || {
+            WorkerSelectionPolicy::new(
+                KvRouterConfig::default(),
+                "test",
+                Vec::new(),
+                Box::new(ExpectNoCounts),
+            )
+        };
+        // No host handle, then a handle with no tracked ranks yet.
+        for policy in [
+            policy(),
+            policy().with_resident_block_counts(ResidentBlockCountsHandle::default()),
+        ] {
+            policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn runtime_replacement_keeps_resident_block_counts() {
+        use std::sync::Arc;
+
+        use crate::indexer::ResidentBlockCountsHandle;
+        use crate::plugins::worker_selection::RuntimePolicyUpdate;
+
+        struct ExpectCount(u64);
+
+        impl WorkerPicker for ExpectCount {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::RESIDENT_BLOCKS
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert_eq!(input.resident_blocks(0), Some(self.0));
+                Ok(0)
+            }
+        }
+
+        fn build() -> WorkerSelectionPolicy {
+            WorkerSelectionPolicy::new(
+                KvRouterConfig::default(),
+                "test",
+                Vec::new(),
+                Box::new(ExpectCount(5)),
+            )
+        }
+
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let request = base_request(16);
+        let counts = ResidentBlockCountsHandle::fixed([(WorkerWithDpRank::new(0, 0), 5)]);
+        let mut policy = build()
+            .with_resident_block_counts(counts)
+            .with_runtime_config(serde_json::Map::new(), Arc::new(|_| Ok(build())));
+        // The replacement is built without the host's counts; the update carries them over.
+        policy
+            .update_runtime_config(RuntimePolicyUpdate::reset(0))
+            .unwrap();
+        policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
     }
 
     #[test]
