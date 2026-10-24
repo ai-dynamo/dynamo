@@ -744,7 +744,18 @@ pub struct HttpService {
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
+    /// Admin routes, served on their own listener when enabled.
+    admin: Option<AdminListener>,
     frontend_load_target: Option<FrontendLoadTarget>,
+}
+
+/// Admin routes and the address they are served on.
+#[derive(Clone)]
+struct AdminListener {
+    router: axum::Router,
+    addr: SocketAddr,
+    /// The port was set explicitly, so a bind failure aborts startup.
+    port_explicit: bool,
 }
 
 /// Where this service publishes frontend load.
@@ -847,14 +858,24 @@ pub struct HttpServiceConfig {
     enable_nvext: bool,
 
     /// Master switch for `/router_policy` (including its busy-threshold subresource)
-    /// and the legacy `/busy_threshold` API. Default `true`; env-truthy
-    /// `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
+    /// and the legacy `/busy_threshold` API, served on the admin listener. Default
+    /// `true`; env-truthy `DYN_DISABLE_FRONTEND_ADMIN_API` overrides to `false`.
     #[builder(default = "true")]
     enable_admin_api: bool,
 
     /// Port for the RL worker discovery listener. Defaults to `DYN_RL_PORT` or 8001.
     #[builder(default = "default_rl_port()")]
     rl_port: u16,
+
+    /// Host for the admin listener. Defaults to `DYN_FRONTEND_ADMIN_HOST` or `127.0.0.1`.
+    #[builder(setter(into), default = "default_admin_host()")]
+    admin_host: String,
+
+    /// Port for the admin listener, from the builder or `DYN_FRONTEND_ADMIN_PORT`.
+    /// When set, a bind failure aborts startup. When unset, the listener tries
+    /// `DEFAULT_ADMIN_PORT` (8002) and a bind failure only logs an error.
+    #[builder(setter(strip_option), default = "admin_port_from_env()")]
+    admin_port: Option<u16>,
 
     /// Distributed runtime used by the RL worker discovery API and to publish
     /// frontend load to the KV DC Relay.
@@ -884,6 +905,29 @@ fn default_rl_port() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8001)
+}
+
+/// Admin listener port used when `DYN_FRONTEND_ADMIN_PORT` is unset.
+const DEFAULT_ADMIN_PORT: u16 = 8002;
+
+fn default_admin_host() -> String {
+    std::env::var(env_llm::DYN_FRONTEND_ADMIN_HOST).unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+fn admin_port_from_env() -> Option<u16> {
+    let value = std::env::var(env_llm::DYN_FRONTEND_ADMIN_PORT).ok()?;
+    match value.parse() {
+        Ok(port) => Some(port),
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_FRONTEND_ADMIN_PORT,
+                value,
+                %error,
+                "Ignoring invalid admin port; using the default"
+            );
+            None
+        }
+    }
 }
 
 impl HttpService {
@@ -1017,6 +1061,7 @@ impl HttpService {
         };
         tracing::info!(address = %listener.local_addr()?, "{protocol} server listening");
 
+        self.spawn_admin_listener_if_configured(&cancel_token, tls.clone())?;
         self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
         // Spawn canary after all fallible startup so it won't leak on early errors
@@ -1061,6 +1106,49 @@ impl HttpService {
             move || observer.is_ready(),
             cancel_token.child_token(),
         );
+    }
+
+    /// Serves the admin routes on their own listener, with the same TLS settings as
+    /// the HTTP service.
+    fn spawn_admin_listener_if_configured(
+        &self,
+        cancel_token: &CancellationToken,
+        tls: Option<tokio_rustls::TlsAcceptor>,
+    ) -> Result<()> {
+        let Some(admin) = self.admin.clone() else {
+            return Ok(());
+        };
+        let listener = match bind_listener(admin.addr) {
+            Ok(listener) => listener,
+            Err(e) if admin.port_explicit => {
+                anyhow::bail!("Failed to bind admin listener on {}: {e}", admin.addr);
+            }
+            // The default port is best effort, so several frontends on one host
+            // still start.
+            Err(e) => {
+                tracing::error!(
+                    address = %admin.addr,
+                    error = %e,
+                    "Failed to bind admin listener; admin routes are unavailable. Set {} to a free port, or {}=1 to disable them",
+                    env_llm::DYN_FRONTEND_ADMIN_PORT,
+                    env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+                );
+                return Ok(());
+            }
+        };
+        tracing::info!(address = %admin.addr, "Admin listener started");
+        let admin_cancel = cancel_token.child_token();
+        tokio::spawn(super::server::serve(
+            listener,
+            tls,
+            admin.router,
+            write_idle_timeout(),
+            async move {
+                admin_cancel.cancelled_owned().await;
+                Duration::ZERO
+            },
+        ));
+        Ok(())
     }
 
     async fn spawn_rl_listener_if_configured(
@@ -1423,21 +1511,6 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
-        // TODO: Revisit admin write exposure: listener separation, authentication, and default enablement.
-        if admin_api_enabled {
-            system_routes.push(super::router_policy::router_policy_router(
-                state.manager_clone(),
-            ));
-            system_routes.push(super::busy_threshold::busy_threshold_router(
-                state.clone(),
-                None,
-            ));
-        } else {
-            tracing::info!(
-                env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
-                "frontend admin API disabled — admin routes not registered"
-            );
-        }
         for extension in &config.frontend_route_extensions {
             let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
             system_routes.push(route_set.into_parts());
@@ -1492,6 +1565,38 @@ impl HttpServiceConfigBuilder {
         );
         append_route_docs(&mut all_docs, &mut seen_route_docs, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
+
+        // Admin routes are served on their own listener, so they are documented after the
+        // inference port's `/openapi.json` is built: `route_docs()` lists them, that spec does not.
+        // TODO: Add authentication to the admin listener.
+        let admin = if admin_api_enabled {
+            let mut admin_router = axum::Router::new();
+            for (route_docs, route) in [
+                super::router_policy::router_policy_router(state.manager_clone()),
+                super::busy_threshold::busy_threshold_router(state.clone(), None),
+            ] {
+                append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
+                admin_router = admin_router.merge(route);
+            }
+            Some(AdminListener {
+                router: admin_router.layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(make_system_request_span)
+                        .on_response(on_response),
+                ),
+                addr: listen_socket_addr(
+                    &config.admin_host,
+                    config.admin_port.unwrap_or(DEFAULT_ADMIN_PORT),
+                )?,
+                port_explicit: config.admin_port.is_some(),
+            })
+        } else {
+            tracing::info!(
+                env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+                "frontend admin API disabled — admin listener not started"
+            );
+            None
+        };
 
         system_router = system_router.layer(
             TraceLayer::new_for_http()
@@ -1562,6 +1667,7 @@ impl HttpServiceConfigBuilder {
             generate_engine_capabilities,
             rl_router,
             rl_port: config.rl_port,
+            admin,
             frontend_load_target: config.runtime.map(|runtime| FrontendLoadTarget {
                 runtime,
                 namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
@@ -2577,21 +2683,28 @@ mod tests {
         assert_eq!(observer.inflight_count(), 0);
     }
 
+    /// Returns a local port that was free when this was called.
+    async fn free_local_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
     #[tokio::test]
-    async fn test_admin_api_disabled_404s_router_management() {
-        let cancel_token = Arc::new(CancellationToken::new());
+    async fn test_admin_routes_only_on_admin_listener() {
+        let cancel_token = CancellationToken::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let admin_port = free_local_port().await;
         let service = HttpService::builder()
             .port(port)
-            .enable_admin_api(false)
+            .admin_port(admin_port)
             .build()
             .unwrap();
 
         let service_token = cancel_token.clone();
         let handle = tokio::spawn(async move {
             service
-                .run_with_listener((*service_token).clone(), listener)
+                .run_with_listener(service_token, listener)
                 .await
                 .unwrap();
         });
@@ -2615,7 +2728,14 @@ mod tests {
             assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
         }
 
-        let live = reqwest::Client::new()
+        let admin = client
+            .get(format!("http://127.0.0.1:{admin_port}/busy_threshold"))
+            .send()
+            .await
+            .expect("admin request failed");
+        assert_eq!(admin.status(), reqwest::StatusCode::OK);
+
+        let live = client
             .get(format!("http://localhost:{}/live", port))
             .send()
             .await
@@ -2624,6 +2744,53 @@ mod tests {
 
         cancel_token.cancel();
         handle.abort();
+
+        // Disabled: nothing listens on the admin port.
+        let admin_port = free_local_port().await;
+        let (_, _, handle) =
+            spawn_service(|builder| builder.enable_admin_api(false).admin_port(admin_port)).await;
+        assert!(
+            client
+                .get(format!("http://127.0.0.1:{admin_port}/busy_threshold"))
+                .send()
+                .await
+                .is_err()
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_admin_port_bind_failure_policy() {
+        temp_env::async_with_vars([(env_llm::DYN_FRONTEND_ADMIN_PORT, None::<&str>)], async {
+            // A taken explicit admin port aborts startup.
+            let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let taken_port = taken.local_addr().unwrap().port();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let service = HttpService::builder()
+                .admin_port(taken_port)
+                .build()
+                .unwrap();
+            assert!(
+                service
+                    .run_with_listener(CancellationToken::new(), listener)
+                    .await
+                    .is_err()
+            );
+
+            // A taken default admin port does not. If this bind fails, the port is
+            // already taken.
+            let _default = tokio::net::TcpListener::bind(("127.0.0.1", DEFAULT_ADMIN_PORT)).await;
+            let (port, _, handle) = spawn_service(|builder| builder).await;
+            let live = reqwest::Client::new()
+                .get(format!("http://127.0.0.1:{port}/live"))
+                .send()
+                .await
+                .expect("request failed");
+            assert_eq!(live.status(), reqwest::StatusCode::OK);
+            handle.abort();
+        })
+        .await;
     }
 
     /// Starts an `HttpService` on an ephemeral local port.
