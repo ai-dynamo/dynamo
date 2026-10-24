@@ -52,12 +52,10 @@ _VISION_MODALITIES = frozenset({"image", "video"})
 def _deepstack_vision_width(hf_config) -> int | None:
     """Row width of DeepStack image/video embeddings, or None if not DeepStack.
 
-    DeepStack models (e.g. Qwen3-VL) concatenate one feature map per
-    DeepStack level onto each visual token, so a stored image or video row
-    is out_hidden_size * (1 + len(deepstack_visual_indexes)) wide instead of
-    the text hidden size. Qwen3-Omni nests its vision config under
-    thinker_config.
+    DeepStack models append one feature map per DeepStack level to each
+    visual token.
     """
+    # Qwen3-Omni keeps its vision config under thinker_config.
     for config in (hf_config, getattr(hf_config, "thinker_config", None)):
         vision_config = getattr(config, "vision_config", None)
         deepstack_visual_indexes = getattr(
@@ -222,7 +220,6 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             [], dtype=vllm_config.model_config.dtype
         ).element_size()
         self._bytes_per_embed = vllm_config.model_config.get_hidden_size() * dtype_bytes
-        # Audio rows (Qwen3-Omni) stay at the hidden size.
         vision_width = _deepstack_vision_width(vllm_config.model_config.hf_config)
         self._bytes_per_vision_embed = (
             self._bytes_per_embed
@@ -359,8 +356,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             evicted_hash, evicted_bytes = self._cache_order.popitem(last=False)
             self._num_used_bytes -= evicted_bytes
             self._evicts_this_step.add(evicted_hash)
-            # The worker applies evicts before the encoder runs, so a save
-            # planned earlier this step would store an untracked entry.
+            # The worker evicts before it saves, so drop any save planned this step.
             self._saves_this_step.discard(evicted_hash)
             num_evicted += 1
 
@@ -439,8 +435,7 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         embedding = encoder_cache[mm_hash].cpu()
         self._cpu_store[mm_hash] = embedding
 
-        # The scheduler budgets from model config; flag models whose stored
-        # rows differ so capacity_gb is not silently exceeded.
+        # The scheduler sizes entries from model config; check against the real row.
         row_bytes = embedding.shape[-1] * embedding.element_size()
         budgets = (self._bytes_per_embed, self._bytes_per_vision_embed)
         if row_bytes not in budgets and not self._warned_row_bytes:
