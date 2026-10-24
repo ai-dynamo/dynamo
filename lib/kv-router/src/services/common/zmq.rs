@@ -4,6 +4,8 @@
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc as StdArc, OnceLock};
 use std::task::{Context, Poll, ready};
 
 use anyhow::{Result, anyhow};
@@ -27,16 +29,109 @@ const ZMQ_HEARTBEAT_TIMEOUT_MS: i32 = 15000;
 const ZMQ_HEARTBEAT_TTL_MS: i32 = 15000;
 const ZMQ_LINGER_MS: i32 = 0;
 
+/// I/O threads for each shared context; the same variable the runtime event plane reads.
+const IO_THREADS_ENV: &str = "DYN_ZMQ_IO_THREADS";
+const DEFAULT_IO_THREADS: i32 = 4;
+/// Sockets per shared context, under libzmq's default `ZMQ_MAX_SOCKETS` of 1023, which the
+/// `zmq` crate cannot raise.
+const SOCKETS_PER_CONTEXT: usize = 1000;
+
+/// Process-wide ZMQ contexts. A context owns an I/O thread pool and a reaper thread, so a
+/// context per socket costs two threads per KV-event source; one SUB and one replay DEALER
+/// per worker rank made thousands of threads at large worker counts. Sockets share a
+/// context until it holds `capacity` of them, then the pool adds another.
+struct ContextPool {
+    contexts: std::sync::Mutex<Vec<PooledContext>>,
+    capacity: usize,
+    io_threads: i32,
+}
+
+struct PooledContext {
+    context: zmq::Context,
+    sockets: StdArc<AtomicUsize>,
+}
+
+/// A socket's slot in a pooled context, released when the socket closes.
+struct ContextLease(StdArc<AtomicUsize>);
+
+impl Drop for ContextLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl ContextPool {
+    fn new(capacity: usize, io_threads: i32) -> Self {
+        Self {
+            contexts: std::sync::Mutex::new(Vec::new()),
+            capacity,
+            io_threads,
+        }
+    }
+
+    fn global() -> &'static Self {
+        static POOL: OnceLock<ContextPool> = OnceLock::new();
+        POOL.get_or_init(|| Self::new(SOCKETS_PER_CONTEXT, io_threads_from_env()))
+    }
+
+    /// Only this method adds sockets, under the lock, so no context exceeds `capacity`.
+    fn lease(&self) -> Result<(zmq::Context, ContextLease)> {
+        let mut contexts = self.contexts.lock().unwrap();
+        let index = match contexts
+            .iter()
+            .position(|pooled| pooled.sockets.load(Ordering::Acquire) < self.capacity)
+        {
+            Some(index) => index,
+            None => {
+                let context = zmq::Context::new();
+                // Takes effect only before the context's first socket.
+                context.set_io_threads(self.io_threads)?;
+                contexts.push(PooledContext {
+                    context,
+                    sockets: StdArc::default(),
+                });
+                contexts.len() - 1
+            }
+        };
+        let pooled = &contexts[index];
+        pooled.sockets.fetch_add(1, Ordering::AcqRel);
+        Ok((
+            pooled.context.clone(),
+            ContextLease(StdArc::clone(&pooled.sockets)),
+        ))
+    }
+}
+
+fn io_threads_from_env() -> i32 {
+    let Some(value) = std::env::var_os(IO_THREADS_ENV) else {
+        return DEFAULT_IO_THREADS;
+    };
+    match value.to_str().and_then(|value| value.parse::<i32>().ok()) {
+        Some(threads) if threads > 0 => threads,
+        _ => {
+            tracing::warn!(
+                value = ?value,
+                default = DEFAULT_IO_THREADS,
+                "{IO_THREADS_ENV} must be a positive integer; using the default"
+            );
+            DEFAULT_IO_THREADS
+        }
+    }
+}
+
 struct SocketWrapper {
+    // Field order matters: the socket closes before its context slot is released.
     socket: zmq::Socket,
     fd: RawFd,
+    _lease: ContextLease,
 }
 
 impl SocketWrapper {
-    fn new(socket: zmq::Socket) -> Result<Self> {
+    fn new(socket: zmq::Socket, lease: ContextLease) -> Result<Self> {
         Ok(Self {
             fd: socket.get_fd()?,
             socket,
+            _lease: lease,
         })
     }
 }
@@ -50,8 +145,8 @@ impl AsRawFd for SocketWrapper {
 pub(crate) struct ZmqSocket(AsyncFd<SocketWrapper>);
 
 impl ZmqSocket {
-    fn new(socket: zmq::Socket) -> Result<Self> {
-        let wrapper = SocketWrapper::new(socket)?;
+    fn new(socket: zmq::Socket, lease: ContextLease) -> Result<Self> {
+        let wrapper = SocketWrapper::new(socket, lease)?;
         // SAFETY: `fd` is the socket's `ZMQ_FD`, owned by the `zmq::Socket` that the wrapper
         // owns, so it stays open until the wrapper is dropped, and `as_raw_fd` always returns it.
         let fd = unsafe { AsyncFd::register(wrapper) }.map_err(std::io::Error::from)?;
@@ -212,10 +307,21 @@ fn build_socket<F>(socket_type: zmq::SocketType, configure: F) -> Result<ZmqSock
 where
     F: FnOnce(&zmq::Socket) -> Result<()>,
 {
-    let context = zmq::Context::new();
+    build_socket_in(ContextPool::global(), socket_type, configure)
+}
+
+fn build_socket_in<F>(
+    pool: &ContextPool,
+    socket_type: zmq::SocketType,
+    configure: F,
+) -> Result<ZmqSocket>
+where
+    F: FnOnce(&zmq::Socket) -> Result<()>,
+{
+    let (context, lease) = pool.lease()?;
     let socket = context.socket(socket_type)?;
     configure(&socket)?;
-    ZmqSocket::new(socket)
+    ZmqSocket::new(socket, lease)
 }
 
 #[cfg(any(test, feature = "standalone-indexer"))]
@@ -324,6 +430,21 @@ pub(crate) fn validate_endpoint(endpoint: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn pool_adds_a_context_when_full_and_reuses_freed_slots() {
+        let pool = ContextPool::new(2, 1);
+        let sub = || build_socket_in(&pool, zmq::SUB, |_| Ok(())).unwrap();
+        let contexts = || pool.contexts.lock().unwrap().len();
+        let first = sub();
+        let _second = sub();
+        assert_eq!(contexts(), 1);
+        let _third = sub();
+        assert_eq!(contexts(), 2, "a full context gets a sibling");
+        drop(first);
+        let _reused = sub();
+        assert_eq!(contexts(), 2, "a closed socket frees its slot");
+    }
 
     #[tokio::test]
     async fn bracketed_ipv6_endpoints_connect() {
