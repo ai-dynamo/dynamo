@@ -13,6 +13,12 @@ forwards each request to the worker selected by the EPP.
 Use this topology when Gateway API should own traffic entry, policy, and gateway-level observability.
 For direct-to-Frontend routing, use [the Dynamo Frontend](dynamo-frontend.md).
 
+<Warning>
+The Dynamo EPP does not have full feature parity with the standard Dynamo deployment, in which the
+Dynamo Frontend routes requests. Before you continue, review
+[Features Not Supported by the Dynamo EPP](overview.md#features-not-supported-by-the-dynamo-epp).
+</Warning>
+
 ## Before You Begin
 
 You need:
