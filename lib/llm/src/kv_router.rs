@@ -561,6 +561,19 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
             dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
                 .expect("registered queue deadline reason"),
         )
+    } else if error_type == ErrorType::ResourceExhausted {
+        error.reason(
+            dynamo_runtime::error::ErrorReason::new("router.admission_rejected")
+                .expect("registered router admission reason"),
+        )
+    } else if error_type == ErrorType::WorkerOverloaded {
+        // A router refusal too, so the client gets 429 if it is not migrated.
+        // Unlike router.admission_rejected this stays migratable: a session
+        // affinity pin can still move to another worker.
+        error.reason(
+            dynamo_runtime::error::ErrorReason::new("router.pinned_worker_overloaded")
+                .expect("registered pinned worker overload reason"),
+        )
     } else {
         error
     };
@@ -572,6 +585,11 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     } else {
         error.build().into()
     }
+}
+
+#[cfg(test)]
+pub(crate) fn scheduler_error_for_test(error: scheduling::KvSchedulerError) -> anyhow::Error {
+    map_scheduler_error(error)
 }
 
 fn cancelled_error(context_id: &str) -> anyhow::Error {

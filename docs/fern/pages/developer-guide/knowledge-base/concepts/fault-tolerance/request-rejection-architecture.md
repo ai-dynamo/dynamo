@@ -33,19 +33,20 @@ configuration fields, see [Frontend Configuration](../../../../reference/compone
                                            │ every eligible worker busy
                                            ▼
                                 ┌─────────────────────┐
-                                │ HTTP 529 Overloaded │
+                                │      HTTP 429       │
                                 └─────────────────────┘
 ```
 
 The router distinguishes two failure classes:
 
 - **Overloaded** means workers are registered but every eligible worker is busy. The Frontend returns
-  HTTP 529 by default.
+  HTTP 429 with OpenAI `error.type` `Too Many Requests`.
 - **Unavailable** means no usable service path exists. The Frontend returns HTTP 503.
 
-`DYN_HTTP_OVERLOAD_STATUS_CODE` can change the overload response code for client compatibility. Values
-from 200 through 999 are accepted. Informational values from 100 through 199, invalid values, and
-out-of-range values fall back to 529. The value is read and cached on first use.
+`DYN_HTTP_OVERLOAD_STATUS_CODE` changes the status for worker and engine overload, not this router
+admission refusal. Values from 200 through 999 are accepted. Informational values from 100 through
+199, invalid values, and out-of-range values fall back to 529. The value is read and cached on first
+use. Rejection metrics stay in the overload class.
 
 ## Independently Enabled Signals
 
@@ -96,7 +97,7 @@ When a request arrives:
 2. If at least one busy threshold is configured, the router removes workers in the current busy set.
 3. If registered workers exist but no eligible worker remains, the router returns
    `PipelineError::ServiceOverloaded`.
-4. The HTTP layer maps overload to the configured overload status, 529 by default.
+4. The HTTP layer maps that pool exhaustion to HTTP 429. `error.type` is `Too Many Requests`.
 5. The Frontend increments `dynamo_frontend_model_rejection_total`.
 
 The Frontend also exports the latest observed worker values through

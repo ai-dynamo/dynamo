@@ -79,14 +79,33 @@ pub(crate) fn record_failure(error: &DynamoError) {
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
-    // Both overload flavors are client-visible rejections (HTTP 529). They differ
-    // only in whether migration may retry elsewhere.
+    // Both overload flavors are capacity rejections. They differ only in whether
+    // migration may retry elsewhere. A policy-class queue refusal is not a
+    // DynamoError but is a rejection too. HTTP status is chosen by the protocol
+    // layer: a terminal router admission refusal is 429, and worker or engine
+    // overload stays on the configured overload status.
     const REJECTION: &[DynamoErrorType] = &[
         DynamoErrorType::ResourceExhausted,
         DynamoErrorType::WorkerOverloaded,
     ];
     const NON_REJECTION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
+        || find_queue_rejection_in_chain(err).is_some()
+}
+
+pub(super) fn find_queue_rejection_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(rejection) =
+            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+        {
+            return Some(rejection);
+        }
+        current = error.source();
+    }
+    None
 }
 
 /// User-facing body for a request whose caller-supplied deadline elapsed
@@ -111,6 +130,32 @@ pub(super) fn queue_deadline_error<'a>(
         current = error.source();
     }
     None
+}
+
+/// A terminal router refusal: a policy-class [`QueueRejection`](dynamo_kv_router::scheduling::QueueRejection),
+/// a pool exhaustion stamped `router.admission_rejected`, or an overloaded pinned
+/// worker stamped `router.pinned_worker_overloaded`.
+///
+/// Checked before semantic classification. That reason is a valid
+/// `CapacityExhausted`, so the generic overload policy would otherwise answer
+/// with the configured overload status.
+pub(super) fn router_admission_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
+    if find_queue_rejection_in_chain(err).is_some() {
+        return true;
+    }
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>()
+            && matches!(
+                error.reason().as_str(),
+                "router.admission_rejected" | "router.pinned_worker_overloaded"
+            )
+        {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 /// Check whether an error chain indicates that no backend worker is available
@@ -3042,6 +3087,21 @@ mod tests {
 
     fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
         model_ready_value_with_name(registry, &model_ready_metric_name(None), model)
+    }
+
+    #[test]
+    fn policy_queue_rejection_counts_as_router_admission_rejection() {
+        use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
+
+        let error = anyhow::Error::new(QueueRejection {
+            policy_class: "latency".to_string(),
+            limit_kind: QueueLimitKind::CachedTokens,
+            current: 2048,
+            limit: 1024,
+        });
+
+        assert!(request_was_rejected(error.as_ref()));
+        assert!(router_admission_rejected(error.as_ref()));
     }
 
     #[test]
