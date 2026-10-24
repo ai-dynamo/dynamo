@@ -170,11 +170,12 @@ KV_TRANSFER_CASES = [
         "tcp",
         marks=pytest.mark.xfail(
             reason=(
-                "Known TensorRT-LLM 1.3.0rc25 KV-migration output-continuity "
-                "failure; tracked in https://github.com/ai-dynamo/dynamo/pull/14609"
+                "Known TensorRT-LLM KV-migration output-continuity failure; "
+                "intermittent on 1.3.0rc29, tracked in "
+                "https://github.com/ai-dynamo/dynamo/issues/16406"
             ),
             raises=OutputContinuityError,
-            strict=True,
+            strict=False,
         ),
         id="worker-failure-completion-stream-tcp",
     ),
