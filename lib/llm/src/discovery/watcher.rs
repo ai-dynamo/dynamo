@@ -127,6 +127,18 @@ fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelC
     }
 }
 
+/// The narrowest query that still lists every card `normalize` could admit under the filter.
+///
+/// No query expresses a namespace prefix, so a prefix lists all models and filters afterwards.
+fn reconciliation_query(namespace_filter: &NamespaceFilter) -> DiscoveryQuery {
+    match namespace_filter {
+        NamespaceFilter::Exact(namespace) => DiscoveryQuery::NamespacedModels {
+            namespace: namespace.clone(),
+        },
+        NamespaceFilter::Global | NamespaceFilter::Prefix(_) => DiscoveryQuery::AllModels,
+    }
+}
+
 fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
     card.worker_type == Some(WorkerType::Encode)
         || card.media_decoder.is_some()
@@ -1330,8 +1342,14 @@ impl ControllerHost for ModelWatcher {
         drop(prepared);
     }
 
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
-        self.drt.discovery().list(DiscoveryQuery::AllModels).await
+    async fn list_instances(
+        &self,
+        namespace_filter: &NamespaceFilter,
+    ) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        self.drt
+            .discovery()
+            .list(reconciliation_query(namespace_filter))
+            .await
     }
 }
 
@@ -1498,6 +1516,48 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn reconciliation_lists_every_card_the_filter_admits_and_exactly_those_for_an_exact_one() {
+        let card = |namespace: &str| DiscoveryInstance::Model {
+            namespace: namespace.to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            card_json: serde_json::json!({}),
+            model_suffix: None,
+        };
+        let filters = [
+            NamespaceFilter::Global,
+            NamespaceFilter::Exact("ns".to_string()),
+            NamespaceFilter::Prefix("ns".to_string()),
+        ];
+        for filter in &filters {
+            let query = reconciliation_query(filter);
+            for mode in [
+                NamespacePrefixMode::Literal,
+                NamespacePrefixMode::WorkerGeneration,
+            ] {
+                for namespace in ["ns", "ns-1a2b3c4d", "ns-legacy", "ns-bar", "other"] {
+                    let listed = card(namespace).matches(&query);
+                    let admitted = filter.matches_with_prefix_mode(namespace, mode);
+                    assert!(
+                        listed || !admitted,
+                        "{filter:?} {mode:?} {namespace}: admitted but not listed"
+                    );
+                    if matches!(filter, NamespaceFilter::Exact(_)) {
+                        assert_eq!(listed, admitted, "{filter:?} {mode:?} {namespace}");
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            reconciliation_query(&NamespaceFilter::Exact("ns".to_string())),
+            DiscoveryQuery::NamespacedModels {
+                namespace: "ns".to_string()
+            }
+        );
+    }
 
     #[test]
     fn qwen_video_contract_digest_is_canonical_and_engine_specific() {
