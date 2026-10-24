@@ -804,6 +804,8 @@ navigation:
             path: pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
           - page: Deploy the KAI + GPU Fractions Experiment
             path: pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
+          - page: Reproduce Multi-GPU GPU Fractions
+            path: pages/use-cases/gpu-sharing/deploy-tp2-gpu-fractions.md
           - page: Per-GPU Compute and Memory Limits with MPS
             path: pages/use-cases/gpu-sharing/mps-per-gpu-limits.md
   - tab: recipes
