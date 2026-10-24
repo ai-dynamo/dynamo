@@ -23,6 +23,8 @@ pub use config::RuntimeConfig;
 pub mod component;
 pub mod compute;
 pub mod discovery;
+#[cfg(test)]
+mod endpoint_test_utils;
 pub mod engine;
 pub mod engine_routes;
 pub mod error;

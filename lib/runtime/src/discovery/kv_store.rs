@@ -684,6 +684,14 @@ impl Discovery for KVStoreDiscovery {
         Ok(())
     }
 
+    async fn get_endpoint(&self, id: &EndpointInstanceId) -> Result<Option<DiscoveryInstance>> {
+        let Some(bucket) = self.store.get_bucket(INSTANCES_BUCKET).await? else {
+            return Ok(None);
+        };
+        let value = bucket.get(&kv::Key::new(id.to_path())).await?;
+        value.map(|value| Self::parse_instance(&value)).transpose()
+    }
+
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         let prefix = Self::query_prefix(&query);
         let bucket_name = Self::bucket_for_prefix(&prefix);
@@ -1352,6 +1360,54 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(event, DiscoveryEvent::Resync(vec![]));
+    }
+
+    #[tokio::test]
+    async fn endpoint_point_lookup_ignores_other_records() {
+        let store = kv::Manager::memory_without_range_reads();
+        let bucket = store
+            .get_or_create_bucket(INSTANCES_BUCKET, None)
+            .await
+            .unwrap();
+        let client = KVStoreDiscovery::new(store, CancellationToken::new());
+        let spec = DiscoverySpec::Endpoint {
+            namespace: "point-lookup".to_string(),
+            component: "worker".to_string(),
+            endpoint: "query".to_string(),
+            transport: crate::component::TransportType::Nats("query".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let instance = spec.into_instance(client.instance_id());
+        let DiscoveryInstanceId::Endpoint(id) = instance.id() else {
+            unreachable!()
+        };
+        assert!(client.get_endpoint(&id).await.unwrap().is_none());
+        bucket
+            .insert(
+                &kv::Key::new(id.to_path()),
+                serde_json::to_vec(&instance).unwrap().into(),
+                0,
+            )
+            .await
+            .unwrap();
+        // A point read must neither decode nor depend on an unrelated discovery record.
+        bucket
+            .insert(
+                &kv::Key::new("other/worker/query/1".to_string()),
+                bytes::Bytes::from_static(b"invalid json"),
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(bucket.entries().await.is_err());
+        assert!(client.list(DiscoveryQuery::AllEndpoints).await.is_err());
+        assert_eq!(client.get_endpoint(&id).await.unwrap(), Some(instance));
+        let missing = EndpointInstanceId {
+            instance_id: id.instance_id.wrapping_add(1),
+            ..id
+        };
+        assert!(client.get_endpoint(&missing).await.unwrap().is_none());
     }
 
     #[tokio::test]
