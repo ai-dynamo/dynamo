@@ -228,7 +228,12 @@ async def _fetch_embeddings_with_cache(
         )
 
     # Extract handles from disaggregated params
-    handles = getattr(ep_disaggregated_params, "multimodal_embedding_handles", None)
+    handoff = getattr(ep_disaggregated_params, "multimodal", None)
+    handles = (
+        ep_disaggregated_params.get_multimodal_embedding_handles()
+        if handoff is not None
+        else getattr(ep_disaggregated_params, "multimodal_embedding_handles", None)
+    )
     if not handles:
         raise RuntimeError(
             "fetch_embeddings_with_cache: No multimodal_embedding_handles in ep_disaggregated_params"
