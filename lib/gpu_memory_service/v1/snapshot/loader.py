@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 
@@ -47,10 +48,50 @@ def _build_parser():
             "(for example, --posix-backend-param ios_pool_size=64)."
         ),
     )
+    mx = parser.add_argument_group(
+        "mx backend", "Fill from a ModelExpress peer serving the same weights."
+    )
+    mx.add_argument("--mx-model", help="Model the peer serves.")
+    mx.add_argument("--mx-revision", default="", help="Model revision.")
+    mx.add_argument("--mx-tensor-parallel-size", type=int, help="Peer TP size.")
+    mx.add_argument("--mx-server-url", help="ModelExpress server address.")
+    mx.add_argument(
+        "--mx-listen-port",
+        type=int,
+        help="NIXL listen port base; each rank listens on base + rank.",
+    )
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=None,
+        help=(
+            "Rank whose socket, artifact and peer to use. Default: --device. "
+            "Differs from --device when the process sees only its own GPU."
+        ),
+    )
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def _mx_backend_params(parser, args) -> dict[str, object]:
+    if args.transfer_backend != "mx":
+        return {}
+    if not args.mx_model or not args.mx_tensor_parallel_size or not args.mx_listen_port:
+        parser.error(
+            "--transfer-backend=mx needs --mx-model, --mx-tensor-parallel-size "
+            "and --mx-listen-port"
+        )
+    return {
+        "mx_rank": args.rank,
+        "mx_model": args.mx_model,
+        "mx_revision": args.mx_revision,
+        "mx_tensor_parallel_size": args.mx_tensor_parallel_size,
+        "mx_server_url": args.mx_server_url,
+        "mx_listen_port": args.mx_listen_port + args.rank,
+    }
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Validated loader arguments, with ``backend_params`` resolved."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     if not args.checkpoint_dir:
@@ -64,21 +105,34 @@ def main(argv: list[str] | None = None) -> None:
     if args.sharded_ssd_queues_per_root <= 0:
         parser.error("--sharded-ssd-queues-per-root must be a positive integer")
     try:
-        posix_backend_params = _parse_backend_params(args.posix_backend_param)
+        args.posix_backend_params = _parse_backend_params(args.posix_backend_param)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.rank is None:
+        args.rank = args.device
+    args.backend_params = _mx_backend_params(parser, args)
+    return args
 
+
+def load(args: argparse.Namespace, **backend_params: object) -> None:
+    """Fill the rank's weights server from its artifact through the backend."""
+    logger.info("GMS V1 loader starting device=%d rank=%d", args.device, args.rank)
     init_vmm(VMMDeviceType.CUDA)
     load_weights(
-        os.path.join(args.checkpoint_dir, f"device-{args.device}"),
-        get_socket_path(args.device, "weights"),
+        os.path.join(args.checkpoint_dir, f"device-{args.rank}"),
+        get_socket_path(args.rank, "weights"),
         args.device,
         max_workers=args.max_workers,
         transfer_backend=args.transfer_backend,
         sharded_ssd_roots=parse_sharded_ssd_roots(args.sharded_ssd_roots),
         sharded_ssd_queues_per_root=args.sharded_ssd_queues_per_root,
-        posix_backend_params=posix_backend_params,
+        posix_backend_params=args.posix_backend_params,
+        backend_params={**args.backend_params, **backend_params},
     )
+
+
+def main(argv: list[str] | None = None) -> None:
+    load(parse_args(argv))
     logger.info("GMS V1 loader complete; exiting")
 
 

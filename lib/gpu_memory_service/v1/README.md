@@ -128,7 +128,9 @@ granted RO and returns without loading. Otherwise it is granted RW, recreates
 the exact IDs and sizes, and builds generic `FileTransferSource` and
 `GMSTransferTarget` records. Backend selection goes through
 `snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
-`sharded-ssd` use the same implementations and configuration as V0. The loader
+`sharded-ssd` use the same implementations and configuration as V0. `mx` fills
+the allocations over RDMA from a ModelExpress peer that serves the same weights
+(`v1.snapshot.mx_source`) and reads only the artifact manifest. The loader
 synchronizes, releases its temporary mappings, commits the same socket RW to
 RO, closes its lease, and exits. The `gpu_memory_service.cli.snapshot.loader`
 entry point then stays running, so Kubernetes does not restart the container.
@@ -197,29 +199,41 @@ sequenceDiagram
 Suspend order is weights then KV so the exclusive KV lease remains held until
 local weight memory is asleep. Resume order is KV then weights.
 
-Every connection verifies the physical GPU identity. The container-local device
-ordinal selects both the rank-local socket and the `device-<ordinal>` artifact
-directory; a predecessor server identity is not persisted. V1 does not
+Every connection verifies the physical GPU identity. The rank selects both the
+rank-local socket and the `device-<rank>` artifact directory; a predecessor
+server identity is not persisted. V1 does not
 reconstruct models, retain KV contents, scan raw mappings, validate
 model-specific layouts, or implement SGLang integration.
 
 ## Running V1
 
-Start one V1 child per visible device:
+Start one V1 process per GPU:
 
 ```text
-DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server
+DYN_GMS_USE_V1=true GMS_SOCKET_DIR=/run/gms python3 -m gpu_memory_service.cli.server
 ```
 
-The supervisor discovers the visible devices and monitors the children. To
-start one rank-local child directly:
+The supervisor reads the GPUs from `/proc/driver/nvidia/gpus` without starting
+CUDA and gives rank r to the r-th GPU in PCI bus order, the order engines see
+with `CUDA_DEVICE_ORDER=PCI_BUS_ID`. Each rank process can open only its own
+GPU node, so libcuda brings up one GPU instead of all of them, and no rank can
+reach another rank's GPU or memory:
+
+- Run as root, rank r runs as uid and gid `20000 + r` with `no_new_privs`. Only
+  its group may open its `/dev/nvidia<minor>` in this container, it serves from
+  `GMS_SOCKET_DIR/rank-r` (mode 0700), and clients reach it through the links
+  `GMS_SOCKET_DIR/gms_<r>_<domain>.sock` in a directory only root may change.
+- Otherwise each rank confines itself with Landlock before starting CUDA; its
+  sockets are then reachable by the other ranks.
+
+The supervisor monitors the ranks. To start one rank-local child directly:
 
 ```text
 DYN_GMS_USE_V1=true gpu-memory-service --device 0
 ```
 
 Save or load every visible device (pass `--device N` for one GPU). Artifacts
-land under `<checkpoint-dir>/device-<ordinal>`:
+land under `<checkpoint-dir>/device-<rank>`:
 
 ```text
 DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.saver \
@@ -230,8 +244,15 @@ DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.loader \
 DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
   --checkpoint-dir /checkpoints/run/versions/1 \
   --transfer-backend nixl-gds
+DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
+  --checkpoint-dir /checkpoints/run/versions/1 \
+  --transfer-backend mx --mx-model <model> --mx-revision <revision> \
+  --mx-tensor-parallel-size 8 --mx-server-url mx-server:8001 --mx-listen-port 25555
 ```
 
+With `--enable-loader`, each rank fills its own server from inside its process
+and keeps serving. The `mx` backend imports ModelExpress and starts its NIXL
+agent while the rank allocates, and rank r listens on the port base + r.
 The loader also accepts `nixl` and `sharded-ssd`, the existing sharded SSD root
 and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.
 Start the restored worker with `GMS_SOCKET_DIR`. Only the `weights` socket is

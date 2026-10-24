@@ -18,6 +18,7 @@ class TransferBackendKind(str, Enum):
     NIXL = "nixl"
     NIXL_GDS = "nixl-gds"
     SHARDED_SSD = "sharded-ssd"
+    MX = "mx"
 
     def __str__(self) -> str:
         return self.value
@@ -114,6 +115,11 @@ def create_transfer_backend(
         )
 
         return ShardedSSDTransferBackend(config=config)
+
+    if name == TransferBackendKind.MX.value:
+        from gpu_memory_service.snapshot.backends.mx import MXTransferBackend
+
+        return MXTransferBackend(config=config)
 
     choices = ", ".join(backend.value for backend in TransferBackendKind)
     raise ValueError(

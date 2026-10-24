@@ -220,10 +220,13 @@ def load_weights(
     sharded_ssd_roots: Sequence[str] | None = None,
     sharded_ssd_queues_per_root: int = 2,
     posix_backend_params: Mapping[str, str] | None = None,
+    backend_params: Mapping[str, object] | None = None,
 ) -> None:
     """Load exact V1 weight IDs into a fresh server and publish them.
 
     Returns without loading if the server already has committed weights.
+    ``backend_params`` passes backend-specific settings through, such as the
+    peer identity and rank the ``mx`` backend fills from.
     """
     started_at = monotonic()
     if max_workers <= 0:
@@ -245,6 +248,7 @@ def load_weights(
                 "sharded_ssd_roots": list(roots),
                 "sharded_ssd_queues_per_root": sharded_ssd_queues_per_root,
                 "posix_backend_params": posix_backend_params,
+                **(backend_params or {}),
             },
         ),
     )
@@ -267,6 +271,11 @@ def load_weights(
         if session.lock_type is GrantedLockType.RO:
             logger.info("GMS V1 weights already committed on device=%d", device)
             return
+        logger.info(
+            "GMS V1 loader RW granted device=%d elapsed=%.3fs",
+            device,
+            monotonic() - started_at,
+        )
 
         mappings: list[tuple[LocalMapping, int]] = []
         targets: dict[str, GMSTransferTarget] = {}
@@ -293,6 +302,12 @@ def load_weights(
                     device,
                     record.aligned_size,
                 )
+            logger.info(
+                "GMS V1 loader allocated device=%d allocations=%d elapsed=%.3fs",
+                device,
+                len(targets),
+                monotonic() - started_at,
+            )
 
             if set(targets) != {source.allocation_id for source in sources}:
                 raise RuntimeError(
@@ -303,6 +318,11 @@ def load_weights(
                 transfer_resources.callback(transfer.close)
                 transfer.restore(targets)
                 vmm.synchronize()
+            logger.info(
+                "GMS V1 loader transferred device=%d elapsed=%.3fs",
+                device,
+                monotonic() - started_at,
+            )
 
         _close_backend(backend_holder)
         session.commit()
