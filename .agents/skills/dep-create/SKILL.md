@@ -95,7 +95,6 @@ gh issue create \
   --repo ai-dynamo/dynamo \
   --title "DEP (light): <short descriptive title>" \
   --label "dep:draft" \
-  --label "dep:lightweight" \
   --label "<area>" \
   --body "$(cat <<'EOF'
 ## Summary
@@ -140,8 +139,8 @@ or `dep:done` and reference the existing PRs.
 - The issue body IS the spec — treat it as a living document.
 - `dep:draft` is applied automatically. PIC changes to
   `dep:under-review` when ready.
-- For lightweight DEPs, use `dep:lightweight` label and omit optional
-  sections.
+- For lightweight DEPs, use the `DEP (light):` title prefix and omit
+  optional sections.
 - For plan revisions, post a new comment with a changelog at the top.
   Do not edit the original — preserve the timeline.
 - **Customer name stripping**: Before creating or updating a DEP,
