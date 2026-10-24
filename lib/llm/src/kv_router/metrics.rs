@@ -63,7 +63,10 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
-use crate::http::service::metrics::generate_log_buckets;
+use crate::http::service::metrics::{
+    EnvLookup, generate_log_buckets, input_sequence_buckets, inter_token_latency_buckets,
+    output_sequence_buckets, system_env, time_to_first_token_buckets,
+};
 use crate::protocols::common::timing::RequestPhase;
 
 mod worker_registered;
@@ -1081,12 +1084,16 @@ impl RouterRequestMetrics {
                 let router_id = instance_id.to_string();
                 let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
 
-                Arc::new(Self::build(component, extra_labels))
+                Arc::new(Self::build(component, extra_labels, &system_env))
             })
             .clone()
     }
 
-    fn build<H: MetricsHierarchy>(hierarchy: &H, extra_labels: &[(&str, &str)]) -> Self {
+    fn build<H: MetricsHierarchy>(
+        hierarchy: &H,
+        extra_labels: &[(&str, &str)],
+        env: EnvLookup<'_>,
+    ) -> Self {
         let metrics = hierarchy.metrics();
         let requests_started_total = metrics
             .create_intcounter(
@@ -1107,7 +1114,7 @@ impl RouterRequestMetrics {
                 &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
                 "Time to first token observed at the router",
                 extra_labels,
-                Some(generate_log_buckets(0.001, 480.0, 18)),
+                Some(time_to_first_token_buckets(env)),
             )
             .expect("failed to create router_time_to_first_token_seconds");
         let inter_token_latency_seconds = metrics
@@ -1115,7 +1122,7 @@ impl RouterRequestMetrics {
                 &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
                 "Average inter-token latency observed at the router",
                 extra_labels,
-                Some(generate_log_buckets(0.001, 2.0, 13)),
+                Some(inter_token_latency_buckets(env)),
             )
             .expect("failed to create router_inter_token_latency_seconds");
         let input_sequence_tokens = metrics
@@ -1124,7 +1131,7 @@ impl RouterRequestMetrics {
                 "Input sequence length in tokens observed at the router",
                 &[KV_PHASE_LABEL, labels::MODEL],
                 extra_labels,
-                Some(generate_log_buckets(50.0, 128000.0, 12)),
+                Some(input_sequence_buckets(env)),
             )
             .expect("failed to create router_input_sequence_tokens");
         let output_sequence_tokens = metrics
@@ -1132,7 +1139,7 @@ impl RouterRequestMetrics {
                 &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
                 "Output sequence length in tokens observed at the router",
                 extra_labels,
-                Some(generate_log_buckets(50.0, 32000.0, 10)),
+                Some(output_sequence_buckets(env)),
             )
             .expect("failed to create router_output_sequence_tokens");
         let kv_hit_rate = metrics
@@ -1243,7 +1250,7 @@ impl RouterRequestMetrics {
         let mut hierarchy = kv_publisher_registration_tests::FakeHierarchy::component("", "", 0);
         hierarchy.registry = registry.clone();
         hierarchy.connection_id = None;
-        Arc::new(Self::build(&hierarchy, &[]))
+        Arc::new(Self::build(&hierarchy, &[], &system_env))
     }
 
     /// Record a selection that sacrificed KV cache overlap.
@@ -1519,7 +1526,8 @@ mod tests {
     fn router_request_metrics_register_with_component_labels() {
         let hierarchy =
             kv_publisher_registration_tests::FakeHierarchy::component("dynamo", "frontend", 0x123);
-        let metrics = RouterRequestMetrics::build(&hierarchy, &[(labels::ROUTER_ID, "291")]);
+        let metrics =
+            RouterRequestMetrics::build(&hierarchy, &[(labels::ROUTER_ID, "291")], &system_env);
         metrics
             .observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64)
             .inc_by(72);
@@ -1585,6 +1593,71 @@ mod tests {
         let mut buffer = Vec::new();
         encoder.encode(&registry.gather(), &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn router_histograms_use_the_frontend_bucket_settings() {
+        let pairs = [
+            ("DYN_METRICS_TTFT_MAX", "60"),
+            ("DYN_METRICS_ITL_MAX", "30"),
+            ("DYN_METRICS_INPUT_SEQUENCE_MAX", "262144"),
+            ("DYN_METRICS_OUTPUT_SEQUENCE_MAX", "262144"),
+            ("DYN_METRICS_OUTPUT_SEQUENCE_COUNT", "13"),
+        ];
+        let env = |name: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        };
+        let hierarchy = kv_publisher_registration_tests::FakeHierarchy::component("", "", 0);
+        let metrics = RouterRequestMetrics::build(&hierarchy, &[], &env);
+        metrics.time_to_first_token_seconds.observe(1.0);
+        metrics.inter_token_latency_seconds.observe(0.01);
+        metrics
+            .input_sequence_tokens
+            .with_label_values(&["prefill", "m"])
+            .observe(100.0);
+        metrics.output_sequence_tokens.observe(100.0);
+
+        let families = hierarchy.registry.get_prometheus_registry().gather();
+        let bounds = |name: &str| -> Vec<f64> {
+            families
+                .iter()
+                .find(|family| family.name() == format!("dynamo_component_router_{name}"))
+                .unwrap()
+                .get_metric()[0]
+                .get_histogram()
+                .get_bucket()
+                .iter()
+                .map(|bucket| bucket.upper_bound())
+                .collect()
+        };
+        for (name, expected, top) in [
+            (
+                "time_to_first_token_seconds",
+                time_to_first_token_buckets(&env),
+                60.0,
+            ),
+            (
+                "inter_token_latency_seconds",
+                inter_token_latency_buckets(&env),
+                30.0,
+            ),
+            (
+                "input_sequence_tokens",
+                input_sequence_buckets(&env),
+                260000.0,
+            ),
+            (
+                "output_sequence_tokens",
+                output_sequence_buckets(&env),
+                260000.0,
+            ),
+        ] {
+            assert_eq!(expected.last(), Some(&top), "{name}");
+            assert_eq!(bounds(name), expected, "{name}");
+        }
     }
 
     #[test]

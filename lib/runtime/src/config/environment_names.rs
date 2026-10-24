@@ -581,7 +581,9 @@ pub mod llm {
         /// Histogram bucket configuration prefixes. Each is suffixed with `_MIN`,
         /// `_MAX`, or `_COUNT` to form the variable that tunes one frontend
         /// histogram's log-spaced buckets, for example `DYN_METRICS_ITL_MAX`.
-        /// Values are read once, when the frontend builds its metrics.
+        /// The TTFT, ITL, and input and output sequence settings also apply to the
+        /// router's copies of those histograms. Values are read once, when the
+        /// frontend or router builds its metrics.
         pub const DYN_METRICS_REQUEST_DURATION: &str = "DYN_METRICS_REQUEST_DURATION";
         /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_INPUT_SEQUENCE: &str = "DYN_METRICS_INPUT_SEQUENCE";
