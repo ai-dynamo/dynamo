@@ -794,13 +794,48 @@ mod tests {
         RoutingScopeId, StableDpSlotId,
     };
     use crate::indexer::{
-        KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation, WorkerKvQueryResponse,
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation,
+        WorkerKvQueryResponse,
     };
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, ResetScope, ResidencyDomain, ResidencyProjection,
         RouterEvent, StorageTier, WorkerWithDpRank,
     };
+    use crate::test_utils::create_store_event;
+
+    #[tokio::test]
+    async fn opted_in_primary_preserves_shared_cache_eligibility_in_recovery_dump() {
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let primary = KvIndexer::builder(token.clone(), 1, metrics.clone())
+            .shared_cache_provenance(true)
+            .build();
+        let indexer = LocalKvIndexer::from_primary(primary, metrics, 1);
+        for event in [
+            create_store_event(7, 1, vec![1], None).with_shared_cache_eligibility(true),
+            create_store_event(7, 2, vec![2], Some(ExternalSequenceBlockHash(100))),
+        ] {
+            indexer.apply_event_with_buffer(event).await.unwrap();
+        }
+        indexer.flush().await;
+        let response = indexer.get_events_in_id_range(Some(1), None).await;
+        let decoded: WorkerKvQueryResponse =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&response).unwrap()).unwrap();
+        let WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+            ..
+        } = decoded
+        else {
+            panic!("expected a tree dump after the first event left the buffer");
+        };
+        assert_eq!(last_event_id, 2);
+        assert_eq!(events.len(), 2);
+        assert!(events[0].shared_cache_eligible);
+        assert!(!events[1].shared_cache_eligible);
+        token.cancel();
+    }
 
     fn cache_owner_id() -> CacheOwnerId {
         CacheOwnerId::new(
