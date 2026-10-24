@@ -4,10 +4,10 @@
 name: PR
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - "pull-request/[0-9]+"
-      - "ci/test-runner-group-balancing"
 
 concurrency:
   # Keep stress-test pushes concurrent; normal PR pushes still supersede older runs.
