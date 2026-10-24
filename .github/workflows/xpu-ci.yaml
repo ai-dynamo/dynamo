@@ -353,7 +353,9 @@ jobs:
   cleanup-xpu:
     needs: [build-xpu, test-xpu-gms, test-xpu, test-xpu-2card]
     if: ${{ always() }}
-    runs-on: xpu
+    # Own label so cleanup does not queue behind build/test jobs; its runner
+    # must share the Docker daemon that build-xpu writes images to.
+    runs-on: xpu-cleanup
     env:
       IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
       TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}-test
