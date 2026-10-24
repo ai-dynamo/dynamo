@@ -11,6 +11,7 @@
 mod default;
 mod thunderagent;
 mod two_tier_cost_fn;
+mod uncached_pool_split;
 pub use default::{DefaultWorkerSelector, default_factory, default_policy};
 
 /// Registry containing the required default only, without an optional policy catalog.
@@ -29,6 +30,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     default::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
+    uncached_pool_split::register(registry)?;
     Ok(())
 }
 

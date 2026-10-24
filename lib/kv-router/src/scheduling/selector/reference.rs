@@ -275,6 +275,7 @@ fn default_row(
     input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
+        None,
         WorkerInputs::ALL,
         |effective_overlap_blocks, device_overlap_blocks| {
             context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
@@ -1968,7 +1969,7 @@ mod tests {
         let input = MaterializedSelectionInput::new(&request, 16);
         let default_context =
             DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
-        let custom_row = input.row(worker, None, WorkerInputs::CACHE);
+        let custom_row = input.row(worker, None, None, WorkerInputs::CACHE);
         let default_row = default_row(&input, default_context, worker, None);
 
         assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);

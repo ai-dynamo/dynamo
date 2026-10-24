@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cell::Cell, collections::HashMap};
+use std::{cell::Cell, collections::HashMap, collections::HashSet, sync::Arc};
 
 mod policy;
 #[cfg(any(test, feature = "bench"))]
@@ -213,11 +213,13 @@ impl<'a> MaterializedSelectionInput<'a> {
         &self,
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
+        taints: Option<Arc<HashSet<String>>>,
         inputs: WorkerInputs,
     ) -> CandidateData {
         self.row_with_device_overlap(
             worker,
             preferred_taint_multiplier,
+            taints,
             inputs,
             |_, device_overlap_blocks| device_overlap_blocks,
         )
@@ -228,6 +230,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         &self,
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
+        taints: Option<Arc<HashSet<String>>>,
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> CandidateData {
@@ -297,6 +300,11 @@ impl<'a> MaterializedSelectionInput<'a> {
             cache,
             load,
             preferred_taint_multiplier,
+            taints: if inputs.contains(WorkerInputs::TAINTS) {
+                taints
+            } else {
+                None
+            },
         }
     }
 }
@@ -538,7 +546,32 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
                 };
-                let row = picker.pick(&input.context, picker_input)?;
+                let row = match picker.pick(&input.context, picker_input) {
+                    Ok(row) => row,
+                    // Custom-policy pickers only (the default selector returns its own
+                    // rows): a picker that declines placement for capacity reasons
+                    // (`NoCapacity`) is classified through the overload branch so the
+                    // request gets the overload semantics (529, or 429 via
+                    // DYN_HTTP_OVERLOAD_STATUS_CODE) when workers exist but the policy
+                    // would not place the request on any of them. Other picker errors —
+                    // including `Failed`, which BYO policies use for permanent
+                    // configuration problems such as unsupported worker types — pass
+                    // through unchanged. The default selector path above is untouched.
+                    Err(WorkerSelectionPolicyError::NoCapacity(_)) => {
+                        if eligibility.has_eligible_worker_ignoring_overload(
+                            workers
+                                .iter()
+                                .map(|(&worker_id, config)| (worker_id, config)),
+                        ) {
+                            return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+                        }
+                        return Err(WorkerSelectionPolicyError::no_capacity(
+                            "no eligible worker satisfies the policy",
+                        )
+                        .into());
+                    }
+                    Err(policy_error) => return Err(policy_error.into()),
+                };
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,
@@ -593,6 +626,7 @@ mod selection_trace_tests {
                 worker: WorkerWithDpRank::from_worker_id(id as u64),
                 cost: *cost,
                 preferred_taint_multiplier: None,
+                taints: None,
             })
             .collect()
     }
@@ -644,7 +678,6 @@ mod selection_trace_tests {
 
 #[cfg(test)]
 mod test_support {
-    use std::collections::HashSet;
 
     use rustc_hash::FxHashMap;
 

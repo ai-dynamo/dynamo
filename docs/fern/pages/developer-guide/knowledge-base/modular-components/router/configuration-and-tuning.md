@@ -110,6 +110,7 @@ link no catalog and reject a configured policy type at startup.
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-uncached-pool-split` | Isolates large cache-miss prefills onto per-tier compute pools. Classifies by effective prefill (prompt length minus device-resident cache overlap) rather than raw input length, so long-but-cached agent turns keep their cache affinity. Tiers are `[min, max)` bands over effective prefill, each bound to a worker taint; members are declared by the workers themselves. A cache-miss request with no eligible tier member fails as overload (529, or 429 via `DYN_HTTP_OVERLOAD_STATUS_CODE`) rather than falling back to warm workers. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -130,6 +131,84 @@ yours to choose; `type` must be one of the policy types above.
 ```bash
 python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml
 ```
+
+#### Split Compute Pools from Uncached Prefills
+
+`dynamo-uncached-pool-split` keeps large cache-miss prefills away from cache-friendly traffic by
+restricting them to tiered compute pools. A request is Cold only when its effective prefill —
+prompt tokens minus the best worker's device-resident cache overlap — falls inside a configured
+band; a long multi-turn prompt whose prefix is cached keeps its cache affinity and selects
+normally. Apply it to the prefill or aggregated stage:
+
+```yaml
+worker_selection:
+  prefill: compute-split
+  instances:
+    - name: compute-split
+      type: dynamo-uncached-pool-split
+      parameters:
+        pools:
+          - min_uncached_tokens: 131072   # 128K
+            max_uncached_tokens: 262144    # 256K, exclusive; omit for unbounded
+            taint: dynamo.topology/worker_pool=cold-1
+          - min_uncached_tokens: 262144   # 256K
+            taint: dynamo.topology/worker_pool=cold-2
+```
+
+Each tier is a `[min_uncached_tokens, max_uncached_tokens)` band over effective prefill bound to
+a worker taint. Bands must be ordered and disjoint; gaps between bands are Warm and select
+normally. Membership is declared by the workers: label the pool pods so they publish the taint
+(for example via `topology_domains` with `DYN_TOPOLOGY_ENABLED=true`, which turns
+`worker_pool: cold-1` into the canonical taint above), and scaling a pool is a deployment
+change rather than a router change. Workers carrying no taint never serve Cold traffic.
+
+For a single-tier deployment without labels, a convenience mode takes the first N candidates
+as the pool (`uncached_threshold_tokens: 100000` plus `compute_workers: 2`). It is mutually
+exclusive with `pools`, and either form must be configured: an instance without one fails at
+startup.
+
+Cold selection is least-loaded among eligible tier members. With `allow_tier_upgrade`
+(default `true`), a cold request whose own tier has no eligible member tries each higher
+tier in ascending order before failing — a 150K request on a saturated cold-1 may run on
+cold-2 — but never crosses down to a lower tier or into the warm pool. A Cold request with
+no eligible member anywhere — including single-worker selections, which cannot form a pool —
+surfaces as `AllEligibleWorkersOverloaded` and returns the overload status code (529 by
+default, or 429 via `DYN_HTTP_OVERLOAD_STATUS_CODE`) with `ServiceOverloaded` semantics; it
+never silently falls back to warm workers. Queue-side admission
+(`uncached_token_queue_limit_per_worker`) bounds waiting independently. Warm and
+cache-affine traffic is unaffected by the pools.
+
+Classification credits shared-cache hits (for example Mooncake HiCache, configured through
+`shared_cache_type: hicache`) alongside device-resident overlap: a follow-up turn whose
+prefix lives in the shared cache is fetchable by every candidate, so its fresh-prefill
+volume drops accordingly and multi-turn traffic stays out of the cold tiers without
+routing back to the worker that warmed the prefix.
+
+By default the split is strict: a warm request selects only non-pool workers — even when its
+largest cached prefix lives on a pool worker, since borrowing that affinity would drag warm
+contention onto the dedicated pool — so an idle cold pool stays idle until cold traffic
+arrives. Set `allow_warm_spillover: true` to let warm traffic escape onto cold workers once
+every warm worker has been drained from eligibility by overload detection, subject to a
+headroom floor:
+
+```yaml
+      parameters:
+        allow_warm_spillover: true
+        spillover_free_threshold: 0.5   # default: escape only while >= 50% of the cold pool remains eligible
+        pools:
+          - min_uncached_tokens: 131072
+            taint: dynamo.topology/worker_pool=cold-1
+```
+
+`spillover_free_threshold` (default `0.5`, range `[0.0, 1.0]`) is the minimum fraction of
+cold-pool members that must still be eligible before a spillover is allowed: with three pool
+workers and the default 0.5, draining two of them blocks escape until capacity returns. The
+denominator is the pool membership the policy remembers across requests, so it reflects
+workers drained from eligibility rather than only the survivors of the current selection.
+Spillover is one-directional and last-resort: warm requests still prefer warm workers while
+any remains eligible, warm traffic already carrying affinity to a pool worker stays on it
+only when the escape is allowed (below the floor, a drained warm pool rejects with the
+overload status instead), and cold requests never spill into the warm pool.
 
 #### Configure the Default Policy
 
