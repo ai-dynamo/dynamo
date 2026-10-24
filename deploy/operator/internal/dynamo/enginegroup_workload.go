@@ -23,6 +23,8 @@ func RenderComponentEngineGroup(dgd *api.DynamoGraphDeployment, component *api.D
 		return nil, err
 	}
 	switch backend {
+	case BackendFrameworkVLLM:
+		return renderVLLMComponentEngineGroup(dgd, component, worldIndex)
 	default:
 		return nil, fmt.Errorf("Engine Group declaration is not implemented for backend %q", backend)
 	}
