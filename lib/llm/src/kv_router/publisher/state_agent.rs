@@ -1780,6 +1780,11 @@ fn normalize_raw_batch(
             cache_owner_fault.get_or_insert("KVCR ownership has an unsupported storage medium");
             continue;
         }
+        // The cache-owner normalizer is recreated per attachment and never sees
+        // GPU-tier stores, so teach it the group kinds they carry.
+        if ownership == KvEventOwnership::Framework {
+            cache_owner_normalizer.learn_group_metadata(&raw_event, worker.dp_rank);
+        }
         let normalizer = match ownership {
             KvEventOwnership::Framework => &mut *framework_normalizer,
             KvEventOwnership::Kvcr => &mut *cache_owner_normalizer,
@@ -2132,6 +2137,95 @@ mod tests {
                 KvCacheEventData::Stored(_)
             ));
         }
+    }
+
+    /// Replays a framework GPU store (when `kind` is given) and then a KVCR removal of
+    /// the same group through one pair of normalizers, as a single attachment would.
+    fn owner_removal_after_gpu_store(
+        kind: Option<&str>,
+        sliding_window: Option<u32>,
+        group_idx: u32,
+    ) -> NormalizedRawBatch {
+        let worker = WorkerWithDpRank::new(17, 0);
+        let mut framework = ZmqEventNormalizer::new(4);
+        let mut owner = ZmqEventNormalizer::new(4);
+        if let Some(kind) = kind {
+            let gpu_store = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [100], "medium": "GPU",
+                "token_ids": [10, 11, 12, 13], "block_size": 4, "group_idx": group_idx,
+                "kv_cache_spec_kind": kind, "kv_cache_spec_sliding_window": sliding_window
+            }))
+            .unwrap();
+            let batch = normalize_raw_batch(
+                vec![gpu_store],
+                worker,
+                4,
+                KvStateIngressProtocol::VllmResidencyV1,
+                &mut framework,
+                &mut owner,
+            );
+            assert_eq!(batch.source_fault, None);
+            assert_eq!(batch.cache_owner_fault, None);
+        }
+        let removal = serde_json::from_value(serde_json::json!({
+            "type": "BlockRemoved", "block_hashes": [100], "medium": "CPU",
+            "group_idx": group_idx, "ownership": "kvcr"
+        }))
+        .unwrap();
+        normalize_raw_batch(
+            vec![removal],
+            worker,
+            4,
+            KvStateIngressProtocol::VllmResidencyV1,
+            &mut framework,
+            &mut owner,
+        )
+    }
+
+    fn assert_owner_removal_forwarded(batch: &NormalizedRawBatch) {
+        assert_eq!(batch.cache_owner_fault, None);
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(
+            batch.events[0].placement.residency_domain,
+            ResidencyDomain::CacheOwner
+        );
+        let KvCacheEventData::Removed(removed) = &batch.events[0].event.data else {
+            panic!("expected a removal");
+        };
+        assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(100)]);
+    }
+
+    #[test]
+    fn owner_removal_drops_group_learned_from_framework_mamba_store() {
+        let batch = owner_removal_after_gpu_store(Some("mamba"), None, 3);
+        assert_eq!(batch.cache_owner_fault, None);
+        assert!(batch.events.is_empty());
+    }
+
+    #[test]
+    fn owner_removal_forwards_group_learned_as_full_attention() {
+        assert_owner_removal_forwarded(&owner_removal_after_gpu_store(
+            Some("full_attention"),
+            None,
+            3,
+        ));
+    }
+
+    #[test]
+    fn owner_removal_without_framework_store_is_forwarded() {
+        assert_owner_removal_forwarded(&owner_removal_after_gpu_store(None, None, 3));
+    }
+
+    #[test]
+    fn owner_removal_forwards_group_learned_as_unknown_kind() {
+        assert_owner_removal_forwarded(&owner_removal_after_gpu_store(Some("unknown"), None, 3));
+    }
+
+    #[test]
+    fn owner_removal_drops_group_learned_from_sliding_window_store() {
+        let batch = owner_removal_after_gpu_store(Some("sliding_window"), Some(128), 2);
+        assert_eq!(batch.cache_owner_fault, None);
+        assert!(batch.events.is_empty());
     }
 
     #[test]
