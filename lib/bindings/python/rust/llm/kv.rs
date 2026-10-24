@@ -571,6 +571,72 @@ where
     rt.block_on(selection::run_server(config.port, service))
 }
 
+#[cfg(feature = "select-service")]
+use prompt_request::depythonize_prompt_request;
+
+#[cfg(feature = "select-service")]
+mod prompt_request {
+    use super::*;
+    use dynamo_kv_router::services::selection::PromptRequest;
+
+    /// Selection requests whose prompt `token_ids` the binding extracts itself.
+    pub(super) trait PromptRequestBody {
+        fn prompt_mut(&mut self) -> &mut PromptRequest;
+    }
+
+    macro_rules! impl_prompt_request_body {
+        ($($ty:ty),*) => {
+            $(impl PromptRequestBody for $ty {
+                fn prompt_mut(&mut self) -> &mut PromptRequest {
+                    &mut self.prompt
+                }
+            })*
+        };
+    }
+
+    impl_prompt_request_body!(
+        SelectRequest,
+        SelectAndReserveRequest,
+        ReservationRequest,
+        PotentialLoadsRequest,
+        OverlapScoresRequest
+    );
+
+    /// Depythonize a prompt-carrying request dict. `token_ids` is extracted with pyo3's typed
+    /// list conversion: pythonize's per-element serde path costs several times more per token,
+    /// all of it on the calling thread under the GIL.
+    pub(super) fn depythonize_prompt_request<T>(request: &Bound<'_, PyAny>) -> PyResult<T>
+    where
+        T: PromptRequestBody + for<'de> Deserialize<'de>,
+    {
+        let dict = request.downcast::<pyo3::types::PyDict>().ok();
+        let token_ids = match dict {
+            Some(dict) => match dict.get_item("token_ids")? {
+                Some(tokens) if !tokens.is_none() => Some(
+                    tokens
+                        .extract::<Vec<u32>>()
+                        .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))?,
+                ),
+                _ => None,
+            },
+            None => None,
+        };
+        let parsed: Result<T, _> = match (dict, token_ids.is_some()) {
+            (Some(dict), true) => {
+                let rest = dict.copy()?;
+                rest.del_item("token_ids")?;
+                depythonize(rest.as_any())
+            }
+            _ => depythonize(request),
+        };
+        let mut req = parsed.map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if token_ids.is_some() {
+            req.prompt_mut().token_ids = token_ids;
+        }
+        Ok(req)
+    }
+}
+
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
 /// `ValueError`, anything else a `SelectionServiceError` carrying `kind` and
 /// `status_code`.
@@ -793,8 +859,7 @@ impl SelectionService {
 
     /// Per-worker KV-overlap scores for a prompt (dict, see `OverlapScoresRequest`).
     fn overlap_scores<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: OverlapScoresRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req: OverlapScoresRequest = depythonize_prompt_request(request.bind(py))?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.overlap_scores(req).await.map_err(selection_to_pyerr)?;
@@ -804,8 +869,7 @@ impl SelectionService {
 
     /// Select the best worker by KV-overlap + load, no booking (dict, see `SelectRequest`).
     fn select<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req: SelectRequest = depythonize_prompt_request(request.bind(py))?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.select(req).await.map_err(selection_to_pyerr)?;
@@ -819,8 +883,7 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectAndReserveRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req: SelectAndReserveRequest = depythonize_prompt_request(request.bind(py))?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -838,8 +901,7 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: ReservationRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req: ReservationRequest = depythonize_prompt_request(request.bind(py))?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -904,8 +966,7 @@ impl SelectionService {
 
     /// Per-worker potential loads for a prompt, without booking (dict, see `PotentialLoadsRequest`).
     fn potential_loads<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: PotentialLoadsRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req: PotentialLoadsRequest = depythonize_prompt_request(request.bind(py))?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
