@@ -24,6 +24,7 @@ ARG TRANSFORMERS_VERSION
 ARG TOKENIZERS_VERSION
 {% endif -%}
 ARG NIXL_REF
+ARG MOONCAKE_VERSION
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
@@ -465,7 +466,6 @@ RUN set -eu; \
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.vllm.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
     uv pip install {{ pip_target }} \
         --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
         --no-deps --requirement /tmp/requirements.vllm.txt && \
@@ -475,6 +475,18 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # requirements file on purpose; a test asserts the two agree.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
+# Install mooncake as a dedicated step rather than through requirements.vllm.txt:
+# distribution name hardcodes CUDA 13 (it links libcudart for that major and
+# ships the same `mooncake` package as the generic project), so guard the build
+# against a mismatched CUDA major. Refreshes the upstream vllm-openai base's
+# bundled wheel to a current etcd client stack (older wheels vendor a stale Go
+# dependency set inside libetcd_wrapper.so).
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: Only mooncake-transfer-engine-cuda13 is supported; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
+    uv pip install {{ pip_target }} --no-deps \
+        "mooncake-transfer-engine-cuda13>=${MOONCAKE_VERSION}" && \
+    rm -rf /opt/uv/cache
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an
@@ -511,7 +523,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
     rm -f /tmp/requirements.vllm.nonvidia.txt && \
     /opt/venv/bin/python -c "import importlib.util,sys; sys.exit(1 if importlib.util.find_spec('PyNvVideoCodec') else 0)" && \
-    /opt/venv/bin/python -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)" && \
     rm -rf /opt/uv/cache
 {% endif %}
 

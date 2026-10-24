@@ -90,7 +90,7 @@ dynamo:
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
   sccache_version: "v0.14.0"
-  efa_version: 1.50.0
+  efa_version: 1.51.0
 
 vllm:
   cuda13.0:
@@ -127,6 +127,7 @@ vllm:
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
   vllm_omni_ref: "v0.31.0rc1"
   nixl_ref: v1.4.1
+  mooncake_version: "0.3.13.post1,<0.4"
   max_jobs: "10"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
@@ -174,6 +175,7 @@ sglang:
   # build doesn't leak into the runtime image.
   nixl_ref: v1.5.0
   enable_media_ffmpeg: "true"
+  mooncake_version: "0.3.13.post1,<0.4"
   enable_gpu_memory_service: "true"
   enable_modelexpress: "true"
   modelexpress_version: "0.7.0"
