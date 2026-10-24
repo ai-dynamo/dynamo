@@ -49,7 +49,17 @@ use dynamo_runtime::engine::AsyncEngineContextProvider;
 use dynamo_runtime::pipeline::{Context, RequestStream};
 use futures::{SinkExt, StreamExt, stream::SplitSink};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
+
+mod journal;
+#[cfg(test)]
+mod tests;
+use journal::Journal;
+
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bound on the per-connection request queue. Picks backpressure over
 /// unbounded growth so a fast client cannot drive memory exhaustion against
@@ -141,136 +151,271 @@ async fn handle_socket(
         return;
     }
 
-    let Some((engine, session_update)) =
-        select_engine(&mut ws_rx, &mut *writer, state.as_ref()).await
-    else {
+    let selected = tokio::select! {
+        _ = state.cancel_token().cancelled() => return,
+        selected = select_engine(&mut ws_rx, &mut *writer, state.as_ref()) => selected,
+    };
+    let Some((engine, session_update)) = selected else {
         // Client disconnected before an engine was selected.
         return;
     };
 
-    let (req_tx, req_rx) = mpsc::channel::<DynamoRealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
-
-    // Forward the session.update verbatim — it carries the engine's
-    // generation config (instructions, voice, audio formats, turn-detection,
-    // max_output_tokens, tools, output_modalities). The handler only used
-    // it to pick the engine; the rest is the engine's to apply.
-    if req_tx
-        .send(RealtimeClientEvent::SessionUpdate(session_update).into())
+    let journal = (state.migration_limit > 0)
+        .then(|| Journal::new(&session_update))
+        .flatten();
+    let mut session = RealtimeSession {
+        engine,
+        journal,
+        incoming: None,
+        migration_limit: state.migration_limit,
+        attempts: 0,
+        deadline: None,
+        cancel: state.cancel_token().clone(),
+    };
+    if let Err(error) = session
+        .run(&mut ws_rx, &mut *writer, &close_reason, session_update)
         .await
-        .is_err()
     {
-        tracing::debug!("/v1/realtime engine receiver dropped before session.update delivered");
-        return;
+        tracing::warn!(%error, "Realtime session failed");
+        *close_reason.lock() = Some(close_message(
+            close_code::ERROR,
+            &SanitizedError::Internal.to_string(),
+        ));
+        let _ = tokio::time::timeout(
+            CLOSE_DRAIN_TIMEOUT,
+            send_error_event(
+                &mut *writer,
+                "server_error",
+                &SanitizedError::Internal.to_string(),
+                None,
+            ),
+        )
+        .await;
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("realtime worker stream ended unexpectedly")]
+struct UnexpectedEnd;
+
+struct StopGeneration(dynamo_runtime::engine::Context);
+
+impl Drop for StopGeneration {
+    fn drop(&mut self) {
+        self.0.stop_generating();
+    }
+}
+
+async fn recovery_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+struct RealtimeSession {
+    engine: RealtimeBidirectionalEngine,
+    journal: Option<Journal>,
+    incoming: Option<DynamoRealtimeClientEvent>,
+    migration_limit: u32,
+    attempts: u32,
+    deadline: Option<Instant>,
+    cancel: CancellationToken,
+}
+
+impl RealtimeSession {
+    async fn run<S, T>(
+        &mut self,
+        ws_rx: &mut S,
+        ws_tx: &mut T,
+        close_reason: &Mutex<Option<Message>>,
+        session: RealtimeClientEventSessionUpdate,
+    ) -> anyhow::Result<()>
+    where
+        S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
+        T: futures::Sink<Message, Error = axum::Error> + Unpin,
+    {
+        let mut setup = RealtimeClientEvent::SessionUpdate(session).into();
+        loop {
+            let result = self.run_attempt(ws_rx, ws_tx, close_reason, setup).await;
+            let Err(error) = result else { return Ok(()) };
+            let is_retryable =
+                crate::migration::is_migratable(error.as_ref()) || error.is::<UnexpectedEnd>();
+            let Some(journal) = self.journal.as_mut().filter(|j| j.can_recover()) else {
+                return Err(error);
+            };
+            if !is_retryable || self.attempts >= self.migration_limit {
+                return Err(error);
+            }
+            let recovery_end = *self
+                .deadline
+                .get_or_insert_with(|| Instant::now() + RECOVERY_TIMEOUT);
+            anyhow::ensure!(Instant::now() < recovery_end, "realtime recovery timed out");
+            self.attempts += 1;
+            tracing::info!(
+                attempt = self.attempts,
+                "Recovering realtime transcription worker"
+            );
+            setup = journal
+                .start_replay()
+                .ok_or_else(|| anyhow::anyhow!("realtime replay unavailable"))?;
+        }
     }
 
-    let request_stream = Box::pin(ReceiverStream::new(req_rx));
-    let input = Context::new(RequestStream::new(request_stream));
-
-    let mut response_stream = match engine.generate(input).await {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::error!(%err, "/v1/realtime engine.generate() failed");
-            *close_reason.lock() = Some(close_message(
-                close_code::ERROR,
-                &SanitizedError::Internal.to_string(),
-            ));
-            return;
-        }
-    };
-    let resp_ctx = response_stream.context();
-
-    // Outbound task: drain the engine response stream onto the WebSocket.
-    // Peels off the Dynamo-side `Annotated` envelope so clients receive bare
-    // `RealtimeServerEvent` frames as the OpenAI Realtime spec requires. Engine
-    // errors surfaced via `Annotated::error` are mapped to a synthesized
-    // `RealtimeServerEvent::Error` so they remain visible on the wire.
-    let outbound = tokio::spawn(async move {
-        let mut writer = writer;
-        while let Some(annotated) = response_stream.next().await {
-            let event = if let Some(event) = annotated.data {
-                event
-            } else if let Some(err) = annotated.error {
-                tracing::error!("/v1/realtime engine error: {err}");
-                let sanitized = SanitizedError::Internal;
-                RealtimeServerEvent::Error(RealtimeServerEventError {
-                    event_id: format!("event_{}", Uuid::new_v4()),
-                    error: RealtimeAPIError {
-                        r#type: "server_error".to_string(),
-                        code: None,
-                        message: sanitized.to_string(),
-                        param: None,
-                        event_id: None,
-                    },
-                })
-            } else {
-                continue;
-            };
-            let frame_payload = match serde_json::to_string(&event) {
-                Ok(s) => s,
-                Err(err) => {
-                    tracing::warn!(%err, "/v1/realtime serializing response chunk failed");
-                    continue;
+    async fn run_attempt<S, T>(
+        &mut self,
+        ws_rx: &mut S,
+        ws_tx: &mut T,
+        close_reason: &Mutex<Option<Message>>,
+        setup: DynamoRealtimeClientEvent,
+    ) -> anyhow::Result<()>
+    where
+        S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
+        T: futures::Sink<Message, Error = axum::Error> + Unpin,
+    {
+        let Self {
+            engine,
+            journal,
+            incoming,
+            deadline,
+            attempts,
+            cancel,
+            ..
+        } = self;
+        let attempt = *attempts;
+        let (req_tx, req_rx) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
+        req_tx.try_send(setup)?;
+        let input = Context::new(RequestStream::new(Box::pin(ReceiverStream::new(req_rx))));
+        let _stop = StopGeneration(input.context());
+        let connecting = engine.generate(input);
+        tokio::pin!(connecting);
+        let mut responses = loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = recovery_deadline(*deadline) => anyhow::bail!("realtime recovery timed out"),
+                response = &mut connecting => break response?,
+                msg = ws_rx.next(), if incoming.is_none() => {
+                    if !queue_client_message(msg, incoming, close_reason) { return Ok(()); }
                 }
-            };
-            if writer
-                .send(Message::Text(Utf8Bytes::from(frame_payload)))
-                .await
-                .is_err()
-            {
-                tracing::debug!("/v1/realtime client disconnected during response");
-                break;
-            }
-        }
-        // writer dropped at end of scope → spawned cleanup sends Close + drains.
-    });
-
-    while let Some(msg) = ws_rx.next().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(err) => {
-                tracing::debug!(%err, "/v1/realtime inbound frame error; treating as disconnect");
-                break;
             }
         };
-        match msg {
-            Message::Text(text) => {
-                match serde_json::from_str::<DynamoRealtimeClientEvent>(text.as_str()) {
-                    Ok(event) => {
-                        if req_tx.send(event).await.is_err() {
-                            tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
-                            break;
-                        }
+        let mut pending = None;
+        let mut is_sender_closed = false;
+        let mut sender_deadline = None;
+        loop {
+            if pending.is_none() {
+                if deadline.is_some() {
+                    let journal = journal
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("realtime replay unavailable"))?;
+                    anyhow::ensure!(journal.can_recover(), "realtime replay disabled by worker");
+                    pending = journal.next_replay();
+                    if pending.is_none() && !journal.waiting_for_session {
+                        let elapsed = RECOVERY_TIMEOUT
+                            - deadline
+                                .map(|d| d.saturating_duration_since(Instant::now()))
+                                .unwrap_or_default();
+                        tracing::info!(
+                            attempt,
+                            elapsed_ms = elapsed.as_millis(),
+                            "Realtime transcription worker recovered"
+                        );
+                        *deadline = None;
+                        continue;
                     }
-                    Err(err) => {
-                        tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
-                        *close_reason.lock() =
-                            Some(close_message(close_code::INVALID, "malformed JSON frame"));
-                        break;
+                } else if let Some(event) = incoming.take() {
+                    if let Some(journal) = journal {
+                        journal.record(&event);
                     }
+                    pending = Some(event);
                 }
             }
-            Message::Binary(_) => {
-                tracing::warn!("/v1/realtime received binary frame; not supported in this slice");
-                *close_reason.lock() = Some(close_message(
-                    close_code::UNSUPPORTED,
-                    "binary frames not supported",
-                ));
-                break;
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = recovery_deadline(*deadline) => anyhow::bail!("realtime recovery timed out"),
+                _ = recovery_deadline(sender_deadline) => return Err(UnexpectedEnd.into()),
+                response = responses.next() => {
+                    let Some(annotated) = response else {
+                        return if journal.as_ref().is_some_and(Journal::can_recover) {
+                            Err(UnexpectedEnd.into())
+                        } else {
+                            Ok(())
+                        };
+                    };
+                    if let Some(error) = annotated.error { return Err(error.into()); }
+                    let Some(mut event) = annotated.data else { continue; };
+                    if let Some(journal) = journal {
+                        let forward = journal.reconcile(&mut event).map_err(anyhow::Error::msg)?;
+                        if !forward { continue; }
+                    }
+                    let payload = serde_json::to_string(&event)?;
+                    // Bounded input buffering can hide a Close behind a text frame
+                    // while output is blocked, so every write needs a deadline.
+                    let writing = tokio::time::timeout(
+                        SOCKET_WRITE_TIMEOUT,
+                        ws_tx.send(Message::Text(payload.into())),
+                    );
+                    tokio::pin!(writing);
+                    loop {
+                        tokio::select! {
+                            _ = cancel.cancelled() => return Ok(()),
+                            _ = recovery_deadline(*deadline) => anyhow::bail!("realtime recovery timed out"),
+                            result = &mut writing => {
+                                if !matches!(result, Ok(Ok(()))) { return Ok(()); }
+                                break;
+                            }
+                            msg = ws_rx.next(), if incoming.is_none() => {
+                                if !queue_client_message(msg, incoming, close_reason) { return Ok(()); }
+                            }
+                        }
+                    }
+                }
+                permit = req_tx.reserve(), if pending.is_some() && !is_sender_closed => {
+                    match permit {
+                        Ok(permit) => {
+                            if let Some(event) = pending.take() { permit.send(event); }
+                        }
+                        Err(_) => {
+                            // Drain terminal output before classifying a closed sender: a pending
+                            // application error must not be mistaken for a transport failure.
+                            is_sender_closed = true;
+                            sender_deadline = Some(Instant::now() + RECOVERY_TIMEOUT);
+                        }
+                    }
+                }
+                msg = ws_rx.next(), if incoming.is_none() => {
+                    if !queue_client_message(msg, incoming, close_reason) { return Ok(()); }
+                }
             }
-            Message::Close(_) => break,
-            Message::Ping(_) | Message::Pong(_) => {} // axum handles ping replies
         }
     }
+}
 
-    // Inbound loop ended (client close, EOF, error, or unsupported frame).
-    // Cancel any in-flight engine work, then drop the sender so the engine's
-    // input stream completes; outbound picks up the close-reason left in the
-    // shared slot (or NORMAL on natural completion).
-    resp_ctx.stop_generating();
-    drop(req_tx);
-
-    // Wait for outbound to finish flushing.
-    let _ = outbound.await;
+fn queue_client_message(
+    msg: Option<Result<Message, axum::Error>>,
+    incoming: &mut Option<DynamoRealtimeClientEvent>,
+    close_reason: &Mutex<Option<Message>>,
+) -> bool {
+    match msg {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str(text.as_str()) {
+            Ok(event) => *incoming = Some(event),
+            Err(_) => {
+                *close_reason.lock() =
+                    Some(close_message(close_code::INVALID, "malformed JSON frame"));
+                return false;
+            }
+        },
+        Some(Ok(Message::Binary(_))) => {
+            *close_reason.lock() = Some(close_message(
+                close_code::UNSUPPORTED,
+                "binary frames not supported",
+            ));
+            return false;
+        }
+        Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+        _ => return false,
+    }
+    true
 }
 
 fn close_message(code: u16, reason: &str) -> Message {
@@ -296,8 +441,8 @@ fn close_message(code: u16, reason: &str) -> Message {
 /// a spawned task that outlives the dropping scope. The task owns `ws_tx`
 /// exclusively, so the WebSocket's underlying TCP socket stays open until
 /// the cleanup writes the Close frame, drains the sink under
-/// `CLOSE_DRAIN_TIMEOUT`, and drops `ws_tx`. `handle_socket`'s
-/// `outbound.await` returns *before* the Close frame is on the wire, but
+/// `CLOSE_DRAIN_TIMEOUT`, and drops `ws_tx`. `handle_socket` can return
+/// before the Close frame is on the wire, but
 /// the client still sees the in-band Close — the only scenario the cleanup
 /// can't complete is runtime shutdown racing connection teardown, which
 /// doesn't happen on axum's long-lived global runtime.
@@ -350,8 +495,13 @@ impl Drop for ScopedWsWriter {
                 .lock()
                 .take()
                 .unwrap_or_else(|| close_message(close_code::NORMAL, "stream complete"));
-            let _ = ws_tx.send(msg).await;
-            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
+            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, async {
+                // Receiving a Close queues tungstenite's automatic reply; another
+                // send can fail with SendAfterClosing, but that reply still needs flushing.
+                let _ = ws_tx.send(msg).await;
+                let _ = ws_tx.close().await;
+            })
+            .await;
         });
     }
 }
@@ -505,7 +655,12 @@ where
     let event = RealtimeServerEvent::Error(RealtimeServerEventError {
         event_id: format!("event_{}", Uuid::new_v4()),
         error: RealtimeAPIError {
-            r#type: "invalid_request_error".to_string(),
+            r#type: if code == "server_error" {
+                "server_error"
+            } else {
+                "invalid_request_error"
+            }
+            .to_string(),
             code: Some(code.to_string()),
             message: message.to_string(),
             param: param.map(|s| s.to_string()),
