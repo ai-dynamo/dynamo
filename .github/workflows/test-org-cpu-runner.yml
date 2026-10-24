@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Temporary workflow to verify the org-level CPU runner scale set picks up jobs.
+name: Test Org CPU Runner
+
+on:
+  push:
+    branches:
+      - dcullinan/test-org-cpu-runners
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  org-cpu-runner:
+    runs-on: [cpu, amd64, 4gi]
+    timeout-minutes: 10
+    steps:
+      - name: Runner details
+        run: |
+          echo "runner: ${RUNNER_NAME} (${RUNNER_OS}/${RUNNER_ARCH})"
+          echo "event: ${GITHUB_EVENT_NAME} ref: ${GITHUB_REF}"
+          echo "node: $(uname -n) cpus: $(nproc) memory: $(free -h | awk '/Mem:/ {print $2}')"
+      - name: Event payload visibility
+        run: |
+          jq '{visibility: .repository.visibility, private: .repository.private}' "${GITHUB_EVENT_PATH}"
