@@ -180,16 +180,41 @@ func TestExtractGPUCountFromResourceRequirements_AllowsSameRequestAndLimitKey(t 
 	assert.Equal(t, 4, count)
 }
 
-func TestExtractGPUCountFromResourceRequirements_MIGResource(t *testing.T) {
-	resources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceName("nvidia.com/mig-3g.20gb"): resource.MustParse("2"),
-		},
+func TestExtractGPUCountFromResourceRequirements_ScalarResourceNames(t *testing.T) {
+	tests := []struct {
+		name         string
+		resourceName corev1.ResourceName
+		want         int
+	}{
+		{name: "whole GPU", resourceName: corev1.ResourceName(commonconsts.KubeResourceGPUNvidia), want: 2},
+		{name: "shared GPU renamed by default", resourceName: "nvidia.com/gpu.shared", want: 2},
+		{name: "MIG slice", resourceName: "nvidia.com/mig-3g.20gb", want: 2},
+		{name: "shared MIG slice", resourceName: "nvidia.com/mig-1g.10gb.shared", want: 2},
+		{name: "shared HAMi GPU memory", resourceName: "nvidia.com/gpumem.shared", want: 0},
+		{name: "other vendor GPU", resourceName: "amd.com/gpu", want: 2},
+		{name: "unqualified GPU", resourceName: "gpu", want: 2},
+		{name: "CPU", resourceName: corev1.ResourceCPU, want: 0},
+		{name: "memory", resourceName: corev1.ResourceMemory, want: 0},
+		{name: "HAMi GPU memory", resourceName: "nvidia.com/gpumem", want: 0},
+		{name: "HAMi GPU cores", resourceName: "nvidia.com/gpucores", want: 0},
+		{name: "shared lookalike", resourceName: "example.com/notgpu.shared", want: 0},
+		{name: "shared suffix with trailing text", resourceName: "nvidia.com/gpu.shared-extra", want: 0},
+		{name: "empty", resourceName: "", want: 0},
 	}
 
-	gpuCount, err := ExtractGPUCountFromResourceRequirements(resources)
-	require.NoError(t, err)
-	assert.Equal(t, 2, gpuCount)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Request two units of the scalar resource")
+			resources := corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{tt.resourceName: resource.MustParse("2")},
+			}
+
+			t.Log("Count only GPU resource names")
+			gpuCount, err := ExtractGPUCountFromResourceRequirements(resources)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, gpuCount)
+		})
+	}
 }
 
 func TestExtractGPUCountFromResourceRequirements_RejectsFractionalGPU(t *testing.T) {
