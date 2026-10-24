@@ -569,6 +569,16 @@ async def get_runtime_config(
             "default_thinking_mode",
             json.dumps(dynamo_args.dyn_default_thinking_mode),
         )
+    # The frontend renders the chat template, so SGLang's serving layer never
+    # applies this default; publish it for the frontend to merge.
+    default_chat_template_kwargs = getattr(
+        server_args, "default_chat_template_kwargs", None
+    )
+    if default_chat_template_kwargs:
+        runtime_config.set_engine_specific(
+            "default_chat_template_kwargs",
+            json.dumps(default_chat_template_kwargs),
+        )
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )

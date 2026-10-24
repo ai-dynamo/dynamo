@@ -465,6 +465,7 @@ mod embedding_base64_transport_tests {
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
 pub(crate) const DEFAULT_THINKING_MODE_RUNTIME_KEY: &str = "default_thinking_mode";
+pub(crate) const DEFAULT_CHAT_TEMPLATE_KWARGS_RUNTIME_KEY: &str = "default_chat_template_kwargs";
 
 /// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
 /// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
@@ -2195,6 +2196,25 @@ impl OpenAIPreprocessor {
 
     fn apply_default_thinking_mode(&self, request: &mut NvCreateChatCompletionRequest) {
         Self::apply_default_thinking_mode_from_runtime_config(&self.runtime_config, request);
+    }
+
+    /// Layer the worker's default chat template kwargs under the request's.
+    /// Request keys win, matching SGLang's `--default-chat-template-kwargs`.
+    fn apply_default_chat_template_kwargs(
+        runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
+        request: &mut NvCreateChatCompletionRequest,
+    ) {
+        let Some(defaults) = runtime_config
+            .runtime_data
+            .get(DEFAULT_CHAT_TEMPLATE_KWARGS_RUNTIME_KEY)
+            .and_then(serde_json::Value::as_object)
+        else {
+            return;
+        };
+        let args = request.chat_template_args.get_or_insert_with(HashMap::new);
+        for (key, value) in defaults {
+            args.entry(key.clone()).or_insert_with(|| value.clone());
+        }
     }
 
     fn guided_output_requires_reasoning<R: OAIChatLikeRequest>(
@@ -7776,6 +7796,7 @@ impl
         // while explicit request controls still take precedence.
         let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
         self.apply_default_thinking_mode(&mut request);
+        Self::apply_default_chat_template_kwargs(&self.runtime_config, &mut request);
         Self::normalize_thinking_arg_with_source(
             &mut request,
             self.runtime_config.reasoning_parser.as_deref(),
@@ -12752,6 +12773,30 @@ mod tests {
         assert_eq!(
             args.get("thinking_mode"),
             Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_default_chat_template_kwargs_layer_under_request_args() {
+        let mut runtime_config = crate::local_model::runtime_config::ModelRuntimeConfig::new();
+        runtime_config
+            .set_engine_specific(
+                DEFAULT_CHAT_TEMPLATE_KWARGS_RUNTIME_KEY,
+                serde_json::json!({"clear_thinking": false, "preserve_thinking": true}),
+            )
+            .unwrap();
+        let mut request = chat_request_with_args(Some(HashMap::from([(
+            "preserve_thinking".to_string(),
+            serde_json::json!(false),
+        )])));
+
+        OpenAIPreprocessor::apply_default_chat_template_kwargs(&runtime_config, &mut request);
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("clear_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("preserve_thinking"),
+            Some(&serde_json::json!(false))
         );
     }
 

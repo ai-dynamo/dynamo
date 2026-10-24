@@ -252,6 +252,14 @@ def _runtime_config_parser_name(
     return value if isinstance(value, str) and value else None
 
 
+def _runtime_default_chat_template_kwargs(
+    mdc: ModelDeploymentCard,
+) -> dict[str, Any] | None:
+    runtime_data = (mdc.runtime_config() or {}).get("runtime_data") or {}
+    value = runtime_data.get("default_chat_template_kwargs")
+    return value if isinstance(value, dict) and value else None
+
+
 def _guided_json_is_content(preproc: dict[str, Any]) -> bool:
     return (
         "json" in (preproc["sampling_options"]["guided_decoding"] or {})
@@ -301,6 +309,7 @@ _w_reasoning_parser_name: str | None = None
 _w_exclude_tools_when_tool_choice_none: bool = True
 _w_template_force_reasoning: bool = False
 _w_default_thinking_mode: str | None = None
+_w_default_chat_template_kwargs: dict[str, Any] | None = None
 _w_structural_tag_mode: str = "off"
 _w_structural_tag_scope: str = "auto"
 _w_structural_tag_schema: str = "auto"
@@ -358,12 +367,14 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    default_chat_template_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
     global _w_structural_tag_scope, _w_structural_tag_schema
+    global _w_default_chat_template_kwargs
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -372,6 +383,7 @@ def _init_worker(
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
     _w_template_force_reasoning = template_force_reasoning
     _w_default_thinking_mode = default_thinking_mode
+    _w_default_chat_template_kwargs = default_chat_template_kwargs
     _w_structural_tag_mode = structural_tag_mode
     _w_structural_tag_scope = structural_tag_scope
     _w_structural_tag_schema = structural_tag_schema
@@ -391,6 +403,7 @@ def _preprocess_worker(
         exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
         template_force_reasoning=_w_template_force_reasoning,
         default_thinking_mode=_w_default_thinking_mode,
+        default_chat_template_kwargs=_w_default_chat_template_kwargs,
         structural_tag_mode=_w_structural_tag_mode,
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
@@ -564,6 +577,7 @@ class SglangProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -588,6 +602,7 @@ class SglangProcessor:
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
         self.default_thinking_mode = default_thinking_mode
+        self.default_chat_template_kwargs = default_chat_template_kwargs
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
@@ -648,6 +663,7 @@ class SglangProcessor:
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 template_force_reasoning=self.template_force_reasoning,
                 default_thinking_mode=self.default_thinking_mode,
+                default_chat_template_kwargs=self.default_chat_template_kwargs,
                 structural_tag_mode=self.structural_tag_mode,
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
@@ -1181,6 +1197,7 @@ class SglangEngineFactory:
             or _runtime_config_parser_name(mdc, "reasoning_parser")
         )
         default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        default_chat_template_kwargs = _runtime_default_chat_template_kwargs(mdc)
         (
             structural_tag_mode,
             structural_tag_scope,
@@ -1193,6 +1210,10 @@ class SglangEngineFactory:
             logger.info("SGLang reasoning parser: %s", reasoning_parser_name)
         if default_thinking_mode:
             logger.info("SGLang default thinking mode: %s", default_thinking_mode)
+        if default_chat_template_kwargs:
+            logger.info(
+                "SGLang default chat template kwargs: %s", default_chat_template_kwargs
+            )
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -1218,6 +1239,7 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    default_chat_template_kwargs,
                 ),
             )
             futures = [
@@ -1257,6 +1279,7 @@ class SglangEngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            default_chat_template_kwargs=default_chat_template_kwargs,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

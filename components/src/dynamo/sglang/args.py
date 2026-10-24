@@ -32,6 +32,7 @@ from dynamo.common.snapshot.lifecycle import (
     is_snapshot_enabled,
 )
 from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.frontend.thinking import THINKING_CONTROL_KEYS
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
@@ -910,6 +911,31 @@ async def parse_args(args: list[str]) -> Config:
             "--schedule-low-priority-values-first is not supported in Dynamo's "
             "SGLang integration. Dynamo normalizes request priority so higher "
             "values are always higher priority at the API layer."
+        )
+
+    # The frontend reads these keys from the request before it merges the
+    # defaults (thinking normalization, the response aggregator, the keep-alive
+    # gate, the nested chat_template check), so a default would skip them.
+    default_template_kwargs = (
+        getattr(server_args, "default_chat_template_kwargs", None) or {}
+    )
+    request_only_keys = [
+        key
+        for key in (*THINKING_CONTROL_KEYS, "force_nonempty_content", "chat_template")
+        if key in default_template_kwargs
+    ]
+    if request_only_keys:
+        raise ValueError(
+            f"--default-chat-template-kwargs cannot set {', '.join(request_only_keys)}. "
+            "Dynamo reads these keys from each request before it applies the defaults. "
+            "Use --dyn-default-thinking-mode to set a default thinking mode, and "
+            "--custom-jinja-template to replace the chat template."
+        )
+    if default_template_kwargs and dynamo_config.use_sglang_tokenizer:
+        raise ValueError(
+            "--default-chat-template-kwargs does not work with --use-sglang-tokenizer, "
+            "because the worker then renders the chat template without the defaults. "
+            "Use --dyn-chat-processor sglang on the frontend instead."
         )
 
     backend_from_cli = _attention_backend_from_cli(parsed_args)

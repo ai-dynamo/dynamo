@@ -61,6 +61,10 @@ By default, Dynamo handles tokenization and detokenization through its Rust-base
 
 For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](chat-processor.md) for architecture and usage.
 
+SGLang's `--default-chat-template-kwargs` works with both frontend paths. The worker publishes the value in its model runtime metadata. The frontend merges it under each request's `chat_template_kwargs`, and a key in the request takes precedence. The flag cannot set `thinking`, `enable_thinking`, `thinking_mode`, `reasoning_effort`, `force_nonempty_content`, or `chat_template`, because Dynamo reads these keys from each request before it applies the defaults. Use `--dyn-default-thinking-mode` to set the default thinking mode, and `--custom-jinja-template` to replace the chat template. The flag does not work with `--use-sglang-tokenizer`.
+
+Workers that publish different defaults go into separate worker sets. During a rolling change of the flag, a frontend sends no traffic to the new workers until all workers with the old value leave.
+
 > [!WARNING]
 > `--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
 
