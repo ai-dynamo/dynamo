@@ -20,6 +20,7 @@ a warm ModelExpress NIXL agent with nothing registered, which is consumed.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import Future
 from typing import Any, Dict, Mapping, Sequence
 
 from gpu_memory_service.snapshot.transfer import (
@@ -75,13 +76,20 @@ def byte_tensors(extents: Sequence[tuple[int, int]], device: int) -> Dict[str, A
     import torch
 
     return {
-        allocation_tensor_name(index): torch.as_tensor(_CudaBytes(va, size), device=device)
+        allocation_tensor_name(index): torch.as_tensor(
+            _CudaBytes(va, size), device=device
+        )
         for index, (va, size) in enumerate(extents)
     }
 
 
-def mx_load_context(config: Mapping[str, Any], rank: int, device: int,
-                    tensors: Mapping[str, Any], **overrides):
+def mx_load_context(
+    config: Mapping[str, Any],
+    rank: int,
+    device: int,
+    tensors: Mapping[str, Any],
+    **overrides,
+):
     """A ModelExpress load context whose engine is a set of GMS allocations."""
     import uuid
 
@@ -91,7 +99,9 @@ def mx_load_context(config: Mapping[str, Any], rank: int, device: int,
     from modelexpress.metadata.client_factory import create_metadata_client
 
     identity = source_identity(
-        config["mx_model"], config.get("mx_revision", ""), int(config["mx_tensor_parallel_size"])
+        config["mx_model"],
+        config.get("mx_revision", ""),
+        int(config["mx_tensor_parallel_size"]),
     )
 
     class _AllocationsAdapter(EngineAdapter):
@@ -129,10 +139,35 @@ def mx_load_context(config: Mapping[str, Any], rank: int, device: int,
     )
 
 
+def _resolve(manager):
+    """A NIXL manager, or a future of one from prepare_nixl_manager."""
+    return manager.result() if isinstance(manager, Future) else manager
+
+
+def prepare_nixl_manager(config: Mapping[str, Any], device: int):
+    """A NIXL agent for the restoring rank, ready before its allocations exist.
+
+    Importing ModelExpress and bringing up UCX take seconds and need no
+    weights memory, so a loader can do both while its server starts and its
+    weights are allocated. Pass the result, or a future of it, as
+    ``mx_nixl_manager``.
+    """
+    import torch
+    from modelexpress.load_strategy import rdma_strategy  # noqa: F401
+    from modelexpress.load_strategy.base import _init_nixl_manager
+
+    torch.cuda.set_device(device)
+    return _init_nixl_manager(
+        int(config["mx_rank"]), device, "gms-mx", int(config["mx_listen_port"])
+    )
+
+
 class MXTransferSession:
     """One restore: the artifact's allocations, filled from a peer."""
 
-    def __init__(self, config: GMSSnapshotConfig, sources: Sequence[FileTransferSource]):
+    def __init__(
+        self, config: GMSSnapshotConfig, sources: Sequence[FileTransferSource]
+    ):
         self._config = config
         self._sources = list(sources)
         self._manager = config.backend_config.pop("mx_nixl_manager", None)
@@ -166,10 +201,12 @@ class MXTransferSession:
                 return scoped
 
         torch.cuda.set_device(device)
-        manager, self._manager = self._manager, None
+        manager, self._manager = _resolve(self._manager), None
         if manager is None:
             # NIXL fetches the source's metadata through the listen thread.
-            manager = _init_nixl_manager(rank, device, "gms-mx", int(backend["mx_listen_port"]))
+            manager = _init_nixl_manager(
+                rank, device, "gms-mx", int(backend["mx_listen_port"])
+            )
         try:
             ctx = mx_load_context(backend, rank, device, tensors, nixl_manager=manager)
             strategy = _SameAllocationsRdmaStrategy()
@@ -183,7 +220,7 @@ class MXTransferSession:
 
     def close(self) -> None:
         if self._manager is not None:
-            self._manager.shutdown()
+            _resolve(self._manager).shutdown()
             self._manager = None
 
 
@@ -191,7 +228,9 @@ class MXTransferBackend:
     """Restore GMS weights from a peer serving the same weights."""
 
     def __init__(self, *, config: GMSSnapshotConfig) -> None:
-        missing = {"mx_rank", "mx_model", "mx_tensor_parallel_size"} - set(config.backend_config)
+        missing = {"mx_rank", "mx_model", "mx_tensor_parallel_size"} - set(
+            config.backend_config
+        )
         if missing:
             raise ValueError(f"ModelExpress transfer backend needs {sorted(missing)}")
         self._config = config
