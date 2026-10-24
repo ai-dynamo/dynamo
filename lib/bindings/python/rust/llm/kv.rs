@@ -1465,7 +1465,7 @@ enum RadixTreeRequest {
     ApplyEvent {
         worker_id: WorkerId,
         kv_cache_event_bytes: Vec<u8>,
-        response_tx: mpsc::SyncSender<PyResult<()>>,
+        response_tx: mpsc::SyncSender<Result<(), RadixTreeError>>,
     },
     RemoveWorker {
         worker_id: WorkerId,
@@ -1481,7 +1481,37 @@ enum RadixTreeRequest {
     Shutdown,
 }
 
+/// A worker-side failure, converted to a Python exception by the caller after it receives the
+/// reply. The worker replies only with plain Rust values, so it never needs the GIL.
+#[derive(Debug)]
+enum RadixTreeError {
+    InvalidEvent(String),
+    ApplyFailed(String),
+}
+
+impl From<RadixTreeError> for PyErr {
+    fn from(err: RadixTreeError) -> Self {
+        match err {
+            RadixTreeError::InvalidEvent(e) => PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Failed to deserialize KvCacheEvent: {}", e),
+            ),
+            RadixTreeError::ApplyFailed(e) => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                format!("Failed to apply event: {}", e),
+            ),
+        }
+    }
+}
+
 // NOTE: RadixTree is now thread-safe with pure sync patterns
+//
+// The short request methods wait for the worker thread while still holding the GIL, including
+// behind any request already queued from another thread. The worker never touches Python (its
+// replies, errors included, are plain Rust values), so this cannot deadlock. Releasing the GIL
+// there would make the caller
+// re-take it inside a PyO3 frame, and on Python before 3.13.8 a daemon thread doing that during
+// interpreter finalization is terminated with pthread_exit. PyO3 0.23's trampoline
+// `catch_unwind` then catches the forced unwind and glibc aborts the whole process with
+// "FATAL: exception not rethrown".
 #[pyclass]
 pub(crate) struct RadixTree {
     request_tx: mpsc::Sender<RadixTreeRequest>,
@@ -1518,108 +1548,37 @@ impl RadixTree {
     }
 
     #[pyo3(signature = (sequence, early_exit=false))]
-    fn find_matches(
-        &self,
-        py: Python,
-        sequence: Vec<u64>,
-        early_exit: bool,
-    ) -> PyResult<OverlapScores> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-
-        let local_block_hashes =
-            py.allow_threads(|| sequence.into_iter().map(LocalBlockHash).collect());
-
-        let request = RadixTreeRequest::FindMatches {
+    fn find_matches(&self, sequence: Vec<u64>, early_exit: bool) -> PyResult<OverlapScores> {
+        let local_block_hashes = sequence.into_iter().map(LocalBlockHash).collect();
+        let inner = self.roundtrip(|response_tx| RadixTreeRequest::FindMatches {
             local_block_hashes,
             early_exit,
             response_tx,
-        };
-
-        self.request_tx.send(request).map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "RadixTree background task has shut down",
-            )
         })?;
-
-        // Release GIL while waiting for response
-        let result = py.allow_threads(move || {
-            response_rx.recv().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
-            })
-        })?;
-
-        Ok(OverlapScores { inner: result })
+        Ok(OverlapScores { inner })
     }
 
-    fn apply_event(
-        &self,
-        py: Python,
-        worker_id: WorkerId,
-        kv_cache_event_bytes: &[u8],
-    ) -> PyResult<()> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-
-        let request = RadixTreeRequest::ApplyEvent {
+    fn apply_event(&self, worker_id: WorkerId, kv_cache_event_bytes: &[u8]) -> PyResult<()> {
+        let kv_cache_event_bytes = kv_cache_event_bytes.to_vec();
+        self.roundtrip(|response_tx| RadixTreeRequest::ApplyEvent {
             worker_id,
-            kv_cache_event_bytes: kv_cache_event_bytes.to_vec(),
+            kv_cache_event_bytes,
             response_tx,
-        };
-
-        self.request_tx.send(request).map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "RadixTree background task has shut down",
-            )
-        })?;
-
-        // Release GIL while waiting for response
-        let result = py.allow_threads(move || response_rx.recv());
-
-        result.map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
         })?
+        .map_err(PyErr::from)
     }
 
-    fn remove_worker(&self, py: Python, worker_id: WorkerId) -> PyResult<()> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-
-        let request = RadixTreeRequest::RemoveWorker {
+    fn remove_worker(&self, worker_id: WorkerId) -> PyResult<()> {
+        self.roundtrip(|response_tx| RadixTreeRequest::RemoveWorker {
             worker_id,
             response_tx,
-        };
-
-        self.request_tx.send(request).map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "RadixTree background task has shut down",
-            )
-        })?;
-
-        // Release GIL while waiting for response
-        py.allow_threads(move || {
-            response_rx.recv().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
-            })
         })
     }
 
-    fn clear_all_blocks(&self, py: Python, worker_id: WorkerId) -> PyResult<()> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-
-        let request = RadixTreeRequest::ClearAllBlocks {
+    fn clear_all_blocks(&self, worker_id: WorkerId) -> PyResult<()> {
+        self.roundtrip(|response_tx| RadixTreeRequest::ClearAllBlocks {
             worker_id,
             response_tx,
-        };
-
-        self.request_tx.send(request).map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "RadixTree background task has shut down",
-            )
-        })?;
-
-        // Release GIL while waiting for response
-        py.allow_threads(move || {
-            response_rx.recv().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
-            })
         })
     }
 
@@ -1632,7 +1591,7 @@ impl RadixTree {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send dump tree request")
         })?;
 
-        // Release GIL while waiting for response from dedicated thread
+        // A dump scales with the whole tree, so unlike the short requests it releases the GIL.
         let events = py.allow_threads(move || {
             response_rx.recv().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1659,6 +1618,27 @@ impl RadixTree {
 }
 
 impl RadixTree {
+    /// Send a short request and wait for its reply, holding the GIL throughout (see the note on
+    /// `RadixTree`).
+    fn roundtrip<T>(
+        &self,
+        make_request: impl FnOnce(mpsc::SyncSender<T>) -> RadixTreeRequest,
+    ) -> PyResult<T> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+
+        self.request_tx
+            .send(make_request(response_tx))
+            .map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "RadixTree background task has shut down",
+                )
+            })?;
+
+        response_rx.recv().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+        })
+    }
+
     fn handle_request(
         radix_tree: &mut dynamo_kv_router::indexer::RadixTree,
         request: RadixTreeRequest,
@@ -1680,17 +1660,12 @@ impl RadixTree {
                 let result = match serde_json::from_slice::<KvCacheEvent>(&kv_cache_event_bytes) {
                     Ok(kv_cache_event) => {
                         let router_event = RouterEvent::new(worker_id, kv_cache_event);
-                        match radix_tree.apply_event(router_event) {
-                            Ok(_) => Ok(()),
-                            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                                format!("Failed to apply event: {}", e),
-                            )),
-                        }
+                        radix_tree
+                            .apply_event(router_event)
+                            .map(|_| ())
+                            .map_err(|e| RadixTreeError::ApplyFailed(e.to_string()))
                     }
-                    Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Failed to deserialize KvCacheEvent: {}",
-                        e
-                    ))),
+                    Err(e) => Err(RadixTreeError::InvalidEvent(e.to_string())),
                 };
                 let _ = response_tx.send(result);
             }
