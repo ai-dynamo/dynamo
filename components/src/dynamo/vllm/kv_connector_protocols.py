@@ -50,7 +50,7 @@ class NixlConnectorProtocol(KvConnectorProtocol):
 
     Serves both NIXL modes: pull (``NixlConnector`` or its
     ``NixlPullConnector`` alias, decode READs from prefill) and push
-    (``NixlPushConnector``, prefill WRITEs to decode) — vLLM hands dynamo
+    (``NixlPushConnector``, prefill WRITEs to decode). vLLM hands dynamo
     the same param shape either way.
     """
 
@@ -153,7 +153,7 @@ KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
 
 # Wrapper connectors that compose sub-connectors under
 # ``kv_connector_extra_config["connectors"]``. ``PdConnector``
-# (kvbm.vllm_integration.connector) subclasses vLLM's ``MultiConnector``
+# (dynamo.vllm.pd_connector) subclasses vLLM's ``MultiConnector``
 # with the same config shape, so both delegate PD coordination to their
 # single PD-capable child.
 MULTI_CONNECTOR_WRAPPERS: Tuple[str, ...] = ("MultiConnector", "PdConnector")

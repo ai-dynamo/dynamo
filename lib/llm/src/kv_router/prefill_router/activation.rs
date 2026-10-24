@@ -20,6 +20,15 @@ use dynamo_runtime::{
 };
 
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
+
+/// Routing state of a prefill hop, resolved atomically by [`PrefillRouter::activation_snapshot`].
+pub(super) enum ActivationSnapshot {
+    Active(Arc<PrefillBinding>),
+    /// A target is set but its binding is not published yet: fail closed.
+    Pending,
+    /// No prefill target (never set, or cleared): passthrough to decode is safe.
+    Untargeted,
+}
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource},
@@ -632,6 +641,28 @@ impl PrefillRouter {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
 
+    /// One consistent view of target, lifecycle and binding, read under the
+    /// target lock. Both publishers (`set_target` and the build loop) store the
+    /// binding and lifecycle while holding that lock, so a routing decision made
+    /// from this snapshot cannot interleave with a Pending->Active transition the
+    /// way two separate lock-free reads can.
+    pub(super) fn activation_snapshot(&self) -> ActivationSnapshot {
+        let target = self.target.lock();
+        match self.lifecycle_state() {
+            PrefillLifecycleState::Active => match self.binding.load_full() {
+                Some(binding) => ActivationSnapshot::Active(binding),
+                // The binding is stored before `Active` under this lock, so this
+                // arm is not expected; resolve by target rather than panicking.
+                None if target.is_some() => ActivationSnapshot::Pending,
+                None => ActivationSnapshot::Untargeted,
+            },
+            PrefillLifecycleState::Pending if target.is_some() => ActivationSnapshot::Pending,
+            PrefillLifecycleState::Pending | PrefillLifecycleState::Unavailable => {
+                ActivationSnapshot::Untargeted
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
         self.target_tx
@@ -642,6 +673,7 @@ impl PrefillRouter {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
     use std::time::Duration;
 
     use super::*;
@@ -654,6 +686,7 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::{DiscoverySpec, EventTransportKind},
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
+        error::{ErrorType, match_error_chain},
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, SingleIn,
             network::Ingress,
@@ -760,6 +793,37 @@ mod tests {
         let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
         while response.next().await.is_some() {}
         worker
+    }
+
+    /// Worker 99 is the downstream aggregated path, which must never be reached.
+    async fn await_activation(router: &PrefillRouter, expected_prefill_worker: u32) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match router
+                    .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99)))
+                    .await
+                {
+                    Err(error) => {
+                        assert!(
+                            match_error_chain(error.as_ref(), &[ErrorType::WorkerUnavailable], &[]),
+                            "activation window must surface WorkerUnavailable, got: {error}"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(mut response) => {
+                        let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
+                        while response.next().await.is_some() {}
+                        assert_eq!(
+                            worker, expected_prefill_worker,
+                            "activated router must route through prefill"
+                        );
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("committed prefill target must activate");
     }
 
     #[tokio::test]
@@ -903,18 +967,7 @@ mod tests {
         );
         let (admissions, admitted_ids) = watch::channel(vec![ids[0]]);
         router.set_target(Some(target(1, 64, admitted_ids)));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let worker = prefilled_worker(&router).await;
-                if worker != 99 {
-                    assert_eq!(worker, 0);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("committed prefill target must activate");
+        await_activation(&router, 0).await;
         assert_eq!(
             router.available_worker_ids_for(&group_id, &endpoint.id()),
             Some(HashSet::from([ids[0]]))
@@ -1021,18 +1074,7 @@ mod tests {
                 .available_worker_ids_for("other-group", &endpoint.id())
                 .is_none()
         );
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let worker = prefilled_worker(&router).await;
-                if worker != 99 {
-                    assert_eq!(worker, 2);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("same-endpoint successor must activate");
+        await_activation(&router, 2).await;
         assert_eq!(
             router.available_worker_ids_for(&group_id, &endpoint.id()),
             Some(HashSet::from([ids[2]]))
@@ -1066,5 +1108,228 @@ mod tests {
             worker.shutdown().await.unwrap();
         }
         runtime.shutdown();
+    }
+
+    struct WaitingPrefillWorker(tokio::sync::mpsc::UnboundedSender<String>);
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for WaitingPrefillWorker
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            let context = request.context();
+            let worker_context = context.clone();
+            let cancelled = self.0.clone();
+            let response = async_stream::stream! {
+                yield Annotated::from_data(LLMEngineOutput {
+                    disaggregated_params: Some(serde_json::json!({
+                        "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
+                    })),
+                    ..Default::default()
+                });
+                worker_context.stopped().await;
+                let _ = cancelled.send(worker_context.id().to_string());
+            };
+            Ok(ResponseStream::new(Box::pin(response), context))
+        }
+    }
+
+    struct RejectingDecodeHost {
+        stream: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for RejectingDecodeHost
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            let error = dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::WorkerOverloaded)
+                .message("decode admission rejected")
+                .build();
+            if !self.stream {
+                return Err(error.into());
+            }
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter([Annotated::from_err(error)])),
+                request.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_rejection_reaches_remote_prefill_context() {
+        // Isolate the process-global TCP request server, as in the routing-hop test above.
+        const TEST: &str = concat!(
+            module_path!(),
+            "::decode_rejection_reaches_remote_prefill_context"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env("DYNAMO_ROUTING_HOP_TEST", test_name)
+                .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let runtime = Runtime::from_current().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let config = || DistributedConfig {
+            discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(store.path().into())),
+            nats_config: None,
+            request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
+            event_transport_kind: EventTransportKind::Zmq,
+        };
+        let namespace = format!("prefill-rejection-{}", uuid::Uuid::new_v4());
+        let worker_runtime = DistributedRuntime::new(runtime.clone(), config())
+            .await
+            .unwrap();
+        let worker_endpoint = worker_runtime
+            .namespace(namespace.clone())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("prefill");
+        let (cancelled, mut cancellations) = tokio::sync::mpsc::unbounded_channel();
+        let worker = worker_endpoint
+            .endpoint_builder()
+            .handler(Ingress::for_engine(Arc::new(WaitingPrefillWorker(cancelled))).unwrap())
+            .start_with_registration()
+            .await
+            .unwrap();
+        let kv_config = KvRouterConfig {
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let mut advertised = card(Some(RouterConfig::new(RouterMode::KV, kv_config)));
+        advertised.kv_cache_block_size = 64;
+        worker_runtime
+            .discovery()
+            .register(
+                DiscoverySpec::from_model(
+                    namespace.clone(),
+                    "workers".into(),
+                    "prefill".into(),
+                    &advertised,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let frontend_runtime = DistributedRuntime::new(runtime, config()).await.unwrap();
+        let endpoint = frontend_runtime
+            .namespace(namespace.clone())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("prefill");
+        let router = PrefillRouter::new_with_selection_policy(
+            None,
+            Arc::new(ModelManager::new()),
+            RouterMode::KV,
+            64,
+            None,
+            SelectionPolicySource::Registry,
+            None,
+            None,
+            SessionAffinityMode::Hard,
+            "test-model".into(),
+            namespace,
+            LoadThresholdHandle::new(Default::default()),
+            frontend_runtime.child_token(),
+            None,
+        );
+        let (_admissions, admitted_ids) = watch::channel(vec![worker.instance().id()]);
+        router.set_target(Some(WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+            group: endpoint.id().to_string(),
+            endpoint,
+            generation: 1,
+            card: Arc::new(advertised),
+            admitted_ids,
+        })));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while router.lifecycle_state() != PrefillLifecycleState::Active {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prefill target must activate");
+
+        // Exercise the production generate path, discovery, TCP dispatch, and
+        // cancellation propagation for all output modes and both refusal paths.
+        for annotations in [
+            vec![],
+            vec!["prefill_output"],
+            vec!["prefill_output", "prefill_output_first"],
+        ] {
+            for streamed in [false, true] {
+                let mut input = request();
+                input.annotations = annotations.iter().map(|s| s.to_string()).collect();
+                let input = SingleIn::new(input);
+                let id = input.context().id().to_string();
+                let downstream = Arc::new(RejectingDecodeHost { stream: streamed });
+                let result = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    router.generate(input, downstream),
+                )
+                .await
+                .unwrap();
+                if streamed {
+                    let mut response = result.unwrap();
+                    let item = tokio::time::timeout(Duration::from_secs(5), response.next())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(item.err().is_some());
+                } else {
+                    assert!(result.is_err());
+                }
+                let cancelled = tokio::time::timeout(Duration::from_secs(5), cancellations.recv())
+                    .await
+                    .expect("decode refusal did not cancel the dispatched prefill worker")
+                    .unwrap();
+                assert_eq!(
+                    cancelled, id,
+                    "must cancel the matching remote prefill request"
+                );
+            }
+        }
+        drop(router);
+        worker.shutdown().await.unwrap();
+        frontend_runtime.shutdown();
+        worker_runtime.shutdown();
     }
 }

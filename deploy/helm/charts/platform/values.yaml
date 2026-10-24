@@ -67,6 +67,23 @@ global:
 
 # Dynamo operator configuration
 dynamo-operator:
+  grovePreflight:
+    # -- Validate externally managed Grove before installing/upgrading the operator. Disable only with a separate compatibility gate.
+    enabled: true
+    # -- Image containing Python 3 (standard library only). Override for an internal registry.
+    image: docker.io/library/python:3.12-slim
+    # -- Existing pull secrets for the Grove preflight image.
+    imagePullSecrets: []
+    # -- Maximum Job duration in seconds, including retries.
+    activeDeadlineSeconds: 120
+    # -- Independent preflight affinity. Does not inherit controllerManager.affinity.
+    affinity: {}
+    # -- Full replacement of the preflight pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it.
+    podSecurityContext: null
+    # -- Namespace of external Grove. Empty discovers across all namespaces.
+    namespace: ""
+    # -- External Grove Deployment name. Requires namespace; empty discovers by container name.
+    deploymentName: ""
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
@@ -75,6 +92,14 @@ dynamo-operator:
   # operator. Namespace-restricted installations must set this to false and use the CRDs managed by
   # the cluster-wide operator.
   upgradeCRD: true
+
+  dgdrV1Beta2:
+    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
+    # Request API with conversion and install the Run and Candidate APIs. Run and
+    # Candidate objects are persisted in etcd; incompatible schema changes may make
+    # them unreadable or block future CRD upgrades. The operator does not reconcile
+    # v1beta2 requests.
+    enabled: false
 
   # Environment variables to pass to operator Deployment.
   env: []

@@ -38,7 +38,7 @@ func TestApplyVersionMatrix(t *testing.T) {
 			wantPreservation: func(t *testing.T, result *unstructured.Unstructured) {
 				pvcs := mustNestedSlice(t, result.Object, "spec", "pvcs")
 				require.Len(t, pvcs, 1)
-				assert.Equal(t, "model-cache", pvcs[0].(map[string]interface{})["name"])
+				assert.Equal(t, "model-cache", pvcs[0].(map[string]any)["name"])
 			},
 		},
 		{
@@ -50,7 +50,7 @@ func TestApplyVersionMatrix(t *testing.T) {
 			wantPreservation: func(t *testing.T, result *unstructured.Unstructured) {
 				pvcs := mustNestedSlice(t, result.Object, "spec", "pvcs")
 				require.Len(t, pvcs, 1)
-				assert.Equal(t, "model-cache", pvcs[0].(map[string]interface{})["name"])
+				assert.Equal(t, "model-cache", pvcs[0].(map[string]any)["name"])
 			},
 		},
 		{
@@ -110,6 +110,70 @@ func TestApplyVersionMatrix(t *testing.T) {
 	}
 }
 
+// A v1alpha1 envFromSecret override must reach the v1beta1 main container
+// even when the blueprint's main container already has envFrom.
+func TestApplyAlphaEnvFromSecretKeepsBlueprintEnvFrom(t *testing.T) {
+	t.Parallel()
+
+	blueprint := mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: frontend-image
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: Worker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: worker-image
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+`)
+	override := mustObject(t, `
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+spec:
+  services:
+    Frontend:
+      envFromSecret: qa-probe-secret
+    Worker:
+      envFromSecret: qa-probe-secret
+`)
+
+	result, _, err := Apply(blueprint, override)
+	require.NoError(t, err)
+	assert.Equal(t, "nvidia.com/v1beta1", result.GetAPIVersion())
+	for _, name := range []string{"Frontend", "Worker"} {
+		component := mustBetaComponent(t, result, name)
+		containers := mustNestedSlice(t, component, "podTemplate", "spec", "containers")
+		main := findNamedObject(t, containers, "main")
+		require.NotNil(t, main, "missing %s main container", name)
+		envFrom, _, err := unstructured.NestedSlice(main, "envFrom")
+		require.NoError(t, err)
+		secrets := []string{}
+		for _, entry := range envFrom {
+			secretName, _, err := unstructured.NestedString(entry.(map[string]any), "secretRef", "name")
+			require.NoError(t, err)
+			secrets = append(secrets, secretName)
+		}
+		assert.Equal(t, []string{"hf-token-secret", "qa-probe-secret"}, secrets, name)
+	}
+}
+
 func TestApplyUsesStructuralListSemantics(t *testing.T) {
 	t.Parallel()
 
@@ -122,8 +186,8 @@ func TestApplyUsesStructuralListSemantics(t *testing.T) {
 
 	components := mustNestedSlice(t, result.Object, "spec", "components")
 	require.Len(t, components, 2, "component list should merge by name")
-	assert.Equal(t, "Frontend", components[0].(map[string]interface{})["name"])
-	assert.Equal(t, "Worker", components[1].(map[string]interface{})["name"])
+	assert.Equal(t, "Frontend", components[0].(map[string]any)["name"])
+	assert.Equal(t, "Worker", components[1].(map[string]any)["name"])
 
 	worker := mustBetaWorker(t, result)
 	containers := mustNestedSlice(t, worker, "podTemplate", "spec", "containers")
@@ -132,7 +196,7 @@ func TestApplyUsesStructuralListSemantics(t *testing.T) {
 	main := findNamedObject(t, containers, "main")
 	require.NotNil(t, main)
 	assert.Equal(t, "new-image", main["image"])
-	assert.Equal(t, []interface{}{"--override"}, main["args"], "atomic args list should be replaced")
+	assert.Equal(t, []any{"--override"}, main["args"], "atomic args list should be replaced")
 
 	env := mustNestedSlice(t, main, "env")
 	require.Len(t, env, 3, "environment variables should merge by name")
@@ -175,7 +239,7 @@ spec:
 		"main",
 	)
 	require.NotNil(t, main)
-	assert.Equal(t, []interface{}{"--base", "--router-mode", "kv"}, main["args"])
+	assert.Equal(t, []any{"--base", "--router-mode", "kv"}, main["args"])
 	assert.NotContains(t, main, "$patch")
 	assert.NotContains(t, worker, "containerArgsPatches")
 }
@@ -185,14 +249,14 @@ func TestApplyMaterializesFrontendArgsAppendAfterExplicitDefaults(t *testing.T) 
 
 	t.Log("Materialize the operator-equivalent frontend CLI in the profiler blueprint")
 	blueprint := mustObject(t, betaBlueprintYAML)
-	updateBetaComponent(t, blueprint, "Frontend", func(frontend map[string]interface{}) {
+	updateBetaComponent(t, blueprint, "Frontend", func(frontend map[string]any) {
 		require.NoError(t, unstructured.SetNestedSlice(
 			frontend,
-			[]interface{}{
-				map[string]interface{}{
+			[]any{
+				map[string]any{
 					"name":    "main",
-					"command": []interface{}{"python3"},
-					"args":    []interface{}{"-m", "dynamo.frontend"},
+					"command": []any{"python3"},
+					"args":    []any{"-m", "dynamo.frontend"},
 				},
 			},
 			"podTemplate",
@@ -229,8 +293,8 @@ spec:
 		"main",
 	)
 	require.NotNil(t, main)
-	assert.Equal(t, []interface{}{"python3"}, main["command"])
-	assert.Equal(t, []interface{}{"-m", "dynamo.frontend", "--router-mode", "kv"}, main["args"])
+	assert.Equal(t, []any{"python3"}, main["command"])
+	assert.Equal(t, []any{"-m", "dynamo.frontend", "--router-mode", "kv"}, main["args"])
 	assert.NotContains(t, main, "$patch")
 }
 
@@ -239,11 +303,11 @@ func TestApplyMaterializesBetaArgsAppendForExistingSidecar(t *testing.T) {
 
 	t.Log("Add explicit base arguments to the generated sidecar")
 	blueprint := mustObject(t, betaBlueprintYAML)
-	updateBetaComponent(t, blueprint, "Worker", func(worker map[string]interface{}) {
+	updateBetaComponent(t, blueprint, "Worker", func(worker map[string]any) {
 		containers := mustNestedSlice(t, worker, "podTemplate", "spec", "containers")
 		sidecar := findNamedObject(t, containers, "sidecar")
 		require.NotNil(t, sidecar)
-		sidecar["args"] = []interface{}{"--serve"}
+		sidecar["args"] = []any{"--serve"}
 		require.NoError(t, unstructured.SetNestedSlice(
 			worker,
 			containers,
@@ -284,7 +348,7 @@ spec:
 	)
 	require.NotNil(t, sidecar)
 	assert.Equal(t, "sidecar-image", sidecar["image"])
-	assert.Equal(t, []interface{}{"--serve", "--verbose"}, sidecar["args"])
+	assert.Equal(t, []any{"--serve", "--verbose"}, sidecar["args"])
 	assert.NotContains(t, sidecar, "$patch")
 	assert.NotContains(t, worker, "containerArgsPatches")
 }
@@ -346,7 +410,7 @@ func TestApplyUsesStructuralSetSemantics(t *testing.T) {
 	t.Parallel()
 
 	blueprint := mustObject(t, betaBlueprintYAML)
-	updateBetaComponent(t, blueprint, "Worker", func(worker map[string]interface{}) {
+	updateBetaComponent(t, blueprint, "Worker", func(worker map[string]any) {
 		require.NoError(t, unstructured.SetNestedStringSlice(
 			worker,
 			[]string{"sidecar", "shared"},
@@ -357,7 +421,7 @@ func TestApplyUsesStructuralSetSemantics(t *testing.T) {
 	})
 
 	override := mustObject(t, betaOverrideYAML)
-	updateBetaComponent(t, override, "Worker", func(worker map[string]interface{}) {
+	updateBetaComponent(t, override, "Worker", func(worker map[string]any) {
 		require.NoError(t, unstructured.SetNestedStringSlice(
 			worker,
 			[]string{"metrics", "shared"},
@@ -993,12 +1057,12 @@ kind: DynamoGraphDeployment
 
 func mustObject(t *testing.T, document string) *unstructured.Unstructured {
 	t.Helper()
-	content := map[string]interface{}{}
+	content := map[string]any{}
 	require.NoError(t, yaml.Unmarshal([]byte(document), &content))
 	return &unstructured.Unstructured{Object: content}
 }
 
-func mustNestedSlice(t *testing.T, object map[string]interface{}, fields ...string) []interface{} {
+func mustNestedSlice(t *testing.T, object map[string]any, fields ...string) []any {
 	t.Helper()
 	value, found, err := unstructured.NestedSlice(object, fields...)
 	require.NoError(t, err)
@@ -1006,7 +1070,7 @@ func mustNestedSlice(t *testing.T, object map[string]interface{}, fields ...stri
 	return value
 }
 
-func mustNestedStringSlice(t *testing.T, object map[string]interface{}, fields ...string) []string {
+func mustNestedStringSlice(t *testing.T, object map[string]any, fields ...string) []string {
 	t.Helper()
 	value, found, err := unstructured.NestedStringSlice(object, fields...)
 	require.NoError(t, err)
@@ -1014,12 +1078,12 @@ func mustNestedStringSlice(t *testing.T, object map[string]interface{}, fields .
 	return value
 }
 
-func mustBetaWorker(t *testing.T, object *unstructured.Unstructured) map[string]interface{} {
+func mustBetaWorker(t *testing.T, object *unstructured.Unstructured) map[string]any {
 	t.Helper()
 	return mustBetaComponent(t, object, "Worker")
 }
 
-func mustBetaComponent(t *testing.T, object *unstructured.Unstructured, name string) map[string]interface{} {
+func mustBetaComponent(t *testing.T, object *unstructured.Unstructured, name string) map[string]any {
 	t.Helper()
 	components := mustNestedSlice(t, object.Object, "spec", "components")
 	component := findNamedObject(t, components, name)
@@ -1031,7 +1095,7 @@ func updateBetaComponent(
 	t *testing.T,
 	object *unstructured.Unstructured,
 	name string,
-	update func(map[string]interface{}),
+	update func(map[string]any),
 ) {
 	t.Helper()
 	components := mustNestedSlice(t, object.Object, "spec", "components")
@@ -1041,10 +1105,10 @@ func updateBetaComponent(
 	require.NoError(t, unstructured.SetNestedSlice(object.Object, components, "spec", "components"))
 }
 
-func findNamedObject(t *testing.T, values []interface{}, name string) map[string]interface{} {
+func findNamedObject(t *testing.T, values []any, name string) map[string]any {
 	t.Helper()
 	for i, value := range values {
-		object, ok := value.(map[string]interface{})
+		object, ok := value.(map[string]any)
 		require.True(t, ok, "item %d is %T, not an object", i, value)
 		if object["name"] == name {
 			return object
@@ -1056,7 +1120,7 @@ func findNamedObject(t *testing.T, values []interface{}, name string) map[string
 func targetReplicas(t *testing.T, object *unstructured.Unstructured, name string) int64 {
 	t.Helper()
 
-	var value interface{}
+	var value any
 	if object.GetAPIVersion() == alphaAPIVersion {
 		var found bool
 		var err error
@@ -1079,7 +1143,7 @@ func targetReplicas(t *testing.T, object *unstructured.Unstructured, name string
 	}
 }
 
-func mainContainer(t *testing.T, object *unstructured.Unstructured) map[string]interface{} {
+func mainContainer(t *testing.T, object *unstructured.Unstructured) map[string]any {
 	t.Helper()
 	switch object.GetAPIVersion() {
 	case alphaAPIVersion:
@@ -1116,7 +1180,7 @@ func mainContainerImage(t *testing.T, object *unstructured.Unstructured) string 
 func mainContainerArgs(t *testing.T, object *unstructured.Unstructured) []string {
 	t.Helper()
 	args := mainContainer(t, object)["args"]
-	values, ok := args.([]interface{})
+	values, ok := args.([]any)
 	require.True(t, ok, "args has type %T", args)
 	result := make([]string, len(values))
 	for i, value := range values {
@@ -1147,10 +1211,10 @@ func mainContainerEnv(t *testing.T, object *unstructured.Unstructured) map[strin
 	return result
 }
 
-func addEnvValues(t *testing.T, result map[string]string, env []interface{}) {
+func addEnvValues(t *testing.T, result map[string]string, env []any) {
 	t.Helper()
 	for _, item := range env {
-		entry := item.(map[string]interface{})
+		entry := item.(map[string]any)
 		result[entry["name"].(string)] = entry["value"].(string)
 	}
 }

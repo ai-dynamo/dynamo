@@ -30,7 +30,11 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.backend_args import (
+    DynamoVllmArgGroup,
+    DynamoVllmConfig,
+    _configured_artifact_router_profile,
+)
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
@@ -117,6 +121,8 @@ async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
         The validated configuration, retaining the original source in ``model``.
     """
     dynamo_config, vllm_args = _parse_cli_args(argv)
+    if dynamo_config.artifact_router_profile is not None:
+        _configured_artifact_router_profile(dynamo_config.artifact_router_profile)
     if needs_local_model_path(dynamo_config.model):
         vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
         if not vllm_args.served_model_name:
@@ -597,9 +603,32 @@ def create_kv_events_config(
                 "To publish events, explicitly set enable_kv_cache_events to True."
             )
         logger.info(f"Using user-provided kv_events_config {c}")
+        _set_state_agent_topic(engine_config, c)
         return c
 
     return None
+
+
+def _set_state_agent_topic(
+    engine_config: AsyncEngineArgs, events: KVEventsConfig
+) -> None:
+    """Publish on this worker's KV state-agent topic, which its attachment
+    descriptors advertise, so the agent can route its raw streams by topic."""
+    from dynamo.common.kv_state_agent import worker_raw_topic
+
+    from .state_agent import state_agent_settings_from_engine_args
+
+    settings = state_agent_settings_from_engine_args(engine_config)
+    if settings is None:
+        return
+    topic = worker_raw_topic(settings.cache_owner_ids.values())
+    if events.topic != topic:
+        logger.info(
+            "Publishing KV events on the KV state-agent worker topic %r instead of %r",
+            topic,
+            events.topic,
+        )
+        events.topic = topic
 
 
 # These NIXL connectors need the side-channel handshake: pull and push mode
@@ -694,7 +723,7 @@ def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str
             "kv_connector": "PdConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"connectors": multi_connectors},
-            "kv_connector_module_path": "kvbm.vllm_integration.connector",
+            "kv_connector_module_path": "dynamo.vllm.pd_connector",
         }
     )
 
