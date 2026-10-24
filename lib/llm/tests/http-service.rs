@@ -23,14 +23,14 @@ use dynamo_llm::{
         Metrics,
         error::HttpError,
         metrics::{Endpoint, ErrorType, RequestType, Status},
-        service_v2::{BackendErrorCheck, HttpService},
+        service_v2::{BackendErrorCheck, HttpService, HttpServiceConfigBuilder},
     },
     model_card::ModelDeploymentCard,
 };
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
-    error::{DynamoError, ErrorType as DynamoErrorType},
+    error::{DynamoError, ErrorClass, ErrorType as DynamoErrorType},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
@@ -3473,6 +3473,461 @@ async fn test_images_worker_internal_error_maps_to_sanitized_500() {
 
     token.cancel();
     let _ = task.await;
+}
+
+use dynamo_llm::protocols::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
+use dynamo_llm::types::openai::videos::OpenAIVideosStreamingEngine;
+
+struct ErrorVideosEngine {
+    error: DynamoError,
+}
+
+struct DelayedErrorVideosEngine {
+    delay: std::time::Duration,
+    error: DynamoError,
+}
+
+struct GatedVideosEngine {
+    release: Arc<tokio::sync::Notify>,
+}
+
+fn video_error_frame(error: DynamoError) -> Annotated<NvVideosResponse> {
+    Annotated {
+        data: None,
+        id: None,
+        event: Some("error".to_string()),
+        comment: None,
+        error: Some(error),
+    }
+}
+
+fn completed_video_frame() -> Annotated<NvVideosResponse> {
+    let mut response = NvVideosResponse::empty();
+    response.id = "video-1".to_string();
+    response.model = "video-model".to_string();
+    Annotated::from_data(response)
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateVideoRequest>, ManyOut<Annotated<NvVideosResponse>>, Error>
+    for ErrorVideosEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateVideoRequest>,
+    ) -> Result<ManyOut<Annotated<NvVideosResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let error = self.error.clone();
+        let stream = stream! {
+            yield video_error_frame(error);
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateVideoRequest>, ManyOut<Annotated<NvVideosResponse>>, Error>
+    for DelayedErrorVideosEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateVideoRequest>,
+    ) -> Result<ManyOut<Annotated<NvVideosResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let delay = self.delay;
+        let error = self.error.clone();
+        let stopped = ctx.clone();
+        let stream = stream! {
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => yield video_error_frame(error),
+                _ = stopped.stopped() => {}
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateVideoRequest>, ManyOut<Annotated<NvVideosResponse>>, Error>
+    for GatedVideosEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateVideoRequest>,
+    ) -> Result<ManyOut<Annotated<NvVideosResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let release = self.release.clone();
+        let stopped = ctx.clone();
+        let stream = stream! {
+            tokio::select! {
+                _ = release.notified() => yield completed_video_frame(),
+                _ = stopped.stopped() => {}
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+const VIDEOS_IO_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn start_videos_service(
+    engine: OpenAIVideosStreamingEngine,
+) -> (
+    u16,
+    Arc<Metrics>,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    start_videos_service_with(engine, |builder| builder).await
+}
+
+async fn start_videos_service_with(
+    engine: OpenAIVideosStreamingEngine,
+    configure: impl FnOnce(HttpServiceConfigBuilder) -> HttpServiceConfigBuilder,
+) -> (
+    u16,
+    Arc<Metrics>,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let (listener, port) = bind_random_port().await;
+    let service = configure(HttpService::builder().port(port))
+        .build()
+        .unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Videos, true)
+        .unwrap();
+    let state = service.state_clone();
+    let metrics = state.metrics_clone();
+    let card = ModelDeploymentCard::with_name_only("video-model");
+    state
+        .manager()
+        .add_videos_model("video-model", card.mdcsum(), engine)
+        .unwrap();
+
+    let registry = Registry::new();
+    metrics.register(&registry).unwrap();
+
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+    (port, metrics, token, task)
+}
+
+/// Catalog class for a worker-side material URI 403. The diagnostic is the
+/// `{message, code}` envelope `http_like_error_to_dynamo` stores for urllib
+/// `HTTPError`; metrics map this class to `ErrorType::Validation`.
+fn material_permission_denied() -> DynamoError {
+    DynamoError::builder()
+        .class(ErrorClass::PermissionDenied)
+        .diagnostic(r#"{"message":"HTTP Error 403: Forbidden","code":403}"#)
+        .build()
+}
+
+fn videos_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(VIDEOS_IO_BOUND)
+        .build()
+        .expect("videos test client")
+}
+
+fn videos_request_body(stream: bool) -> serde_json::Value {
+    serde_json::json!({
+        "model": "video-model",
+        "prompt": "a cat running",
+        "stream": stream,
+    })
+}
+
+async fn post_videos_generation(port: u16, stream: bool) -> reqwest::Response {
+    timeout(
+        VIDEOS_IO_BOUND,
+        videos_client()
+            .post(format!("http://localhost:{port}/v1/videos"))
+            .json(&videos_request_body(stream))
+            .send(),
+    )
+    .await
+    .expect("videos response headers timed out")
+    .expect("videos request failed")
+}
+
+async fn read_videos_body(response: reqwest::Response) -> String {
+    timeout(VIDEOS_IO_BOUND, response.text())
+        .await
+        .expect("videos response body timed out")
+        .expect("videos response body")
+}
+
+async fn stop_videos_service(
+    token: CancellationToken,
+    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    token.cancel();
+    timeout(VIDEOS_IO_BOUND, task)
+        .await
+        .expect("videos service shutdown timed out")
+        .expect("videos service task panicked")
+        .expect("videos service shutdown failed");
+}
+
+async fn assert_videos_material_403(
+    stream: bool,
+    request_type: RequestType,
+    check: Option<BackendErrorCheck>,
+) {
+    let engine: OpenAIVideosStreamingEngine = Arc::new(ErrorVideosEngine {
+        error: material_permission_denied(),
+    });
+    let (port, metrics, token, task) = match check {
+        Some(check) => {
+            start_videos_service_with(engine, |builder| {
+                builder.streaming_backend_error_check(check)
+            })
+            .await
+        }
+        None => start_videos_service(engine).await,
+    };
+
+    let response = post_videos_generation(port, stream).await;
+    let status = response.status();
+    let body = read_videos_body(response).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "material HTTP 403 must be HTTP 403, not {status}; body: {body}"
+    );
+    assert!(
+        !body.to_lowercase().contains("internal"),
+        "client/material 403 must not be classified as internal; got: {body}"
+    );
+    assert!(
+        body.contains("Permission denied"),
+        "catalog message missing; got: {body}"
+    );
+
+    compare_counter(
+        &metrics,
+        "video-model",
+        &Endpoint::Videos,
+        &request_type,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
+    );
+    compare_counter(
+        &metrics,
+        "video-model",
+        &Endpoint::Videos,
+        &request_type,
+        &Status::Error,
+        &ErrorType::Internal,
+        0,
+    );
+
+    stop_videos_service(token, task).await;
+}
+
+#[tokio::test]
+async fn test_videos_material_http_403_is_4xx_not_internal() {
+    assert_videos_material_403(false, RequestType::Unary, None).await;
+}
+
+#[tokio::test]
+async fn test_videos_streaming_material_http_403_is_4xx_not_internal() {
+    assert_videos_material_403(
+        true,
+        RequestType::Stream,
+        Some(BackendErrorCheck::Bounded(
+            std::time::Duration::from_millis(500),
+        )),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_videos_streaming_keep_alive_during_slow_generation() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let engine: OpenAIVideosStreamingEngine = Arc::new(GatedVideosEngine {
+        release: release.clone(),
+    });
+    let (port, metrics, token, task) = start_videos_service_with(engine, |builder| {
+        builder
+            .streaming_backend_error_check(BackendErrorCheck::Bounded(
+                std::time::Duration::from_millis(20),
+            ))
+            .sse_keep_alive(std::time::Duration::from_millis(25))
+    })
+    .await;
+
+    let response = timeout(
+        std::time::Duration::from_secs(2),
+        videos_client()
+            .post(format!("http://localhost:{port}/v1/videos"))
+            .json(&videos_request_body(true))
+            .send(),
+    )
+    .await
+    .expect("SSE headers did not arrive while video generation was still silent")
+    .expect("videos request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "{content_type}"
+    );
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    loop {
+        let chunk = timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("slow video stream did not emit a keep-alive")
+            .expect("slow video stream ended before a keep-alive")
+            .expect("failed to read video stream");
+        body.extend_from_slice(&chunk);
+        let body_text = String::from_utf8_lossy(&body);
+        if body_text.contains(":\n\n") {
+            assert!(
+                !body_text.contains("data:"),
+                "model data arrived before the keep-alive comment: {body_text}"
+            );
+            break;
+        }
+    }
+
+    release.notify_one();
+    while let Some(chunk) = timeout(VIDEOS_IO_BOUND, stream.next())
+        .await
+        .expect("video stream did not finish")
+    {
+        body.extend_from_slice(&chunk.expect("failed to read video stream"));
+    }
+
+    let body = String::from_utf8(body).expect("SSE response was not UTF-8");
+    assert!(
+        body.contains("video-1"),
+        "stream did not emit the video frame: {body}"
+    );
+    assert!(
+        body.contains("data: [DONE]"),
+        "stream did not terminate with [DONE]: {body}"
+    );
+    wait_for_counter(
+        &metrics,
+        "video-model",
+        &Endpoint::Videos,
+        &RequestType::Stream,
+        &Status::Success,
+        &ErrorType::None,
+        1,
+    )
+    .await;
+
+    stop_videos_service(token, task).await;
+}
+
+#[tokio::test]
+async fn test_videos_streaming_error_after_preflight_is_sse_event() {
+    let engine: OpenAIVideosStreamingEngine = Arc::new(DelayedErrorVideosEngine {
+        delay: BACKEND_ERROR_DELAY,
+        error: material_permission_denied(),
+    });
+    let (port, metrics, token, task) = start_videos_service_with(engine, |builder| {
+        builder.streaming_backend_error_check(BackendErrorCheck::Bounded(
+            std::time::Duration::from_millis(20),
+        ))
+    })
+    .await;
+
+    let response = post_videos_generation(port, true).await;
+    let status = response.status();
+    let body = read_videos_body(response).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an error after the preflight window must stay on the open SSE response; got {status}, body: {body}"
+    );
+    assert!(
+        body.contains("\"type\":\"permission_error\""),
+        "late material 403 must be an SSE error event; got: {body}"
+    );
+    assert!(
+        body.contains("Permission denied"),
+        "catalog message missing from the SSE error; got: {body}"
+    );
+    assert!(
+        body.contains("\"code\":403"),
+        "SSE error must keep the 403 code; got: {body}"
+    );
+    let error_at = body
+        .find("permission_error")
+        .expect("permission_error frame");
+    let done_at = body.find("data: [DONE]").expect("SSE [DONE]");
+    assert!(
+        error_at < done_at,
+        "SSE error must precede [DONE]; got: {body}"
+    );
+    wait_for_counter(
+        &metrics,
+        "video-model",
+        &Endpoint::Videos,
+        &RequestType::Stream,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
+    )
+    .await;
+    compare_counter(
+        &metrics,
+        "video-model",
+        &Endpoint::Videos,
+        &RequestType::Stream,
+        &Status::Error,
+        &ErrorType::Internal,
+        0,
+    );
+
+    stop_videos_service(token, task).await;
+}
+
+#[tokio::test]
+async fn test_videos_internal_error_stays_500() {
+    let error = DynamoError::msg("secret internal detail: decoder panic");
+    let engine: OpenAIVideosStreamingEngine = Arc::new(ErrorVideosEngine { error });
+    let (port, metrics, token, task) = start_videos_service(engine).await;
+
+    let response = post_videos_generation(port, false).await;
+    let status = response.status();
+    let body = read_videos_body(response).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "genuine internal failure must stay HTTP 500; got {status}, body: {body}"
+    );
+    assert!(
+        !body.contains("secret internal detail"),
+        "internal details must not leak to the client, got: {body}"
+    );
+
+    compare_counter(
+        &metrics,
+        "video-model",
+        &Endpoint::Videos,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Internal,
+        1,
+    );
+
+    stop_videos_service(token, task).await;
 }
 
 mod zero_top_logprobs {
