@@ -64,6 +64,7 @@ impl PrefillRouter {
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> Result<PrefillReservation> {
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
@@ -87,7 +88,7 @@ impl PrefillRouter {
             });
         };
         let admitted = chooser
-            .find_best_match_details_with_policy_class_admitted(
+            .find_best_match_details_with_policy_class_admitted_and_do_not_queue(
                 Some(reservation_id),
                 token_ids,
                 block_mm_infos,
@@ -104,6 +105,7 @@ impl PrefillRouter {
                 None,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
             )
             .await?;
         let (outcome, booking) = admitted.into_parts();
@@ -538,6 +540,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap();
@@ -555,6 +558,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap();
@@ -616,6 +620,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap();
