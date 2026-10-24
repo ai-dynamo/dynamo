@@ -4621,7 +4621,8 @@ pub fn validate_response_unsupported_fields(
 pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
     use crate::protocols::openai::validate;
 
-    let map_err = |e: anyhow::Error| {
+    /// Maps any validation diagnostic to a prefixed HTTP 400 invalid-request response.
+    fn invalid_request(e: impl std::fmt::Display) -> ErrorResponse {
         ErrorMessage::from_http_error(
             ErrorClass::InvalidRequest,
             HttpError {
@@ -4629,16 +4630,16 @@ pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), Error
                 message: VALIDATION_PREFIX.to_string() + &e.to_string(),
             },
         )
-    };
+    }
 
-    validate::validate_temperature(request.inner.temperature).map_err(&map_err)?;
-    validate::validate_top_p(request.inner.top_p).map_err(&map_err)?;
-    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(&map_err)?;
+    validate::validate_temperature(request.inner.temperature).map_err(invalid_request)?;
+    validate::validate_top_p(request.inner.top_p).map_err(invalid_request)?;
+    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(invalid_request)?;
 
     if let Some(text) = &request.inner.text {
         use crate::protocols::openai::responses::convert_text_format;
         if let Some(response_format) = convert_text_format(text) {
-            validate::validate_response_format(&Some(response_format)).map_err(&map_err)?;
+            validate::validate_response_format(&Some(response_format)).map_err(invalid_request)?;
         }
     }
 
