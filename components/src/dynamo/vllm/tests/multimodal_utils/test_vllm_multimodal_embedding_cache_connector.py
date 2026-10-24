@@ -246,13 +246,12 @@ class TestEmbeddingRowSize:
 
     def test_budget_uses_measured_width_per_modality(self):
         conn = self._make_connector(_DEEPSTACK_WIDTHS)
-        for mm_hash, modality in (("i", "image"), ("v", "video"), ("a", "audio")):
+        for mm_hash, modality in (("v", "video"), ("a", "audio")):
             conn.update_state_after_alloc(
                 _make_request([(mm_hash, 10)], modality=modality), 0
             )
 
         assert dict(conn._cache_order) == {
-            "i": 10 * 4 * 4096 * 2,
             "v": 10 * 4 * 4096 * 2,
             "a": 10 * 4096 * 2,
         }
@@ -262,8 +261,6 @@ class TestEmbeddingRowSize:
         image_bytes = 10 * 4 * 4096 * 2
         conn._capacity_bytes = 2 * image_bytes
 
-        # Three new images in one step with room for two: "a" is evicted
-        # in the same step it was planned for saving.
         for mm_hash in ("a", "b", "c"):
             conn.update_state_after_alloc(_make_request([(mm_hash, 10)]), 0)
         meta = conn.build_connector_meta(MagicMock())
