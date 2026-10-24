@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod accounting;
 mod capacity;
 mod scheduler;
 
@@ -8,14 +9,14 @@ pub use capacity::{WorkerCapacityProvider, WorkerCapacitySnapshot};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
     RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
-    RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
+    RequestClassifierProviderError, RequestClassifierRegistryError,
 };
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -50,9 +51,10 @@ fn classifier_provider(
         .map_err(|error| RequestClassifierProviderError::new(error.to_string()))?;
 
     Ok(Arc::new(move |context| {
+        let block_size = context.block_size() as usize;
         let capacity_provider = capacity_provider(context);
         Box::new(
-            ThunderAgentClassifier::new(config.clone(), capacity_provider)
+            ThunderAgentClassifier::with_block_size(config.clone(), capacity_provider, block_size)
                 .expect("ThunderAgent configuration was validated during catalog resolution"),
         )
     }))
@@ -89,31 +91,26 @@ struct Inner {
     state: Mutex<State>,
     capacity_provider: Arc<dyn WorkerCapacityProvider>,
     scheduler_started: AtomicBool,
+    scheduler_wakeup: Arc<Notify>,
+    event_driven_admission: bool,
+    shared_prefix_accounting: bool,
 }
 
 impl Inner {
-    fn register(
-        &self,
-        request_id: String,
-        session_id: String,
-        input_tokens: usize,
-        progress: RequestProgress,
-        session_final: bool,
-        pinned_worker: Option<dynamo_kv_router::protocols::WorkerWithDpRank>,
-    ) -> Result<Arc<Notify>, ThunderAgentError> {
+    fn register(&self, request: RequestRegistration) -> Result<Arc<Notify>, ThunderAgentError> {
         let capacities = self.capacity_provider.snapshot();
-        self.state.lock().register(
-            RequestRegistration::new(
-                request_id,
-                session_id,
-                input_tokens,
-                progress,
-                session_final,
-            )
-            .with_pinned_worker(pinned_worker),
-            &capacities,
-            Instant::now(),
-        )
+        let result = self
+            .state
+            .lock()
+            .register(request, &capacities, Instant::now());
+        self.wake_for_waiting_demand();
+        result
+    }
+
+    fn wake_for_waiting_demand(&self) {
+        if self.event_driven_admission && self.state.lock().has_waiting_demand() {
+            self.scheduler_wakeup.notify_one();
+        }
     }
 
     fn start_scheduler(self: &Arc<Self>) {
@@ -125,10 +122,17 @@ impl Inner {
             return;
         }
         let interval = self.state.lock().scheduler_interval();
+        let wakeup = Arc::clone(&self.scheduler_wakeup);
         let inner = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {},
+                    _ = wakeup.notified() => {
+                        // Bound whole-table reconciliation during arrival/completion bursts.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    },
+                }
                 let Some(inner) = inner.upgrade() else {
                     break;
                 };
@@ -168,6 +172,10 @@ impl Inner {
             marked_for_pause = telemetry.marked_for_pause,
             waiting_requests = telemetry.waiting_requests,
             tracked_requests = telemetry.tracked_requests,
+            gross_budget_tokens = telemetry.gross_budget_tokens,
+            shared_prefix_savings_tokens = telemetry.shared_prefix_savings_tokens,
+            effective_budget_tokens = telemetry.effective_budget_tokens,
+            growth_reserve_tokens = telemetry.growth_reserve_tokens,
             "ThunderAgent scheduler state changed"
         );
     }
@@ -184,7 +192,15 @@ impl Inner {
             return;
         }
         let capacities = self.capacity_provider.snapshot();
+        let releases_reservation = matches!(
+            event,
+            ClassifyEvent::Completed { .. } | ClassifyEvent::Aborted { .. }
+        );
         state.on_event(event, &capacities, Instant::now());
+        drop(state);
+        if releases_reservation {
+            self.wake_for_waiting_demand();
+        }
     }
 
     fn cancel_request(&self, request_id: &str, notify: &Arc<Notify>) {
@@ -194,6 +210,8 @@ impl Inner {
         }
         let capacities = self.capacity_provider.snapshot();
         state.cancel_request(request_id, &capacities, Instant::now());
+        drop(state);
+        self.wake_for_waiting_demand();
     }
 }
 
@@ -259,23 +277,44 @@ pub struct ThunderAgentClassifier {
 }
 
 impl ThunderAgentClassifier {
-    pub fn new(
+    #[cfg(test)]
+    fn new(
         config: ThunderAgentConfig,
         capacity_provider: Arc<dyn WorkerCapacityProvider>,
     ) -> Result<Self, ConfigError> {
+        Self::with_block_size(config, capacity_provider, 0)
+    }
+
+    fn with_block_size(
+        config: ThunderAgentConfig,
+        capacity_provider: Arc<dyn WorkerCapacityProvider>,
+        block_size: usize,
+    ) -> Result<Self, ConfigError> {
         config.validate()?;
+        if config.shared_prefix_accounting && block_size == 0 {
+            return Err(ConfigError::Invalid(
+                "shared prefix accounting requires the router block size",
+            ));
+        }
+        let event_driven_admission = config.event_driven_admission;
+        let shared_prefix_accounting = config.shared_prefix_accounting;
         tracing::info!(
             target: "thunderagent",
             scheduler_interval_seconds = config.scheduler_interval_seconds,
             resume_timeout_seconds = config.resume_timeout_seconds,
             max_tracked_requests = config.max_tracked_requests,
+            event_driven_admission = config.event_driven_admission,
+            shared_prefix_accounting = config.shared_prefix_accounting,
             "ThunderAgent admission enabled"
         );
         Ok(Self {
             inner: Arc::new(Inner {
-                state: Mutex::new(State::new(config)),
+                state: Mutex::new(State::new(config).with_block_size(block_size)),
                 capacity_provider,
                 scheduler_started: AtomicBool::new(false),
+                scheduler_wakeup: Arc::new(Notify::new()),
+                event_driven_admission,
+                shared_prefix_accounting,
             }),
         })
     }
@@ -297,13 +336,21 @@ impl RequestClassifier for ThunderAgentClassifier {
         let input_tokens = request.input_tokens();
         let progress = request.progress().clone();
         let pinned_worker = request.pinned_worker();
+        let hashes = if self.inner.shared_prefix_accounting {
+            Arc::from(request.sequence_hashes().unwrap_or_default())
+        } else {
+            Arc::from([])
+        };
         let notify = match self.inner.register(
-            request_id.clone(),
-            session_id,
-            input_tokens,
-            progress,
-            session_final,
-            pinned_worker,
+            RequestRegistration::new(
+                request_id.clone(),
+                session_id,
+                input_tokens,
+                progress,
+                session_final,
+            )
+            .with_pinned_worker(pinned_worker)
+            .with_prefix_hashes(hashes),
         ) {
             Ok(notify) => notify,
             Err(error) => {
@@ -335,7 +382,7 @@ impl RequestClassifier for ThunderAgentClassifier {
 mod tests {
     use std::time::Duration;
 
-    use dynamo_kv_router::plugins::request_classifier::RequestClassifierWorker;
+    use dynamo_kv_router::plugins::request_classifier::{RequestClassifierWorker, RequestProgress};
     use dynamo_kv_router::protocols::WorkerWithDpRank;
 
     use super::scheduler::ProgramLifecycle;
@@ -531,14 +578,13 @@ mod tests {
         let (progress, _) = RequestProgress::new(tokens);
         classifier
             .inner
-            .register(
+            .register(RequestRegistration::new(
                 request_id.to_owned(),
                 session_id.to_owned(),
                 tokens,
                 progress,
                 session_final,
-                None,
-            )
+            ))
             .unwrap();
     }
 
@@ -577,6 +623,46 @@ mod tests {
                 context_tokens: Some(tokens),
             })
             .await;
+    }
+
+    #[tokio::test]
+    async fn completion_and_finalization_wake_other_sessions_before_the_periodic_tick() {
+        for finalize in [false, true] {
+            let snapshot = capacities(&[(1, 1_000)]);
+            let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
+            let mut classifier = ThunderAgentClassifier::new(
+                ThunderAgentConfig {
+                    event_driven_admission: true,
+                    scheduler_interval_seconds: 3_600.0,
+                    resume_timeout_seconds: 3_600.0,
+                    session_retention_seconds: 3_600.0,
+                    ..config()
+                },
+                provider,
+            )
+            .unwrap();
+            register(&classifier, "first", "a", 900, false);
+            release(&classifier, "first").await;
+            if finalize {
+                completed(&mut classifier, "first", 900).await;
+            }
+            register(&classifier, "second", "b", 200, false);
+            // Consume the arrival wake-up while there is still no usable budget.
+            // The completion below must cause a separate wake-up.
+            if !finalize {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                assert!(matches!(
+                    status(&classifier.inner.state.lock(), "second"),
+                    WaitStatus::Waiting
+                ));
+                completed(&mut classifier, "first", 900).await;
+            } else {
+                register(&classifier, "final", "a", 0, true);
+            }
+            tokio::time::timeout(Duration::from_secs(1), release(&classifier, "second"))
+                .await
+                .expect("released by an event, not the hourly periodic tick");
+        }
     }
 
     #[test]
@@ -1177,14 +1263,13 @@ mod tests {
         .unwrap();
         register(&classifier, "request-1", "session-a", 100, false);
 
-        let result = classifier.inner.register(
+        let result = classifier.inner.register(RequestRegistration::new(
             "request-2".into(),
             "session-b".into(),
             100,
             RequestProgress::new(100).0,
             false,
-            None,
-        );
+        ));
         assert!(matches!(
             result,
             Err(ThunderAgentError::RequestLimitExceeded { limit: 1 })

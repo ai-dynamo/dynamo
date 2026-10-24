@@ -15,6 +15,10 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThunderAgentConfig {
+    /// Wake admission after demand or released reservations, coalescing bursts.
+    pub event_driven_admission: bool,
+    /// Experimental logical accounting of exact complete prefix blocks per rank.
+    pub shared_prefix_accounting: bool,
     pub pause_threshold: f64,
     pub pause_target: f64,
     pub resume_hysteresis: f64,
@@ -30,6 +34,8 @@ pub struct ThunderAgentConfig {
 impl Default for ThunderAgentConfig {
     fn default() -> Self {
         Self {
+            event_driven_admission: false,
+            shared_prefix_accounting: false,
             pause_threshold: 0.95,
             pause_target: 0.80,
             resume_hysteresis: 0.10,
@@ -46,6 +52,11 @@ impl Default for ThunderAgentConfig {
 
 impl ThunderAgentConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.shared_prefix_accounting && self.acting_token_weight != 1.0 {
+            return Err(ConfigError::Invalid(
+                "shared_prefix_accounting requires acting_token_weight=1",
+            ));
+        }
         validate_fraction(self.pause_threshold, "pause_threshold must be in [0, 1]")?;
         validate_fraction(self.pause_target, "pause_target must be in [0, 1]")?;
         if self.pause_target > self.pause_threshold {
@@ -127,6 +138,15 @@ mod tests {
     #[test]
     fn validates_control_values() {
         assert!(ThunderAgentConfig::default().validate().is_ok());
+        assert!(
+            ThunderAgentConfig {
+                shared_prefix_accounting: true,
+                acting_token_weight: 0.5,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
         assert!(
             ThunderAgentConfig {
                 pause_target: 0.96,
