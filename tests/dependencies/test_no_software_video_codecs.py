@@ -65,6 +65,22 @@ _REQUIRED = ("vp9",)
 
 _SURFACES = ("encoders", "decoders", "parsers")
 
+# Bitstream filters PyNvVideoCodec needs to feed NVDEC. It calls
+# av_bsf_get_by_name("h264_mp4toannexb") to reframe MP4/AVCC into Annex-B before
+# handing the stream to the hardware decoder, so their absence breaks hardware
+# H.264/H.265 decode outright -- and does so from inside a vendored library, as
+# "SimpleDecoder constructor failed: av_bsf_get_by_name() failed", which points
+# nowhere near this build.
+#
+# Collected for presence only and deliberately NOT added to _SURFACES: these
+# names contain "h264"/"hevc" and would trip _DISALLOWED_RE, yet they carry no
+# codec implementation -- they reframe an already-encoded stream. That is the
+# same distinction the build-time guard in wheel_builder.Dockerfile draws when
+# it scans encoders/decoders/parsers and skips -bsfs.
+_REQUIRED_BSFS = ("h264_mp4toannexb", "hevc_mp4toannexb")
+
+_PRESENCE_SURFACES = _SURFACES + ("bsfs",)
+
 
 def _ffmpeg() -> str:
     """Resolve FFmpeg the way the encode path does."""
@@ -89,7 +105,7 @@ def _surface(exe: str, surface: str) -> str:
 def _surfaces() -> dict[str, str]:
     exe = _ffmpeg()
     try:
-        out = {s: _surface(exe, s) for s in _SURFACES}
+        out = {s: _surface(exe, s) for s in _PRESENCE_SURFACES}
     except (OSError, FileNotFoundError) as exc:
         pytest.fail(f"could not run the shipped ffmpeg ({exe}): {exc}")
     if not any(out.values()):
@@ -98,12 +114,38 @@ def _surfaces() -> dict[str, str]:
 
 
 def _assert_required_codecs_present(surfaces: dict[str, str]) -> None:
-    """Sanity: the listings are real, so the absence checks mean something."""
-    listing = "\n".join(surfaces.values()).lower()
+    """Sanity: the listings are real, so the absence checks mean something.
+
+    Scoped to `_SURFACES` rather than every collected listing. `bsfs` is now
+    collected too, and it always carries `vp9_superframe`/`vp9_superframe_split`
+    once any bitstream filter is enabled -- so joining all of them would let a
+    build with no vp9 codec at all satisfy this check, which is precisely the
+    vacuous pass it exists to prevent.
+    """
+    listing = "\n".join(surfaces[s] for s in _SURFACES).lower()
     for name in _REQUIRED:
         assert name in listing, (
             f"{name} missing from the shipped ffmpeg -- the build is broken, and "
             "the absence assertions here would pass vacuously"
+        )
+
+
+def _assert_required_bsfs_present(surfaces: dict[str, str]) -> None:
+    """The NVDEC feed path must keep its bitstream filters.
+
+    Paired with the absence checks below on purpose: this file asserts what the
+    images may not carry, and hardware decode is the reason H.264/H.265 may be
+    absent in software at all. If these filters go, the justification goes with
+    them, quietly.
+    """
+    listing = surfaces.get("bsfs", "").lower()
+    for name in _REQUIRED_BSFS:
+        assert name in listing, (
+            f"{name} missing from the shipped ffmpeg -- PyNvVideoCodec cannot "
+            "build its NVDEC pipeline without it, and hardware H.264/H.265 "
+            "decode fails at runtime with 'av_bsf_get_by_name() failed'. It is "
+            "enabled in wheel_builder.Dockerfile via --enable-bsf; a blanket "
+            "--disable-bsfs would drop it again."
         )
 
 
@@ -264,6 +306,7 @@ def _assert_bundled_libavcodecs_carry_no_software_codecs() -> None:
 def _check_image(ships_cv2: bool = False) -> None:
     surfaces = _surfaces()
     _assert_required_codecs_present(surfaces)
+    _assert_required_bsfs_present(surfaces)
     _assert_no_software_codecs(surfaces)
     _assert_python_carriers_absent(ships_cv2)
     if ships_cv2:
@@ -275,6 +318,40 @@ def _check_image(ships_cv2: bool = False) -> None:
 # that backend's lane and is skipped in the others -- tests/conftest.py skips an
 # item whose framework marker names an absent module, so a single module marked
 # with all three would skip everywhere and silently prove nothing.
+
+
+def test_required_codec_check_ignores_bitstream_filters() -> None:
+    """A vp9 bitstream filter must not satisfy the vp9 *codec* sanity check.
+
+    The two listings overlap by name: `-bsfs` lists `vp9_superframe` whenever any
+    filter is enabled, while `vp9` as a codec lives only on encoders/decoders/
+    parsers. Feeding a build that has the filter and no codec is the shape that
+    made this check vacuous when `bsfs` was first collected.
+    """
+    broken = {
+        "encoders": " V..... libx264               H.264\n",
+        "decoders": " V..... rawvideo              raw video\n",
+        "parsers": " rawvideo\n",
+        "bsfs": "vp9_superframe\nvp9_superframe_split\n",
+    }
+    with pytest.raises(AssertionError, match="vp9 missing"):
+        _assert_required_codecs_present(broken)
+
+
+def test_required_bsf_check_ignores_codecs() -> None:
+    """...and the mirror image: a codec listing must not satisfy the BSF check.
+
+    Cheap to assert and it pins the scoping in the other direction, so a later
+    edit cannot make either check satisfiable by the other's surface.
+    """
+    no_filters = {
+        "encoders": " V..... libvpx-vp9            libvpx VP9\n",
+        "decoders": " V..... vp9                   Google VP9\n",
+        "parsers": " vp9\n",
+        "bsfs": "aac_adtstoasc\npgs_frame_merge\n",
+    }
+    with pytest.raises(AssertionError, match="h264_mp4toannexb missing"):
+        _assert_required_bsfs_present(no_filters)
 
 
 @pytest.mark.vllm
