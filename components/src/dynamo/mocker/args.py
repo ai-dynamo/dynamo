@@ -659,9 +659,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         choices=["nats", "zmq"],
         default=os.environ.get("DYN_EVENT_PLANE"),
-        help="Determines how events are published [nats|zmq]. If unset, "
-        "auto-detected from --discovery-backend (zmq for file/mem, nats "
-        "for etcd/kubernetes).",
+        help="Determines how events are published [nats|zmq]. Defaults to "
+        "DYN_EVENT_PLANE; if unset, defaults to 'zmq' for all discovery "
+        "backends. Set to 'nats' to use a NATS-based event plane.",
     )
 
     # Same flags the frontend and engine backends expose, so a mocker can stand
