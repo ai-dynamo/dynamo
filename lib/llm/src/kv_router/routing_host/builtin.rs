@@ -365,6 +365,9 @@ impl RoutingHost {
             occupancy_reservation,
             lora_load,
             &request,
+            // Builtin hosts never classify, but a decode leg behind a KV-routed
+            // prefill hop continues the lifecycle that hop handed off.
+            claim_request_lifecycle(&request),
         );
         let tracker = request.tracker.clone();
         let request_context = request.context().clone();
@@ -482,7 +485,11 @@ impl RoutingHost {
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
-                guard.abort().await;
+                if !crate::migration::is_migratable(error.as_ref())
+                    || !guard.release_for_retry().await
+                {
+                    guard.abort_with_error(Some(error.as_ref())).await;
+                }
                 return Err(error);
             }
         };

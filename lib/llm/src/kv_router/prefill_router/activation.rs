@@ -31,7 +31,7 @@ pub(super) enum ActivationSnapshot {
 }
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
-    kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource},
+    kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, plugins::RouterPluginBuilder},
     model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -141,13 +141,13 @@ impl PrefillRouter {
         load_thresholds: LoadThresholdHandle,
         parent_token: tokio_util::sync::CancellationToken,
     ) -> Arc<Self> {
-        Self::new_with_selection_policy(
+        Self::new_with_plugins(
             Some(activation_rx),
             model_manager,
             decode_router_mode,
             kv_cache_block_size,
             kv_router_config,
-            SelectionPolicySource::Registry,
+            RouterPluginBuilder::default(),
             prefill_load_estimator,
             session_affinity_ttl_secs,
             session_affinity_mode,
@@ -172,7 +172,7 @@ impl PrefillRouter {
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
-            selection_policy: None,
+            plugins: None,
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             decode_router_mode,
@@ -192,13 +192,13 @@ impl PrefillRouter {
     }
 
     #[expect(clippy::too_many_arguments)]
-    pub(crate) fn new_with_selection_policy(
+    pub(crate) fn new_with_plugins(
         activation_rx: Option<oneshot::Receiver<Endpoint>>,
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        selection_policy: SelectionPolicySource,
+        plugins: RouterPluginBuilder,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
@@ -224,7 +224,7 @@ impl PrefillRouter {
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
-            selection_policy: Some(selection_policy),
+            plugins: Some(plugins),
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             decode_router_mode,
@@ -369,10 +369,10 @@ impl PrefillRouter {
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = context
                 .model_manager
-                .kv_chooser_for_with_policy_and_client(
+                .kv_chooser_for_with_plugins_and_client(
                     client.clone(),
                     prefill_block_size,
-                    context.selection_policy.clone(),
+                    &context.plugins,
                     prefill_kv_config,
                     context.prefill_load_estimator.clone(),
                     Some(crate::worker_type::WorkerType::Prefill),
@@ -406,6 +406,13 @@ impl PrefillRouter {
                 affinity,
             ))
         } else {
+            if context.plugins.has_request_classifier() {
+                tracing::warn!(
+                    ?prefill_router_mode,
+                    "Request classifier requires KV routing on the prefill hop; \
+                     disaggregated requests will not be classified"
+                );
+            }
             let affinity = create_affinity_coordinator(
                 prefill_session_affinity_ttl,
                 context.session_affinity_mode,
@@ -529,10 +536,10 @@ impl PrefillRouter {
             let build_context = PrefillBuildContext {
                 model_manager: router_ref.model_manager.clone(),
                 decode_router_mode: router_ref.decode_router_mode,
-                selection_policy: router_ref
-                    .selection_policy
+                plugins: router_ref
+                    .plugins
                     .clone()
-                    .expect("enabled prefill router has a selection policy"),
+                    .expect("enabled prefill router has its plugins"),
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
                 session_affinity_mode: router_ref.session_affinity_mode,
@@ -949,13 +956,13 @@ mod tests {
                 admitted_ids,
             })
         };
-        let router = PrefillRouter::new_with_selection_policy(
+        let router = PrefillRouter::new_with_plugins(
             None,
             Arc::new(ModelManager::new()),
             RouterMode::RoundRobin,
             16,
             None,
-            SelectionPolicySource::Registry,
+            RouterPluginBuilder::default(),
             None,
             None,
             SessionAffinityMode::Hard,
