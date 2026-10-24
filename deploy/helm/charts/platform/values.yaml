@@ -112,6 +112,8 @@ dynamo-operator:
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
+  # -- Make workers without shared model storage (no PVC, hostPath or NFS mount) fetch model files through the Model Express server and set HF_HUB_OFFLINE=1, so replicas starting together do not each download from Hugging Face. Requires a Model Express URL and a worker image with Model Express client 0.7.0 or newer. Changing it restarts affected workers.
+  modelExpressServerCache: false
 
   # The LPX scheduler and its CRDs must be installed separately.
   lpx:
