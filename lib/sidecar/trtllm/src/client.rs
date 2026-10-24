@@ -27,9 +27,10 @@ use crate::proto as pb;
 use crate::proto::control_client::ControlClient;
 use crate::proto::inference_client::InferenceClient;
 
-/// Deadline for the one-shot `Control.Abort`, so a connected-but-unresponsive
-/// server cannot hang cancellation. Startup is bounded by the operator's
-/// `--grpc-startup-deadline-secs` instead.
+/// Deadline for the one-shot RPCs, so a connected-but-unresponsive server cannot
+/// hang them: `Control.Abort`, and the single configured-context `GetModelInfo`
+/// in `model_limits`. The unconfigured `wait_for_model_limits` path is bounded by
+/// the operator's `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -187,7 +188,7 @@ impl TrtllmClient {
 
     /// One `GetModelInfo` call, for when `--context-length` already supplies the
     /// window and the engine is consulted only to cross-check it and to learn
-    /// its output cap.
+    /// its output cap. Bounded by `RPC_TIMEOUT`, not by the startup deadline.
     pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelLimits, DynamoError> {
         tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model))
             .await
