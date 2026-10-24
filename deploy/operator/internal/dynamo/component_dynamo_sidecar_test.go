@@ -125,7 +125,25 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
 			}
 			originalDCD := dcd.DeepCopy()
-			pod, err := GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, RoleMain, commonconsts.MultinodeDeploymentTypeGrove, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+			backend, err := GetBackendFrameworkFromDynamoComponent(dcd)
+			require.NoError(t, err)
+
+			t.Log("Copy the component before rendering, as the production DCD renderer does")
+			componentForRendering := dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
+			pod, err := GenerateBasePodSpec(
+				componentForRendering,
+				backend,
+				nil,
+				dcd.Name,
+				dcd.Namespace,
+				RoleMain,
+				dcd.Spec.GetNumberOfNodes(),
+				&configv1alpha1.OperatorConfiguration{},
+				commonconsts.MultinodeDeploymentTypeGrove,
+				GetDCDComponentName(dcd),
+				nil,
+				staticContainerGPUCount(0),
+			)
 			require.NoError(t, err)
 			require.Equal(t, originalDCD, dcd)
 
