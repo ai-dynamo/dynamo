@@ -14,6 +14,9 @@
 //! The run moves through warmup, measure and profile phases and touches
 //! `<out>/phase.<name>` at each start so an outside profiler can align with them.
 //! Per-window and per-phase results go to `<out>/windows.jsonl` and `<out>/summary.json`.
+//!
+//! `--flow ingress` replaces HTTP with `select_service_ray_ingress.py`, which hosts the
+//! service in process the way a Ray Serve LLM ingress replica does.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -37,6 +40,11 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+#[path = "select_service/ingress.rs"]
+mod ingress;
+
+use ingress::{IngressClient, LifecycleEvent, WorkerRegistration};
+
 const VOCAB_SIZE: u64 = 151_936;
 const MAX_LOGGED_ERRORS: u64 = 20;
 
@@ -47,6 +55,9 @@ enum Flow {
     Ray,
     /// Atomic `POST /select_and_reserve`.
     SelectAndReserve,
+    /// In-process `select_and_reserve` plus batched lifecycle events through the Ray-style
+    /// ingress host at `--ingress-socket`.
+    Ingress,
 }
 
 #[derive(Debug, Clone, Parser, Serialize)]
@@ -54,6 +65,9 @@ enum Flow {
 struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8092")]
     service_url: String,
+    /// Unix socket of `select_service_ray_ingress.py`; required by `--flow ingress`.
+    #[arg(long)]
+    ingress_socket: Option<PathBuf>,
     /// Mooncake-format trace with `session_id`; rows of a session are replayed in file order.
     #[arg(long)]
     trace: PathBuf,
@@ -373,6 +387,7 @@ counters!(
     stored_blocks,
     removed_blocks,
     cleared_events,
+    lifecycle_events,
 );
 
 #[derive(Default)]
@@ -578,6 +593,7 @@ struct Ctx {
     workload: Workload,
     engines: Vec<LiveEngine>,
     http: reqwest::Client,
+    ingress: Option<IngressClient>,
     stats: Arc<Stats>,
     phase: AtomicU8,
     next_session: AtomicU64,
@@ -586,7 +602,8 @@ struct Ctx {
 
 enum Lifecycle {
     PrefillComplete,
-    OutputBlock,
+    /// Cumulative generated tokens at the block boundary.
+    OutputBlock(u32),
     Free,
 }
 
@@ -646,7 +663,36 @@ impl Ctx {
         selection_id: &str,
         tokens: &[u32],
         session_id: &str,
+        max_tokens: usize,
     ) -> Option<SelectReply> {
+        if let Some(ingress) = &self.ingress {
+            let started = Instant::now();
+            let session_id = (!self.args.no_session_id).then_some(session_id);
+            let max_tokens = u32::try_from(max_tokens).unwrap_or(u32::MAX);
+            let result = ingress
+                .select(selection_id, session_id, max_tokens, tokens)
+                .await;
+            self.stats.record(
+                Endpoint::SelectAndReserve,
+                started.elapsed(),
+                result.as_ref().err().map(|_| 0),
+            );
+            return match result {
+                Ok(selected) => Some(SelectReply {
+                    worker_id: self.args.worker_id_base + u64::from(selected.worker_index),
+                    overlap: OverlapReply {
+                        gpu: u64::from(selected.gpu_overlap_tokens),
+                    },
+                }),
+                Err(error) => {
+                    if self.stats.logged_errors.fetch_add(1, Ordering::Relaxed) < MAX_LOGGED_ERRORS
+                    {
+                        eprintln!("ingress select failed: {error}");
+                    }
+                    None
+                }
+            };
+        }
         let body = serde_json::to_vec(&SelectBody {
             model_name: &self.args.model_name,
             selection_id,
@@ -673,7 +719,7 @@ impl Ctx {
                 .await?;
                 reply
             }
-            Flow::SelectAndReserve => {
+            Flow::SelectAndReserve | Flow::Ingress => {
                 self.call(
                     Endpoint::SelectAndReserve,
                     Method::POST,
@@ -698,7 +744,10 @@ impl Ctx {
         let uuid = Uuid::new_v4();
         let selection_id = uuid.to_string();
         self.stats.add(|c| &c.started, 1);
-        let Some(reply) = self.select(&selection_id, &tokens, session_id).await else {
+        let Some(reply) = self
+            .select(&selection_id, &tokens, session_id, turn.output_length)
+            .await
+        else {
             self.stats.add(|c| &c.failed, 1);
             return;
         };
@@ -722,11 +771,24 @@ impl Ctx {
         let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
         let lifecycle = {
             let ctx = Arc::clone(self);
+            let selection_id_owned = selection_id.clone();
             let base = format!("/reservations/{selection_id}");
             let output_block_path = format!("{base}/output_block");
             let prefill_complete_path = format!("{base}/prefill_complete");
             tokio::spawn(async move {
                 while let Some(call) = lifecycle_rx.recv().await {
+                    if let Some(ingress) = &ctx.ingress {
+                        let id = selection_id_owned.clone();
+                        ingress.lifecycle(match call {
+                            Lifecycle::PrefillComplete => LifecycleEvent::PrefillComplete(id),
+                            Lifecycle::OutputBlock(tokens) => {
+                                LifecycleEvent::DecodeProgress(id, tokens)
+                            }
+                            Lifecycle::Free => LifecycleEvent::Completed(id),
+                        });
+                        ctx.stats.add(|c| &c.lifecycle_events, 1);
+                        continue;
+                    }
                     let (endpoint, method, path, body) = match call {
                         Lifecycle::PrefillComplete => (
                             Endpoint::PrefillComplete,
@@ -734,7 +796,7 @@ impl Ctx {
                             &prefill_complete_path,
                             None,
                         ),
-                        Lifecycle::OutputBlock => (
+                        Lifecycle::OutputBlock(_) => (
                             Endpoint::OutputBlock,
                             Method::POST,
                             &output_block_path,
@@ -768,7 +830,8 @@ impl Ctx {
                     if signal.token_id.is_some() {
                         generated += 1;
                         if generated.is_multiple_of(self.output_block_tokens) {
-                            let _ = lifecycle_tx.send(Lifecycle::OutputBlock);
+                            let tokens = u32::try_from(generated).unwrap_or(u32::MAX);
+                            let _ = lifecycle_tx.send(Lifecycle::OutputBlock(tokens));
                         }
                     }
                     if signal.completed {
@@ -948,7 +1011,7 @@ async fn report(ctx: Arc<Ctx>) -> anyhow::Result<BTreeMap<&'static str, PhaseAgg
             windows_file.flush()?;
             let first_hop = match args.flow {
                 Flow::Ray => "select",
-                Flow::SelectAndReserve => "select_and_reserve",
+                Flow::SelectAndReserve | Flow::Ingress => "select_and_reserve",
             };
             eprintln!(
                 "[{:>6.0}s {:<7}] req/s {:>8.1} http/s {:>9.1} inflight {:>6} {first_hop} p50/p99 {:>7.2}/{:>8.2} ms err {:.1e} hit pred/eng {:.3}/{:.3} kv store/rm {:>9.0}/{:>9.0} blk/s",
@@ -1047,17 +1110,44 @@ async fn main() -> anyhow::Result<()> {
         .output_block_tokens
         .unwrap_or(args.block_size as usize)
         .max(1);
+    let ingress = match args.flow {
+        Flow::Ingress => {
+            let path = args
+                .ingress_socket
+                .as_deref()
+                .context("--flow ingress needs --ingress-socket")?;
+            Some(IngressClient::connect(path, Duration::from_secs(args.ready_timeout_secs)).await?)
+        }
+        _ => None,
+    };
     let ctx = Arc::new(Ctx {
         args,
         workload,
         engines,
         http,
+        ingress,
         stats,
         phase: AtomicU8::new(Phase::Warmup as u8),
         next_session: AtomicU64::new(0),
         output_block_tokens,
     });
-    register_workers(&ctx).await?;
+    if let Some(ingress) = &ctx.ingress {
+        let workers = (0..ctx.args.workers)
+            .map(|idx| WorkerRegistration {
+                worker_id: ctx.args.worker_id_base + idx as u64,
+                block_size: ctx.args.block_size,
+                max_num_batched_tokens: ctx.args.max_num_batched_tokens as u32,
+                kv_events_endpoint: format!(
+                    "tcp://{}:{}",
+                    ctx.args.zmq_host,
+                    ctx.args.zmq_base_port as usize + idx
+                ),
+            })
+            .collect::<Vec<_>>();
+        ingress.register(&workers).await?;
+    } else {
+        register_workers(&ctx).await?;
+    }
     // Let the service's SUB sockets finish connecting before the first events.
     tokio::time::sleep(Duration::from_secs(2)).await;
     eprintln!("{} workers registered and ready", ctx.args.workers);
