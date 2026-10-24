@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, StrictBool, StrictFloat, StrictInt, StrictStr, conint
+from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 
 class ImageAccounting(BaseModel):
@@ -21,16 +21,16 @@ class ImageAccounting(BaseModel):
     [`ImageAccounting::merge`] for how a multi-chunk response treats each field.
     """
 
-    output_images: conint(ge=0, strict=True)
+    output_images: Annotated[StrictInt, Field(ge=0)]
     """
     Images generated and returned in `data`.
     """
-    input_images: conint(ge=0, strict=True) = 0
+    input_images: Annotated[StrictInt, Field(ge=0)] = 0
     """
     Reference images the request consumed: 0 for text-to-image, 1 for an
     `input_reference` or an `/v1/images/edits` request.
     """
-    num_inference_steps: conint(ge=0, strict=True) | None = None
+    num_inference_steps: Annotated[StrictInt | None, Field(ge=0)] = None
     """
     The step count the backend ran. Omitted when the backend does not
     know it.
@@ -71,7 +71,7 @@ class ImageNvExt(BaseModel):
     """
     A text description of the undesired image(s).
     """
-    num_inference_steps: conint(ge=1, strict=True) | None = None
+    num_inference_steps: Annotated[StrictInt | None, Field(ge=1)] = None
     """
     The number of denoising steps, at least 1. More denoising steps usually lead to a higher quality image at the expense of slower inference.
     """
@@ -91,8 +91,8 @@ class ImageTokenDetails(BaseModel):
     A token count split by kind.
     """
 
-    text_tokens: conint(ge=0, strict=True)
-    image_tokens: conint(ge=0, strict=True)
+    text_tokens: Annotated[StrictInt, Field(ge=0)]
+    image_tokens: Annotated[StrictInt, Field(ge=0)]
 
 
 class ImageUsage(BaseModel):
@@ -101,15 +101,15 @@ class ImageUsage(BaseModel):
     `ImageGenUsage`, including the singular `output_token_details`.
     """
 
-    input_tokens: conint(ge=0, strict=True)
+    input_tokens: Annotated[StrictInt, Field(ge=0)]
     """
     Tokens (image and text) in the input prompt
     """
-    total_tokens: conint(ge=0, strict=True)
+    total_tokens: Annotated[StrictInt, Field(ge=0)]
     """
     Tokens (image and text) used for the generation
     """
-    output_tokens: conint(ge=0, strict=True)
+    output_tokens: Annotated[StrictInt, Field(ge=0)]
     """
     Tokens the model generated
     """
@@ -141,7 +141,7 @@ class NvCreateImageRequest(BaseModel):
 
     prompt: StrictStr
     model: StrictStr | None = None
-    n: conint(ge=1, le=10, strict=True) | None = None
+    n: Annotated[StrictInt | None, Field(ge=1, le=10)] = None
     """
     Number of images to generate, 1 to 10 as the OpenAI API documents.
     The frontend rejects a value outside the range, so a worker never
@@ -152,14 +152,14 @@ class NvCreateImageRequest(BaseModel):
     )
     response_format: Literal['url', 'b64_json'] | None = None
     output_format: Literal['png', 'jpeg', 'webp'] | None = None
-    output_compression: conint(ge=0, le=100, strict=True) | None = None
+    output_compression: Annotated[StrictInt | None, Field(ge=0, le=100)] = None
     """
     Compression level of jpeg and webp output, 0 to 100 percent as the
     OpenAI API documents. The frontend rejects a value outside the range,
     so a worker never sees one.
     """
     stream: StrictBool | None = None
-    partial_images: conint(ge=0, le=3, strict=True) | None = None
+    partial_images: Annotated[StrictInt | None, Field(ge=0, le=3)] = None
     """
     Number of partial images to stream before the final image, 0 to 3 as
     the OpenAI API documents. The frontend rejects a value outside the
@@ -193,7 +193,7 @@ class NvImagesResponse(BaseModel):
     the key is omitted when the worker reports nothing.
     """
 
-    created: conint(ge=0, strict=True)
+    created: Annotated[StrictInt, Field(ge=0)]
     """
     Unix timestamp of creation
     """

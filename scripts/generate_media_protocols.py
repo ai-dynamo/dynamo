@@ -62,6 +62,12 @@ OPTIONS = (
     "float",
     "bool",
     "str",
+    # A bound is an Annotated[..., Field(...)] constraint, not a conint() or
+    # confloat() call: mypy rejects a call as an annotation, and CI runs mypy
+    # without the pydantic plugin. The same flag puts a field default after
+    # the annotation, where mypy reads it; a positional Field(default) is
+    # invisible to it.
+    "--use-annotated",
     "--use-field-description",
     "--use-schema-description",
     "--disable-timestamp",

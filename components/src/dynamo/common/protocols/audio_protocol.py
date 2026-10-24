@@ -6,17 +6,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import (
-    BaseModel,
-    Field,
-    StrictBool,
-    StrictFloat,
-    StrictInt,
-    StrictStr,
-    confloat,
-)
+from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 
 class AudioData(BaseModel):
@@ -96,7 +88,7 @@ class NvAudioSpeechResponse(BaseModel):
     """
     Unix timestamp of creation
     """
-    data: list[AudioData] = Field([], validate_default=True)
+    data: Annotated[list[AudioData], Field(validate_default=True)] = []
     """
     Generated audio data
     """
@@ -135,7 +127,7 @@ class NvCreateAudioSpeechRequest(BaseModel):
     """
     Output codec: "wav", "mp3", "pcm", "flac", "aac", "opus" (default: "wav")
     """
-    speed: confloat(ge=0.25, le=4.0, strict=True) = 1.0
+    speed: Annotated[StrictFloat, Field(ge=0.25, le=4.0)] = 1.0
     """
     Speed factor, 0.25 to 4.0. An omitted `speed` and an explicit `null`
     both mean 1.0, as they did when this field was an `Option`. The

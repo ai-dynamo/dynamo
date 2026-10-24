@@ -6,17 +6,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import (
-    BaseModel,
-    Field,
-    StrictBool,
-    StrictFloat,
-    StrictInt,
-    StrictStr,
-    conint,
-)
+from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 
 class VideoData(BaseModel):
@@ -57,11 +49,11 @@ class VideoNvExt(BaseModel):
     User requests triggers which result in the request issue back out-of-band information in the SSE
     stream using the `event:` field.
     """
-    fps: conint(ge=1, strict=True) | None = None
+    fps: Annotated[StrictInt | None, Field(ge=1)] = None
     """
     Frames per second, at least 1 (default: 24)
     """
-    num_frames: conint(ge=1, strict=True) | None = None
+    num_frames: Annotated[StrictInt | None, Field(ge=1)] = None
     """
     Number of frames to generate, at least 1 (overrides fps * seconds if set)
     """
@@ -69,7 +61,7 @@ class VideoNvExt(BaseModel):
     """
     A text description of the undesired video content.
     """
-    num_inference_steps: conint(ge=1, strict=True) | None = None
+    num_inference_steps: Annotated[StrictInt | None, Field(ge=1)] = None
     """
     The number of denoising steps, at least 1. More steps usually lead to higher quality at the expense of slower inference.
     """
@@ -108,7 +100,7 @@ class NvCreateVideoRequest(BaseModel):
     """
     Optional image reference that guides generation (for I2V)
     """
-    seconds: conint(ge=1, strict=True) | None = None
+    seconds: Annotated[StrictInt | None, Field(ge=1)] = None
     """
     Clip duration in seconds, at least 1. The frontend rejects a value
     outside the range, so a worker never sees one.
@@ -169,7 +161,7 @@ class NvVideosResponse(BaseModel):
     """
     Unix timestamp of creation
     """
-    data: list[VideoData] = Field([], validate_default=True)
+    data: Annotated[list[VideoData], Field(validate_default=True)] = []
     """
     Generated video data
     """
