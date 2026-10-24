@@ -57,6 +57,7 @@ pub struct WorkerRegistration {
     pub block_size: u32,
     pub max_num_batched_tokens: u32,
     pub kv_events_endpoint: String,
+    pub replay_endpoint: Option<String>,
 }
 
 impl IngressClient {
@@ -162,6 +163,10 @@ impl IngressClient {
             body.extend_from_slice(&worker.block_size.to_le_bytes());
             body.extend_from_slice(&worker.max_num_batched_tokens.to_le_bytes());
             put_str(&mut body, &worker.kv_events_endpoint);
+            put_str(
+                &mut body,
+                worker.replay_endpoint.as_deref().unwrap_or_default(),
+            );
             self.send(REGISTER, body)?;
         }
         self.send(REGISTER_DONE, Vec::new())?;

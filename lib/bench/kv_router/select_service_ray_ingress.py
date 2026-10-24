@@ -79,7 +79,9 @@ class KVTokenTracker:
         self._request_ids_by_worker: Dict[int, Set[str]] = {}
         self._completed_request_ids: "OrderedDict[str, float]" = OrderedDict()
 
-    async def upsert_worker(self, worker_id, replica_id, endpoint, max_num_batched_tokens):
+    async def upsert_worker(
+        self, worker_id, replica_id, endpoint, replay_endpoint, max_num_batched_tokens
+    ):
         await self._svc.upsert_worker(
             {
                 "worker_id": worker_id,
@@ -91,7 +93,7 @@ class KVTokenTracker:
                 "data_parallel_start_rank": 0,
                 "data_parallel_size": 1,
                 "kv_events_endpoints": {0: endpoint},
-                "replay_endpoint": None,
+                "replay_endpoint": replay_endpoint,
             }
         )
 
@@ -255,11 +257,17 @@ class Ingress:
     async def _register_all(self, writer):
         block_size = self.pending_registrations[0][1]
         self.tracker = KVTokenTracker(self.svc, block_size)
-        for index, (_, _, max_batched, endpoint) in enumerate(self.pending_registrations):
+        for index, (_, _, max_batched, endpoint, replay_endpoint) in enumerate(
+            self.pending_registrations
+        ):
             replica = Replica(f"replica-{index}", index)
             self.replicas.append(replica)
             await self.tracker.upsert_worker(
-                get_worker_id(replica.unique_id), replica.unique_id, endpoint, max_batched
+                get_worker_id(replica.unique_id),
+                replica.unique_id,
+                endpoint,
+                replay_endpoint,
+                max_batched,
             )
         while self.svc.ready().get("schedulable_workers", 0) < len(self.replicas):
             await asyncio.sleep(0.2)
@@ -309,8 +317,9 @@ def _ipc_decode_str(body, offset):
 
 def _ipc_decode_register(body):
     worker, block_size, max_batched = struct.unpack_from("<QII", body, 0)
-    endpoint, _ = _ipc_decode_str(body, 16)
-    return worker, block_size, max_batched, endpoint
+    endpoint, offset = _ipc_decode_str(body, 16)
+    replay_endpoint, _ = _ipc_decode_str(body, offset)
+    return worker, block_size, max_batched, endpoint, replay_endpoint or None
 
 
 def _ipc_decode_select(body):

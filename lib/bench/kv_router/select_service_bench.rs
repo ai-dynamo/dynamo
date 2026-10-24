@@ -86,6 +86,10 @@ struct Args {
     worker_id_base: u64,
     #[arg(long, default_value_t = 20_000)]
     zmq_base_port: u16,
+    /// Bind a replay ROUTER per engine at this base port and register it as the worker's
+    /// `replay_endpoint`, as Ray Serve LLM's vLLM KV-events config does.
+    #[arg(long)]
+    zmq_replay_base_port: Option<u16>,
     /// Host the service uses to reach the engines' ZMQ publishers.
     #[arg(long, default_value = "127.0.0.1")]
     zmq_host: String,
@@ -135,6 +139,13 @@ struct Args {
     ready_timeout_secs: u64,
     #[arg(long)]
     out: PathBuf,
+}
+
+impl Args {
+    fn replay_endpoint(&self, worker_index: usize) -> Option<String> {
+        self.zmq_replay_base_port
+            .map(|base| format!("tcp://{}:{}", self.zmq_host, base as usize + worker_index))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +293,8 @@ struct WorkerBody<'a> {
     model_name: &'a str,
     endpoint: String,
     kv_events_endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replay_endpoint: Option<String>,
     block_size: u32,
     max_num_batched_tokens: u64,
     total_kv_blocks: u64,
@@ -907,6 +920,7 @@ async fn register_workers(ctx: &Ctx) -> anyhow::Result<()> {
                     args.zmq_host,
                     args.zmq_base_port as usize + idx
                 ),
+                replay_endpoint: args.replay_endpoint(idx),
                 block_size: args.block_size,
                 max_num_batched_tokens: args.max_num_batched_tokens as u64,
                 total_kv_blocks: args.num_gpu_blocks as u64,
@@ -1085,7 +1099,11 @@ async fn main() -> anyhow::Result<()> {
     let mut engines = Vec::with_capacity(args.workers);
     for idx in 0..args.workers {
         let port = u16::try_from(args.zmq_base_port as usize + idx).context("ZMQ port range")?;
-        let sink = ZmqKvEventSink::bind(Some(port), None, 0, args.block_size)?;
+        let replay_port = args
+            .zmq_replay_base_port
+            .map(|base| u16::try_from(base as usize + idx).context("ZMQ replay port range"))
+            .transpose()?;
+        let sink = ZmqKvEventSink::bind(Some(port), replay_port, 0, args.block_size)?;
         let sink = CountingSink {
             inner: sink,
             stats: Arc::clone(&stats),
@@ -1142,6 +1160,7 @@ async fn main() -> anyhow::Result<()> {
                     ctx.args.zmq_host,
                     ctx.args.zmq_base_port as usize + idx
                 ),
+                replay_endpoint: ctx.args.replay_endpoint(idx),
             })
             .collect::<Vec<_>>();
         ingress.register(&workers).await?;
@@ -1246,6 +1265,7 @@ mod tests {
             model_name: "m",
             endpoint: "mock://worker-3".to_string(),
             kv_events_endpoint: "tcp://127.0.0.1:20002".to_string(),
+            replay_endpoint: Some("tcp://127.0.0.1:21002".to_string()),
             block_size: 16,
             max_num_batched_tokens: 8192,
             total_kv_blocks: 1024,
@@ -1258,6 +1278,10 @@ mod tests {
             Some("tcp://127.0.0.1:20002")
         );
         assert_eq!(parsed.total_kv_blocks, Some(1024));
+        assert_eq!(
+            parsed.replay_endpoint.as_deref(),
+            Some("tcp://127.0.0.1:21002")
+        );
     }
 
     #[test]
