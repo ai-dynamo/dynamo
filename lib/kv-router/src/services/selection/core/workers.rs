@@ -358,6 +358,7 @@ impl SelectionCore {
                     // these stay `None` unless an embedding host injects them.
                     self.host.load.overloaded_workers.clone(),
                     self.host.load.available_workers.clone(),
+                    self.host.load.reject_thresholds.clone(),
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
                     self.cancel_token.child_token(),

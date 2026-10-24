@@ -28,8 +28,8 @@ use dynamo_kv_router::{
     },
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
-        RequestClassifier, RequestClassifierContext, RequestClassifierWorker,
-        WorkerAvailabilityProvider, effective_prefill_tokens,
+        RejectThresholdsProvider, RequestClassifier, RequestClassifierContext,
+        RequestClassifierWorker, WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
     },
@@ -819,6 +819,13 @@ impl KvRouter {
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        // The queue checks the live busy thresholds against its own booked load at
+        // selection; the worker monitor keeps only the decode check on the engine-reported
+        // `kv_used_blocks`, the signal the queue cannot see.
+        let reject_thresholds = scheduler_load.route_busy_thresholds().map(|thresholds| {
+            Arc::new(move || thresholds.get().into()) as RejectThresholdsProvider
+        });
+
         let client_for_registration = client.clone();
         let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
             Arc::new(move || client_for_registration.available_instance_ids());
@@ -869,6 +876,7 @@ impl KvRouter {
                 is_eagle,
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
+                reject_thresholds,
                 available_worker_provider,
                 registration_availability_provider,
                 shared_cache: shared_cache.clone(),
