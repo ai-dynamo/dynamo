@@ -1116,17 +1116,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bs62"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afdf0f7a8a430954ae6cba49be4af8fa3a4bee15d9210aa8a82aee6abca531bd"
-dependencies = [
- "lazy_static",
- "num-bigint 0.4.6",
- "num-traits",
-]
-
-[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2143,7 +2132,6 @@ dependencies = [
  "bincode 2.0.1",
  "bitflags 2.12.1",
  "blake3",
- "bs62",
  "bytemuck",
  "bytes",
  "chrono",
