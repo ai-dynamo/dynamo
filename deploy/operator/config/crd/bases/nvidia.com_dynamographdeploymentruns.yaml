@@ -66,7 +66,7 @@ spec:
                     image:
                       description: |-
                         Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-                        and execution defaults are resolved outside this API.
+                        persists the configured override or a version-matched Dynamo planner image.
                       minLength: 1
                       type: string
                     parameters:
@@ -77,9 +77,11 @@ spec:
                       x-kubernetes-preserve-unknown-fields: true
                     versionOverride:
                       description: |-
-                        VersionOverride declares the AISimulate compatibility version when it
-                        cannot be inferred from the effective image.
+                        VersionOverride declares the AISimulate compatibility version as three numeric parts
+                        (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required
+                        when the image tag is not a version and wins over a version in the tag.
                       minLength: 1
+                      pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                       type: string
                   type: object
                 backends:
@@ -93,6 +95,7 @@ spec:
                     type: string
                   minItems: 1
                   type: array
+                  x-kubernetes-list-type: set
                 hardware:
                   description: |-
                     Hardware bounds the accelerator configurations evaluated by the search.
@@ -131,13 +134,13 @@ spec:
                 objective:
                   description: |-
                     Objective defines scalar optimization or a multi-objective Pareto search.
-                    When omitted, the schema supplies the default Optimize mode and SLA;
-                    admission supplies the conditional scalar metric.
+                    When omitted, admission supplies the object. Its mode defaults to Optimize, and admission
+                    supplies the conditional scalar metric.
                   properties:
                     metric:
                       description: |-
                         Metric is the scalar target when mode is Optimize.
-                        When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
+                        When omitted in Optimize mode, admission defaults it to Throughput.
                       enum:
                         - Throughput
                         - ThroughputPerGPU
@@ -165,17 +168,15 @@ spec:
                       type: array
                       x-kubernetes-list-type: set
                     mode:
-                      default: Optimize
                       description: Mode selects scalar optimization or a Pareto search.
                       enum:
                         - Optimize
                         - Pareto
                       type: string
                     sla:
-                      default:
-                        itlMs: 30
-                        ttftMs: 2000
-                      description: SLA defines per-request latency bounds used to calculate goodput.
+                      description: |-
+                        SLA defines per-request latency bounds used to calculate goodput. When omitted, no
+                        bounds apply. spec.aisimulate.parameters.goal.sla overrides the bounds it names.
                       properties:
                         e2eMs:
                           description: E2EMs is an alternative end-to-end bound in milliseconds.
@@ -208,7 +209,6 @@ spec:
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
                     maxCandidates:
-                      default: 1
                       description: |-
                         MaxCandidates is the maximum number of DGDCs owned by one run. Scalar
                         candidates are ordered best first; Pareto candidates have no scalar rank.
@@ -219,19 +219,21 @@ spec:
                       type: integer
                   type: object
                 workload:
-                  description: Workload defines the synthetic traffic model used for every candidate evaluation.
+                  description: |-
+                    Workload defines the synthetic traffic model used for every candidate evaluation.
+                    When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;
+                    an explicit empty workload receives the same shape from admission. An explicit
+                    workload.static: {} opts out of that shape, leaving the workload to
+                    spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the
+                    fields it names.
+                    The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a
+                    KV-load ratio search.
                   properties:
                     static:
-                      default:
-                        isl: 4000
-                        kvLoadRatio:
-                          - 0
-                          - 1
-                        osl: 1000
                       description: |-
-                        Static defines one of AISimulate's synthetic workload shapes. When omitted,
-                        it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
-                        An explicit empty object opts out of this underlay.
+                        Static defines one of AISimulate's synthetic workload shapes. Its fields are not
+                        defaulted individually: the default belongs to spec.workload as a whole, so an
+                        explicit workload object keeps exactly the fields it names.
                       properties:
                         concurrency:
                           description: Concurrency is a fixed closed-loop in-flight request cap.
@@ -254,6 +256,9 @@ spec:
                           maxItems: 2
                           minItems: 1
                           type: array
+                          x-kubernetes-validations:
+                            - message: a range needs min < max
+                              rule: size(self) != 2 || self[0] < self[1]
                         numRequestRatio:
                           description: NumRequestRatio sets request count relative to the selected load.
                           exclusiveMinimum: true

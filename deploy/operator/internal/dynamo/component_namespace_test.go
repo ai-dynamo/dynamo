@@ -11,7 +11,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -22,13 +22,13 @@ func TestComponentNamespacePrefixRuntimeCompatibility(t *testing.T) {
 	t.Log("render frontend and EPP defaults across the strict-discovery release boundary")
 	versions := []struct {
 		name    string
-		version *runtimeversion.Version
+		version *versionoverride.Version
 		strict  bool
 	}{
 		{name: "unknown runtime"},
-		{name: "older runtime", version: &runtimeversion.Version{Major: 1, Minor: 5, Patch: 9}},
-		{name: "supported runtime", version: &runtimeversion.Version{Major: 1, Minor: 6, Patch: 0}, strict: true},
-		{name: "newer runtime", version: &runtimeversion.Version{Major: 1, Minor: 7, Patch: 0}, strict: true},
+		{name: "older runtime", version: &versionoverride.Version{Major: 1, Minor: 5, Patch: 9}},
+		{name: "supported runtime", version: &versionoverride.Version{Major: 1, Minor: 6, Patch: 0}, strict: true},
+		{name: "newer runtime", version: &versionoverride.Version{Major: 1, Minor: 7, Patch: 0}, strict: true},
 	}
 
 	for _, componentType := range []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypeEPP} {
@@ -59,7 +59,7 @@ func TestLegacyEPPDoesNotEnableStrictNamespacePrefix(t *testing.T) {
 	container, err := NewEPPDefaults().GetBaseContainer(ComponentContext{
 		DynamoNamespace: "default-foo",
 		ComponentType:   commonconsts.ComponentTypeEPP,
-		RuntimeVersion:  &runtimeversion.Version{Major: 1, Minor: 6, Patch: 0},
+		RuntimeVersion:  &versionoverride.Version{Major: 1, Minor: 6, Patch: 0},
 		EPPConfig:       &v1beta1.EPPConfig{},
 	})
 	require.NoError(t, err)
