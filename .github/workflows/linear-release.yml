@@ -78,6 +78,7 @@ jobs:
           # cut puts the patch In Development. Both releases must already exist.
           QA_VERSION=""
           DEV_VERSION=""
+          PLAN_VERSION=""
           if [[ "$GITHUB_EVENT_NAME" == "push" && "$BRANCH_CREATED" == "true" && "$COMMAND" == "sync" ]]; then
             IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"
             if [[ "$PATCH" == "0" ]]; then
@@ -86,6 +87,12 @@ jobs:
                 DEV_VERSION="$((MAJOR + 1)).0.0"
               else
                 DEV_VERSION="${MAJOR}.$((MINOR + 1)).0"
+              fi
+              IFS=. read -r DEV_MAJOR DEV_MINOR _ <<< "$DEV_VERSION"
+              if (( DEV_MINOR >= 9 )); then
+                PLAN_VERSION="$((DEV_MAJOR + 1)).0.0"
+              else
+                PLAN_VERSION="${DEV_MAJOR}.$((DEV_MINOR + 1)).0"
               fi
             else
               DEV_VERSION="$VERSION"
@@ -97,6 +104,7 @@ jobs:
             echo "name=Dynamo v${VERSION}"
             echo "qa_version=${QA_VERSION}"
             echo "dev_version=${DEV_VERSION}"
+            echo "plan_version=${PLAN_VERSION}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run Linear Release
@@ -108,6 +116,41 @@ jobs:
           command: ${{ steps.params.outputs.command }}
           version: ${{ steps.params.outputs.version }}
           name: ${{ steps.params.outputs.name }}
+
+      - name: Create missing releases in Planned
+        # The stage moves below target a release by version, so the release
+        # must exist first. This also creates the release after next, so PMs
+        # can plan against it for a whole cycle. The IDs are the Dynamo
+        # pipeline and its Planned stage in Linear.
+        if: steps.params.outputs.dev_version != ''
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          PIPELINE_ID: f9c6223b-eb31-4d30-bd20-30359a48f184
+          PLANNED_STAGE_ID: 13c52be3-063d-4db1-a69d-b12b48ed565d
+          VERSIONS: ${{ steps.params.outputs.dev_version }} ${{ steps.params.outputs.plan_version }}
+        run: |
+          set -euo pipefail
+          linear() {
+            curl -sS --fail-with-body https://api.linear.app/graphql \
+              -H "Authorization: ${LINEAR_API_KEY}" -H "Content-Type: application/json" -d "$1"
+          }
+          existing=$(linear "$(jq -n --arg id "$PIPELINE_ID" \
+            '{query: "query($id: String!) { releasePipeline(id: $id) { releases(first: 250) { nodes { version } } } }", variables: {id: $id}}')" \
+            | jq -r '.data.releasePipeline.releases.nodes[].version')
+          for version in $VERSIONS; do
+            if grep -qx -e "$version" -e "v$version" <<< "$existing"; then
+              echo "Dynamo v${version} exists"
+              continue
+            fi
+            result=$(linear "$(jq -n --arg name "Dynamo v${version}" --arg version "$version" \
+              --arg pipeline "$PIPELINE_ID" --arg stage "$PLANNED_STAGE_ID" \
+              '{query: "mutation($input: ReleaseCreateInput!) { releaseCreate(input: $input) { success } }", variables: {input: {name: $name, version: $version, pipelineId: $pipeline, stageId: $stage}}}')")
+            if [[ "$(jq -r '.data.releaseCreate.success' <<< "$result")" != "true" ]]; then
+              echo "::error::Could not create Dynamo v${version}: ${result}"
+              exit 1
+            fi
+            echo "Created Dynamo v${version} in Planned"
+          done
 
       - name: Move the cut release to QA
         if: steps.params.outputs.qa_version != ''
