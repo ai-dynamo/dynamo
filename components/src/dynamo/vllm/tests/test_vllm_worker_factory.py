@@ -40,6 +40,7 @@ from dynamo.vllm.worker_factory import (
     _stop_worker_gc_policy,
     _sync_fpm_worker_id,
     _sync_fpm_worker_id_or_shutdown,
+    _validate_execution_measurement,
     _wait_and_load_benchmark,
     _WorkerLifecycle,
 )
@@ -3241,6 +3242,94 @@ def test_merge_preserves_execution_samples_and_each_ranks_warmup_ledger(tmp_path
         assert actual == source["results"][0]["fpms"][0]["benchmark_measurement"]
     on_disk["rank_warmup_evidence"]["0"]["records"].clear()
     assert payloads[0]["warmup_evidence"]["records"]
+
+
+@pytest.fixture
+def native_cuda_measurement():
+    source = _execution_rank_payloads()[0]["iteration_groups"][0]["rank_results"][0][
+        "fpms"
+    ][0]
+    measurement = source["benchmark_measurement"]
+    for index, (raw, duration) in enumerate(
+        zip(measurement["raw_fpms"], [0.007, 0.011, 0.010, 0.009], strict=True)
+    ):
+        raw["wall_time"] = duration
+        raw["timing_scope"] = "model_step_cuda"
+        raw["scheduled_requests"] = {
+            "num_decode_requests": 2,
+            "sum_decode_kv_tokens": 512 + 4 * index,
+        }
+        raw["benchmark_sample"].update(
+            native_iteration_id=100 + index,
+            timing={
+                "basis": "model_step_cuda",
+                "start_monotonic": None,
+                "end_monotonic": None,
+                "duration_seconds": duration,
+            },
+        )
+    retained = copy.deepcopy(measurement["raw_fpms"][2])
+    del retained["benchmark_sample"]
+    measurement["estimate"] = {
+        "method": "actual_upper_median",
+        "raw_sample_indices": [0, 1, 2, 3],
+        "selected_raw_sample_index": 2,
+    }
+    retained["benchmark_measurement"] = measurement
+    return retained, measurement
+
+
+def test_native_cuda_measurement_keeps_selected_shape_and_duration(
+    native_cuda_measurement,
+):
+    retained, measurement = native_cuda_measurement
+    assert _validate_execution_measurement(retained, measurement, -1) == 13
+    assert retained["scheduled_requests"]["sum_decode_kv_tokens"] == 520
+    assert retained["wall_time"] == 0.010
+
+
+def test_native_cuda_measurement_rejects_zero_duration(native_cuda_measurement):
+    retained, measurement = native_cuda_measurement
+    raw = measurement["raw_fpms"][0]
+    raw["wall_time"] = 0.0
+    raw["benchmark_sample"]["timing"]["duration_seconds"] = 0.0
+    with pytest.raises(RuntimeError, match="native CUDA timing"):
+        _validate_execution_measurement(retained, measurement, -1)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("timing", "start_monotonic"), 1.0),
+        (("timing", "duration_seconds"), 0.5),
+        (("native_iteration_id",), 100),
+    ],
+)
+def test_native_cuda_measurement_rejects_false_clock_or_identity(
+    native_cuda_measurement, path, value
+):
+    retained, measurement = native_cuda_measurement
+    target = measurement["raw_fpms"][1]["benchmark_sample"]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    with pytest.raises(RuntimeError, match="native CUDA timing"):
+        _validate_execution_measurement(retained, measurement, -1)
+
+
+@pytest.mark.parametrize("corruption", ["shape", "selected_index", "partial"])
+def test_native_cuda_measurement_rejects_fabricated_or_partial_median(
+    native_cuda_measurement, corruption
+):
+    retained, measurement = native_cuda_measurement
+    if corruption == "shape":
+        retained["scheduled_requests"]["sum_decode_kv_tokens"] = 512
+    elif corruption == "selected_index":
+        measurement["estimate"]["selected_raw_sample_index"] = 1
+    else:
+        measurement["expected_internal_samples"] = 20
+    with pytest.raises(RuntimeError, match="execution evidence is invalid"):
+        _validate_execution_measurement(retained, measurement, -1)
 
 
 def test_merge_records_missing_remote_warmup_history_without_losing_raw_observations(

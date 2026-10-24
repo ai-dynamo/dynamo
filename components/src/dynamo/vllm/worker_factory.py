@@ -343,6 +343,7 @@ def _validate_execution_measurement(
         or "benchmark_sample" in fpm
     ):
         raise invalid("missing raw samples or contradictory retained observation")
+    previous_native_iteration = -1
     for index, sample_fpm in enumerate(raw):
         if not isinstance(sample_fpm, dict) or (
             type(sample_fpm.get("counter_id")) is not int
@@ -366,18 +367,35 @@ def _validate_execution_measurement(
         if not isinstance(timing, dict) or timing.get("basis") not in {
             "schedule_to_output",
             "inter_output",
+            "model_step_cuda",
         }:
             raise invalid(f"raw sample {index} has no timing interval")
         start, end = timing.get("start_monotonic"), timing.get("end_monotonic")
         wall = sample_fpm.get("wall_time")
         if (
-            end is None
-            or type(end) not in (int, float)
-            or not math.isfinite(end)
-            or wall is None
+            wall is None
             or type(wall) not in (int, float)
             or not math.isfinite(wall)
             or wall < 0
+        ):
+            raise invalid(f"raw sample {index} has an invalid duration")
+        if timing["basis"] == "model_step_cuda":
+            native_iteration = sample.get("native_iteration_id")
+            if (
+                wall <= 0
+                or start is not None
+                or end is not None
+                or sample_fpm.get("timing_scope") != "model_step_cuda"
+                or timing.get("duration_seconds") != wall
+                or type(native_iteration) is not int
+                or native_iteration <= previous_native_iteration
+            ):
+                raise invalid(f"raw sample {index} contradicts its native CUDA timing")
+            previous_native_iteration = native_iteration
+        elif (
+            end is None
+            or type(end) not in (int, float)
+            or not math.isfinite(end)
             or (
                 start is not None
                 and (
@@ -432,7 +450,14 @@ def _validate_execution_measurement(
         (method == "single_step" and (len(raw) != 1 or indices != [0]))
         or (method == "last_step" and indices != [len(raw) - 1])
         or (method == "adjacent_upper_median" and indices != list(range(1, len(raw))))
-        or method not in {"single_step", "last_step", "adjacent_upper_median"}
+        or (method == "actual_upper_median" and indices != list(range(len(raw))))
+        or method
+        not in {
+            "single_step",
+            "last_step",
+            "adjacent_upper_median",
+            "actual_upper_median",
+        }
     ):
         raise invalid("reduction inputs contradict the reduction method")
     walls = sorted(raw[index]["wall_time"] for index in indices)
@@ -440,6 +465,30 @@ def _validate_execution_measurement(
         fpm["wall_time"], walls[len(walls) // 2], rel_tol=1e-9, abs_tol=1e-12
     ):
         raise invalid("retained wall time contradicts the raw reduction inputs")
+    if method == "actual_upper_median":
+        chosen_index = sorted(indices, key=lambda index: raw[index]["wall_time"])[
+            len(indices) // 2
+        ]
+        selected = estimate.get("selected_raw_sample_index")
+        if (
+            type(selected) is not int
+            or selected != chosen_index
+            or expected != len(raw)
+            or any(
+                sample["benchmark_sample"]["timing"]["basis"] != "model_step_cuda"
+                for sample in raw
+            )
+        ):
+            raise invalid("native CUDA sample selection contradicts the reduction")
+        chosen = raw[chosen_index]
+        for field in (
+            "wall_time",
+            "scheduled_requests",
+            "queued_requests",
+            "timing_scope",
+        ):
+            if fpm.get(field) != chosen.get(field):
+                raise invalid(f"retained {field} differs from the selected execution")
     return previous_forward_index
 
 
