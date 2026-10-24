@@ -60,7 +60,7 @@ spec:
       advisory: true
 ```
 
-advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。
+advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。planner-in-the-loop replay 也遵循此设置：模拟部署保持不变，只报告建议，retune 决策（retune 目前仅在离线仿真中运行）也只记录、不应用。
 
 ### 优化目标
 
@@ -161,7 +161,7 @@ spec:
 | `backend` | string | `vllm` | Backend：`vllm`、`sglang`、`trtllm` 或 `mocker`。 |
 | `environment` | string | `kubernetes` | 运行时环境：`kubernetes`、`virtual` 或 `global-planner`。 |
 | `namespace` | string | env `DYN_NAMESPACE` | 部署使用的 Dynamo 逻辑/运行时 namespace。 |
-| `advisory` | bool | `false` | 仅建议模式。计算、记录、导出并报告建议副本数，但不执行扩缩容操作，也不更改部署。 |
+| `advisory` | bool | `false` | 仅建议模式。计算、记录、导出并报告建议副本数，但不执行扩缩容操作，也不更改部署。planner-in-the-loop replay 同样遵循此设置，retune 决策只记录、不应用。 |
 
 ### 流量预测设置
 
