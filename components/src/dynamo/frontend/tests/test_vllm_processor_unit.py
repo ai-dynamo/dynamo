@@ -1793,6 +1793,110 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
 
 
 @pytest.mark.asyncio
+async def test_generator_inner_projects_agent_hints_into_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset()
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=RequestForSampling(
+                    max_completion_tokens=None,
+                    max_tokens=1,
+                    logprobs=None,
+                    top_logprobs=None,
+                    cache_salt=None,
+                    mm_processor_kwargs=None,
+                    include_reasoning=True,
+                    top_k=None,
+                    min_p=None,
+                ),
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
+
+    input_processor = SimpleNamespace(
+        generation_config_fields={},
+        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
+        process_inputs=process_inputs,
+        model_config=None,
+    )
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=input_processor,
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    monkeypatch.setattr(
+        processor,
+        "_prepare_mm_routing",
+        AsyncMock(return_value=(None, [], False)),
+    )
+
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id,
+        request,
+        dynamo_preproc,
+        tokens,
+        vllm_preproc,
+        post_processors,
+        *,
+        mm_routing_info,
+        context,
+    ):
+        captured["routing"] = dynamo_preproc["routing"]
+        yield {"captured": True}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+
+    results = [
+        item
+        async for item in processor._generator_inner(
+            {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "nvext": {
+                    "agent_hints": {"priority": 5, "strict_priority": 2, "osl": 64},
+                    "dp_rank": 0,
+                },
+            }
+        )
+    ]
+
+    assert results == [{"captured": True}]
+    assert captured["routing"] == {
+        "priority": 5,
+        "priority_jump": 5.0,
+        "strict_priority": 2,
+        "expected_output_tokens": 64,
+        "dp_rank": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_generator_inner_forwards_reasoning_parser_and_model_config(
     vllm_processor_module,
     monkeypatch,
