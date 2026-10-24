@@ -7,8 +7,9 @@ mod utils;
 
 pub use crd::{DynamoWorkerMetadata, DynamoWorkerMetadataSpec};
 // hash_pod_name/hash_container_name are used by C bindings and the Rust EPP
-// for pod- and container-level worker ID mapping.
-pub use utils::{hash_container_name, hash_pod_name};
+// for pod- and container-level worker ID mapping. ready_container_names is
+// also used by the EPP.
+pub use utils::{hash_container_name, hash_pod_name, ready_container_names};
 
 use crd::{apply_cr, build_cr};
 use daemon::{DaemonOutputs, DaemonState, DiscoveryDaemon, ListState};
