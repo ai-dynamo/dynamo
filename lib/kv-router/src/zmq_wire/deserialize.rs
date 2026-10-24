@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use crate::protocols::BlockExtraInfo;
+use crate::protocols::{BlockExtraInfo, fold_token_id};
 
 use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
 use super::filter::{
@@ -500,12 +500,15 @@ fn normalize_medium(medium: Option<String>) -> Option<String> {
 
 fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
     match token_ids {
-        KvTokenIds::Single(tids) => (tids, false),
+        KvTokenIds::Single(tids) => (tids.into_iter().map(fold_token_id).collect(), false),
         KvTokenIds::Bigram(tids) => {
-            let mut new_tids: Vec<u32> = tids.iter().map(|&(first, _)| first).collect();
+            let mut new_tids: Vec<u32> = tids
+                .iter()
+                .map(|&(first, _)| fold_token_id(first))
+                .collect();
             if !tids.is_empty() {
                 let last_token = tids.last().map(|&(_, second)| second).unwrap();
-                new_tids.push(last_token);
+                new_tids.push(fold_token_id(last_token));
             }
             (new_tids, true)
         }
