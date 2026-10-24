@@ -108,6 +108,10 @@
 //!
 //! # Configuration
 //!
+//! Backend admission is disabled unless `DYN_BACKEND_ADMISSION_ENABLED` is
+//! truthy or, while that is unset, at least one setting below has an explicit
+//! value (see [`enabled`]).
+//!
 //! Each setting is a per-rank limit, read once when a worker's gate is created,
 //! from the first of its environment names that holds a valid value:
 //!
@@ -141,7 +145,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::Poll;
 
 use dynamo_runtime::component::Component;
@@ -162,6 +166,10 @@ use crate::model_card::ModelDeploymentCard;
 mod metrics;
 
 use metrics::{AdmissionSource, BackendAdmissionMetrics, DP_RANK_UNSPECIFIED, RankSeries};
+
+/// Turns backend admission on or off. Unset, any explicit limit turns it on.
+/// `--enable-backend-admission` reaches the gate through this name.
+const DYN_BACKEND_ADMISSION_ENABLED: &str = "DYN_BACKEND_ADMISSION_ENABLED";
 
 /// Maximum admitted requests that have not finished, per DP rank.
 /// `--engine-request-limit` reaches the gate through this name.
@@ -281,6 +289,31 @@ struct ExplicitLimits {
     engine_request_limit: Option<Explicit>,
     engine_request_waiting_limit: Option<Explicit>,
     request_queue_limit: Option<Explicit>,
+}
+
+static EXPLICIT_LIMITS: LazyLock<ExplicitLimits> = LazyLock::new(ExplicitLimits::from_environment);
+
+static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+    let enabled = std::env::var(DYN_BACKEND_ADMISSION_ENABLED)
+        .ok()
+        .and_then(|value| dynamo_runtime::config::parse_bool_opt(&value))
+        .unwrap_or(*EXPLICIT_LIMITS != ExplicitLimits::default());
+    if enabled {
+        tracing::info!("Backend admission enabled");
+    } else {
+        tracing::info!(
+            "Backend admission disabled; set {DYN_BACKEND_ADMISSION_ENABLED}=1 or an admission \
+             limit to enable it"
+        );
+    }
+    enabled
+});
+
+/// Whether backend admission is enabled: as `DYN_BACKEND_ADMISSION_ENABLED`
+/// says, or, while it is unset, when any limit has an explicit, valid value.
+/// Disabled, backends never create or consult a gate.
+pub fn enabled() -> bool {
+    *ENABLED
 }
 
 impl ExplicitLimits {
@@ -1572,7 +1605,7 @@ impl BackendAdmissionGate {
                 .map(|worker_id| format!("{worker_id:x}"))
                 .unwrap_or_default(),
         };
-        let gate = Self::with_metrics(owner, ExplicitLimits::from_environment(), metrics);
+        let gate = Self::with_metrics(owner, *EXPLICIT_LIMITS, metrics);
         // Logged once per worker, as the effective configuration: the limits
         // are not exported as metrics.
         gate.state

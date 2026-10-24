@@ -98,6 +98,7 @@ class DynamoRuntimeConfig(ConfigBase):
     # process environment when it is created (see
     # lib/llm/src/admission_gate.rs).
     engine_request_limit: Optional[int] = None
+    enable_backend_admission: bool = False
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
     tcp_tls_ca_cert_path: Optional[str] = None
@@ -149,6 +150,8 @@ class DynamoRuntimeConfig(ConfigBase):
             # An explicit flag outranks both environment names, so it replaces
             # the canonical one, which the gate reads ahead of the legacy alias.
             os.environ[_ENGINE_REQUEST_LIMIT_ENV] = str(self.engine_request_limit)
+        if self.enable_backend_admission:
+            os.environ["DYN_BACKEND_ADMISSION_ENABLED"] = "1"
 
         os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
@@ -462,7 +465,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "request finishes. Takes precedence over both environment variables.\n"
             f"env var: {_ENGINE_REQUEST_LIMIT_ENV} (legacy alias: "
             "DYN_ENGINE_REQUEST_LIMIT) | default: the engine's reported "
-            "max_num_seqs, or 10000 until it is reported",
+            "max_num_seqs once backend admission is enabled",
+        )
+        g.add_argument(
+            "--enable-backend-admission",
+            dest="enable_backend_admission",
+            action="store_true",
+            help="Enable the backend admission gate, with every limit not set "
+            "explicitly sized from the engine's reported max_num_seqs. Setting "
+            "any admission limit also enables it.\n"
+            "env var: DYN_BACKEND_ADMISSION_ENABLED | default: disabled",
         )
 
         add_argument(

@@ -111,7 +111,9 @@ ENGINE_REQUEST_WAITING_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING
 FORMER_ENGINE_WAIT_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT"
 REQUEST_QUEUE_LIMIT_ENV = "DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT"
 LEGACY_REQUEST_QUEUE_LIMIT_ENV = "DYN_DYNAMO_REQUEST_QUEUE_LIMIT"
+ADMISSION_ENABLED_ENV = "DYN_BACKEND_ADMISSION_ENABLED"
 ADMISSION_SETTINGS = (
+    ADMISSION_ENABLED_ENV,
     ENGINE_REQUEST_LIMIT_ENV,
     LEGACY_ENGINE_REQUEST_LIMIT_ENV,
     ENGINE_REQUEST_WAITING_LIMIT_ENV,
@@ -973,9 +975,9 @@ def test_automatic_limits_follow_the_reported_capacity(
     request_plane,
     dynamo_dynamic_ports,
 ):
-    """With no setting given, every limit follows the `max_num_seqs` the worker
-    reports, one sequence: one request in the engine, one awaiting its first
-    response, and a queue of twice that. With the first request running, the
+    """With admission enabled and no limit given, every limit follows the
+    `max_num_seqs` the worker reports, one sequence: one request in the engine,
+    one awaiting its first response, and a queue of twice that. With the first request running, the
     second and third queue, the fourth is refused, and the queue drains in
     order."""
 
@@ -1011,8 +1013,9 @@ def test_automatic_limits_follow_the_reported_capacity(
             "the queue has drained", received=4, direct=1, queue=2, rejected=1
         )
 
+    settings = {ADMISSION_ENABLED_ENV: 1}
     with _deployment(
-        request, dynamo_dynamic_ports, request_plane, {}, max_num_seqs=1
+        request, dynamo_dynamic_ports, request_plane, settings, max_num_seqs=1
     ) as deployment:
         _run(dynamo_dynamic_ports.frontend_port, deployment, scenario)
 
@@ -1532,8 +1535,9 @@ def test_a_failed_worker_is_still_reported_down(
     for the worker — the record no worker refusing for capacity may ever
     produce."""
 
+    settings = {ADMISSION_ENABLED_ENV: 1}
     with _deployment(
-        request, dynamo_dynamic_ports, request_plane, {}, max_num_seqs=1
+        request, dynamo_dynamic_ports, request_plane, settings, max_num_seqs=1
     ) as deployment:
 
         async def main() -> None:

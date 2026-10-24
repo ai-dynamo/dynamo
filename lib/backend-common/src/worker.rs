@@ -1107,12 +1107,16 @@ impl Worker {
                 // before they reach the engine, sized by the model card it
                 // registered above; the local health-check probe below calls
                 // the adapter directly, outside admission.
-                let admission_gate = self.admission_gate.get_or_create(endpoint.component());
-                admission_gate.record_model_card(local_model.card());
-                let ingress = Ingress::for_engine_with_lifecycle_role(
-                    AdmissionEngine::new(admission_gate, engine_adapter.clone()),
-                    lifecycle_role,
-                )
+                let ingress = if dynamo_llm::admission_gate::enabled() {
+                    let admission_gate = self.admission_gate.get_or_create(endpoint.component());
+                    admission_gate.record_model_card(local_model.card());
+                    Ingress::for_engine_with_lifecycle_role(
+                        AdmissionEngine::new(admission_gate, engine_adapter.clone()),
+                        lifecycle_role,
+                    )
+                } else {
+                    Ingress::for_engine_with_lifecycle_role(engine_adapter.clone(), lifecycle_role)
+                }
                 .map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),

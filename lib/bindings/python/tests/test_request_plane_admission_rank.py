@@ -421,6 +421,8 @@ async def _runtimes(tmp_path, codec: str, count: int):
     with reserved_ports(count, DefaultPort.SYSTEM1.value) as ports:
         os.environ["DYN_FILE_KV"] = str(tmp_path)
         os.environ["DYN_REQUEST_PLANE_CODEC"] = codec
+        # Admission is opt-in.
+        os.environ.setdefault("DYN_BACKEND_ADMISSION_ENABLED", "1")
         runtimes: list = []
         servers: list = []
         try:
