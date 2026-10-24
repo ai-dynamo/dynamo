@@ -6323,6 +6323,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			name: "frontend with runtime 1.6.0",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:          commonconsts.ComponentTypeFrontend,
+				Annotations:            map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
 				RuntimeVersionOverride: "1.6.0",
 			},
 			backendFramework: BackendFrameworkVLLM,
@@ -10379,6 +10380,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			name: "frontendSidecar uses its runtime 1.6.0 startup allowance",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:          commonconsts.ComponentTypeWorker,
+				Annotations:            map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
 				RuntimeVersionOverride: "1.5.0",
 				FrontendSidecar:        &v1alpha1.FrontendSidecarSpec{Image: "my-frontend:1.6.0"},
 			},

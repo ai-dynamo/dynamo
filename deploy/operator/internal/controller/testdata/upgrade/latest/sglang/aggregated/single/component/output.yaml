@@ -114,15 +114,6 @@ spec:
           successThreshold: 1
           timeoutSeconds: 3
         resources: {}
-        startupProbe:
-          failureThreshold: 30
-          httpGet:
-            path: /live
-            port: http
-            scheme: HTTP
-          periodSeconds: 10
-          successThreshold: 1
-          timeoutSeconds: 1
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         volumeMounts:
