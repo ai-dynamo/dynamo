@@ -319,6 +319,19 @@ impl EmbeddedSelection {
             .enumerate()
             .map(|(index, class)| (class.name.clone(), index))
             .collect();
+        let wait_metrics = queue_metrics.clone();
+        let queue_wait_observer: dynamo_kv_router::queue::RouterQueueWaitObserver =
+            Arc::new(move |class_index: usize, wait: Duration| {
+                if let Some(metrics) = wait_metrics.get(class_index) {
+                    metrics.wait_seconds.observe(wait.as_secs_f64());
+                }
+            });
+        if !partition
+            .scheduler()
+            .set_queue_wait_observer(queue_wait_observer)
+        {
+            anyhow::bail!("queue-wait observer is already installed");
+        }
         spawn_queue_metrics_updater(
             partition.clone(),
             queue_metrics.clone(),

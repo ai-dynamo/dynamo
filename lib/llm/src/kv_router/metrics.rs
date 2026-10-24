@@ -701,6 +701,7 @@ pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
     pub pending_isl_tokens: IntGaugeVec,
     pub pending_cached_tokens: IntGaugeVec,
+    pub wait_seconds: prometheus::HistogramVec,
     pub backpressure_total: IntCounterVec,
     pub received_total: IntCounterVec,
     pub deadline_rejections_total: IntCounterVec,
@@ -711,6 +712,7 @@ pub struct RouterQueueMetricHandles {
     pub pending_requests: IntGauge,
     pub pending_isl_tokens: IntGauge,
     pub pending_cached_tokens: IntGauge,
+    pub wait_seconds: prometheus::Histogram,
     pub request_limit_rejections: IntCounter,
     pub raw_isl_limit_rejections: IntCounter,
     pub cached_token_limit_rejections: IntCounter,
@@ -754,6 +756,22 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> = LazyLock::new(||
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         )
         .expect("Failed to create router_queue_pending_cached_tokens gauge"),
+        wait_seconds: prometheus::HistogramVec::new(
+            HistogramOpts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::FRONTEND,
+                    frontend_service::ROUTER_QUEUE_WAIT_SECONDS
+                ),
+                "Time requests spend pending in the router scheduler queue",
+            )
+            .buckets(vec![
+                0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+                60.0,
+            ]),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+        )
+        .expect("Failed to create router_queue_wait_seconds histogram"),
         received_total: IntCounterVec::new(
             Opts::new(
                 format!("{}_router_admission_received_total", name_prefix::FRONTEND),
@@ -802,6 +820,7 @@ impl RouterQueueMetrics {
             pending_requests: self.pending_requests.with_label_values(&queue_labels),
             pending_isl_tokens: self.pending_isl_tokens.with_label_values(&queue_labels),
             pending_cached_tokens: self.pending_cached_tokens.with_label_values(&queue_labels),
+            wait_seconds: self.wait_seconds.with_label_values(&queue_labels),
             request_limit_rejections: rejection("request_limit"),
             raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
             cached_token_limit_rejections: rejection("cached_token_limit"),
@@ -844,6 +863,7 @@ pub fn register_router_queue_metrics(
     registry.register(Box::new(m.pending_requests.clone()))?;
     registry.register(Box::new(m.pending_isl_tokens.clone()))?;
     registry.register(Box::new(m.pending_cached_tokens.clone()))?;
+    registry.register(Box::new(m.wait_seconds.clone()))?;
     registry.register(Box::new(m.backpressure_total.clone()))?;
     registry.register(Box::new(m.received_total.clone()))?;
     registry.register(Box::new(m.deadline_rejections_total.clone()))?;
@@ -1761,6 +1781,18 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
                 &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
             )
             .unwrap(),
+            wait_seconds: prometheus::HistogramVec::new(
+                HistogramOpts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::ROUTER_QUEUE_WAIT_SECONDS
+                    ),
+                    "Time requests spend pending in the router scheduler queue",
+                ),
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+            )
+            .unwrap(),
             received_total: IntCounterVec::new(
             Opts::new(
                 format!("{}_router_admission_received_total", name_prefix::FRONTEND),
@@ -1794,6 +1826,9 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
             .register(Box::new(metrics.pending_cached_tokens.clone()))
             .unwrap();
         registry
+            .register(Box::new(metrics.wait_seconds.clone()))
+            .unwrap();
+        registry
             .register(Box::new(metrics.backpressure_total.clone()))
             .unwrap();
 
@@ -1814,9 +1849,11 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
         handles.pending_requests.set(5);
         handles.pending_isl_tokens.set(1024);
         handles.pending_cached_tokens.set(512);
+        handles.wait_seconds.observe(1.25);
 
         let output = gather_pef(&registry);
-        let expected = "\
+        for expected in [
+            "\
 # HELP dynamo_frontend_router_admission_received_total Total attempts received by router admission; includes retries and excludes advisory probes
 # TYPE dynamo_frontend_router_admission_received_total counter
 dynamo_frontend_router_admission_received_total{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 12
@@ -1838,11 +1875,18 @@ dynamo_frontend_router_queue_pending_isl_tokens{model=\"model\",policy_class=\"d
 # HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_requests gauge
 dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 5
-";
-        assert_eq!(
-            output, expected,
-            "\nActual PEF:\n{output}\nExpected PEF:\n{expected}"
-        );
+",
+            "# HELP dynamo_frontend_router_queue_wait_seconds Time requests spend pending in the router scheduler queue\n",
+            "# TYPE dynamo_frontend_router_queue_wait_seconds histogram\n",
+            "dynamo_frontend_router_queue_wait_seconds_bucket{model=\"model\",policy_class=\"default\",worker_type=\"decode\",le=\"2.5\"} 1\n",
+            "dynamo_frontend_router_queue_wait_seconds_sum{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 1.25\n",
+            "dynamo_frontend_router_queue_wait_seconds_count{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 1\n",
+        ] {
+            assert!(
+                output.contains(expected),
+                "\nMissing expected PEF:\n{expected}\nActual PEF:\n{output}"
+            );
+        }
     }
 
     #[test]
