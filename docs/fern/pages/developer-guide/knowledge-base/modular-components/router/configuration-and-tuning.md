@@ -326,6 +326,12 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 
 ## Session Affinity
 
+In KV mode, session-affinity hits now emit the structured `Selected worker` log
+message with `router_mode="kv"` and `selection="session_affinity"`, replacing
+`Selected pinned worker`. Update log filters that match the old message to match
+`Selected worker` and the `selection` field. Explicit pins use `selection="pinned"`;
+other KV selections use `selection="kv"`.
+
 Session affinity is disabled by default. On the frontend, set
 `--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
 a value from `1` through `31536000` to enable it, then send
