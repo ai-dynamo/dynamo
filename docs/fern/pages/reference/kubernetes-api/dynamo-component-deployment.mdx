@@ -371,6 +371,10 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 
 <ParamField path="failover" type="FailoverSpec">
   Configures active-passive GPU failover for a worker component. The `spec.podTemplate.spec.containers[name=main]` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+
+  **Snapshotfailover:** with `checkpoint.enabled: true` and `mode: IntraPod`, supports single-node vLLM and SGLang. Capture must target `main`; automatic capture requires `checkpoint.startupPolicy: WaitForCheckpoint`. TensorRT-LLM is rejected at admission. See [Shadow Engine Recovery](../../kubernetes/fault-tolerance/shadow-engine-recovery.mdx) for the GMS weight capture/restore setup and limitations.
+
+  **Coldstartfailover:** without checkpointing, vLLM uses the separate GMS V0 shadow initialization path. Its `--load-format gms` configuration does not apply to snapshotfailover.
 </ParamField>
 
 <Indent>

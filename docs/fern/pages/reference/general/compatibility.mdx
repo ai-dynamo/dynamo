@@ -64,6 +64,12 @@ Worker count is a capacity approximation, not a measurement of end-to-end servin
 
 ## Feature Support
 
+For the v1.6.0 snapshotfailover workflow, see
+[Shadow Engine Recovery](../../kubernetes/fault-tolerance/shadow-engine-recovery.mdx).
+It supports single-node vLLM and SGLang; TensorRT-LLM's Snapshot capture/restore
+support does not include shadow engine recovery. The separate coldstartfailover
+path uses GMS V0 with vLLM.
+
 <FeatureHeatmap />
 
 ### Per-Backend Detail
