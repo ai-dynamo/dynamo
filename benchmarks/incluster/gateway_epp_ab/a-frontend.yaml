@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Arm A of the gateway A/B benchmark (see README.md):
+#   client -> Gateway -> Dynamo Frontend (KV router) -> mocker workers
+#
+# This is examples/backends/vllm/deploy/agg_router.yaml (Qwen/Qwen3-0.6B,
+# aggregated, Frontend in KV mode) with each vLLM worker replaced by one mocker
+# worker. The worker component must match the one in b-epp.yaml, apart from
+# B's frontend sidecar; tests/test_gateway_epp_ab.py checks it. run.sh sets the
+# images, the worker count and the model cache claim when it applies this file,
+# and records the applied manifest with the results.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen-a
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.1
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          # By default the router opens one ZMQ socket per worker for each KV
+          # event stream, and libzmq allows 1,023 sockets, so past a few hundred
+          # workers it stops receiving most workers' KV events. 16 workers per
+          # socket keeps 2048 workers at 128 sockets per stream.
+          - name: DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB
+            value: "16"
+          # Model files come from the shared cache, so no pod calls Hugging Face.
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          # No CPU limit: CFS throttling would add latency spikes to the router.
+          resources:
+            requests:
+              cpu: "8"
+              memory: 16Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: worker
+    type: decode
+    replicas: 2048
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          # No dedicated mocker image exists; the planner image carries dynamo.mocker.
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.1
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --model-name
+          - Qwen/Qwen3-0.6B
+          # The recipe's vLLM block size. The Frontend and the EPP read it from
+          # the workers' model cards, so both routers hash prefixes the same way.
+          - --block-size
+          - "16"
+          - --speedup-ratio
+          - "1.0"
+          env:
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 4Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        # Spread the arm's workers over the nodes. Each requests little, so
+        # without this the scheduler put up to 382 of 2048 workers on one node.
+        # A soft anti-affinity, because Grove rejects topologySpreadConstraints.
+        # run.sh also caps them per node (MAX_WORKERS_PER_NODE).
+        affinity:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-graph-deployment-name: qwen-a
+                    nvidia.com/dynamo-component-type: decode
+---
+# The Gateway sends arm A's requests to the Frontend's Service. The route
+# matches the model header, as the GAIE routes do, and the arm header, so A and
+# B can share one Gateway. run.sh sets the arm header to <namespace>/qwen-a.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen-a
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: inference-gateway
+    namespace: agentgateway-system
+    sectionName: http
+  rules:
+  - matches:
+    - headers:
+      - name: X-Gateway-Model-Name
+        type: Exact
+        value: Qwen/Qwen3-0.6B
+      - name: X-Dynamo-AB-Arm
+        type: Exact
+        value: qwen-a
+      path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: ""
+      kind: Service
+      name: qwen-a-frontend
+      port: 8000
+    timeouts:
+      request: 300s
