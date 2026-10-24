@@ -1358,8 +1358,8 @@ mod tests {
         }
     }
 
-    // Spin up a GRPC server and create a gRPC bi-directional stream
-    async fn connect(t: Arc<Tracker>) -> ExternalProcessorClient<tonic::transport::Channel> {
+    /// Bind before spawning so callers can connect without a startup sleep.
+    async fn start_server(t: Arc<Tracker>) -> std::net::SocketAddr {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         let svc = ExtProcServer::new(t).into_service();
@@ -1368,7 +1368,13 @@ mod tests {
                 .add_service(svc)
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(l)),
         );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        addr
+    }
+
+    /// Allow disconnect tests to insert a TCP proxy without duplicating client setup.
+    async fn connect_to(
+        addr: std::net::SocketAddr,
+    ) -> ExternalProcessorClient<tonic::transport::Channel> {
         ExternalProcessorClient::new(
             tonic::transport::Channel::from_shared(format!("http://{addr}"))
                 .unwrap()
@@ -1376,6 +1382,11 @@ mod tests {
                 .await
                 .unwrap(),
         )
+    }
+
+    /// Give each lifecycle test its own loopback server.
+    async fn connect(t: Arc<Tracker>) -> ExternalProcessorClient<tonic::transport::Channel> {
+        connect_to(start_server(t).await).await
     }
 
     fn stream() -> Vec<ProcessingRequest> {
@@ -1541,6 +1552,52 @@ mod tests {
         let t = Arc::new(Tracker::agg());
         run(&mut connect(t.clone()).await).await;
         assert_eq!(t.free.load(Ordering::SeqCst), 1);
+    }
+
+    /// Transport loss frees the booking while both client RPC handles remain alive.
+    #[tokio::test]
+    async fn test_stream_close_after_selection_frees_its_reservation() {
+        let tracker = Arc::new(Tracker::agg().minting());
+        let server_addr = start_server(tracker.clone()).await;
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let connection = tokio::spawn(async move {
+            let (mut downstream, _) = proxy.accept().await.unwrap();
+            let mut upstream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+            tokio::io::copy_bidirectional(&mut downstream, &mut upstream)
+                .await
+                .unwrap();
+        });
+        let mut client = connect_to(proxy_addr).await;
+        let (tx, rx) = mpsc::channel(2);
+        for request in request_only_stream("client-id") {
+            tx.send(request).await.unwrap();
+        }
+        let mut response = client
+            .process(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+        tokio::time::timeout(Duration::from_secs(5), response.message())
+            .await
+            .expect("selection should finish")
+            .unwrap()
+            .expect("routing response");
+        assert_eq!(tracker.free.load(Ordering::SeqCst), 0);
+
+        connection.abort();
+        assert!(connection.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while tracker.free.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("disconnect should free the adopted reservation");
+        assert_eq!(*tracker.freed.lock().unwrap(), vec!["res-0"]);
+        assert_eq!(tracker.free.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.prefill_complete.load(Ordering::SeqCst), 0);
+        drop(tx);
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{RoutingConstraints, TokensWithHashes, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
@@ -168,7 +168,7 @@ impl Router {
         let mut kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
-        // replicas; replica-sync alone does not close the selection-to-booking race.
+        // replicas; replica-sync alone does not provide a shared admission authority.
         kv_router_config.skip_initial_worker_wait = true;
 
         let component_handle = drt.namespace(actual_namespace)?.component(component)?;
@@ -505,7 +505,8 @@ impl Router {
             .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
     }
 
-    /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
+    /// Atomically select and reserve a decode worker under `reservation_id`.
+    /// Returns (WorkerWithDpRank, overlap_blocks).
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary
@@ -519,6 +520,7 @@ impl Router {
     #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
+        reservation_id: &str,
         tokens: &[u32],
         is_disaggregated: bool,
         cache_namespace: Option<String>,
@@ -530,17 +532,17 @@ impl Router {
     ) -> Result<(WorkerWithDpRank, u32)> {
         let config_override = decode_router_config_override(is_disaggregated);
 
-        let outcome = self
+        let admitted = self
             .decode_router
-            .find_best_match_details_with_policy_class(
-                None,
+            .find_best_match_details_with_policy_class_admitted(
+                Some(reservation_id),
                 tokens,
                 None,
                 config_override.as_ref(),
-                false,
+                true,
                 false,
                 None,
-                cache_namespace,
+                cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 policy_class,
@@ -551,63 +553,41 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Decode reservation failed: {:?}", e))?;
 
+        let (outcome, booking) = admitted.into_parts();
         match outcome {
             FindBestMatchOutcome::Routed {
                 worker,
                 overlap_blocks,
                 ..
-            } => Ok((worker, overlap_blocks)),
+            } => {
+                let booking = booking.ok_or_else(|| {
+                    anyhow::anyhow!("Decode reservation did not return a booking")
+                })?;
+                let config = self.decode_router.kv_router_config();
+                let routing_decision = if !config.use_kv_events || config.predict_on_route_enabled()
+                {
+                    let mut prompt =
+                        TokensWithHashes::new(tokens.to_vec(), self.decode_router.block_size())
+                            .with_is_eagle(self.decode_router.is_eagle());
+                    if let Some(namespace) = cache_namespace {
+                        prompt = prompt.with_cache_namespace(namespace);
+                    }
+                    Some(prompt)
+                } else {
+                    None
+                };
+                self.decode_router
+                    .enroll_public_request_attempt(booking, routing_decision)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Decode reservation failed: {e}"))?;
+                Ok((worker, overlap_blocks))
+            }
             FindBestMatchOutcome::QueueRejected { rejection } => {
-                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
+                Err(anyhow::anyhow!("Decode reservation failed: {rejection}"))
             }
         }
-    }
-
-    /// Register a request with the decode router for bookkeeping.
-    pub async fn add_request(
-        &self,
-        request_id: &str,
-        tokens: &[u32],
-        worker_id: u64,
-        dp_rank: u32,
-        is_disaggregated: bool,
-        cache_namespace: Option<String>,
-    ) -> Result<()> {
-        let decode_router = self.decode_router.clone();
-        let request_id = request_id.to_owned();
-        let tokens = tokens.to_vec();
-
-        tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
-            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-            let router_config_override = decode_router_config_override(is_disaggregated);
-
-            let overlap_blocks = decode_router
-                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
-                .await
-                .map_err(|e| anyhow::anyhow!("get_overlap_blocks failed: {e:?}"))?;
-
-            let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
-
-            decode_router
-                .add_request(
-                    request_id,
-                    &tokens,
-                    None,
-                    cached_tokens,
-                    None,
-                    worker,
-                    None,
-                    cache_namespace,
-                    router_config_override.as_ref(),
-                )
-                .await;
-
-            Ok(())
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("add_request timed out"))?
     }
 
     /// Mark prefill as completed for a request.
@@ -1494,6 +1474,7 @@ impl EndpointPicker for Router {
 
         let (decode_worker, _overlap) = self
             .route_decode(
+                &reservation_id,
                 &tokens,
                 is_disaggregated,
                 cache_namespace.clone(),
@@ -1509,14 +1490,21 @@ impl EndpointPicker for Router {
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
         let endpoint = if worker_map.is_empty() {
-            self.resolve_worker_endpoint(decode_worker.worker_id)
-                .ok_or_else(|| {
+            let Some(endpoint) = self.resolve_worker_endpoint(decode_worker.worker_id) else {
+                tracing::warn!(
+                    worker_id = decode_worker.worker_id,
+                    "Selected worker has no resolved endpoint"
+                );
+                if let Err(error) = self.free_request(&reservation_id).await {
                     tracing::warn!(
-                        worker_id = decode_worker.worker_id,
-                        "Selected worker has no resolved endpoint"
+                        %reservation_id,
+                        %error,
+                        "Failed to release decode reservation after endpoint resolution failed"
                     );
-                    PickError::NoEndpoints
-                })?
+                }
+                return Err(PickError::NoEndpoints);
+            };
+            endpoint
         } else {
             worker_map
                 .iter()
@@ -1530,25 +1518,6 @@ impl EndpointPicker for Router {
                     endpoints[0].address_port()
                 })
         };
-
-        // Register the request with the router for bookkeeping (load tracking).
-        if let Err(e) = self
-            .add_request(
-                &reservation_id,
-                &tokens,
-                decode_worker.worker_id,
-                decode_worker.dp_rank,
-                is_disaggregated,
-                cache_namespace.clone(),
-            )
-            .await
-        {
-            tracing::warn!(
-                request_id = %req.request_id,
-                error = %e,
-                "Failed to register request with router bookkeeping"
-            );
-        }
 
         let prefill_worker = prefill_booking
             .as_ref()
@@ -1677,7 +1646,295 @@ mod tests {
     use std::sync::{Arc, atomic::Ordering};
 
     use super::*;
+    use dynamo_kv_router::config::KvRouterConfig;
     use k8s_openapi::api::core::v1::Pod;
+
+    /// Disable cache credit and KV reuse so load alone drives concurrent picks.
+    async fn decode_test_router() -> Router {
+        decode_test_router_with_config(KvRouterConfig {
+            overlap_score_credit: 0.0,
+            router_temperature: 0.0,
+            router_assume_kv_reuse: false,
+            use_kv_events: false,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Use a local worker watch and tokenizer fixture without external services.
+    async fn decode_test_router_with_config(config: KvRouterConfig) -> Router {
+        use dynamo_llm::discovery::LoadThresholdHandle;
+        use dynamo_llm::kv_router::{
+            KvRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource,
+        };
+        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+        use dynamo_runtime::distributed::DistributedConfig;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace(format!("atomic-decode-{}", Uuid::new_v4()))
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let load_context = RoutingLoadContext::start(
+            client.clone(),
+            RouterLoadSource::Aggregated,
+            LoadThresholdHandle::new(Default::default()),
+            &drt.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let (_workers_tx, workers_rx) = tokio::sync::watch::channel(
+            [1, 2]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        ModelRuntimeConfig {
+                            total_kv_blocks: Some(16),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let decode_router = KvRouter::new(
+            endpoint,
+            client,
+            workers_rx,
+            None,
+            2,
+            SelectionPolicySource::Registry,
+            Some(config),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let card = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            None,
+        )
+        .unwrap();
+        let mut index = WorkerEndpointIndex::default();
+        index.endpoints.insert(1, "127.0.0.1:8001".into());
+        index.endpoints.insert(2, "127.0.0.1:8002".into());
+
+        Router {
+            prefill_router: PrefillRouter::disabled(
+                Arc::new(ModelManager::new()),
+                RouterMode::KV,
+                None,
+            ),
+            prefill_bookings: DashMap::new(),
+            decode_router: ManagedKvRouter::new(load_context, Arc::new(decode_router)),
+            preprocessor: OpenAIPreprocessor::new(card).unwrap(),
+            runtime,
+            worker_index: Arc::new(RwLock::new(index)),
+            pod_store_ready: Arc::new(AtomicBool::new(true)),
+            served_model: "test-model".into(),
+        }
+    }
+
+    /// Reuse a client ID with pretokenized input to exercise reservation isolation.
+    fn decode_test_request() -> RequestInfo {
+        RequestInfo {
+            request_id: "client-request".into(),
+            headers: vec![],
+            body: r#"{"model":"test-model","prompt":[1,2,3,4]}"#.into(),
+            model: "test-model".into(),
+            candidate_subset: vec![],
+        }
+    }
+
+    /// Probe per-worker accounting without adding any prompt load to the projection.
+    async fn decode_test_loads(router: &Router) -> Vec<dynamo_kv_router::protocols::PotentialLoad> {
+        let loads = router
+            .decode_router
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(loads.len(), 2);
+        loads
+    }
+
+    /// First output clears prefill load; completion releases the decode booking.
+    #[tokio::test]
+    async fn decode_selection_books_before_returning() {
+        let router = decode_test_router().await;
+        for is_disaggregated in [false, true] {
+            let (worker, _) = router
+                .route_decode(
+                    "decode-reservation",
+                    &[1, 2, 3, 4],
+                    is_disaggregated,
+                    None,
+                    0.0,
+                    0,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                )
+                .await
+                .unwrap();
+            let loads = decode_test_loads(&router).await;
+            let selected = loads
+                .iter()
+                .find(|load| load.worker_id == worker.worker_id && load.dp_rank == worker.dp_rank)
+                .unwrap();
+            assert_eq!(selected.active_requests, 1);
+            assert_eq!(selected.potential_decode_blocks, 2);
+            assert_eq!(
+                selected.potential_prefill_tokens,
+                if is_disaggregated { 0 } else { 4 }
+            );
+            router.on_prefill_complete("decode-reservation").await;
+            let loads = decode_test_loads(&router).await;
+            assert_eq!(
+                loads.iter().map(|load| load.active_requests).sum::<usize>(),
+                1
+            );
+            assert!(loads.iter().all(|load| load.potential_prefill_tokens == 0));
+            router
+                .on_request_complete_with_usage("decode-reservation", None)
+                .await;
+            let loads = decode_test_loads(&router).await;
+            assert!(loads.iter().all(|load| load.active_requests == 0));
+            assert!(loads.iter().all(|load| load.potential_decode_blocks == 0));
+        }
+    }
+
+    /// Duplicate client IDs must yield distinct bookings and an even worker split.
+    #[tokio::test]
+    async fn concurrent_decode_picks_account_for_previous_selections() {
+        let router = decode_test_router().await;
+        let request = decode_test_request();
+        let picks = tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::future::join_all((0..8).map(|_| router.pick(&request, &[]))),
+        )
+        .await
+        .expect("concurrent picks should finish")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        for endpoint in ["127.0.0.1:8001", "127.0.0.1:8002"] {
+            assert_eq!(
+                picks
+                    .iter()
+                    .filter(|pick| pick.endpoint == endpoint)
+                    .count(),
+                4,
+                "each selection must see load booked by earlier selections"
+            );
+        }
+        let booking_ids: HashSet<_> = picks
+            .iter()
+            .map(|pick| pick.reservation_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(booking_ids.len(), 8);
+        let loads = decode_test_loads(&router).await;
+        assert!(loads.iter().all(|load| load.active_requests == 4));
+
+        for pick in picks {
+            router
+                .on_request_complete_with_usage(pick.reservation_id.as_deref().unwrap(), None)
+                .await;
+        }
+        let loads = decode_test_loads(&router).await;
+        assert!(loads.iter().all(|load| load.active_requests == 0));
+    }
+
+    #[tokio::test]
+    async fn decode_pick_without_endpoint_releases_booking() {
+        let router = decode_test_router().await;
+        write_index(&router.worker_index).endpoints.clear();
+        assert!(matches!(
+            router.pick(&decode_test_request(), &[]).await,
+            Err(PickError::NoEndpoints)
+        ));
+        let loads = decode_test_loads(&router).await;
+        assert!(loads.iter().all(|load| load.active_requests == 0));
+    }
+
+    /// Predicted cache residency survives completion and remains isolated by tenant.
+    #[tokio::test]
+    async fn decode_selection_records_namespaced_approximate_cache() {
+        let router = decode_test_router_with_config(KvRouterConfig {
+            use_kv_events: false,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        })
+        .await;
+        let tokens = [1, 2, 3, 4];
+        let (worker, _) = router
+            .route_decode(
+                "cache-reservation",
+                &tokens,
+                false,
+                Some("tenant-a".into()),
+                0.0,
+                0,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while router
+                .decode_router
+                .get_overlap_blocks(&tokens, None, worker, None, Some("tenant-a"))
+                .await
+                .unwrap()
+                != 2
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("decode selection should record the prompt's cache placement");
+        assert_eq!(
+            router
+                .decode_router
+                .get_overlap_blocks(&tokens, None, worker, None, Some("tenant-b"))
+                .await
+                .unwrap(),
+            0
+        );
+        router
+            .on_request_complete_with_usage("cache-reservation", None)
+            .await;
+        assert_eq!(
+            router
+                .decode_router
+                .get_overlap_blocks(&tokens, None, worker, None, Some("tenant-a"))
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(
+            decode_test_loads(&router)
+                .await
+                .iter()
+                .all(|load| load.active_requests == 0)
+        );
+    }
 
     #[test]
     fn global_namespace_discovery_does_not_restrict_worker_pod_labels() {
