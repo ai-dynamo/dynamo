@@ -9,9 +9,10 @@
 //! The state machine enforces ordered responses:
 //! `RequestHeaders → RequestBody → RequestTrailers → ResponseHeaders → ResponseBody → ResponseTrailers`
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -19,6 +20,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
+use crate::metrics::{self, Stage};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
 };
@@ -29,6 +31,7 @@ use crate::proto::envoy::service::ext_proc::v3::{
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
 use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
+use serde_json::value::RawValue;
 
 /// State machine phases for the ext_proc stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +86,11 @@ struct RequestContext {
 
     /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
     sse_usage_buf: Vec<u8>,
+
+    /// When the request headers arrived, for [`Stage::ReceiveBody`].
+    headers_received_at: Option<Instant>,
+    /// When the routing decision was ready, for [`Stage::FirstResponse`].
+    routed_at: Option<Instant>,
 }
 
 impl RequestContext {
@@ -112,6 +120,8 @@ impl RequestContext {
             resp_trailer_resp: None,
             parsed_usage: None,
             sse_usage_buf: Vec::new(),
+            headers_received_at: None,
+            routed_at: None,
         }
     }
 
@@ -216,6 +226,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
     /// Handle request headers phase.
     fn handle_request_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
+        ctx.headers_received_at = Some(Instant::now());
         // Collect headers and resolve the request ID for every request,
         // including header-only (end_of_stream) requests such as GET /v1/models.
         // The body-less case is routed later via `handle_header_only_request`,
@@ -297,10 +308,14 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             candidate_subset,
         };
 
-        let result = picker
-            .pick(&req_info, endpoints)
-            .await
-            .map_err(ExtProcError::from_pick_error)?;
+        let picked = {
+            let _in_flight = metrics::pick_in_flight();
+            let started = Instant::now();
+            let picked = picker.pick(&req_info, endpoints).await;
+            metrics::observe_stage(Stage::Pick, started.elapsed());
+            picked
+        };
+        let result = picked.map_err(ExtProcError::from_pick_error)?;
 
         ctx.body_routed = true;
         ctx.booking_id = result.reservation_id.clone();
@@ -339,7 +354,11 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             CacheSaltForwarding::Preserve => None,
         };
         let forwarded_body: Bytes = if result.token_ids.is_some() || cache_salt.is_some() {
-            match inject_body_extensions(&raw_body, result.token_ids.as_deref(), cache_salt) {
+            let started = Instant::now();
+            let rewritten =
+                inject_body_extensions(&raw_body, result.token_ids.as_deref(), cache_salt);
+            metrics::observe_stage(Stage::Rewrite, started.elapsed());
+            match rewritten {
                 Ok(modified) => {
                     tracing::trace!(
                         request_id = %ctx.request_id,
@@ -358,12 +377,15 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             raw_body.clone()
         };
 
+        metrics::observe_body_bytes(metrics::Body::Received, raw_body.len());
+        metrics::observe_body_bytes(metrics::Body::Forwarded, forwarded_body.len());
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
         tracing::debug!(
             has_header_resp = ctx.req_header_resp.is_some(),
             body_resp_count = ctx.req_body_resp.len(),
             "[MUTATION] Responses prepared, waiting for drain"
         );
+        ctx.routed_at = Some(Instant::now());
 
         Ok(())
     }
@@ -616,6 +638,9 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             body_buf.extend_from_slice(&body.body);
 
                             if body.end_of_stream {
+                                if let Some(received) = ctx.headers_received_at {
+                                    metrics::observe_stage(Stage::ReceiveBody, received.elapsed());
+                                }
                                 // Freeze the accumulated body once into `Bytes`
                                 // (moves the Vec, no copy); downstream sharing is
                                 // by cheap refcount clone.
@@ -669,6 +694,9 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 && !body.body.is_empty()
                             {
                                 ctx.prefill_complete_signaled = true;
+                                if let Some(routed) = ctx.routed_at.take() {
+                                    metrics::observe_stage(Stage::FirstResponse, routed.elapsed());
+                                }
                                 // Hand back the picker's own booking id (falls
                                 // back to request_id if it booked nothing).
                                 let booking_id = ctx
@@ -755,7 +783,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                     .unwrap_or_else(|| ctx.request_id.clone());
                 let usage = ctx.parsed_usage.take();
                 if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
-                    crate::metrics::observe_cached_tokens(cached_tokens);
+                    metrics::observe_cached_tokens(cached_tokens);
                 }
                 picker
                     .on_request_complete_with_usage(&booking_id, usage)
@@ -855,47 +883,48 @@ fn validate_protocol_config(
 ///   [`CacheSaltForwarding::NativeVllm`]. Native vLLM reads the top-level
 ///   field; `Preserve` backends (Dynamo runtime) skip this rewrite because
 ///   their handler applies the tag itself.
+///
+/// The body is never parsed into a `Value` tree. Untouched top-level members
+/// are borrowed and re-emitted byte for byte, only `nvext` is parsed when
+/// tokens are injected, and the token ids are written straight from the
+/// slice.
 fn inject_body_extensions(
     body: &[u8],
     token_ids: Option<&[u32]>,
     cache_salt: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
-
-    let obj = parsed
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("body is not a JSON object"))?;
-
-    if let Some(token_ids) = token_ids {
-        let nvext = obj
-            .entry("nvext")
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-
-        let nvext_obj = nvext
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
-
-        nvext_obj.insert(
-            "token_data".to_string(),
-            serde_json::Value::Array(
-                token_ids
-                    .iter()
-                    .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
-                    .collect(),
-            ),
-        );
+    let mut members: BTreeMap<String, &RawValue> = serde_json::from_slice(body)?;
+    let nvext = token_ids
+        .map(|ids| nvext_with_token_data(members.get("nvext").copied(), ids))
+        .transpose()?;
+    if let Some(nvext) = &nvext {
+        members.insert("nvext".to_string(), nvext);
     }
-
-    if let Some(cache_salt) = cache_salt {
-        // Top-level `cache_salt` is the canonical field native vLLM reads; the
-        // Dynamo tag keeps the namespace unambiguous in KV event extra_keys.
-        obj.insert(
-            "cache_salt".to_string(),
-            serde_json::Value::String(format!("{}{}", DYNAMO_CACHE_SALT_PREFIX, cache_salt)),
-        );
+    let salt = cache_salt
+        .map(|salt| serde_json::value::to_raw_value(&format!("{DYNAMO_CACHE_SALT_PREFIX}{salt}")))
+        .transpose()?;
+    if let Some(salt) = &salt {
+        members.insert("cache_salt".to_string(), salt);
     }
+    Ok(serde_json::to_vec(&members)?)
+}
 
-    Ok(serde_json::to_vec(&parsed)?)
+/// `nvext` with `token_data` set to `token_ids`, keeping its other fields
+/// byte for byte.
+fn nvext_with_token_data(
+    nvext: Option<&RawValue>,
+    token_ids: &[u32],
+) -> anyhow::Result<Box<RawValue>> {
+    let mut fields: BTreeMap<String, Box<RawValue>> = match nvext {
+        Some(raw) => serde_json::from_str(raw.get())
+            .map_err(|_| anyhow::anyhow!("nvext is not a JSON object"))?,
+        None => BTreeMap::new(),
+    };
+    fields.insert(
+        "token_data".to_string(),
+        serde_json::value::to_raw_value(token_ids)?,
+    );
+    Ok(serde_json::value::to_raw_value(&fields)?)
 }
 
 /// Extract the "model" field from a JSON request body.
