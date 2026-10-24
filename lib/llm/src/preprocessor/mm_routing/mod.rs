@@ -175,7 +175,8 @@ pub(crate) struct VideoRoutingReplacement {
 enum SupportedVideoModel {
     Qwen3(qwen3::Qwen3VideoRoutingSpec),
     Nemotron(nemotron::NemotronVideoRoutingSpec),
-    #[cfg(test)]
+    // Its only user is a preprocessor test that also needs a NIXL-backed media loader.
+    #[cfg(all(test, feature = "testing-nixl"))]
     TestStub,
 }
 
@@ -184,7 +185,7 @@ pub(crate) struct VideoRoutingProcessor {
 }
 
 impl VideoRoutingProcessor {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-nixl"))]
     pub(crate) fn test_stub() -> Self {
         Self {
             model: SupportedVideoModel::TestStub,
@@ -232,7 +233,7 @@ impl VideoRoutingProcessor {
         match &self.model {
             SupportedVideoModel::Qwen3(spec) => spec.build_replacement(input),
             SupportedVideoModel::Nemotron(spec) => spec.build_replacement(input),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "testing-nixl"))]
             SupportedVideoModel::TestStub => anyhow::bail!("test video routing processor stub"),
         }
     }
@@ -241,7 +242,7 @@ impl VideoRoutingProcessor {
         match &self.model {
             SupportedVideoModel::Qwen3(spec) => spec.kv_event_mm_identity(),
             SupportedVideoModel::Nemotron(_) => KvEventMmIdentity::MmMetadata,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "testing-nixl"))]
             SupportedVideoModel::TestStub => KvEventMmIdentity::MmMetadata,
         }
     }
