@@ -244,18 +244,19 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for PromptJson<T> {
 
 /// `application/json` or an `application/*+json` subtype, as axum's `Json` accepts.
 fn has_json_content_type(headers: &HeaderMap) -> bool {
-    let Some(content_type) = headers
+    let essence = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    let essence = content_type.split(';').next().unwrap_or_default().trim();
+        .and_then(|value| value.split(';').next())
+        .unwrap_or_default()
+        .trim();
     let Some((kind, subtype)) = essence.split_once('/') else {
         return false;
     };
-    kind.eq_ignore_ascii_case("application")
-        && (subtype.eq_ignore_ascii_case("json") || subtype.to_ascii_lowercase().ends_with("+json"))
+    let suffix = subtype
+        .rsplit_once('+')
+        .map_or(subtype, |(_, suffix)| suffix);
+    kind.eq_ignore_ascii_case("application") && suffix.eq_ignore_ascii_case("json")
 }
 
 async fn not_found() -> Response {

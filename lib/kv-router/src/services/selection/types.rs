@@ -11,8 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::kv_hints::KvHint;
 use crate::protocols::{
-    DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement, RoutingConstraints,
-    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    BlockExtraInfo, DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement,
+    RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
@@ -20,83 +20,8 @@ use crate::scheduling::{PotentialLoad, SessionContext, WorkerSelectionInputTrigg
 use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::{MmRoutingInfoRequest, PromptRequest};
-use crate::protocols::BlockExtraInfo;
 
 pub const DEFAULT_MODEL_NAME: &str = "default";
-
-/// Request bodies carry `PromptRequest`'s fields at the top level. `#[serde(flatten)]`
-/// would buffer the whole body through serde's `Content` first: every token id becomes a
-/// boxed `Content` value, and self-describing-only inputs (pythonize) fall back to untyped
-/// integer extraction. Each request type instead deserializes through a flat wire struct
-/// with the prompt fields inlined.
-macro_rules! inline_prompt_wire {
-    ($wire:ident => $target:ident {
-        $($(#[$meta:meta])* $field:ident: $ty:ty,)*
-    }) => {
-        #[derive(Deserialize)]
-        struct $wire {
-            $($(#[$meta])* $field: $ty,)*
-            token_ids: Option<Vec<u32>>,
-            mm_routing_info: Option<MmRoutingInfoRequest>,
-            block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
-            block_hashes: Option<Vec<i64>>,
-            sequence_hashes: Option<Vec<i64>>,
-            isl_tokens: Option<usize>,
-            lora_name: Option<String>,
-            #[serde(default, rename = "cache_salt")]
-            cache_namespace: Option<String>,
-            #[serde(default, deserialize_with = "strict_bool")]
-            is_eagle: Option<bool>,
-        }
-
-        impl From<$wire> for $target {
-            fn from(wire: $wire) -> Self {
-                Self {
-                    $($field: wire.$field,)*
-                    prompt: PromptRequest {
-                        token_ids: wire.token_ids,
-                        mm_routing_info: wire.mm_routing_info,
-                        block_mm_infos: wire.block_mm_infos,
-                        block_hashes: wire.block_hashes,
-                        sequence_hashes: wire.sequence_hashes,
-                        isl_tokens: wire.isl_tokens,
-                        lora_name: wire.lora_name,
-                        cache_namespace: wire.cache_namespace,
-                        is_eagle: wire.is_eagle,
-                    },
-                }
-            }
-        }
-    };
-}
-
-/// A boolean or null, nothing else. A typed `bool` field would let pythonize coerce any
-/// truthy object, so `"is_eagle": "false"` would enable Eagle hashing.
-fn strict_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
-    struct StrictBool;
-
-    impl Visitor<'_> for StrictBool {
-        type Value = Option<bool>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a boolean or null")
-        }
-
-        fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
-            Ok(Some(value))
-        }
-
-        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-    }
-
-    deserializer.deserialize_any(StrictBool)
-}
 
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -493,6 +418,80 @@ impl WorkerCatalogRecord {
             self.kv_event_source_mode = patch.kv_event_source_mode;
         }
     }
+}
+
+/// Request bodies carry `PromptRequest`'s fields at the top level. `#[serde(flatten)]`
+/// would buffer the whole body through serde's `Content` first: every token id becomes a
+/// boxed `Content` value, and self-describing-only inputs (pythonize) fall back to untyped
+/// integer extraction. Each request type instead deserializes through a flat wire struct
+/// with the prompt fields inlined.
+macro_rules! inline_prompt_wire {
+    ($wire:ident => $target:ident {
+        $($(#[$meta:meta])* $field:ident: $ty:ty,)*
+    }) => {
+        #[derive(Deserialize)]
+        struct $wire {
+            $($(#[$meta])* $field: $ty,)*
+            token_ids: Option<Vec<u32>>,
+            mm_routing_info: Option<MmRoutingInfoRequest>,
+            block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+            block_hashes: Option<Vec<i64>>,
+            sequence_hashes: Option<Vec<i64>>,
+            isl_tokens: Option<usize>,
+            lora_name: Option<String>,
+            #[serde(default, rename = "cache_salt")]
+            cache_namespace: Option<String>,
+            #[serde(default, deserialize_with = "strict_bool")]
+            is_eagle: Option<bool>,
+        }
+
+        impl From<$wire> for $target {
+            fn from(wire: $wire) -> Self {
+                Self {
+                    $($field: wire.$field,)*
+                    prompt: PromptRequest {
+                        token_ids: wire.token_ids,
+                        mm_routing_info: wire.mm_routing_info,
+                        block_mm_infos: wire.block_mm_infos,
+                        block_hashes: wire.block_hashes,
+                        sequence_hashes: wire.sequence_hashes,
+                        isl_tokens: wire.isl_tokens,
+                        lora_name: wire.lora_name,
+                        cache_namespace: wire.cache_namespace,
+                        is_eagle: wire.is_eagle,
+                    },
+                }
+            }
+        }
+    };
+}
+
+/// A boolean or null, nothing else. A typed `bool` field would let pythonize coerce any
+/// truthy object, so `"is_eagle": "false"` would enable Eagle hashing.
+fn strict_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    struct StrictBool;
+
+    impl Visitor<'_> for StrictBool {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a boolean or null")
+        }
+
+        fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+            Ok(Some(value))
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StrictBool)
 }
 
 #[derive(Debug, Deserialize)]
