@@ -49,7 +49,7 @@ fn endpoint_device_type() -> Option<DeviceType> {
     Some(DeviceType::Cuda)
 }
 
-/// A registered endpoint whose exact callable instance is ready for use.
+/// A started request listener and its exact callable instance.
 ///
 /// Dropping this handle does not stop the endpoint. Call [`shutdown`](Self::shutdown)
 /// for scoped endpoint lifetimes, or [`wait`](Self::wait) for the traditional
@@ -131,6 +131,16 @@ impl EndpointConfigBuilder {
 
     /// Start an endpoint and return once its exact discovery instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
+        self.start_inner(true).await
+    }
+
+    /// Start the request listener without publishing a discovery instance.
+    /// The caller must gate requests and explicitly authorize later registration.
+    pub async fn start_without_registration(self) -> Result<StartedEndpoint> {
+        self.start_inner(false).await
+    }
+
+    async fn start_inner(self, register: bool) -> Result<StartedEndpoint> {
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
             self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
@@ -233,16 +243,28 @@ impl EndpointConfigBuilder {
         // consistent registration/discovery across the system.
         let discovery = endpoint.drt().discovery();
 
-        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-            transport,
-            device_type: endpoint_device_type(),
-            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+        let registration = if register {
+            let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                transport,
+                device_type: endpoint_device_type(),
+                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+            };
+            discovery.register(discovery_spec).await
+        } else {
+            Ok(crate::discovery::DiscoveryInstance::Endpoint(Instance {
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                namespace: endpoint_id.namespace.clone(),
+                instance_id: connection_id,
+                transport,
+                device_type: endpoint_device_type(),
+                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+            }))
         };
-
-        let discovery_instance = match discovery.register(discovery_spec).await {
+        let discovery_instance = match registration {
             Ok(instance) => instance,
             Err(e) => {
                 tracing::error!(

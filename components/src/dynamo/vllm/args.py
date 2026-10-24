@@ -169,6 +169,24 @@ def cross_validate_config(
 ) -> None:
     """Validate dynamo and engine config together. This should not modify the configs."""
 
+    if "DYNAMO_ENGINE_GROUP" in os.environ:
+        if (
+            dynamo_config.disaggregation_mode != DisaggregationMode.AGGREGATED
+            or dynamo_config.embedding_worker
+            or dynamo_config.classify_worker
+            or dynamo_config.realtime
+            or dynamo_config.enable_rl
+            or dynamo_config.gms_shadow_mode
+            or dynamo_config.route_to_encoder
+            or engine_config.enable_lora
+            or engine_config.kv_transfer_config is not None
+            or os.environ.get("DYN_SNAPSHOT_CONTROL_DIR")
+        ):
+            raise ValueError(
+                "managed Engine Groups require aggregated generation without "
+                "pooling, realtime, RL, LoRA, disaggregation, shadow or snapshot lifecycles"
+            )
+
     if hasattr(engine_config, "stream_interval") and engine_config.stream_interval != 1:
         logger.info(
             "--stream-interval=%d will be propagated to the Dynamo frontend. "

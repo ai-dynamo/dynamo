@@ -218,7 +218,12 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
     parent_config = _vllm_config()
     monkeypatch.delenv(processes._ROLE_ENV, raising=False)
     monkeypatch.setattr(processes, "_short_rpc_directory", lambda: rpc_directory)
-    monkeypatch.setattr(processes, "get_engine_zmq_addresses", lambda *_: addresses)
+    monkeypatch.setattr(
+        processes.engine_utils,
+        "get_engine_zmq_addresses",
+        lambda *_: addresses,
+        raising=False,
+    )
     monkeypatch.setattr(processes, "launch_core_engines", launch_context)
     monkeypatch.setattr(processes.Executor, "get_class", lambda _config: object)
     monkeypatch.setattr(processes.subprocess, "Popen", create_child)

@@ -220,6 +220,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
+    m.add_class::<PyStartedEndpoint>()?;
     m.add_class::<PyFirstTokenSource>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
@@ -916,6 +917,25 @@ struct Endpoint {
     event_loop: PyObject,
 }
 
+/// Listener startup acknowledgment. Endpoint shutdown remains owned by the runtime.
+#[pyclass(name = "StartedEndpoint")]
+struct PyStartedEndpoint {
+    inner: Option<rs::component::StartedEndpoint>,
+}
+
+#[pymethods]
+impl PyStartedEndpoint {
+    fn wait<'p>(&mut self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let started = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("endpoint wait has already been started"))?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            started.wait().await.map_err(to_pyerr)
+        })
+    }
+}
+
 #[pyclass(name = "FirstTokenSource")]
 #[derive(Clone)]
 struct PyFirstTokenSource {
@@ -1457,33 +1477,15 @@ impl DistributedRuntime {
     }
 }
 
-#[pymethods]
 impl Endpoint {
-    /// Create one fail-open completion source for this serving endpoint.
-    fn first_token_source<'p>(
+    fn endpoint_config(
         &self,
-        py: Python<'p>,
-        worker_type: WorkerType,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let endpoint = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(
-                llm_rs::first_token::FirstTokenSource::for_endpoint(&endpoint, worker_type.into())
-                    .await
-                    .map(|inner| PyFirstTokenSource { inner }),
-            )
-        })
-    }
-
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
-    fn serve_endpoint<'p>(
-        &self,
-        py: Python<'p>,
+        py: Python<'_>,
         generator: PyObject,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
-        health_check_payload: Option<&Bound<'p, PyDict>>,
-    ) -> PyResult<Bound<'p, PyAny>> {
+        health_check_payload: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<rs::component::EndpointConfigBuilder> {
         // Push egress: the handler pushes each response into a Rust channel via
         // its `response_sender` argument, instead of Rust pulling `__anext__`
         // off its generator on a tokio thread once per response. Selected per
@@ -1587,14 +1589,78 @@ impl Endpoint {
             builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
         }
 
-        let graceful_shutdown = graceful_shutdown.unwrap_or(true);
+        Ok(builder.graceful_shutdown(graceful_shutdown.unwrap_or(true)))
+    }
+}
+
+#[pymethods]
+impl Endpoint {
+    /// Create one fail-open completion source for this serving endpoint.
+    fn first_token_source<'p>(
+        &self,
+        py: Python<'p>,
+        worker_type: WorkerType,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let endpoint = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            builder
-                .graceful_shutdown(graceful_shutdown)
-                .start()
-                .await
-                .map_err(to_pyerr)?;
+            Ok(
+                llm_rs::first_token::FirstTokenSource::for_endpoint(&endpoint, worker_type.into())
+                    .await
+                    .map(|inner| PyFirstTokenSource { inner }),
+            )
+        })
+    }
+
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    fn serve_endpoint<'p>(
+        &self,
+        py: Python<'p>,
+        generator: PyObject,
+        graceful_shutdown: Option<bool>,
+        metrics_labels: Option<Vec<(String, String)>>,
+        health_check_payload: Option<&Bound<'p, PyDict>>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let builder = self.endpoint_config(
+            py,
+            generator,
+            graceful_shutdown,
+            metrics_labels,
+            health_check_payload,
+        )?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            builder.start().await.map_err(to_pyerr)?;
             Ok(())
+        })
+    }
+
+    /// Start a callable listener, optionally withholding discovery publication.
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None, *, register = true))]
+    fn start_endpoint<'p>(
+        &self,
+        py: Python<'p>,
+        generator: PyObject,
+        graceful_shutdown: Option<bool>,
+        metrics_labels: Option<Vec<(String, String)>>,
+        health_check_payload: Option<&Bound<'p, PyDict>>,
+        register: bool,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let builder = self.endpoint_config(
+            py,
+            generator,
+            graceful_shutdown,
+            metrics_labels,
+            health_check_payload,
+        )?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let started = if register {
+                builder.start_with_registration().await
+            } else {
+                builder.start_without_registration().await
+            }
+            .map_err(to_pyerr)?;
+            Ok(PyStartedEndpoint {
+                inner: Some(started),
+            })
         })
     }
 

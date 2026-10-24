@@ -16,6 +16,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Optional
 
+from vllm import envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -36,6 +37,8 @@ from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
+from .engine_group import EngineGroupServing
+from .external_elastic_ep import uses_external_elastic_ep
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
@@ -1306,6 +1309,19 @@ class WorkerFactory:
         )
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
+        if "DYNAMO_ENGINE_GROUP" in os.environ:
+            if not uses_external_elastic_ep(engine_client):
+                raise ValueError("managed serving requires external Elastic EP")
+            handler.engine_group_serving = EngineGroupServing(
+                engine_client,
+                generate_endpoint,
+                os.environ["DYNAMO_POD_UID"],
+                vllm_config.parallel_config.data_parallel_rank,
+                await generate_endpoint.client(),
+                handler.can_serve_engine_group,
+                handler.probe_engine_group,
+                drain_requests=vllm_envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS,
+            )
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -1445,15 +1461,28 @@ class WorkerFactory:
                 ),
             ]
 
-            serve_tasks = [
-                # for decode, we want to transfer the in-flight requests to other decode engines,
-                # because waiting them to finish can take a long time for long OSLs
-                generate_endpoint.serve_endpoint(
+            group_serving = handler.engine_group_serving
+            if group_serving is None:
+                serving = generate_endpoint.serve_endpoint(
                     handler.generate,  # type: ignore
                     graceful_shutdown=True,
                     metrics_labels=model_metrics_labels,
                     health_check_payload=health_check_payload,
-                ),
+                )
+            else:
+                # Start transport without discovery, then let native readiness
+                # and the worker's own serving checks drive registration.
+                started = await generate_endpoint.start_endpoint(
+                    handler.generate,
+                    graceful_shutdown=True,
+                    metrics_labels=model_metrics_labels,
+                    register=False,
+                )
+                group_serving.is_ready = True
+                serving = started.wait()
+
+            serve_tasks = [
+                serving,
                 clear_endpoint.serve_endpoint(
                     handler.clear_kv_blocks,
                     metrics_labels=model_metrics_labels,
@@ -1490,7 +1519,35 @@ class WorkerFactory:
                     ]
                 )
 
-            await asyncio.gather(*serve_tasks)
+            tasks = [asyncio.ensure_future(task) for task in serve_tasks]
+            serving = asyncio.gather(*tasks)
+            maintenance = None
+            try:
+                if group_serving is not None:
+                    maintenance = asyncio.create_task(
+                        group_serving.maintain(shutdown_event)
+                    )
+                    done, _ = await asyncio.wait(
+                        (serving, maintenance), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if maintenance in done:
+                        await maintenance
+                await serving
+            finally:
+                try:
+                    if group_serving is not None:
+                        group_serving.is_ready = False
+                        group_serving.is_admitted = False
+                        if maintenance is not None:
+                            maintenance.cancel()
+                            await asyncio.gather(maintenance, return_exceptions=True)
+                        await group_serving.withdraw()
+                finally:
+                    serving.cancel()
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(serving, return_exceptions=True)
+                    await asyncio.gather(*tasks, return_exceptions=True)
             logger.debug("serve_endpoint completed for decode worker")
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
@@ -1821,7 +1878,15 @@ class WorkerFactory:
         runtime.register_engine_route(
             "control/scale_elastic_ep", handler.scale_elastic_ep
         )
+        runtime.register_engine_route(
+            "control/is_scaling_elastic_ep", handler.is_scaling_elastic_ep
+        )
         runtime.register_engine_route("control/ep_capacity", handler.get_ep_capacity)
+        group_serving = handler.engine_group_serving
+        if group_serving is not None:
+            runtime.register_engine_route(
+                "control/engine_group_status", group_serving.observe
+            )
 
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
@@ -1857,7 +1922,8 @@ class WorkerFactory:
 
         logger.info(
             "Registered engine routes: control/sleep, control/wake_up, "
-            "control/scale_elastic_ep, control/ep_capacity, "
+            "control/scale_elastic_ep, control/is_scaling_elastic_ep, "
+            "control/ep_capacity, "
             "control/start_profile, control/stop_profile, "
             "and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
