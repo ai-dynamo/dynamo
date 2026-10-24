@@ -77,6 +77,7 @@ from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
     normalize_top_k_for_trtllm,
     request_cache_salt,
+    request_trtllm_priority,
 )
 
 if TYPE_CHECKING:
@@ -1300,7 +1301,7 @@ class HandlerBase(BaseGenerativeHandler):
             )
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
-        priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        priority = request_trtllm_priority(request, DEFAULT_REQUEST_PRIORITY)
         cache_salt = request_cache_salt(request)
         if cache_salt is None and request.get(HEALTH_CHECK_KEY):
             # Keep the canary out of the unsalted namespace that TRT-LLM's

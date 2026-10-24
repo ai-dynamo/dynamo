@@ -239,7 +239,7 @@ Backend details:
 
 - **SGLang**: Requires [`--enable-priority-scheduling`](../knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-scheduling) for queue ordering and [`--radix-eviction-policy priority`](../knowledge-base/modular-components/backends/sglang/agents-on-sglang.md#priority-based-kv-cache-eviction) for priority-based eviction.
 - **vLLM**: Requires [`--scheduling-policy priority`](../knowledge-base/modular-components/backends/vllm/reference-guide.md#priority-scheduling).
-- **TensorRT-LLM**: Does not currently support per-request priority.
+- **TensorRT-LLM**: Requires `scheduler_config.waiting_queue_policy: priority` in the engine config (PyTorch backend). See [Priority Scheduling](../../use-cases/agents/priority-scheduling.md#backend-engine-priority) for how Dynamo maps the value onto TensorRT-LLM's `[0.0, 1.0]` scale.
 
 ```json
 {
