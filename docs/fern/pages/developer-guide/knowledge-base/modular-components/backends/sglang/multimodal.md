@@ -24,15 +24,16 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 >   encoding. The multimodal router launcher uses this path for exact
 >   video-aware KV routing.
 > - Disaggregated Qwen2-family deployments support H.264 and H.265 through the
->   frontend-facing `--disaggregation-mode encode` worker. NVDEC performs the
->   decode before the vision encoder produces embeddings.
+>   frontend-facing `--disaggregation-mode encode` worker when
+>   `DYN_DISABLE_NVDEC=0`. NVDEC decodes the video before the vision encoder
+>   produces embeddings.
 >
 > The shipped SGLang image does not provide an AV1 input decoder. SGLang XPU
 > images also omit the frontend FFmpeg decoder, so the aggregated VP8/VP9 path
 > is CUDA-only.
 >
-> NVDEC requires a GPU with a video decode engine and a container granted the
-> `video` driver capability — see
+> NVDEC also requires a GPU with a video decode engine and a container granted
+> the `video` driver capability — see
 > [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
 > `file://` sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
 

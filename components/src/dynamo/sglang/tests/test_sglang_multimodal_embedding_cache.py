@@ -576,8 +576,9 @@ _BLOCKED_URL = "http://169.254.169.254/latest/meta-data/"
 
 
 @pytest.fixture
-def nvdec_handler(cache_handler) -> MultimodalEncodeWorkerHandler:
+def nvdec_handler(cache_handler, monkeypatch) -> MultimodalEncodeWorkerHandler:
     """cache_handler wired with the attributes the NVDEC path reads."""
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "0")
     cache_handler.num_video_frames = 32
     return cache_handler
 
@@ -645,10 +646,15 @@ async def test_disabled_nvdec_fetches_remote_video_with_configured_limit(
 def test_nvdec_video_enabled_gating(nvdec_handler, monkeypatch) -> None:
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
 
-    # Disabled explicitly.
+    # Disabled by default, even if the decoder is installed.
+    monkeypatch.delenv("DYN_DISABLE_NVDEC", raising=False)
+    assert nvdec_handler._nvdec_video_enabled() is False
+
     monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
     assert nvdec_handler._nvdec_video_enabled() is False
-    monkeypatch.delenv("DYN_DISABLE_NVDEC", raising=False)
+
+    # Enabled explicitly.
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "0")
 
     # No PyNvVideoCodec / CUDA.
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: False)

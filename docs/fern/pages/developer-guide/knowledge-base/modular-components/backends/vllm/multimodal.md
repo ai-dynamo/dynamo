@@ -24,13 +24,16 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 | **Audio** | Yes | Yes, with decode reload | Not routed to the separate encoder |
 
 > [!IMPORTANT]
-> **Video input is limited to H.264 and H.265.** The runtime images ship no software
-> video decoder, so these codecs are decoded on the GPU by NVDEC and no other codec
-> (VP8, VP9, AV1) has a decoder available. NVDEC decode requires a GPU with a video
-> decode engine and a container granted the `video` driver capability — see
+> The shipped vLLM worker image has no software video decoder. Backend decoding
+> of H.264/H.265 requires NVDEC enabled with `DYN_DISABLE_NVDEC=0`, or an
+> additional software decoder. With `--frontend-decoding`, Dynamo's in-tree
+> FFmpeg can decode VP8/VP9 before the video reaches vLLM. AV1 requires an
+> additional decoder. NVDEC requires a GPU with a video decode engine and a
+> container granted the `video` driver capability — see
 > [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
-> `http`, `https`, `file://` and `data:` sources are all hardware-decoded; `file://`
-> additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
+> When NVDEC is enabled, `http`, `https`, `file://` and `data:` sources are all
+> hardware-decoded; `file://` additionally requires `DYN_MM_LOCAL_PATH` to
+> permit local reads.
 
 ### Supported URL Formats
 

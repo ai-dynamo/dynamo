@@ -95,7 +95,8 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
 VIDEO_TEST_URI = MULTIMODAL_VIDEO_URL
 
 # Evaluated once at collection, like the vLLM profile's guard: NVDEC needs
-# the container's driver "video" capability, which CI runners do not grant.
+# DYN_DISABLE_NVDEC=0 and the container's driver "video" capability, which CI
+# runners do not grant.
 _NVDEC_UNAVAILABLE = not nvdec_available()
 
 # Generated multimodal configs from profile definitions (mirrors test_vllm.py).
@@ -855,8 +856,9 @@ sglang_configs = {
             pytest.mark.skipif(
                 _NVDEC_UNAVAILABLE,
                 reason=(
-                    "NVDEC/PyNvVideoCodec unavailable; needs the driver "
-                    "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                    "NVDEC is disabled or unavailable. Enable it with DYN_DISABLE_NVDEC=0 "
+                    "and grant the driver 'video' capability "
+                    "(NVIDIA_DRIVER_CAPABILITIES)"
                 ),
             ),
             pytest.mark.timeout(420),

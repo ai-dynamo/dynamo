@@ -35,9 +35,9 @@ from tests.utils.payload_builder import (
 # NVDEC H.264/H.265 serve cases hardware-decode via libnvcuvid, which needs the
 # container's driver "video" capability (NVIDIA_DRIVER_CAPABILITIES=...,video).
 # Runners without it can't decode H.264/H.265 and the codec-compliant image
-# ships no software fallback, so skip rather than fail. Evaluated once at
-# collection; mirrors the guard in
-# components/src/dynamo/common/tests/multimodal/test_nvdec_decoder_gpu.py.
+# ships no software fallback, so skip rather than fail. NVDEC must also be
+# enabled with DYN_DISABLE_NVDEC=0. Evaluated once at collection; mirrors the
+# guard in components/src/dynamo/common/tests/multimodal/test_nvdec_decoder_gpu.py.
 # NVDEC is still validated on gpu-ts.
 _NVDEC_UNAVAILABLE = not nvdec_available()
 
@@ -172,8 +172,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     pytest.mark.skipif(
                         _NVDEC_UNAVAILABLE,
                         reason=(
-                            "NVDEC/PyNvVideoCodec unavailable; needs the driver "
-                            "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                            "NVDEC is disabled or unavailable. Enable it with DYN_DISABLE_NVDEC=0 "
+                            "and grant the driver 'video' capability "
+                            "(NVIDIA_DRIVER_CAPABILITIES)"
                         ),
                     ),
                 ],

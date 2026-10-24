@@ -11,7 +11,7 @@ Two input classes are already covered without installing anything:
 
 - **VP8 and VP9 video** decode through the in-tree FFmpeg when frontend
   decoding is enabled on vLLM, or SGLang on CUDA.
-- **H.264 and H.265 video** decode on the GPU through NVDEC on supported backend paths. NVDEC needs a GPU with a video decode engine and a container granted the `video` driver capability. See [Video Decode GPU Requirements](video-decode-gpu-requirements.md) for the hardware and capability matrix.
+- **H.264 and H.265 video** decode on the GPU through NVDEC on supported backend paths when enabled via `DYN_DISABLE_NVDEC=0`. NVDEC needs a GPU with a video decode engine and a container granted the `video` driver capability. See [Video Decode GPU Requirements](video-decode-gpu-requirements.md) for the hardware and capability matrix.
 
 Without frontend decoding, the backend worker owns VP8/VP9 decoding. Follow the
 [same-version replacement procedure](#notes-and-limits) for vLLM video; other
@@ -19,7 +19,7 @@ backends need the corresponding package from the table below. Installing an
 additional decoder package also covers:
 
 - **AAC and other compressed audio**, which NVDEC does not decode at all.
-- **H.264 and H.265 on hosts where NVDEC is unavailable** — no video decode engine on the GPU, or a container without the `video` capability.
+- **H.264 and H.265 where NVDEC is disabled or unavailable** — including the default configuration, a GPU with no video decode engine, or a container without the `video` capability.
 
 Each backend decodes such input through a specific Python package whose wheel bundles its own FFmpeg, so the support is added with a plain `pip install` — no image rebuild. **Nothing installs automatically.** There is no environment switch and no startup hook: an operator runs the install as a deliberate, visible step, so a deployment that broadens the image's codec surface says so in its Dockerfile, pod spec, or runbook.
 
@@ -99,9 +99,9 @@ The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables
 
 ## Notes and limits
 
-- For H.264 and H.265, prefer NVDEC. Granting the container the `video` driver capability decodes those formats on the GPU with no extra package. Install a software decoder when that is not an option, or when the input is audio.
+- For H.264 and H.265, enable NVDEC with `DYN_DISABLE_NVDEC=0` and grant the `video` driver capability. Install a software decoder when that is not an option, or when the input is audio.
 - Installing a decoder package brings in that wheel's bundled media libraries. The runtime images are scanned for media components at build time; a package installed afterwards is not covered by that scan. Review what your deployment ships — a baked image layer keeps the change visible and reviewable.
-- On TensorRT-LLM, the install puts back `opencv-python-headless`, which those images deliberately do not ship. H.264 and H.265 already decode there through NVDEC, so install it only for a host where NVDEC is unavailable.
+- On TensorRT-LLM, the install puts back `opencv-python-headless`, which those images deliberately do not ship. H.264 and H.265 decode there through NVDEC when enabled, so install it only when NVDEC is disabled or unavailable.
 - The vLLM images ship OpenCV already, rebuilt from source with every video backend disabled. It covers still images — which multimodal Mistral models need, because `mistral_common` resizes every image through `cv2` — and decodes no video at all. Backend video input on vLLM goes through NVDEC. To decode video in software instead, swap that build for the PyPI wheel of the same version:
 
 ```bash

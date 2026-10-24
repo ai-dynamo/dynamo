@@ -17,6 +17,7 @@ the very image it is meant to validate.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -102,6 +103,7 @@ def test_nvdec_decodes_real_clips():
             [sys.executable, __file__, _WORKER_FLAG],
             capture_output=True,
             text=True,
+            env={**os.environ, "DYN_DISABLE_NVDEC": "0"},
             timeout=_WORKER_TIMEOUT_S,
             check=False,
         )
