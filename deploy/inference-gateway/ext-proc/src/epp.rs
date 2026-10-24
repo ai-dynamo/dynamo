@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
@@ -33,6 +33,9 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
+use crate::admission::{
+    RouterRejection, RouterRejectionExt, classify_router_error, record_rejection,
+};
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
@@ -502,7 +505,7 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
+            .context("Prefill reservation failed")
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
@@ -527,7 +530,7 @@ impl Router {
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<(WorkerWithDpRank, u32)> {
+    ) -> std::result::Result<(WorkerWithDpRank, u32), PickError> {
         let config_override = decode_router_config_override(is_disaggregated);
 
         let outcome = self
@@ -551,7 +554,12 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+            .map_err(|error| {
+                // Classify while the router's error is still typed.
+                let rejection = classify_router_error(&error);
+                record_rejection(rejection, &error);
+                rejection.into_pick_error()
+            })?;
 
         match outcome {
             FindBestMatchOutcome::Routed {
@@ -559,8 +567,10 @@ impl Router {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
+            // An outcome, not an error, so it is classified here.
             FindBestMatchOutcome::QueueRejected { rejection } => {
-                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
+                record_rejection(RouterRejection::QueueRejected, &rejection);
+                Err(RouterRejection::QueueRejected.into_pick_error())
             }
         }
     }
@@ -1467,7 +1477,8 @@ impl EndpointPicker for Router {
         // Try prefill routing first (disaggregated mode).
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
-        // router has been deactivated), fall back to aggregated routing.
+        // router has been deactivated), fall back to aggregated routing. A prefill refusal is
+        // final, as on the Frontend: falling back would bypass the prefill limits.
         let prefill_booking = self
             .route_prefill(
                 &format!("epp-prefill/{reservation_id}"),
@@ -1483,13 +1494,21 @@ impl EndpointPicker for Router {
 
         let is_disaggregated = match &prefill_booking {
             Ok(_) => true,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "Prefill routing failed; falling back to aggregated mode"
-                );
-                false
-            }
+            Err(e) => match classify_router_error(e) {
+                rejection @ (RouterRejection::Overloaded
+                | RouterRejection::QueueRejected
+                | RouterRejection::DeadlineExceeded) => {
+                    record_rejection(rejection, e);
+                    return Err(rejection.into_pick_error());
+                }
+                _ => {
+                    tracing::debug!(
+                        error = %format_args!("{e:#}"),
+                        "Prefill routing failed; falling back to aggregated mode"
+                    );
+                    false
+                }
+            },
         };
 
         let (decode_worker, _overlap) = self
@@ -1503,8 +1522,7 @@ impl EndpointPicker for Router {
                 allowed_worker_ids,
                 routing_constraints,
             )
-            .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+            .await?;
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.

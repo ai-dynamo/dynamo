@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::indexer::KvRouterError;
-use crate::scheduling::KvSchedulerError;
+use crate::scheduling::{KvSchedulerError, SchedulerRejection};
 use crate::sequences::SequenceError;
 
 #[derive(Debug, thiserror::Error)]
@@ -69,29 +69,17 @@ impl SelectionError {
 }
 
 fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
-    match error {
-        KvSchedulerError::NoEndpoints
-        | KvSchedulerError::AllEligibleWorkersFiltered
-        | KvSchedulerError::SubscriberShutdown
-        | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    match error.rejection() {
         // Deadline expiry is deliberately 429, not 504: the deadline elapsed
         // while waiting for capacity, so it is backpressure the client should
         // respond to like the overloaded family, not a gateway timeout.
-        KvSchedulerError::AllEligibleWorkersOverloaded
-        | KvSchedulerError::PinnedWorkerOverloaded { .. }
-        | KvSchedulerError::QueueRejected(_)
-        | KvSchedulerError::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
-        KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
-        // A duplicate live request id, or a lifecycle the caller ended (or
-        // re-registered) mid-classification, is caller-induced, like
-        // `BookingFailed` and `SequenceError::DuplicateRequest`.
-        KvSchedulerError::BookingFailed(_)
-        | KvSchedulerError::DuplicateClassificationRequestId(_)
-        | KvSchedulerError::ClassificationLifecycleEnded(_) => StatusCode::CONFLICT,
-        KvSchedulerError::RequestClassifierPanicked(_)
-        | KvSchedulerError::RequestClassifierFailed(_)
-        | KvSchedulerError::InvalidClassificationMetadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        SchedulerRejection::Overloaded
+        | SchedulerRejection::QueueRejected
+        | SchedulerRejection::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
+        SchedulerRejection::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        SchedulerRejection::BadRequest => StatusCode::BAD_REQUEST,
+        SchedulerRejection::Conflict => StatusCode::CONFLICT,
+        SchedulerRejection::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
