@@ -47,6 +47,15 @@ class UpgradeComponentStatusTest(unittest.TestCase):
                 component.update(readyReplicas=1, availableReplicas=1, replicas=2)
         self.assertEqual(expected, fixtures.golden_objects(actual, latest=True))
 
+        # LWS has no status when its external controller is not running in clusterenv.
+        lws = copy.deepcopy(next(obj for obj in objects if obj["kind"] == "Deployment"))
+        lws["kind"] = "LeaderWorkerSet"
+        lws.pop("status", None)
+        dcd = next(obj for obj in objects if obj["kind"] == "DynamoComponentDeployment")
+        normalized = fixtures.golden_objects([dcd, lws], latest=True)
+        self.assertNotIn("status", normalized[1])
+        self.assertEqual(lws["spec"], normalized[1]["spec"])
+
         # Historical capture keeps the complete observed status, including transient errors.
         historical = fixtures.golden_objects(actual)
         for obj in historical:

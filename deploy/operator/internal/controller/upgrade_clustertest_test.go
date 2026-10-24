@@ -23,6 +23,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -274,6 +275,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				after = captureUpgrade(t, env)
 			}
 			checkUpgradeGroveMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
+			checkUpgradeComponentMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
 			if isHistory {
 				if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {
 					t.Error(err)
@@ -296,7 +298,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				require.NoError(t, golden.WriteManifests(path, after))
 			}
 			if !isHistory && !item.promote && strings.HasSuffix(relative, "/component") && !t.Failed() {
-				t.Log("An intentional worker edit must reach a newly rendered Deployment even while Pods are blocked")
+				t.Log("An intentional worker edit must reach every immediate worker template while Pods are blocked")
 				current := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
 				for i := range current.Spec.Components {
 					if current.Spec.Components[i].ComponentType == api.ComponentTypeFrontend {
@@ -305,27 +307,12 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 					container := &current.Spec.Components[i].PodTemplate.Spec.Containers[0]
 					container.Env = append(container.Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
 				}
+				desiredHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
+				require.NoError(t, err)
 				require.NoError(t, env.Client().Update(ctx, current))
-				require.Eventually(t, func() bool {
-					for _, object := range captureUpgrade(t, env) {
-						if object.GetKind() != "Deployment" {
-							continue
-						}
-						containers, _, err := unstructured.NestedSlice(object.Object, "spec", "template", "spec", "containers")
-						if err != nil {
-							return false
-						}
-						for _, container := range containers {
-							for _, variable := range container.(map[string]any)["env"].([]any) {
-								v := variable.(map[string]any)
-								if v["name"] == "WORKER_REVISION" && v["value"] == "2" {
-									return true
-								}
-							}
-						}
-					}
-					return false
-				}, 60*time.Second, 200*time.Millisecond, "worker edit did not reach a Deployment")
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					assert.NoError(c, upgradeComponentWorkerEditError(current, captureUpgrade(t, env), desiredHash))
+				}, 60*time.Second, 200*time.Millisecond, "worker edit did not reach every Deployment/LWS template")
 				require.Error(t, upgradeSafetyError(false, after, captureUpgrade(t, env)))
 			}
 			if isHistory && strings.HasSuffix(relative, "/sglang-1.5") && !t.Failed() {
