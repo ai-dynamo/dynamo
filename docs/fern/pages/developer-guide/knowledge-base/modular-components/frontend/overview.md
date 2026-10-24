@@ -90,6 +90,15 @@ spec:
 
 See the [KServe gRPC Frontend](frontend-guide.md) page for KServe configuration options.
 
+## Responses API Output
+
+Dynamo serves `/v1/responses` by converting each request to Chat Completions and converting the result back. The converted output differs from the OpenAI Responses API in these ways:
+
+- Reasoning items are always returned when the model produces reasoning, with the raw trace in `content` as `reasoning_text` parts. When `reasoning.summary` is set, `summary` mirrors the raw trace and streaming emits `reasoning_summary_*` events instead of `reasoning_text` events.
+- Assistant messages carry `phase`. Text followed by a function call is `commentary`, and text still open when the response ends is `final_answer`. Streamed text followed by more reasoning is `commentary` when the request can call tools (it defines tools and `tool_choice` is not `none`), and `final_answer` otherwise.
+- Streaming sets `phase` on `response.output_item.done` and in `response.completed`, not on `response.output_item.added`.
+- A non-streaming response has no ordering information for text and calls, so its text becomes one `commentary` message placed before the calls. A streamed text, call, text sequence returns a `commentary` message, the call, and a `final_answer` message.
+
 ## Next Steps
 
 | Document | Description |
