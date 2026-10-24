@@ -78,7 +78,7 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 Console formatting does not affect OTLP export; use `jsonl` instead if the local stderr stream also
 needs machine-readable records.
 
-To export traces without runtime logs, disable only the log exporter:
+To export traces without runtime logs, disable only the runtime log exporter:
 
 ```bash
 export OTEL_EXPORT_ENABLED=true
@@ -92,7 +92,10 @@ Dynamo appends `/v1/traces` or `/v1/logs`.
 <Warning>
 `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` does not fall back to
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. If only the traces endpoint is set, logs use the generic
-endpoint or the protocol default and can be silently dropped when no collector is listening there.
+endpoint or the protocol default. When no collector is listening there, each failed export of a log
+batch prints a `BatchLogProcessor.ExportError` line on stderr. The batch processor exports every
+second by default, and sooner when 512 records are queued, so a process that keeps logging prints
+these lines continuously.
 Set `OTEL_EXPORT_LOGS_ENABLED=false` when the collector accepts traces only.
 </Warning>
 
