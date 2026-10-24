@@ -2783,6 +2783,78 @@ class TestPreprocessRawRequestControls:
         assert "thinking_mode" not in result.chat_template_kwargs
 
 
+class _FakeResponseFormatConsumingReasoningParser:
+    def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+        del tokenizer, chat_template_kwargs, model_config
+
+    def adjust_request(self, request):
+        request.response_format = None
+        return request
+
+
+class TestChatParamsApiMetadata:
+    """The renderer must see the caller's response_format and tool_choice.
+
+    vLLM's build_chat_params() reads both before any parser adjusts the request,
+    and some renderers write them into the prompt (Kimi K3 adds an instruction).
+    """
+
+    def _prepare(self, tokenizer, request_extra, **parsers):
+        request_for_sampling, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **request_extra,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=parsers.get("tool_parser_class"),
+            reasoning_parser_class=parsers.get("reasoning_parser_class"),
+        )
+        return request_for_sampling, chat_params
+
+    def test_response_format_without_parsers(self, tokenizer):
+        request_for_sampling, chat_params = self._prepare(
+            tokenizer, {"response_format": {"type": "json_object"}}
+        )
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format.type == "json_object"
+
+    def test_response_format_survives_reasoning_parser(self, tokenizer):
+        request_for_sampling, chat_params = self._prepare(
+            tokenizer,
+            {"response_format": {"type": "json_object"}},
+            reasoning_parser_class=_FakeResponseFormatConsumingReasoningParser,
+        )
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format is None
+
+    def test_response_format_survives_tool_parser(self, tokenizer):
+        request_for_sampling, chat_params = self._prepare(
+            tokenizer,
+            {
+                "response_format": {"type": "json_object"},
+                "tools": TOOL_REQUEST["tools"],
+                "tool_choice": "auto",
+            },
+            tool_parser_class=_FakeResponseFormatConsumingToolParser,
+        )
+        assert chat_params.response_format.type == "json_object"
+        assert request_for_sampling.response_format is None
+
+    def test_tool_choice_with_tools(self, tokenizer):
+        _, chat_params = self._prepare(
+            tokenizer,
+            {"tools": TOOL_REQUEST["tools"], "tool_choice": "required"},
+            tool_parser_class=_FakePassthroughToolParser,
+        )
+        assert chat_params.tool_choice == "required"
+
+    def test_tool_choice_without_tools(self, tokenizer):
+        # The API defaults tool_choice to "none"; without tools it is not rendered.
+        _, chat_params = self._prepare(tokenizer, {})
+        assert chat_params.tool_choice is None
+
+
 class _FakeStructuralTagReasoningParser:
     """A reasoning parser that rewrites the caller's constraint.
 
