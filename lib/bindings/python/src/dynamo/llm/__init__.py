@@ -7,6 +7,8 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
+from dynamo._core import AffinityHold as AffinityHold
+from dynamo._core import AffinityLease as AffinityLease
 from dynamo._core import AisPerfConfig as AisPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
@@ -37,12 +39,14 @@ from dynamo._core import ModelType as ModelType
 from dynamo._core import (
     MultimodalEmbeddingCachePublisher as MultimodalEmbeddingCachePublisher,
 )
+from dynamo._core import OfflineRouter as OfflineRouter
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import RoutingConstraints as RoutingConstraints
+from dynamo._core import SessionAffinity as SessionAffinity
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import WorkerType as WorkerType
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq
@@ -54,6 +58,7 @@ from dynamo._core import run_input
 from dynamo._core import run_kv_indexer as run_kv_indexer
 from dynamo._core import run_select_service as run_select_service
 from dynamo._core import run_slot_tracker as run_slot_tracker
+from dynamo._core import subagent_group_affinity_id as subagent_group_affinity_id
 from dynamo._core import unregister_model as unregister_model
 from dynamo._core import update_model_taints as update_model_taints
 
