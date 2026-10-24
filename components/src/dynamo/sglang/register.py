@@ -63,6 +63,7 @@ from dynamo.sglang.gateway import (
     effective_gateway_workers,
     gateway_engine_id,
 )
+from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -206,6 +207,8 @@ async def _register_model_with_runtime_config(
         True if registration succeeded, False otherwise.
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
+    if runtime_config is not None:
+        publish_kvcr_hint_capabilities(runtime_config, engine, server_args, worker_type)
 
     if dynamo_args.use_sglang_tokenizer and not (
         output_type.supports_embedding() or output_type.supports_rerank()
