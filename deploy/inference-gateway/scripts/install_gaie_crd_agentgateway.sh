@@ -33,12 +33,17 @@ kubectl apply --server-side --force-conflicts \
   -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
 
 # Install the Inference Extension CRDs.
-IGW_LATEST_RELEASE=v1.2.1
+IGW_LATEST_RELEASE=v1.6.2
 kubectl apply \
   -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml"
 
-# Install and upgrade agentgateway (includes CRDs).
-AGW_VERSION=v1.0.0
+# Install and upgrade agentgateway (includes CRDs). Stay on v1.2.x for now:
+# - Before v1.2.0, agentgateway opens a new TLS connection to the EPP for every
+#   request and keeps it idle for up to 3 minutes, which exhausts the EPP's
+#   connection limit under sustained load.
+# - From v1.3.0, it sends an ext_proc ProtocolConfiguration with
+#   send_body_without_waiting_for_header_response=false, which the EPP rejects.
+AGW_VERSION=v1.2.1
 helm upgrade -i --create-namespace --namespace "$AGW_NAMESPACE" --version "$AGW_VERSION" \
   agentgateway-crds oci://cr.agentgateway.dev/charts/agentgateway-crds
 
