@@ -30,6 +30,7 @@ from dynamo.common.utils.prometheus import (
     register_image_loader_metrics,
 )
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
+from dynamo.profiling.agent import ProfilingAgent
 from dynamo.runtime import DistributedRuntime, Endpoint
 
 from .args import Config
@@ -2900,6 +2901,9 @@ class WorkerFactory:
             generate_endpoint: Worker endpoint whose model taints can be updated.
         """
         register_model_taint_route(runtime, generate_endpoint)
+        runtime.register_engine_route(
+            "control/profiling_info", ProfilingAgent("vllm").info
+        )
         runtime.register_engine_route("control/start_profile", handler.start_profile)
         runtime.register_engine_route("control/stop_profile", handler.stop_profile)
         runtime.register_engine_route("control/sleep", handler.sleep)

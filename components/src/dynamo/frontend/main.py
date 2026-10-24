@@ -44,6 +44,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import FrontendArgGroup, FrontendConfig
+from .profiling.hosting import profiling_coordinator
 
 if TYPE_CHECKING:
     from .vllm_processor import EngineFactory
@@ -491,15 +492,28 @@ async def async_main():
         config.frontend_route_extensions
     )
 
-    try:
-        if config.interactive:
-            await run_input(runtime, "text", engine)
-        elif config.kserve_grpc_server:
-            await run_input(runtime, "grpc", engine)
-        else:
-            await run_input(runtime, "http", engine, frontend_route_extensions)
-    except asyncio.exceptions.CancelledError:
-        pass
+    async with profiling_coordinator(
+        config.profiling_config,
+        runtime_context={
+            "input_type": "text"
+            if config.interactive
+            else "grpc"
+            if config.kserve_grpc_server
+            else "http",
+            "route_extension_count": len(frontend_route_extensions)
+            if frontend_route_extensions
+            else 0,
+        },
+    ):
+        try:
+            if config.interactive:
+                await run_input(runtime, "text", engine)
+            elif config.kserve_grpc_server:
+                await run_input(runtime, "grpc", engine)
+            else:
+                await run_input(runtime, "http", engine, frontend_route_extensions)
+        except asyncio.exceptions.CancelledError:
+            pass
 
 
 async def graceful_shutdown(runtime: DistributedRuntime) -> None:
