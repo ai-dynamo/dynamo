@@ -709,6 +709,14 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade pip==26.2.
 RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade certifi==2026.10.19 && \
     /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 19) else 1)'
 
+# Raise the base image's Pillow in system site, for the same inventory reason as
+# aiohttp above; requirements.trtllm.txt only reaches the venv. Pillow has no
+# required dependencies, so this moves exactly one distribution. Mirrored by the
+# pre_runtime whiteout below: the upgrade renames the dist-info directory and the
+# hash-named libraries vendored in pillow.libs.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "pillow>=13.0.0,<14" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
+
 # Pin the upstream developer stack in system site, where the image inventory
 # reads it. The rc29 baseline on both architectures satisfies all transitive
 # requirements of these versions. Fail if the solve changes another distribution:
@@ -872,7 +880,10 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/attrs \
     /usr/local/lib/python3.12/dist-packages/attrs-* \
     /usr/local/lib/python3.12/dist-packages/certifi \
-    /usr/local/lib/python3.12/dist-packages/certifi-* && \
+    /usr/local/lib/python3.12/dist-packages/certifi-* \
+    /usr/local/lib/python3.12/dist-packages/PIL \
+    /usr/local/lib/python3.12/dist-packages/pillow-* \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
@@ -881,6 +892,7 @@ COPY --from=runtime_full / /
 # Validate after the overlay so stale base metadata cannot survive the refresh.
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 19) else 1)'
+RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
 
 {% if target not in ("dev", "local-dev") %}
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
