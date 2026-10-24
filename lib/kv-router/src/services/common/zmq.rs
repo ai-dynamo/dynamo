@@ -4,8 +4,7 @@
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc as StdArc, OnceLock};
+use std::sync::OnceLock;
 use std::task::{Context, Poll, ready};
 
 use anyhow::{Result, anyhow};
@@ -32,73 +31,47 @@ const ZMQ_LINGER_MS: i32 = 0;
 /// I/O threads for each shared context; the same variable the runtime event plane reads.
 const IO_THREADS_ENV: &str = "DYN_ZMQ_IO_THREADS";
 const DEFAULT_IO_THREADS: i32 = 4;
-/// Sockets per shared context, under libzmq's default `ZMQ_MAX_SOCKETS` of 1023, which the
-/// `zmq` crate cannot raise.
-const SOCKETS_PER_CONTEXT: usize = 1000;
 
 /// Process-wide ZMQ contexts. A context owns an I/O thread pool and a reaper thread, so a
 /// context per socket costs two threads per KV-event source; one SUB and one replay DEALER
-/// per worker rank made thousands of threads at large worker counts. Sockets share a
-/// context until it holds `capacity` of them, then the pool adds another.
+/// per worker rank made thousands of threads at large worker counts.
+///
+/// libzmq caps a context at `ZMQ_MAX_SOCKETS` (1023, which the `zmq` crate cannot raise),
+/// and a closed socket keeps its slot until the context's reaper thread has freed it. So the
+/// pool lets libzmq decide: a socket goes to the first context that accepts it, and the pool
+/// adds a context only when every existing one refuses with `EMFILE`.
 struct ContextPool {
-    contexts: std::sync::Mutex<Vec<PooledContext>>,
-    capacity: usize,
+    contexts: std::sync::Mutex<Vec<zmq::Context>>,
     io_threads: i32,
 }
 
-struct PooledContext {
-    context: zmq::Context,
-    sockets: StdArc<AtomicUsize>,
-}
-
-/// A socket's slot in a pooled context, released when the socket closes.
-struct ContextLease(StdArc<AtomicUsize>);
-
-impl Drop for ContextLease {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 impl ContextPool {
-    fn new(capacity: usize, io_threads: i32) -> Self {
+    fn new(io_threads: i32) -> Self {
         Self {
             contexts: std::sync::Mutex::new(Vec::new()),
-            capacity,
             io_threads,
         }
     }
 
     fn global() -> &'static Self {
         static POOL: OnceLock<ContextPool> = OnceLock::new();
-        POOL.get_or_init(|| Self::new(SOCKETS_PER_CONTEXT, io_threads_from_env()))
+        POOL.get_or_init(|| Self::new(io_threads_from_env()))
     }
 
-    /// Only this method adds sockets, under the lock, so no context exceeds `capacity`.
-    fn lease(&self) -> Result<(zmq::Context, ContextLease)> {
+    fn socket(&self, socket_type: zmq::SocketType) -> Result<zmq::Socket> {
         let mut contexts = self.contexts.lock().unwrap();
-        let index = match contexts
-            .iter()
-            .position(|pooled| pooled.sockets.load(Ordering::Acquire) < self.capacity)
-        {
-            Some(index) => index,
-            None => {
-                let context = zmq::Context::new();
-                // Takes effect only before the context's first socket.
-                context.set_io_threads(self.io_threads)?;
-                contexts.push(PooledContext {
-                    context,
-                    sockets: StdArc::default(),
-                });
-                contexts.len() - 1
+        for context in contexts.iter() {
+            match context.socket(socket_type) {
+                Err(zmq::Error::EMFILE) => continue,
+                result => return Ok(result?),
             }
-        };
-        let pooled = &contexts[index];
-        pooled.sockets.fetch_add(1, Ordering::AcqRel);
-        Ok((
-            pooled.context.clone(),
-            ContextLease(StdArc::clone(&pooled.sockets)),
-        ))
+        }
+        let context = zmq::Context::new();
+        // Takes effect only before the context's first socket.
+        context.set_io_threads(self.io_threads)?;
+        let socket = context.socket(socket_type)?;
+        contexts.push(context);
+        Ok(socket)
     }
 }
 
@@ -120,18 +93,15 @@ fn io_threads_from_env() -> i32 {
 }
 
 struct SocketWrapper {
-    // Field order matters: the socket closes before its context slot is released.
     socket: zmq::Socket,
     fd: RawFd,
-    _lease: ContextLease,
 }
 
 impl SocketWrapper {
-    fn new(socket: zmq::Socket, lease: ContextLease) -> Result<Self> {
+    fn new(socket: zmq::Socket) -> Result<Self> {
         Ok(Self {
             fd: socket.get_fd()?,
             socket,
-            _lease: lease,
         })
     }
 }
@@ -145,8 +115,8 @@ impl AsRawFd for SocketWrapper {
 pub(crate) struct ZmqSocket(AsyncFd<SocketWrapper>);
 
 impl ZmqSocket {
-    fn new(socket: zmq::Socket, lease: ContextLease) -> Result<Self> {
-        let wrapper = SocketWrapper::new(socket, lease)?;
+    fn new(socket: zmq::Socket) -> Result<Self> {
+        let wrapper = SocketWrapper::new(socket)?;
         // SAFETY: `fd` is the socket's `ZMQ_FD`, owned by the `zmq::Socket` that the wrapper
         // owns, so it stays open until the wrapper is dropped, and `as_raw_fd` always returns it.
         let fd = unsafe { AsyncFd::register(wrapper) }.map_err(std::io::Error::from)?;
@@ -307,21 +277,9 @@ fn build_socket<F>(socket_type: zmq::SocketType, configure: F) -> Result<ZmqSock
 where
     F: FnOnce(&zmq::Socket) -> Result<()>,
 {
-    build_socket_in(ContextPool::global(), socket_type, configure)
-}
-
-fn build_socket_in<F>(
-    pool: &ContextPool,
-    socket_type: zmq::SocketType,
-    configure: F,
-) -> Result<ZmqSocket>
-where
-    F: FnOnce(&zmq::Socket) -> Result<()>,
-{
-    let (context, lease) = pool.lease()?;
-    let socket = context.socket(socket_type)?;
+    let socket = ContextPool::global().socket(socket_type)?;
     configure(&socket)?;
-    ZmqSocket::new(socket, lease)
+    ZmqSocket::new(socket)
 }
 
 #[cfg(any(test, feature = "standalone-indexer"))]
@@ -362,12 +320,14 @@ pub(crate) fn connect_dealer_socket(endpoint: &str) -> Result<SharedSocket> {
     test
 ))]
 pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
-    build_socket(zmq::PUB, |socket| {
-        configure_send_socket(socket)?;
-        set_ipv6_for(socket, endpoint)?;
-        socket.bind(endpoint)?;
-        Ok(())
-    })
+    // Not pooled: the socket holds the only reference to its context, so dropping it
+    // terminates the context, which waits until libzmq has closed the listener. The port is
+    // free again as soon as the publisher's owner has shut down.
+    let socket = zmq::Context::new().socket(zmq::PUB)?;
+    configure_send_socket(&socket)?;
+    set_ipv6_for(&socket, endpoint)?;
+    socket.bind(endpoint)?;
+    ZmqSocket::new(socket)
 }
 
 #[cfg(feature = "standalone-indexer")]
@@ -431,19 +391,29 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn pool_adds_a_context_when_full_and_reuses_freed_slots() {
-        let pool = ContextPool::new(2, 1);
-        let sub = || build_socket_in(&pool, zmq::SUB, |_| Ok(())).unwrap();
-        let contexts = || pool.contexts.lock().unwrap().len();
-        let first = sub();
-        let _second = sub();
-        assert_eq!(contexts(), 1);
-        let _third = sub();
-        assert_eq!(contexts(), 2, "a full context gets a sibling");
-        drop(first);
-        let _reused = sub();
-        assert_eq!(contexts(), 2, "a closed socket frees its slot");
+    /// Soft `RLIMIT_NOFILE` from `/proc/self/limits`; 0 when it can't be read.
+    fn open_file_limit() -> u64 {
+        std::fs::read_to_string("/proc/self/limits")
+            .ok()
+            .and_then(|limits| {
+                let line = limits
+                    .lines()
+                    .find(|line| line.starts_with("Max open files"))?;
+                line.split_whitespace().nth(3)?.parse().ok()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn pool_adds_a_context_when_libzmq_refuses_a_socket() {
+        // libzmq holds an eventfd per socket and refuses the 1024th socket in a context.
+        if open_file_limit() < 4096 {
+            eprintln!("Skipping ZMQ context pool test: needs more than 1024 open files");
+            return;
+        }
+        let pool = ContextPool::new(1);
+        let _sockets: Vec<_> = (0..1024).map(|_| pool.socket(zmq::SUB).unwrap()).collect();
+        assert_eq!(pool.contexts.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
