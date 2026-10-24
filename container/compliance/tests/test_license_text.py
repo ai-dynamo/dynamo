@@ -15,7 +15,9 @@ from pathlib import Path
 from compliance.generators import go as go_gen
 from compliance.generators import rust as rust_gen
 from compliance.generators.common import (
+    UNKNOWN,
     Component,
+    normalize_cyclonedx_licenses,
     read_harvested_license,
     render_notices,
     spdx_license_text,
@@ -141,6 +143,59 @@ def test_go_prefers_harvested_via_escaped_path(tmp_path):
     )
     assert "Copyright Azure" in comp.license_text
     assert comp.license_text_is_canonical is False
+
+
+def test_normalize_cyclonedx_licenses():
+    """Preserve license values, entry order, grouping, and UNKNOWN fallbacks."""
+    # Table-driven rather than pytest.mark.parametrize so _run_manual.py,
+    # which calls each test with no arguments, can still run it.
+    cases = [
+        (None, UNKNOWN),
+        ([], UNKNOWN),
+        ([{"license": {"id": "MIT"}}], "MIT"),
+        ([{"expression": "MIT OR Apache-2.0"}], "MIT OR Apache-2.0"),
+        (
+            [{"license": {"name": "Some Custom License"}}],
+            "LicenseRef-Some-Custom-License",
+        ),
+        ([{}, {"license": {}}], UNKNOWN),
+        ([{}, {"license": {"id": "MIT"}}, {"license": {}}], "MIT"),
+        (
+            [
+                {"license": {"id": "MIT"}},
+                {"expression": "MIT OR Apache-2.0"},
+                {"license": {"name": "X"}},
+            ],
+            "MIT AND (MIT OR Apache-2.0) AND LicenseRef-X",
+        ),
+    ]
+    for licenses_field, expected in cases:
+        assert normalize_cyclonedx_licenses(licenses_field) == expected, licenses_field
+
+
+def test_go_falls_back_to_evidence_licenses():
+    """Use Go license evidence when the component has no top-level licenses."""
+    comp = go_gen._component_from_sbom_entry(
+        {
+            "name": "github.com/example/mod",
+            "version": "v1.0.0",
+            "evidence": {"licenses": [{"license": {"id": "BSD-3-Clause"}}]},
+            "purl": "pkg:golang/github.com/example/mod@v1.0.0",
+        }
+    )
+    assert comp.spdx == "BSD-3-Clause"
+
+
+def test_rust_falls_back_to_license_overrides():
+    """Use a Rust override when available and keep unknown crates as UNKNOWN."""
+    comp = rust_gen._component_from_sbom_entry(
+        {"name": "sgl-model-gateway", "version": "0.1.0"}
+    )
+    assert comp.spdx == "Apache-2.0"
+    comp2 = rust_gen._component_from_sbom_entry(
+        {"name": "no-such-crate-in-overrides", "version": "0.1.0"}
+    )
+    assert comp2.spdx == UNKNOWN
 
 
 def test_read_harvested_license_none_when_absent(tmp_path):
