@@ -22,7 +22,7 @@ from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
-    validate_media_url,
+    prepare_media_url,
 )
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
@@ -71,7 +71,7 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
     async def _passthrough_url(url, _policy):
         return url
 
-    monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", _passthrough_url)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.prepare_media_url", _passthrough_url)
 
     # Keep cache-only tests independent of host NVDEC capabilities. Tests that
     # exercise the NVDEC path enable it explicitly.
@@ -717,7 +717,7 @@ async def test_maybe_nvdec_decoder_wraps_h264_only(nvdec_handler, monkeypatch) -
     """H.264 yields a decoder built from the fetched bytes, not decoded frames."""
     decoder = object()
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
+        f"{_HANDLER_MOD}.prepare_media_url",
         AsyncMock(return_value="https://x/clip.mp4"),
     )
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
@@ -752,7 +752,7 @@ async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
     two origin fetches for one request before this change, one after.
     """
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
+        f"{_HANDLER_MOD}.prepare_media_url",
         AsyncMock(return_value="https://x/clip.webm"),
     )
     fetch = AsyncMock(return_value=b"vp9-bytes")
@@ -783,7 +783,7 @@ async def test_maybe_nvdec_decoder_rejects_non_http_scheme(
     about scheme dispatch rather than about the policy refusing it.
     """
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
+        f"{_HANDLER_MOD}.prepare_media_url",
         AsyncMock(return_value="ftp://example.invalid/clip.mp4"),
     )
     fetch = AsyncMock()
@@ -812,7 +812,7 @@ async def test_fetch_failure_is_terminal(nvdec_handler, monkeypatch, error) -> N
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
     url = "https://x/clip.mp4"
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
+        f"{_HANDLER_MOD}.prepare_media_url",
         AsyncMock(return_value=url),
     )
     fetch = AsyncMock(side_effect=error)
@@ -844,7 +844,7 @@ async def test_policy_rejection_is_not_swallowed_into_url_passthrough(
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
     error = UrlValidationError("blocked IP")
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
+        f"{_HANDLER_MOD}.prepare_media_url",
         AsyncMock(side_effect=error),
     )
     fetch = AsyncMock()
@@ -877,7 +877,7 @@ async def test_decode_failure_falls_back_to_the_fetched_bytes(
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
+        f"{_HANDLER_MOD}.prepare_media_url",
         AsyncMock(return_value="https://x/clip.mp4"),
     )
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
@@ -917,7 +917,7 @@ async def test_disabled_nvdec_validates_url_before_reporting_decoders(
     )
     # Undo the fixture's passthrough: validation is what this test asserts.
     # The URL below is refused on scheme, so this still performs no lookup.
-    monkeypatch.setattr(f"{_HANDLER_MOD}.validate_media_url", validate_media_url)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.prepare_media_url", prepare_media_url)
 
     with pytest.raises(UrlValidationError):
         await nvdec_handler._build_encode_inputs([_BLOCKED_URL], "VIDEO")
@@ -935,7 +935,7 @@ async def test_decode_failure_without_software_decoder_is_actionable(
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
+        f"{_HANDLER_MOD}.prepare_media_url",
         AsyncMock(return_value="https://x/clip.mp4"),
     )
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
@@ -964,7 +964,7 @@ async def test_codec_probe_failure_is_not_retried(nvdec_handler, monkeypatch) ->
     from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 
     monkeypatch.setattr(
-        f"{_HANDLER_MOD}.validate_media_url",
+        f"{_HANDLER_MOD}.prepare_media_url",
         AsyncMock(return_value="https://x/clip.mp4"),
     )
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
@@ -1097,3 +1097,50 @@ def test_load_video_passthrough_patches_the_encoder_binding() -> None:
 
     _install_load_video_passthrough()  # idempotent
     assert encoder_preprocessor.load_video is patched
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("nvdec_enabled", [False, True])
+@pytest.mark.parametrize("dns_result", ["stalled", "private"])
+async def test_video_dns_is_bounded_before_decoder_diagnostics(
+    nvdec_handler, monkeypatch, nvdec_enabled, dns_result
+) -> None:
+    import asyncio
+
+    from dynamo.common import http
+    from dynamo.common.http import AiohttpClient, HttpTimeoutError, from_env
+
+    config = from_env()
+    config.per_call_timeout_override = 0.01
+    client = AiohttpClient(config)
+    monkeypatch.setattr(http, "_default", client)
+    monkeypatch.setattr(nvdec_handler, "_url_policy", UrlValidationPolicy())
+    monkeypatch.setattr(nvdec_handler, "_nvdec_video_enabled", lambda: nvdec_enabled)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.prepare_media_url", prepare_media_url)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", http.fetch_bytes)
+    decoder_probe = Mock(side_effect=AssertionError("DNS verdict must come first"))
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}._software_video_decoder_imports", decoder_probe
+    )
+    download = AsyncMock(
+        side_effect=AssertionError("DNS failure must prevent download")
+    )
+    monkeypatch.setattr(client, "_fetch_body_or_redirect", download)
+
+    async def lookup(*args, **kwargs):
+        if dns_result == "private":
+            return [(2, 1, 6, "", ("127.0.0.1", 443))]
+        await asyncio.Future()
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", lookup)
+    try:
+        error = HttpTimeoutError if dns_result == "stalled" else UrlValidationError
+        with pytest.raises(error):
+            await nvdec_handler._build_encode_inputs(
+                ["https://media.example/x.mp4"], "VIDEO"
+            )
+        decoder_probe.assert_not_called()
+        download.assert_not_awaited()
+    finally:
+        await client.close()
