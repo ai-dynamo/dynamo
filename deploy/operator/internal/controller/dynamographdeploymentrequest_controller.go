@@ -27,7 +27,6 @@ import (
 	"maps"
 	"reflect"
 	"sort"
-	"strings"
 	"text/template"
 	"time"
 
@@ -1498,52 +1497,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 			"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
 }
 
-// GetGPUDiscoveryFailureReason classifies a GPU discovery error and
-// returns a stable, actionable reason string suitable for structured logging.
-//
-// The classification is based on known error message patterns produced during:
-//   - DCGM exporter pod discovery
-//   - Helm-based GPU operator and DCGM discovery
-//   - Metrics scraping
-//   - Prometheus parsing
-//
-// If the error does not match any known category, "unknown" is returned.
+// GetGPUDiscoveryFailureReason classifies a GPU discovery error into a stable reason string
+// for structured logging. The classification lives in the gpu package so the v1beta2
+// admission path reports the same reasons.
 func GetGPUDiscoveryFailureReason(err error) string {
-	const unknownReason = "unknown"
-
-	if err == nil {
-		return unknownReason
-	}
-	errMsg := strings.ToLower(err.Error())
-
-	switch {
-	case strings.Contains(errMsg, "list pods"):
-		return "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)"
-	case strings.Contains(errMsg, "gpu operator is not installed"):
-		return "GPU Operator not installed in expected namespace"
-	case strings.Contains(errMsg, "helm init failed"):
-		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-	case strings.Contains(errMsg, "timeout waiting for dcgm exporter pods"):
-		return "timeout while waiting for DCGM exporter pods to become ready"
-	case strings.Contains(errMsg, "http get"):
-		return "failed to reach DCGM metrics endpoint on pod (network/port issue)"
-	case strings.Contains(errMsg, "metrics endpoint") &&
-		strings.Contains(errMsg, "status"):
-		return "DCGM pod metrics endpoint returned non-200 status"
-	case strings.Contains(errMsg, "parse prometheus metrics"):
-		return "failed to parse dcgm Prometheus metrics (invalid format)"
-	case strings.Contains(errMsg, "no gpus detected"):
-		return "no GPUs detected in dcgm metrics (GPU model or metrics missing)"
-	case strings.Contains(errMsg, "dcgm is not enabled in the GPU Operator"):
-		return "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"
-	case strings.Contains(errMsg, "failed to scrape any dcgm exporter pod"):
-		return "failed to scrape any dcgm exporter pod (check DCGM exporter pod status and network connectivity)"
-	case strings.Contains(errMsg, "no gpu metrics could be parsed from any dcgm pod"):
-		return "no GPU metrics could be parsed from any DCGM pod (check DCGM exporter pod status and network connectivity)"
-	case strings.Contains(errMsg, "failed to create helm path"):
-		return "failed to initialize Helm client (RBAC, kubeconfig, or Helm driver issue)"
-	}
-	return unknownReason
+	return gpu.DiscoveryFailureReason(err)
 }
 
 // createProfilingJob creates a Kubernetes Job for profiling using SyncResource.
@@ -1980,41 +1938,21 @@ func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(c
 		return nil, nil
 	}
 
-	var dcgmErr error
-	if r.GPUDiscovery != nil {
-		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, reader, r.GPUDiscoveryCache, hw.GPUSKU)
-		if err == nil {
-			return discoveredInfo, nil
-		}
-		dcgmErr = err
-
-		reason := GetGPUDiscoveryFailureReason(err)
-		logger.Info("DCGM discovery failed, falling back to node-label discovery",
-			"reason", reason, "error", err.Error())
+	discoverer := &gpu.Discoverer{
+		Reader:     reader,
+		DCGM:       r.GPUDiscovery,
+		Cache:      r.GPUDiscoveryCache,
+		NodeLabels: r.gpuDiscoveryEnabled,
 	}
-
-	if !r.gpuDiscoveryEnabled() {
+	info, err := discoverer.Discover(ctx, hw.GPUSKU)
+	if err != nil {
 		if discoveryRequired {
-			if dcgmErr != nil {
-				return nil, fmt.Errorf("auto-discovery failed: %w", dcgmErr)
-			}
-			return nil, fmt.Errorf("auto-discovery failed: node-label discovery is disabled")
+			return nil, err
 		}
-		logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
+		logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged", "error", err.Error())
 		return nil, nil
 	}
-
-	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, reader, hw.GPUSKU)
-	if err == nil {
-		return discoveredInfo, nil
-	}
-
-	logger.Info("Node-label discovery also failed", "error", err.Error())
-	if discoveryRequired {
-		return nil, fmt.Errorf("auto-discovery failed: %w", err)
-	}
-	logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged")
-	return nil, nil
+	return info, nil
 }
 
 // extractModelCachePVCConfig reads model cache PVC settings from the typed v1beta1 spec.

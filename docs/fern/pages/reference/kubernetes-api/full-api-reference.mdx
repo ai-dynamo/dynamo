@@ -4531,17 +4531,17 @@ AISimulateSpec selects the AISimulate execution artifact and supplies native inp
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="image" type="string">
-Image selects a Dynamo-compatible AISimulate runner. When omitted, admission and execution defaults are resolved outside this API.
+Image selects a Dynamo-compatible AISimulate runner. When omitted, admission persists the operator's configured image or a version-matched Dynamo planner image.
 **Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="versionOverride" type="string">
-VersionOverride declares the AISimulate compatibility version when it cannot be inferred from the effective image.
-**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+VersionOverride declares the AISimulate compatibility version as three numeric parts, for example 0.13.0. It is a numeric version without a v prefix, pre-release, or build suffix. It is required when the image tag is not a version and wins over a version in the tag. An operator default override is persisted only with its operator default image; a caller-provided image must carry or imply its own version.
+**Validation:** MinLength: 1  Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="parameters" type="RawExtension">
-Parameters contains native AISimulate input. Field names and nesting use the upstream AISimulate JSON contract, including snake_case names.
+Parameters contains native AISimulate input. Field names and nesting use the upstream AISimulate JSON contract, including snake_case names. For a Request, the controller builds a typed underlay, adds derived defaults, and applies Parameters last as an RFC 7386 JSON Merge Patch. Parameters therefore overrides typed values, replaces arrays and scalars, and deletes fields with null. Admission preserves it without interpreting it. In a Run, Parameters contains the resulting complete native input rather than a patch.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
@@ -4782,6 +4782,7 @@ See [DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequestst
 
 <Accordion id="v1beta2-dynamographdeploymentrequestnativespec" title="v1beta2 DynamoGraphDeploymentRequestNativeSpec">
 DynamoGraphDeploymentRequestNativeSpec contains the native v1beta2 request fields.
+Admission persists Request defaults before the controller snapshots this input into a Run.
 
 
 **Kind:** `type`
@@ -4794,37 +4795,37 @@ See [ModelSpec](#modelspec).
 </ParamField>
 
 <ParamField path="backends" type="Backend array">
-Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+Backends lists one or more inference backends searched by AISimulate and used by generated candidates. For a Request, admission defaults an omitted list to vllm, sglang, and trtllm. An explicit list is preserved.
 See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+Hardware bounds the accelerator configurations evaluated by the search. For a Request, omitting hardware, using hardware: \&#123;\&#125;, or using gpu: \&#123;\&#125; requests automatic discovery. Admission persists a complete typed SKU and budget or rejects the write. Parameters remains opaque to admission and may override either value later.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation.
+Workload defines the synthetic traffic model used for every candidate evaluation. For a Request, an omitted or empty workload receives a static shape of ISL 1024, OSL 128, and concurrency 10. workload.static: \&#123;\&#125; opts out and contributes no typed workload fields. Parameters may supply or override the native workload later. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
+Objective defines scalar optimization or a multi-objective Pareto search. For a Request, an omitted or empty objective receives Optimize, ThroughputPerGPU, and SLA bounds of TTFT 2000 ms and ITL 30 ms. objective.sla: \&#123;\&#125; opts out only of the SLA defaults; mode and the conditional metric default still apply.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate selects the execution artifact and supplies native AISimulate input.
+AISimulate selects the execution artifact and supplies native AISimulate input. For a Request, admission persists the effective image and any required version override.
 See [AISimulateSpec](#aisimulatespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="recommendation" type="RecommendationSpec">
-Recommendation controls bounded projection into DGDC resources.
+Recommendation controls bounded projection into DGDC resources. For a Request, admission creates an omitted object and defaults maxCandidates to 1.
 See [RecommendationSpec](#recommendationspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4876,37 +4877,37 @@ See [ModelSpec](#modelspec).
 </ParamField>
 
 <ParamField path="backends" type="Backend array">
-Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+Backends lists one or more inference backends searched by AISimulate and used by generated candidates. For a Request, admission defaults an omitted list to vllm, sglang, and trtllm. An explicit list is preserved.
 See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+Hardware bounds the accelerator configurations evaluated by the search. For a Request, omitting hardware, using hardware: \&#123;\&#125;, or using gpu: \&#123;\&#125; requests automatic discovery. Admission persists a complete typed SKU and budget or rejects the write. Parameters remains opaque to admission and may override either value later.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation.
+Workload defines the synthetic traffic model used for every candidate evaluation. For a Request, an omitted or empty workload receives a static shape of ISL 1024, OSL 128, and concurrency 10. workload.static: \&#123;\&#125; opts out and contributes no typed workload fields. Parameters may supply or override the native workload later. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
+Objective defines scalar optimization or a multi-objective Pareto search. For a Request, an omitted or empty objective receives Optimize, ThroughputPerGPU, and SLA bounds of TTFT 2000 ms and ITL 30 ms. objective.sla: \&#123;\&#125; opts out only of the SLA defaults; mode and the conditional metric default still apply.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate selects the execution artifact and supplies native AISimulate input.
+AISimulate selects the execution artifact and supplies native AISimulate input. For a Request, admission persists the effective image and any required version override.
 See [AISimulateSpec](#aisimulatespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="recommendation" type="RecommendationSpec">
-Recommendation controls bounded projection into DGDC resources.
+Recommendation controls bounded projection into DGDC resources. For a Request, admission creates an omitted object and defaults maxCandidates to 1.
 See [RecommendationSpec](#recommendationspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4985,7 +4986,8 @@ See [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus).
 
 <Accordion id="dynamographdeploymentrunspec" title="DynamoGraphDeploymentRunSpec">
 DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
-Run creators resolve optional Request inputs before persisting the Run.
+Run creators resolve optional Request inputs and the final AISimulate parameters before
+persisting the Run. Request admission defaulting does not apply to Runs.
 
 
 **Kind:** `type`
@@ -4998,37 +5000,37 @@ See [ModelSpec](#modelspec).
 </ParamField>
 
 <ParamField path="backends" type="Backend array">
-Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+Backends lists one or more inference backends searched by AISimulate and used by generated candidates. For a Request, admission defaults an omitted list to vllm, sglang, and trtllm. An explicit list is preserved.
 See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+Hardware bounds the accelerator configurations evaluated by the search. For a Request, omitting hardware, using hardware: \&#123;\&#125;, or using gpu: \&#123;\&#125; requests automatic discovery. Admission persists a complete typed SKU and budget or rejects the write. Parameters remains opaque to admission and may override either value later.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation.
+Workload defines the synthetic traffic model used for every candidate evaluation. For a Request, an omitted or empty workload receives a static shape of ISL 1024, OSL 128, and concurrency 10. workload.static: \&#123;\&#125; opts out and contributes no typed workload fields. Parameters may supply or override the native workload later. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
+Objective defines scalar optimization or a multi-objective Pareto search. For a Request, an omitted or empty objective receives Optimize, ThroughputPerGPU, and SLA bounds of TTFT 2000 ms and ITL 30 ms. objective.sla: \&#123;\&#125; opts out only of the SLA defaults; mode and the conditional metric default still apply.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate selects the execution artifact and supplies native AISimulate input.
+AISimulate selects the execution artifact and supplies native AISimulate input. For a Request, admission persists the effective image and any required version override.
 See [AISimulateSpec](#aisimulatespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="recommendation" type="RecommendationSpec">
-Recommendation controls bounded projection into DGDC resources.
+Recommendation controls bounded projection into DGDC resources. For a Request, admission creates an omitted object and defaults maxCandidates to 1.
 See [RecommendationSpec](#recommendationspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5134,12 +5136,12 @@ GPUHardwareSpec describes accelerator identity and the maximum allocation per ca
 **Appears in:** [HardwareSpec](#v1beta2-hardwarespec)
 
 <ParamField path="sku" type="string">
-SKU identifies the accelerator using the AISimulate hardware catalog name. When omitted, admission discovers the accelerator from the cluster.
+SKU identifies the accelerator using the AISimulate hardware catalog name. For a Request, admission discovers an omitted SKU from the cluster. Discovery rejects an unknown accelerator and an ambiguous cluster with multiple GPU types.
 **Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="budget" type="integer">
-Budget is the maximum total number of GPUs one candidate may use. When omitted, admission derives the available GPU budget from the cluster.
+Budget is the maximum total number of GPUs one candidate may use. For a Request, admission defaults an omitted budget to the number of matching cluster GPUs, capped at 32. An explicit budget is authoritative and is not capped.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -5152,7 +5154,7 @@ HardwareSpec bounds the accelerator configurations evaluated by the search.
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="gpu" type="GPUHardwareSpec">
-GPU describes accelerator identity and the maximum allocation per candidate. Omitted fields are resolved independently by admission.
+GPU describes accelerator identity and the maximum allocation per candidate. For a Request, admission resolves omitted fields independently. It reads the cluster on create and on an update that changes hardware, but not on an update that leaves hardware unchanged. Supplying both fields avoids cluster discovery.
 See [GPUHardwareSpec](#gpuhardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5183,8 +5185,9 @@ Name identifies the model in the syntax accepted by the selected backend.
 </Accordion>
 
 <Accordion id="nativesearchinput" title="NativeSearchInput">
-NativeSearchInput defines the v1beta2 search input shared by Requests and
-immutable Runs.
+NativeSearchInput defines the v1beta2 search input shared by Requests and immutable Runs.
+The admission defaults documented below apply to native Requests. A Run is a fully
+resolved snapshot and does not receive Request defaults.
 
 
 **Kind:** `type`
@@ -5197,37 +5200,37 @@ See [ModelSpec](#modelspec).
 </ParamField>
 
 <ParamField path="backends" type="Backend array">
-Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+Backends lists one or more inference backends searched by AISimulate and used by generated candidates. For a Request, admission defaults an omitted list to vllm, sglang, and trtllm. An explicit list is preserved.
 See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+Hardware bounds the accelerator configurations evaluated by the search. For a Request, omitting hardware, using hardware: \&#123;\&#125;, or using gpu: \&#123;\&#125; requests automatic discovery. Admission persists a complete typed SKU and budget or rejects the write. Parameters remains opaque to admission and may override either value later.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation.
+Workload defines the synthetic traffic model used for every candidate evaluation. For a Request, an omitted or empty workload receives a static shape of ISL 1024, OSL 128, and concurrency 10. workload.static: \&#123;\&#125; opts out and contributes no typed workload fields. Parameters may supply or override the native workload later. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
+Objective defines scalar optimization or a multi-objective Pareto search. For a Request, an omitted or empty objective receives Optimize, ThroughputPerGPU, and SLA bounds of TTFT 2000 ms and ITL 30 ms. objective.sla: \&#123;\&#125; opts out only of the SLA defaults; mode and the conditional metric default still apply.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate selects the execution artifact and supplies native AISimulate input.
+AISimulate selects the execution artifact and supplies native AISimulate input. For a Request, admission persists the effective image and any required version override.
 See [AISimulateSpec](#aisimulatespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="recommendation" type="RecommendationSpec">
-Recommendation controls bounded projection into DGDC resources.
+Recommendation controls bounded projection into DGDC resources. For a Request, admission creates an omitted object and defaults maxCandidates to 1.
 See [RecommendationSpec](#recommendationspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5259,8 +5262,9 @@ ObjectiveMode selects scalar optimization or a multi-objective Pareto search.
 </Accordion>
 
 <Accordion id="objectiveslaspec" title="ObjectiveSLASpec">
-ObjectiveSLASpec defines per-request latency bounds used to calculate goodput.
-An empty object disables SLA filtering.
+ObjectiveSLASpec defines per-request latency bounds used to calculate goodput. Admission
+does not default its individual fields when the object already exists, so an empty object
+disables the model-only SLA default and SLA filtering.
 
 
 **Kind:** `type`
@@ -5289,14 +5293,14 @@ ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
-<ParamField path="mode" type="ObjectiveMode" default="Optimize">
-Mode selects scalar optimization or a Pareto search.
+<ParamField path="mode" type="ObjectiveMode">
+Mode selects scalar optimization or a Pareto search. For a Request, admission defaults an omitted mode to Optimize.
 See [ObjectiveMode](#objectivemode).
 **Validation:** Enum: [Optimize Pareto]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="metric" type="ObjectiveMetric">
-Metric is the scalar target when mode is Optimize. When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
+Metric is the scalar target when mode is Optimize. For a Request in Optimize mode, admission defaults an omitted metric to ThroughputPerGPU. Pareto mode has no scalar metric default.
 See [ObjectiveMetric](#objectivemetric).
 **Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  Optional: \&#123;\&#125;
 </ParamField>
@@ -5307,8 +5311,8 @@ See [ObjectiveMetric](#objectivemetric).
 **Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MaxItems: 7  MinItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="sla" type="ObjectiveSLASpec" default="\{ itlMs:30 ttftMs:2000 \}">
-SLA defines per-request latency bounds used to calculate goodput.
+<ParamField path="sla" type="ObjectiveSLASpec">
+SLA defines per-request latency bounds used to calculate goodput. For a Request, admission defaults an omitted SLA to TTFT 2000 ms and ITL 30 ms. An existing SLA object is preserved exactly as written, so sla: \&#123;\&#125; opts out of these defaults.
 See [ObjectiveSLASpec](#objectiveslaspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5321,8 +5325,8 @@ RecommendationSpec controls bounded projection into DGDC resources.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
-<ParamField path="maxCandidates" type="integer" default="1">
-MaxCandidates is the maximum number of DGDCs owned by one run. Scalar candidates are ordered best first; Pareto candidates have no scalar rank. This field does not limit internal trials.
+<ParamField path="maxCandidates" type="integer">
+MaxCandidates is the maximum number of DGDCs owned by one run. Scalar candidates are ordered best first; Pareto candidates have no scalar rank. This field does not limit internal trials. For a Request, admission defaults the zero value, including omission, to 1.
 **Validation:** Maximum: 100  Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -5362,7 +5366,8 @@ Total is the number of planned rounds.
 </Accordion>
 
 <Accordion id="staticworkloadspec" title="StaticWorkloadSpec">
-StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
+StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes. Admission
+does not default its individual fields when the object already exists.
 
 
 **Kind:** `type`
@@ -5407,8 +5412,8 @@ WorkloadSpec defines the synthetic traffic model used for every candidate evalua
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
-<ParamField path="static" type="StaticWorkloadSpec" default="\{ isl:4000 kvLoadRatio:[0 1] osl:1000 \}">
-Static defines one of AISimulate's synthetic workload shapes. When omitted, it searches the full KV-load ratio range at ISL 4000 and OSL 1000. An explicit empty object opts out of this underlay.
+<ParamField path="static" type="StaticWorkloadSpec">
+Static defines one of AISimulate's synthetic workload shapes. For a Request whose workload is omitted or empty, admission creates this object with ISL 1024, OSL 128, and concurrency 10. An existing static object is preserved exactly as written, so static: \&#123;\&#125; opts out of the model-only workload default.
 See [StaticWorkloadSpec](#staticworkloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
