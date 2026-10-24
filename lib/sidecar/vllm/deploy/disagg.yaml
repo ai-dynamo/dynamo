@@ -25,7 +25,7 @@ spec:
       spec:
         initContainers:
         - name: runtime
-          image: <your-registry>/dynamo-sidecar:1.6.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.5.1
           command:
           - dynamo-vllm-sidecar
           args:
@@ -106,7 +106,7 @@ spec:
       spec:
         initContainers:
         - name: runtime
-          image: <your-registry>/dynamo-sidecar:1.6.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.5.1
           command:
           - dynamo-vllm-sidecar
           args:
