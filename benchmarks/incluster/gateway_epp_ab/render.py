@@ -69,7 +69,10 @@ def render_arm(
                     component["runtimeVersionOverride"] = args.runtime_version
                 spec = component["podTemplate"]["spec"]
                 if component["type"] in ROUTER_TYPES:
-                    images = {"main": args.frontend_image}
+                    router_image = args.frontend_image
+                    if component["type"] == "epp" and args.epp_image:
+                        router_image = args.epp_image
+                    images = {"main": router_image}
                 else:
                     component["replicas"] = args.replicas
                     images = {"main": args.worker_image}
@@ -205,6 +208,9 @@ def main(argv: list[str] | None = None) -> None:
     arm.add_argument("--replicas", type=int, required=True, help="mocker workers")
     arm.add_argument("--frontend-image", required=True)
     arm.add_argument("--worker-image", required=True)
+    arm.add_argument(
+        "--epp-image", default="", help="arm B's EPP; empty means --frontend-image"
+    )
     arm.add_argument(
         "--runtime-version", default="", help="Dynamo version of the images"
     )

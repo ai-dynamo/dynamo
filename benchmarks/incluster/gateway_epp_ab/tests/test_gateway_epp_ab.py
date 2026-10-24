@@ -216,6 +216,7 @@ def render_args(**overrides):
         replicas=8,
         frontend_image="registry.test/frontend:x",
         worker_image="registry.test/planner:x",
+        epp_image="",
         runtime_version="",
         model_cache_pvc="shared-cache",
         image_pull_secret="pull-secret",
@@ -224,6 +225,23 @@ def render_args(**overrides):
         arm_header="bench-ns/qwen-b",
     )
     return argparse.Namespace(**{**args, **overrides})
+
+
+def test_render_arm_runs_only_the_epp_from_epp_image(arm_a, arm_b):
+    # Comparing EPP builds changes the EPP alone: arm B's sidecars and arm A's
+    # Frontend keep the frontend image.
+    args = render_args(epp_image="registry.test/epp:y")
+    dgd_b = by_kind(
+        render.render_arm(copy.deepcopy(arm_b), args), "DynamoGraphDeployment"
+    )
+    dgd_a = by_kind(
+        render.render_arm(copy.deepcopy(arm_a), args), "DynamoGraphDeployment"
+    )
+    assert containers(component(dgd_b, "epp"))["main"]["image"] == "registry.test/epp:y"
+    worker = component(dgd_b, "decode")
+    assert containers(worker)["sidecar-frontend"]["image"] == "registry.test/frontend:x"
+    frontend = component(dgd_a, "frontend")
+    assert containers(frontend)["main"]["image"] == "registry.test/frontend:x"
 
 
 @pytest.mark.parametrize("version", ["", "1.6.0"])

@@ -32,6 +32,9 @@ MAX_WORKERS_PER_NODE=${MAX_WORKERS_PER_NODE:-128}
 DYNAMO_VERSION=${DYNAMO_VERSION:-1.5.1}
 FRONTEND_IMAGE=${FRONTEND_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION}
 WORKER_IMAGE=${WORKER_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION}
+# Empty means FRONTEND_IMAGE. Set it to run arm B's EPP from another build, such
+# as a dynamo-epp image, while the sidecars and arm A keep FRONTEND_IMAGE.
+EPP_IMAGE=${EPP_IMAGE:-}
 # The Dynamo version of those images, for tags the operator cannot read a
 # version from, such as nightly tags.
 RUNTIME_VERSION=${RUNTIME_VERSION:-}
@@ -70,7 +73,7 @@ BURST_PHASE_STARTS=${BURST_PHASE_STARTS:-1}
 
 # Every setting above. deploy and bench record them with the arm's results.
 SETTINGS=(
-  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP MAX_WORKERS_PER_NODE DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE RUNTIME_VERSION
+  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP MAX_WORKERS_PER_NODE DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE EPP_IMAGE RUNTIME_VERSION
   AIPERF_IMAGE MODEL_CACHE_PVC IMAGE_PULL_SECRET GATEWAY_NAME GATEWAY_NAMESPACE READY_TIMEOUT SETTLE_SECONDS
   BENCH_TIMEOUT ORDER KEEP SESSIONS DURATION_S ROUNDS DATASET MAX_CONTEXT TRACES COOLDOWN_S SEED
   SMOKE_TIMEOUT_S SAMPLE_WORKERS SERVER_METRICS_FORMATS BURST_PHASE_STARTS
@@ -176,6 +179,7 @@ render_arm() {
   k create --dry-run=client -o json -f "$HERE/$(label_of "$1").yaml" |
     python3 "$HERE/render.py" arm --replicas "$2" \
       --frontend-image "$FRONTEND_IMAGE" --worker-image "$WORKER_IMAGE" \
+      --epp-image "$EPP_IMAGE" \
       --runtime-version "$RUNTIME_VERSION" \
       --model-cache-pvc "$MODEL_CACHE_PVC" --image-pull-secret "$IMAGE_PULL_SECRET" \
       --gateway-name "$GATEWAY_NAME" --gateway-namespace "$GATEWAY_NAMESPACE" \
@@ -329,7 +333,9 @@ bench() {
   inputs=$RESULTS/$label/inputs
   mkdir -p "$inputs"
   deployed "$arm" || die "$dgd is not deployed; run: $0 deploy $arm"
-  if [[ -z $AIPERF_IMAGE ]]; then AIPERF_IMAGE=$(router_image "$arm"); fi
+  # A dynamo-epp image carries no aiperf, so with EPP_IMAGE set aiperf runs
+  # from FRONTEND_IMAGE.
+  if [[ -z $AIPERF_IMAGE && -z $EPP_IMAGE ]]; then AIPERF_IMAGE=$(router_image "$arm"); fi
   AIPERF_IMAGE=${AIPERF_IMAGE:-$FRONTEND_IMAGE}
   record_settings "$RESULTS/$label/bench.env"
   k get pods -l "$(dgd_pods "$arm")" -o json > "$WORK/pods.json"
@@ -558,12 +564,16 @@ main() {
     all)
       validate_settings
       warn_unfixed_image "$FRONTEND_IMAGE"
+      warn_unfixed_image "$EPP_IMAGE"
       all
       ;;
     deploy | bench)
       check_arm "${2:-}"
       validate_settings
-      if [[ $command == deploy ]]; then warn_unfixed_image "$FRONTEND_IMAGE"; fi
+      if [[ $command == deploy ]]; then
+        warn_unfixed_image "$FRONTEND_IMAGE"
+        warn_unfixed_image "$EPP_IMAGE"
+      fi
       preflight
       if [[ $command == bench ]]; then warn_unfixed_image "$(router_image "$2" || true)"; fi
       "$command" "$2"
