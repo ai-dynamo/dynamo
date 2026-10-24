@@ -88,6 +88,7 @@
 /components/src/dynamo/thunderagent_router/                                                             @ai-dynamo/dynamo-router-codeowners
 
 # === global-router  (@ai-dynamo/dynamo-global-router-codeowners) ===
+/lib/global-discovery-client/                                                                           @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/kv_dc_relay/                                                                     @ai-dynamo/dynamo-global-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
