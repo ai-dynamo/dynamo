@@ -45,12 +45,20 @@ def _deepstack_hf_config() -> SimpleNamespace:
     )
 
 
-def _make_request(hashes_and_embeds: list[tuple[str, int]]) -> MagicMock:
+def _omni_hf_config() -> SimpleNamespace:
+    # Qwen3-Omni keeps its DeepStack vision config under the thinker.
+    return SimpleNamespace(thinker_config=_deepstack_hf_config())
+
+
+def _make_request(
+    hashes_and_embeds: list[tuple[str, int]], modality: str = "image"
+) -> MagicMock:
     request = MagicMock()
     features = []
     for h, _ in hashes_and_embeds:
         f = MagicMock()
         f.identifier = h
+        f.modality = modality
         features.append(f)
     request.mm_features = features
 
@@ -253,7 +261,9 @@ class TestEmbeddingRowSize:
         self._run_worker_step(conn, meta, encoder_cache)
 
     def test_text_model_uses_hidden_size(self):
-        assert self._make_connector()._bytes_per_embed == 4096 * 2
+        conn = self._make_connector()
+        assert conn._bytes_per_embed == 4096 * 2
+        assert conn._bytes_per_vision_embed == 4096 * 2
 
     @pytest.mark.parametrize(
         "vision_config",
@@ -265,15 +275,34 @@ class TestEmbeddingRowSize:
     )
     def test_vision_model_without_deepstack_uses_hidden_size(self, vision_config):
         conn = self._make_connector(SimpleNamespace(vision_config=vision_config))
-        assert conn._bytes_per_embed == 4096 * 2
+        assert conn._bytes_per_vision_embed == 4096 * 2
 
     def test_deepstack_rows_include_every_level(self):
         conn = self._make_connector(_deepstack_hf_config())
-        assert conn._bytes_per_embed == 4 * 4096 * 2
+        assert conn._bytes_per_vision_embed == 4 * 4096 * 2
 
         # The 945-token image from #17244 stores ~31.0 MB, not 7.7 MB.
         conn.update_state_after_alloc(_make_request([("image", 945)]), 0)
         assert conn._num_used_bytes == 945 * 4 * 4096 * 2
+
+    @pytest.mark.parametrize(
+        "hf_config",
+        [_deepstack_hf_config(), _omni_hf_config()],
+        ids=["qwen3_vl", "qwen3_omni"],
+    )
+    def test_budget_follows_modality(self, hf_config):
+        conn = self._make_connector(hf_config)
+        for mm_hash, modality in (("i", "image"), ("v", "video"), ("a", "audio")):
+            conn.update_state_after_alloc(
+                _make_request([(mm_hash, 10)], modality=modality), 0
+            )
+
+        # Image and video rows carry the DeepStack levels; audio rows do not.
+        assert dict(conn._cache_order) == {
+            "i": 10 * 4 * 4096 * 2,
+            "v": 10 * 4 * 4096 * 2,
+            "a": 10 * 4096 * 2,
+        }
 
     def test_deepstack_capacity_bounds_stored_bytes(self):
         conn = self._make_connector(_deepstack_hf_config())
@@ -300,14 +329,17 @@ class TestEmbeddingRowSize:
         assert sum(t.nbytes for t in conn._cpu_store.values()) == 2 * image_bytes
 
     def test_matching_rows_do_not_warn(self):
-        conn = self._make_connector(_deepstack_hf_config())
-        rows = torch.zeros(3, 4 * 4096, dtype=torch.float16)
+        conn = self._make_connector(_omni_hf_config())
+        encoder_cache = {
+            "image": torch.zeros(3, 4 * 4096, dtype=torch.float16),
+            "audio": torch.zeros(3, 4096, dtype=torch.float16),
+        }
 
         with patch.object(mod.logger, "warning") as warn:
-            self._save_all(conn, {"a": rows})
+            self._save_all(conn, encoder_cache)
 
         warn.assert_not_called()
-        assert conn._cpu_store["a"].shape == (3, 4 * 4096)
+        assert set(conn._cpu_store) == {"image", "audio"}
 
     def test_wider_rows_than_budget_warn_once(self):
         conn = self._make_connector()
@@ -317,7 +349,7 @@ class TestEmbeddingRowSize:
             self._save_all(conn, {"a": rows, "b": rows.clone()})
 
         warn.assert_called_once()
-        assert warn.call_args[0][1:] == (4096 * 2, 4 * 4096 * 2)
+        assert warn.call_args[0][1:] == (4096 * 2, 4096 * 2, 4 * 4096 * 2)
         assert set(conn._cpu_store) == {"a", "b"}
 
 

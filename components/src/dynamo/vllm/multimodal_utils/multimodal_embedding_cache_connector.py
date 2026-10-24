@@ -46,22 +46,26 @@ def _get_device(vllm_config: "VllmConfig") -> str:
     return "cuda"
 
 
-def _encoder_output_width(vllm_config: "VllmConfig") -> int:
-    """Width of one encoder-cache embedding row.
+_VISION_MODALITIES = frozenset({"image", "video"})
+
+
+def _deepstack_vision_width(hf_config) -> int | None:
+    """Row width of DeepStack image/video embeddings, or None if not DeepStack.
 
     DeepStack models (e.g. Qwen3-VL) concatenate one feature map per
-    DeepStack level onto each visual token, so a stored row is
-    out_hidden_size * (1 + len(deepstack_visual_indexes)) wide instead of
-    the text hidden size.
+    DeepStack level onto each visual token, so a stored image or video row
+    is out_hidden_size * (1 + len(deepstack_visual_indexes)) wide instead of
+    the text hidden size. Qwen3-Omni nests its vision config under
+    thinker_config.
     """
-    model_config = vllm_config.model_config
-    vision_config = getattr(model_config.hf_config, "vision_config", None)
-    deepstack_visual_indexes = (
-        getattr(vision_config, "deepstack_visual_indexes", None) or []
-    )
-    if not deepstack_visual_indexes:
-        return model_config.get_hidden_size()
-    return vision_config.out_hidden_size * (1 + len(deepstack_visual_indexes))
+    for config in (hf_config, getattr(hf_config, "thinker_config", None)):
+        vision_config = getattr(config, "vision_config", None)
+        deepstack_visual_indexes = getattr(
+            vision_config, "deepstack_visual_indexes", None
+        )
+        if deepstack_visual_indexes:
+            return vision_config.out_hidden_size * (1 + len(deepstack_visual_indexes))
+    return None
 
 
 @dataclass
@@ -217,7 +221,14 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         dtype_bytes = torch.tensor(
             [], dtype=vllm_config.model_config.dtype
         ).element_size()
-        self._bytes_per_embed = _encoder_output_width(vllm_config) * dtype_bytes
+        self._bytes_per_embed = vllm_config.model_config.get_hidden_size() * dtype_bytes
+        # Audio rows (Qwen3-Omni) stay at the hidden size.
+        vision_width = _deepstack_vision_width(vllm_config.model_config.hf_config)
+        self._bytes_per_vision_embed = (
+            self._bytes_per_embed
+            if vision_width is None
+            else vision_width * dtype_bytes
+        )
         self._capacity_bytes = int(capacity_gb * 1024**3)
 
         self._cache_order: OrderedDict[str, int] = OrderedDict()  # hash → size_bytes
@@ -264,10 +275,12 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
 
         logger.info(
             "DynamoMultimodalEmbeddingCacheConnector initialized: "
-            "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d",
+            "capacity_gb=%.2f, capacity_bytes=%d, bytes_per_embed=%d, "
+            "bytes_per_vision_embed=%d",
             capacity_gb,
             self._capacity_bytes,
             self._bytes_per_embed,
+            self._bytes_per_vision_embed,
         )
 
     # ==============================
@@ -313,9 +326,15 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             then mark for GPU→CPU save so the worker persists the newly
             computed embedding. Silently skips items larger than total capacity.
         """
-        mm_hash: str = request.mm_features[index].identifier
+        feature = request.mm_features[index]
+        mm_hash: str = feature.identifier
         num_embeds: int = request.get_num_encoder_embeds(index)
-        size_bytes: int = num_embeds * self._bytes_per_embed
+        bytes_per_embed = (
+            self._bytes_per_vision_embed
+            if feature.modality in _VISION_MODALITIES
+            else self._bytes_per_embed
+        )
+        size_bytes: int = num_embeds * bytes_per_embed
 
         if mm_hash in self._cache_order:
             self._cache_order.move_to_end(mm_hash)
@@ -423,12 +442,13 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         # The scheduler budgets from model config; flag models whose stored
         # rows differ so capacity_gb is not silently exceeded.
         row_bytes = embedding.shape[-1] * embedding.element_size()
-        if row_bytes != self._bytes_per_embed and not self._warned_row_bytes:
+        budgets = (self._bytes_per_embed, self._bytes_per_vision_embed)
+        if row_bytes not in budgets and not self._warned_row_bytes:
             self._warned_row_bytes = True
             logger.warning(
-                "Embedding cache budgets %d bytes per embedding, but encoder "
-                "output rows are %d bytes; host memory use will not match "
-                "multimodal_embedding_cache_capacity_gb.",
-                self._bytes_per_embed,
+                "Embedding cache budgets %d bytes per embedding (%d for image "
+                "and video), but encoder output rows are %d bytes; host memory "
+                "use will not match multimodal_embedding_cache_capacity_gb.",
+                *budgets,
                 row_bytes,
             )
