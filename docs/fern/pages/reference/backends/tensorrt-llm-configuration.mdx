@@ -384,6 +384,33 @@ _These flags set the default values applied to video and image generation reques
   Environment variable: `DYN_TRTLLM_DEFAULT_NUM_IMAGES_PER_PROMPT`
 </ParamField>
 
+## Per-request decoding statistics
+
+To request engine statistics in chat or text completions, include this field in
+the request body. The frontend's NVExt support must be enabled (the default;
+`DYN_DISABLE_FRONTEND_NVEXT` must not be truthy).
+
+```json
+{"nvext": {"extra_fields": ["engine_data"]}}
+```
+
+The response exposes `nvext.engine_data.avg_decoded_tokens_per_iter` when the
+TensorRT-LLM engine supplies a finite, nonnegative value. This is the engine's
+running average of generated tokens per decoding iteration, including the target
+token. Standard decoding normally reports `1`; speculative decoding can report a
+larger value when draft tokens are accepted. The engine can report `0` before a
+decoding iteration completes. This value is not an acceptance-rate percentage or
+a measured latency speedup.
+
+Streaming responses carry the current value on each available chunk, including
+non-final chunks. Keep the last value received; the separate usage-only chunk does
+not repeat it. This preserves the latest delivered statistic when the frontend
+ends generation at a stop token before the engine sends its final response.
+Non-streaming responses expose the latest value through the same field.
+
+This statistic does not require `--publish-metrics`. It is omitted when unavailable
+in the engine response, and `engine_data` is omitted unless the client requests it.
+
 ## Related pages
 
 <CardGroup cols={2}>
