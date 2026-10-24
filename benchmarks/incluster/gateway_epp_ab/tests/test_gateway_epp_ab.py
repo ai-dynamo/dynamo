@@ -394,6 +394,10 @@ def run_script(tmp_path, args, settings=None, extra_env=None, kubectl_body="exit
             "RUNTIME_VERSION must be empty or a version such as 1.6.0, not 'nightly'",
         ),
         ({"KEEP": "yes"}, "KEEP must be 0 or 1, not 'yes'"),
+        (
+            {"BURST_PHASE_STARTS": "true"},
+            "BURST_PHASE_STARTS must be 0 or 1, not 'true'",
+        ),
     ],
 )
 def test_run_rejects_settings_that_cannot_work_before_touching_the_cluster(
@@ -477,6 +481,7 @@ BENCH_PARAMS = {
     "SEED": "42",
     "SMOKE_TIMEOUT_S": "1",
     "SERVER_METRICS_FORMATS": "json csv",
+    "BURST_PHASE_STARTS": "1",
 }
 
 
@@ -566,6 +571,8 @@ def test_bench_replays_sessions_through_the_agentx_scenario(tmp_path):
         assert "--unsafe-override" in args
         # The scenario replays recorded timing; a request rate would conflict.
         assert "--request-rate" not in args
+        # The warmup goes out at once instead of over the recorded arrivals.
+        assert "--burst-phase-starts" in args
         assert call["env"] == {
             # Twice the largest point, for the requests of subagents.
             "AIPERF_HTTP_CONNECTION_LIMIT": "6000",
@@ -584,6 +591,12 @@ def test_bench_runs_full_length_sessions_without_overrides(tmp_path):
     assert "--unsafe-override" not in call["args"]
     assert "--num-dataset-entries" not in call["args"]
     assert call["env"]["AIPERF_HTTP_CONNECTION_LIMIT"] == "2500"
+
+
+def test_bench_can_keep_the_recorded_phase_start_spread(tmp_path):
+    result, out = run_bench(tmp_path, {"SESSIONS": "8", "BURST_PHASE_STARTS": "0"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--burst-phase-starts" not in aiperf_calls(out)["sessions8_r0"]["args"]
 
 
 def test_plot_finds_aiperf_behind_pips_sh_launcher(tmp_path):

@@ -151,7 +151,8 @@ env AIPERF_HTTP_CONNECTION_LIMIT=8192 \
   --url http://inference-gateway.agentgateway-system.svc.cluster.local:80 \
   --endpoint-type chat --streaming \
   --header X-Gateway-Model-Name:Qwen/Qwen3-0.6B --header X-Dynamo-AB-Arm:<namespace>/qwen-a \
-  --scenario inferencex-agentx-mvp --public-dataset semianalysis_cc_traces_weka_062126 \
+  --scenario inferencex-agentx-mvp --burst-phase-starts \
+  --public-dataset semianalysis_cc_traces_weka_062126 \
   --max-context-length 128000 --concurrency 512 --benchmark-duration 900 \
   --extra-inputs ignore_eos:true --use-server-token-count \
   --random-seed 42 --no-gpu-telemetry \
@@ -166,6 +167,10 @@ Every run writes its own command to `command.txt`. The defaults work like this:
   at 10 seconds. It tags the first turn of each session, so a replayed session never finds an
   earlier play's cache. It warms each session up by replaying one turn with its full history, and it
   rejects `--request-rate`: the load is a number of live sessions, `--concurrency`.
+- **A warmup in one burst.** By default aiperf spreads the warmup over the sessions' recorded arrival
+  times, which took 107 minutes at 2048 sessions. `bench.sh` passes `--burst-phase-starts`, which
+  the scenario allows: every warmup request goes out at once, and so does each session's first
+  measured turn. `BURST_PHASE_STARTS=0` keeps the recorded spread.
 - **Load points.** At 2048 workers, the default `SESSIONS` of 512, 2048 and 4096 are about a quarter
   of a session, one, and two per worker. At 4096, two long sessions can fill a worker's KV cache, so
   the router has to trade cache hits against load. Subagents add requests beyond `--concurrency`, so
@@ -351,6 +356,7 @@ Keep these limits in mind when reading the results:
 | `SEED` | `42` | seed of the first run |
 | `SAMPLE_WORKERS` | `4` | worker pods aiperf scrapes during each run |
 | `SERVER_METRICS_FORMATS` | `json csv` | aiperf's server-metrics formats; add `jsonl` for time series |
+| `BURST_PHASE_STARTS` | `1` | `1` sends each run's warmup, and each session's first measured turn, at once; `0` spreads them over the recorded arrival times |
 | `READY_TIMEOUT` | `3600` | seconds to wait for each ramp step, the DGD, or the aiperf pod |
 | `SETTLE_SECONDS` | `60` | wait after the last worker is ready, so the router discovers it |
 | `SMOKE_TIMEOUT_S` | `600` | how long `bench.sh` retries its first request through the Gateway |

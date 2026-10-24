@@ -150,6 +150,11 @@ if [[ -n $TRACES ]]; then corpus+=(--num-dataset-entries "$TRACES"); fi
 # marks the run submission_valid: false, which this A/B does not use.
 override=()
 if ((DURATION_S < 900)); then override=(--unsafe-override); fi
+# By default aiperf spreads each run's warmup over the sessions' recorded
+# arrival times, which took 107 minutes at 2048 sessions. A burst sends every
+# warmup request at once, and then each session's first measured turn.
+phase_starts=()
+if ((BURST_PHASE_STARTS)); then phase_starts=(--burst-phase-starts); fi
 
 snapshot "$out/prometheus/000_baseline.tar.gz"
 seq=0
@@ -175,6 +180,7 @@ for ((round = 0; round < ROUNDS; round++)); do
       # Live sessions, each replaying a recorded coding-agent session with its
       # subagents and think time. The scenario warms each session up first.
       --scenario inferencex-agentx-mvp
+      "${phase_starts[@]}"
       "${corpus[@]}"
       --concurrency "$sessions"
       --benchmark-duration "$DURATION_S"
