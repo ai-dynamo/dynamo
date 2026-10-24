@@ -117,6 +117,26 @@ def test_custom_predictor_preset_is_completed_with_every_knob() -> None:
     assert entry["kalman_min_points"] == 5
 
 
+@pytest.mark.parametrize(
+    "kalman_r,expected",
+    [
+        ({"min": 0.1, "max": 0.3, "step": 0.1}, [0.1, 0.2, 0.3]),
+        ({"min": 0.7, "max": 0.9, "step": 0.1}, [0.7, 0.8, 0.9]),
+    ],
+)
+def test_float_range_keeps_exact_steps_and_max(kalman_r, expected) -> None:
+    space = planner_provider_module.PlannerSearchSpace.model_validate(
+        {
+            "load_predictor": {"preset": False, "type": "kalman"},
+            "kalman_r": {"range": kalman_r},
+        }
+    )
+
+    assert sorted({entry["kalman_r"] for entry in space.load_predictor.preset}) == (
+        expected
+    )
+
+
 def test_custom_predictor_preset_rejects_unknown_knob() -> None:
     with pytest.raises(ValueError, match="unknown keys"):
         planner_provider_module.PlannerSearchSpace.model_validate(
