@@ -323,10 +323,14 @@ impl LLMEngine for SglangSidecarEngine {
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
-        let combined_token_limit = combined_token_limit(&discovery);
-        if combined_token_limit.is_none() {
-            tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
-        }
+        let combined_token_limit = combined_token_limit(&discovery)
+            .inspect_err(|reason| {
+                tracing::warn!(
+                    reason,
+                    "requests without max_tokens keep SGLang's 128-token default"
+                );
+            })
+            .ok();
         self.state
             .set(StartedState {
                 pool,
@@ -958,26 +962,51 @@ fn sglang_eagle_enabled(server_info: &Value) -> bool {
         })
 }
 
+/// Largest step count in SGLang's default adaptive speculation config
+/// (`DEFAULT_ADAPTIVE_CONFIG` in `sglang/srt/speculative/adaptive_spec_params.py`).
+/// Adaptive speculation runs with `topk == 1`, so SGLang reserves one more
+/// draft-token slot than this.
+const SGLANG_DEFAULT_ADAPTIVE_MAX_STEPS: u32 = 7;
+
 /// Context length minus the EAGLE draft-token reserve, which SGLang counts
-/// against the context once `max_new_tokens` is set. Adaptive speculation does
-/// not report its reserve.
-fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
+/// against the context once `max_new_tokens` is set, or why it is unknown.
+///
+/// Under adaptive speculation the reserve covers the largest step count SGLang
+/// may switch to. Server info reports only the starting step count, so the
+/// sidecar knows the largest one only for SGLang's default adaptive config.
+fn combined_token_limit(discovery: &Discovery) -> Result<u32, &'static str> {
     let server_info = &discovery.server_info;
     let reserved = if !sglang_eagle_enabled(server_info) {
         0
-    } else if server_info
-        .get("speculative_adaptive")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
     } else {
         let field = |key| client::json_u32(server_info, key);
-        field("speculative_eagle_topk")?
-            .saturating_mul(field("speculative_num_steps")?)
-            .max(field("speculative_num_draft_tokens")?)
+        let reserved = field("speculative_eagle_topk")
+            .zip(field("speculative_num_steps"))
+            .zip(field("speculative_num_draft_tokens"))
+            .map(|((topk, steps), draft_tokens)| topk.saturating_mul(steps).max(draft_tokens))
+            .ok_or("SGLang did not report its speculative decoding parameters")?;
+        let adaptive = server_info
+            .get("speculative_adaptive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !adaptive {
+            reserved
+        } else if server_info
+            .get("speculative_adaptive_config")
+            .is_some_and(|config| !config.is_null())
+        {
+            return Err(
+                "SGLang uses a custom adaptive speculative decoding config, which the sidecar cannot read",
+            );
+        } else {
+            reserved.max(SGLANG_DEFAULT_ADAPTIVE_MAX_STEPS + 1)
+        }
     };
-    discovery.max_model_len?.checked_sub(reserved)
+    discovery
+        .max_model_len
+        .ok_or("SGLang did not report its context length")?
+        .checked_sub(reserved)
+        .ok_or("the speculative decoding reserve exceeds the context length")
 }
 
 /// SGLang holds a request's grammar until its reasoning parser sees the end of thinking.
@@ -1740,17 +1769,49 @@ mod tests {
             "speculative_num_steps": 3,
             "speculative_num_draft_tokens": 4,
         });
-        assert_eq!(limit(json!({})), Some(4096));
-        assert_eq!(limit(eagle.clone()), Some(4092));
-        let mut adaptive = eagle.clone();
-        adaptive["speculative_adaptive"] = true.into();
-        assert_eq!(limit(adaptive), None);
+        assert_eq!(limit(json!({})), Ok(4096));
+        assert_eq!(limit(eagle.clone()), Ok(4092));
         let mut incomplete = eagle;
         incomplete
             .as_object_mut()
             .unwrap()
             .remove("speculative_num_steps");
-        assert_eq!(limit(incomplete), None);
+        assert!(limit(incomplete).is_err());
+        assert!(combined_token_limit(&discovery(json!({}))).is_err());
+    }
+
+    #[test]
+    fn combined_token_limit_reserves_the_largest_default_adaptive_step() {
+        let limit = |server_info| {
+            let mut discovery = discovery(server_info);
+            discovery.max_model_len = Some(4096);
+            combined_token_limit(&discovery)
+        };
+        // What SGLang reports for `--speculative-adaptive` with its default config:
+        // the starting step count (the middle candidate), not the largest one.
+        let adaptive = json!({
+            "speculative_algorithm": "EAGLE",
+            "speculative_eagle_topk": 1,
+            "speculative_num_steps": 3,
+            "speculative_num_draft_tokens": 4,
+            "speculative_adaptive": true,
+            "speculative_adaptive_config": null,
+        });
+        // Reserving only the reported 4 slots would leave SGLang 4 short, and it
+        // would reject every request that omits max_tokens as too long.
+        assert_eq!(limit(adaptive.clone()), Ok(4096 - 8));
+
+        let mut unset = adaptive.clone();
+        unset
+            .as_object_mut()
+            .unwrap()
+            .remove("speculative_adaptive_config");
+        assert_eq!(limit(unset), Ok(4096 - 8));
+
+        // A custom config's step counts live in a file in SGLang's container.
+        let mut custom = adaptive;
+        custom["speculative_adaptive_config"] = "/configs/adaptive.json".into();
+        assert!(limit(custom).is_err());
     }
 
     #[test]
