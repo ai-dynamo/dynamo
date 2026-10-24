@@ -103,6 +103,8 @@ impl IndexerPolicy {
     }
 }
 
+const PREDICTED_TTL_WARN_THRESHOLD: Duration = Duration::from_secs(10);
+
 /// Predict-on-route side indexer: a short-TTL approximate index that routing
 /// decisions populate so a worker gets cache credit for a prompt before the
 /// engine's first KV event for it arrives. Always local, never dumped or
@@ -122,6 +124,16 @@ impl SideIndexer {
         metrics: Arc<KvIndexerMetrics>,
         cancel: CancellationToken,
     ) -> Self {
+        if ttl > PREDICTED_TTL_WARN_THRESHOLD {
+            tracing::warn!(
+                ttl_secs = ttl.as_secs_f64(),
+                threshold_secs = PREDICTED_TTL_WARN_THRESHOLD.as_secs_f64(),
+                "router_predicted_ttl_secs is greater than 10 seconds. This will likely revert KV \
+                 routing to approximate routing: each routing decision refreshes the predicted \
+                 entries, so they can outlive engine evictions. Set it lower than the end-to-end \
+                 request time; about 1 second for batched workloads with shared prefixes."
+            );
+        }
         let prune_config = Some(PruneConfig { ttl });
         if num_threads > 1 {
             return Self::Concurrent(Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
