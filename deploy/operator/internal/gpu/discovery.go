@@ -178,6 +178,11 @@ type GPUInfo struct {
 	Interconnect     string                      // Primary GPU-to-GPU interconnect technology used within the node (e.g., "nvlink" for high-bandwidth links or "pcie" for standard bus-based communication)
 	InterconnectTier string                      // Qualitative or platform-specific classification of the interconnect (e.g., NVLink generation, topology tier, or vendor-defined performance level)
 	NVLinkLinks      int                         // Number of NVLink connections per GPU (0 if NVLink is not present or interconnect is PCIe-only)
+	// OtherModels lists the GPU models of the nodes that unfiltered discovery left out because
+	// their SKU differs from System. Discovery selects the node with the most GPUs, so a non-empty
+	// list means System is a choice among several GPU types, not a fact about the cluster. It is
+	// empty for a filtered discovery and for a cluster of one SKU.
+	OtherModels []string
 }
 
 type ScrapeMetricsFunc func(ctx context.Context, endpoint string) (*GPUInfo, error)
@@ -430,6 +435,8 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	if err != nil {
 		cloudProvider = CloudProviderUnknown
 	}
+	bestNode.OtherModels = collectOtherModels(filterSKU, bestSKU, len(allNodes),
+		func(i int) (nvidiacomv1beta1.GPUSKUType, string) { return allNodes[i].sku, allNodes[i].info.Model })
 	bestNode.System = bestSKU
 	bestNode.CloudProvider = cloudProvider
 	bestNode.NodesWithGPUs = nodesWithGPUs
@@ -882,6 +889,8 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 		rdmaDetected = true
 	}
 
+	bestNode.OtherModels = collectOtherModels(filterSKU, bestSKU, len(allNodes),
+		func(i int) (nvidiacomv1beta1.GPUSKUType, string) { return allNodes[i].sku, allNodes[i].info.Model })
 	bestNode.System = bestSKU
 	bestNode.NodesWithGPUs = nodesWithGPUs
 	bestNode.RDMAEnabled = rdmaDetected

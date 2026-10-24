@@ -307,6 +307,16 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
+  - dynamographdeploymentruns
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
   - podsnapshots
   verbs:
   - delete

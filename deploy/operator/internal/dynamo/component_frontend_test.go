@@ -11,7 +11,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -20,13 +20,13 @@ import (
 func TestFrontendDefaultsStartupProbeVersionGate(t *testing.T) {
 	tests := []struct {
 		name           string
-		runtimeVersion *runtimeversion.Version
+		runtimeVersion *versionoverride.Version
 		wantEnabled    bool
 	}{
 		{name: "unknown legacy runtime"},
-		{name: "older runtime", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 5, Patch: 9}},
-		{name: "minimum supported runtime", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}, wantEnabled: true},
-		{name: "newer runtime", runtimeVersion: &runtimeversion.Version{Major: 2}, wantEnabled: true},
+		{name: "older runtime", runtimeVersion: &versionoverride.Version{Major: 1, Minor: 5, Patch: 9}},
+		{name: "minimum supported runtime", runtimeVersion: &versionoverride.Version{Major: 1, Minor: 6}, wantEnabled: true},
+		{name: "newer runtime", runtimeVersion: &versionoverride.Version{Major: 2}, wantEnabled: true},
 	}
 
 	for _, tt := range tests {
