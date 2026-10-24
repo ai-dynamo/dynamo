@@ -37,6 +37,7 @@ from codeowners_match import (  # noqa: E402
     compute_resolution,
     load_tree,
     match,
+    merge_base_blob,
     merge_base_tree,
     parse_codeowners,
     resolve_owners,
@@ -226,6 +227,303 @@ def print_ownership_violations(
         )
 
 
+@dataclass(frozen=True)
+class WeakenedDeclaration:
+    """An ownership grant removed at HEAD whose glob still matches files."""
+
+    kind: str
+    glob: str
+    lost: tuple[str, ...]
+
+
+def _spec_teams(spec: dict) -> dict[str, str]:
+    """Label-to-team map read straight off a raw areas spec.
+
+    Local to one revision on purpose. ``_declared_grants`` needs the base
+    revision's own mapping to see a reassignment, and the base spec may not
+    survive ``compute_resolution``.
+    """
+    return {
+        area["label"]: area["github_team"]
+        for area in spec.get("areas") or []
+        if area.get("label") and area.get("github_team")
+    }
+
+
+def _declared_grants(spec: dict) -> dict[tuple[str, str], set[str]]:
+    """Flatten the enforceable ownership grants of a raw areas spec.
+
+    Covers every declaration kind that grants ownership a head-only check
+    cannot re-derive once it is gone: an area's own ``path_globs``,
+    ``required_owners``, ``shared``, the blocking ``classify.filetype_rules``,
+    and ``meta.catch_all``. The later ones matter as much as the first --
+    deleting a nested area glob lets an enclosing area absorb the files, and
+    deleting the ``*Dockerfile*`` rule drops its coowner from every
+    Dockerfile. Coverage stays green through both, so nothing else notices.
+
+    Grants are keyed on the GitHub team, never on the label that names it.
+    A label is an alias; repointing ``github_team`` under a label hands every
+    grant that names it to another team while every glob, every owners list
+    and the coverage total stay byte-identical. Keyed on labels the gate sees
+    nothing move. Keyed on teams the reassignment reads as what it is: the
+    old team losing every path the label reached.
+
+    Reads raw YAML rather than a ``ResolvedModel`` on purpose. The resolver
+    rejects retired schema keys outright, and the base revision this gate
+    compares against is by definition older than HEAD, so resolving it would
+    blind the gate to exactly the history it needs to read.
+    """
+    teams = _spec_teams(spec)
+    grants: dict[tuple[str, str], set[str]] = {}
+    for kind in ("required_owners", "shared"):
+        for rule in spec.get(kind) or []:
+            glob = rule.get("glob")
+            if glob:
+                grants[(kind, glob)] = {
+                    teams.get(label, label) for label in rule.get("owners") or []
+                }
+    for area in spec.get("areas") or []:
+        team = teams.get(area.get("label"))
+        for glob in area.get("path_globs") or []:
+            if team and glob:
+                grants.setdefault(("area", glob), set()).add(team)
+    classify = spec.get("classify") or {}
+    for rule in classify.get("filetype_rules") or []:
+        pattern, coowner = rule.get("pattern"), rule.get("coowner")
+        if pattern and coowner:
+            grants.setdefault(("filetype", pattern), set()).add(
+                teams.get(coowner, coowner)
+            )
+    catch_all = (spec.get("meta") or {}).get("catch_all")
+    if catch_all:
+        grants[("catch_all", "*")] = {catch_all}
+    return grants
+
+
+def _grant_pattern(kind: str, glob: str) -> str:
+    """Match form for a grant key. File-type and catch-all rules are unanchored."""
+    return glob if kind in ("filetype", "catch_all") else anchor(glob)
+
+
+def _transfer_entries(spec: dict) -> list[dict]:
+    """Validated ``ownership_transfers`` entries.
+
+    Fails closed with a policy error rather than a traceback. The resolver
+    never sees this key, so nothing else would catch a malformed entry.
+    """
+    entries = spec.get("ownership_transfers") or []
+    if not isinstance(entries, list):
+        raise SystemExit("areas.yaml: ownership_transfers must be a list")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                f"areas.yaml: ownership_transfers entry {entry!r} must be a mapping"
+            )
+        if not isinstance(entry.get("glob"), str) or not entry["glob"]:
+            raise SystemExit(
+                f"areas.yaml: ownership_transfers entry {entry!r} needs a glob"
+            )
+        removing = entry.get("removing")
+        if (
+            not isinstance(removing, list)
+            or not removing
+            or not all(isinstance(team, str) and team for team in removing)
+        ):
+            raise SystemExit(
+                f"areas.yaml: ownership_transfers entry {entry!r} needs a "
+                "non-empty 'removing' list of owner handles"
+            )
+        bare = [team for team in removing if not team.startswith("@")]
+        if bare:
+            raise SystemExit(
+                f"areas.yaml: ownership_transfers entry {entry!r} names "
+                f"{bare} by area label. Name the outgoing owner handle "
+                "instead (the '@org/team' the failure message prints). A "
+                "label is a pointer: repoint its github_team and the "
+                "approval silently follows to whichever team the label "
+                "names next."
+            )
+    return entries
+
+
+def _transfer_key(glob: str) -> str:
+    """Lookup key for a transfer entry's glob.
+
+    ``*`` stays literal and acknowledges the team's removal repo-wide. That
+    is the shape a reassignment needs: repointing one area's ``github_team``
+    drops the old team from every glob the label reached, and enumerating
+    them one entry at a time turns a one-line intent into forty lines of
+    bookkeeping that rot the moment the area's globs change.
+    """
+    return "*" if glob == "*" else anchor(glob)
+
+
+def _transfer_pairs(spec: dict | None) -> set[tuple[str, str]]:
+    """``(glob key, team)`` pairs a spec's ``ownership_transfers`` declares."""
+    if spec is None:
+        return set()
+    return {
+        (_transfer_key(entry["glob"]), team)
+        for entry in _transfer_entries(spec)
+        for team in entry["removing"]
+    }
+
+
+def _acknowledged_removals(
+    spec: dict, base_spec: dict | None = None
+) -> dict[str, set[str]]:
+    """Teams this change records as deliberately losing ownership.
+
+    Registered under both the written and the anchored spelling of the glob,
+    so ``lib/`` in a transfer entry still matches ``/lib/`` in the grant it
+    covers. Without that, a benign spelling difference costs the author two
+    failures at once: the removal reads as unacknowledged and the entry reads
+    as inert.
+
+    An acknowledgement is spent by the change that introduces it. A pair the
+    merge-base already carries approved a removal that has already landed and
+    been reviewed; leaving it live would let it wave through a later removal
+    nobody looked at, which is how a one-time hand-off becomes a standing
+    exemption. Together with the inert check -- which blocks an entry landed
+    ahead of its removal -- an acknowledgement is live for exactly one
+    change, the one whose diff carries it.
+    """
+    spent = _transfer_pairs(base_spec)
+    acknowledged: dict[str, set[str]] = {}
+    for key, team in _transfer_pairs(spec) - spent:
+        acknowledged.setdefault(key, set()).add(team)
+    return acknowledged
+
+
+def unmatched_transfers(
+    removals: list[WeakenedDeclaration], spec: dict
+) -> set[tuple[str, str]]:
+    """Acknowledged ``(glob, owner)`` pairs that match no actual removal.
+
+    Judged per pair, not per entry. An entry naming both a real removal and a
+    misspelled one would otherwise pass whole on the strength of the real
+    one, and the misspelling would sit there forever -- exactly the rot the
+    self-cleaning rule exists to prevent.
+
+    Judged over every entry, not just the live ones, so a spent entry surfaces
+    as inert and gets pruned rather than accumulating as noise.
+    """
+    live = {(anchor(entry.glob), team) for entry in removals for team in entry.lost}
+    losing = {team for _, team in live}
+    unmatched: set[tuple[str, str]] = set()
+    for entry in _transfer_entries(spec):
+        for team in entry["removing"]:
+            matched = (
+                team in losing
+                if entry["glob"] == "*"
+                else (anchor(entry["glob"]), team) in live
+            )
+            if not matched:
+                unmatched.add((entry["glob"], team))
+    return unmatched
+
+
+def describe_transfers(pairs: set[tuple[str, str]]) -> list[str]:
+    """Render acknowledgement pairs for a report line."""
+    return sorted(f"{glob} ({owner})" for glob, owner in pairs)
+
+
+def weakened_declarations(
+    base_spec: dict | None, head_spec: dict, tree: list[str]
+) -> list[WeakenedDeclaration]:
+    """Ownership grants dropped at HEAD while their files remain tracked.
+
+    The counterpart to ``ownership_contract_violations``. That check catches
+    an owner lost to last-match-wins precedence while its declaration
+    survives. This catches the inverse: the declaration itself deleted, which
+    removes its own enforcement and so leaves the contract check with nothing
+    to assert. Deleting a ``shared`` line is the case that motivated this --
+    shared entries are deliberately not hard contracts, so nothing else
+    notices when one disappears.
+
+    Three shapes are legitimate and must not fire. A reassignment rewrites
+    declarations deliberately and leaves the files owned by whoever claimed
+    them. Pruning removes a grant alongside the files it covered. And a grant
+    can simply move: deleting a ``shared`` line whose owner also reaches the
+    path through an area's own list changes nothing about who owns it.
+
+    So the removed declaration is the trigger, not the verdict. Each one is
+    confirmed against resolved ownership, and only teams that actually stop
+    owning a tracked file are reported. Resolution runs over the paths under
+    candidate globs alone, never the whole tree, which keeps a precise check
+    cheap.
+    """
+    if base_spec is None:
+        return []
+    try:
+        base_rules = _rendered_rules(base_spec)
+    except SystemExit:
+        print(
+            "note: the merge-base areas.yaml no longer resolves under the "
+            "current schema; skipping the removed-declaration gate"
+        )
+        return []
+    head_rules = _rendered_rules(head_spec)
+    head_grants = _declared_grants(head_spec)
+    weakened: list[WeakenedDeclaration] = []
+    for (kind, glob), owners in _declared_grants(base_spec).items():
+        if not owners - head_grants.get((kind, glob), set()):
+            continue
+        lost: set[str] = set()
+        pattern = _grant_pattern(kind, glob)
+        for path in tree:
+            if match(pattern, path):
+                lost |= set(resolve_owners(base_rules, path)) - set(
+                    resolve_owners(head_rules, path)
+                )
+        if lost:
+            weakened.append(
+                WeakenedDeclaration(kind=kind, glob=glob, lost=tuple(sorted(lost)))
+            )
+    return weakened
+
+
+def unacknowledged(
+    removals: list[WeakenedDeclaration], acknowledged: dict[str, set[str]]
+) -> list[WeakenedDeclaration]:
+    """Removals with no matching ``ownership_transfers`` entry to explain them.
+
+    A deliberate hand-off is legitimate and has to be expressible, or the gate
+    blocks real work with no way through except abandoning the intent. What it
+    must not be is silent, so the escape hatch is a declaration in the same
+    file, visible in the diff and subject to the same review as the removal it
+    covers.
+    """
+    remaining = []
+    everywhere = acknowledged.get("*", set())
+    for entry in removals:
+        covered = acknowledged.get(anchor(entry.glob), set()) | everywhere
+        lost = tuple(t for t in entry.lost if t not in covered)
+        if lost:
+            remaining.append(
+                WeakenedDeclaration(kind=entry.kind, glob=entry.glob, lost=lost)
+            )
+    return remaining
+
+
+def _rendered_rules(spec: dict) -> list[tuple[str, list[str]]]:
+    """Parsed CODEOWNERS rules a spec emits, for resolving owners from it."""
+    lines, _ = _render_codeowners(compute_resolution(spec), group=True, external=[])
+    return parse_codeowners("\n".join(lines))
+
+
+def print_weakened_declarations(weakened: list[WeakenedDeclaration]) -> None:
+    """Report ownership grants removed while their files remain tracked."""
+    if not weakened:
+        return
+    print(
+        f"weakened ownership declarations: {len(weakened)} "
+        "(grant removed while its files remain tracked):"
+    )
+    for entry in weakened[:15]:
+        print(f"    {entry.glob} ({entry.kind}): lost {list(entry.lost)}")
+
+
 def newly_stale_patterns(
     dead: list[str], base_paths: list[str] | None
 ) -> list[str] | None:
@@ -260,6 +558,8 @@ def strict_failure(
     dead: list[str],
     newly_stale: list[str] | None,
     additivity_violations: list[SharedAdditivityViolation] | None = None,
+    weakened: list[WeakenedDeclaration] | None = None,
+    inert_transfers: list[str] | None = None,
 ) -> str | None:
     """Return the fail-closed message for the active strict gate.
 
@@ -300,6 +600,19 @@ def strict_failure(
             f"!! strict: {len(additivity_violations)} path(s) where a shared "
             "rule drops an owner the rule it overrides granted -- restate "
             "every retained owner under that entry's 'owners' in areas.yaml"
+        )
+    if weakened:
+        return (
+            f"!! strict: {len(weakened)} ownership declaration(s) removed "
+            "while their files remain tracked -- restore them in areas.yaml, "
+            "or record the hand-off under 'ownership_transfers', naming the "
+            "lost owner handle printed above"
+        )
+    if inert_transfers:
+        return (
+            f"!! strict: {len(inert_transfers)} ownership_transfers entry/"
+            "entries acknowledge a removal that is not happening -- prune "
+            "them from areas.yaml"
         )
     return None
 
@@ -482,6 +795,51 @@ def _print_warnings(gate: CoverageGate, base: str) -> None:
     print("   ", gate.warnings[:15])
 
 
+def split_transfers(
+    removals: list[WeakenedDeclaration],
+    head_spec: dict,
+    base_spec: dict | None,
+) -> tuple[list[str], list[str]]:
+    """Split unmatched acknowledgements into blocking and inherited.
+
+    An entry the base already carried is not this change's problem. Blocking
+    on it would red-X every unrelated policy PR the moment a hand-off lands,
+    and would fail the push-to-main run outright, where HEAD is its own
+    merge-base and no removal can be observed. Same split the stale-glob gate
+    makes between what a branch orphaned and what it inherited.
+    """
+    unmatched = unmatched_transfers(removals, head_spec)
+    inherited = (
+        unmatched_transfers(removals, base_spec) if base_spec is not None else unmatched
+    )
+    return describe_transfers(unmatched - inherited), describe_transfers(
+        unmatched & inherited
+    )
+
+
+def _merge_base_spec(repo: str, base: str, areas: str) -> dict | None:
+    """The areas spec at the merge-base, or ``None`` with a printed reason.
+
+    Skipping is announced rather than silent. A gate that quietly stops
+    gating when it cannot find its reference frame reads as green, which is
+    the failure mode worth engineering against here.
+    """
+    repo_root = Path(repo).resolve()
+    try:
+        rel = Path(areas).resolve().relative_to(repo_root).as_posix()
+    except ValueError:
+        rel = None
+    blob = merge_base_blob(repo_root, base, rel) if rel else None
+    spec = yaml.safe_load(blob) if blob else None
+    if not isinstance(spec, dict):
+        print(
+            f"note: no readable areas.yaml at the merge-base with {base}; "
+            "skipping the removed-declaration gate for this run"
+        )
+        return None
+    return spec
+
+
 def main() -> int:
     args = _parse_args()
     spec = yaml.safe_load(Path(args.areas).read_text())
@@ -502,12 +860,33 @@ def main() -> int:
         # One git call, and only when something is stale to attribute.
         base_paths = merge_base_tree(Path(args.repo), args.base) if dead else []
         newly_stale = newly_stale_patterns(dead, base_paths)
+    base_spec = _merge_base_spec(args.repo, args.base, args.areas)
+    removals = weakened_declarations(base_spec, spec, tree)
+    weakened = unacknowledged(removals, _acknowledged_removals(spec, base_spec))
+    inert, stale_inherited = split_transfers(removals, spec, base_spec)
     _print_summary(model, tree, unmatched, dead, newly_stale, violations)
     print_shared_additivity_violations(additivity)
+    print_weakened_declarations(weakened)
+    if stale_inherited:
+        print(
+            f"warning: {len(stale_inherited)} ownership_transfers entry/entries "
+            "inherited from the base match no removal (not blocking here; a "
+            "later policy change should prune them):"
+        )
+        for line in stale_inherited[:10]:
+            print(f"    {line}")
     gate = split_coverage(unmatched, changed)
     _print_warnings(gate, args.base)
     failure = strict_failure(
-        args.strict, gate, changed, violations, dead, newly_stale, additivity
+        args.strict,
+        gate,
+        changed,
+        violations,
+        dead,
+        newly_stale,
+        additivity,
+        weakened,
+        inert,
     )
     if failure:
         print(failure)
