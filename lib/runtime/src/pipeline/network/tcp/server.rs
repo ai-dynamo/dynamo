@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use socket2::{Domain, SockAddr, SockRef, Socket, Type};
+use socket2::{Domain, SockAddr, Socket, Type};
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
@@ -892,12 +892,8 @@ async fn tcp_listener(
             }
         }
 
-        match SockRef::from(&stream).set_linger(Some(std::time::Duration::from_secs(0))) {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::warn!("failed to set tcp stream to linger: {e}");
-            }
-        }
+        // Keep the default graceful close: zero linger can discard queued frames
+        // and replace the stream's closing control message with a TCP reset.
 
         // Spawn per-connection so the accept loop is never blocked by a slow
         // TLS handshake. The handshake is bounded by DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS (default 3s).
@@ -3159,6 +3155,32 @@ mod tests {
             matches!(ctrl, ControlMessage::Stop),
             "context.stop() should emit Stop, got {ctrl:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_request_stream_closing_frame_survives_socket_close() {
+        time::timeout(Duration::from_secs(5), async {
+            let server = test_server().await;
+            let (mut reader, sender, ctx) = register_and_dial_request_stream(&server).await;
+            ctx.stop();
+            // The receiver is dropped when the server's request writer finishes.
+            // Keep the sender alive so closure is due to cancellation, not EOF.
+            sender.tx.closed().await;
+            let frame = reader
+                .next()
+                .await
+                .expect("closing frame missing")
+                .expect("closing frame read failed");
+            let ctrl: ControlMessage = serde_json::from_slice(frame.header().unwrap()).unwrap();
+            assert_eq!(ctrl, ControlMessage::Stop);
+            let eof = reader.next().await;
+            assert!(
+                eof.is_none(),
+                "expected a graceful EOF after the closing frame, got {eof:?}"
+            );
+        })
+        .await
+        .expect("stream-close test exceeded its deadline");
     }
 
     // ---- accept-loop backoff under resource exhaustion (issue #11822) ----
