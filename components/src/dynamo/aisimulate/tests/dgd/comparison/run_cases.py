@@ -377,7 +377,12 @@ def _validate_same_intent(
     ]
     dgdr_gpu_sku = hardware.get("gpuSku")
     sweeper_gpu_sku = search_space.get("hardware_sku")
-    normalized_dgdr_gpu_sku = {"gb200_sxm": "gb200"}.get(dgdr_gpu_sku, dgdr_gpu_sku)
+
+    # Normalize DGDR GPU identifiers to AISimulate system names.
+    normalized_dgdr_gpu_sku = {
+        "b300_sxm": "gb300",
+        "gb200_sxm": "gb200",
+    }.get(dgdr_gpu_sku, dgdr_gpu_sku)
     if normalized_dgdr_gpu_sku != sweeper_gpu_sku:
         mismatches.append(
             f"hardware_sku: DGDR={dgdr_gpu_sku!r}, Sweeper={sweeper_gpu_sku!r}"
