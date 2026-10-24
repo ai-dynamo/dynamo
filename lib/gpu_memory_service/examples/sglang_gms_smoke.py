@@ -16,11 +16,14 @@ Omit --tag so the server serves every production tag: the integration opens a
 client for both "weights" and "kv_cache", so restricting it to one leaves the
 other socket missing.
 
-Then WRITE mode, which populates the server and holds the weights open:
+Then WRITE mode, which loads the weights from disk and commits them. The
+server keeps them after this process exits:
 
-    python sglang_gms_smoke.py --keep-alive
+    python sglang_gms_smoke.py
 
-Then RO mode in a second process, which adopts what the writer published:
+Then RO mode in a second process, which adopts what the writer published.
+Start it after the writer exits: a writer that still runs (--keep-alive)
+holds the kv_cache lock, and the reader waits for it:
 
     python sglang_gms_smoke.py --read-only
 """
