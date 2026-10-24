@@ -109,10 +109,13 @@ spec:
             value: /opt/models
           - name: HF_HUB_OFFLINE
             value: "1"
+          # Each sidecar keeps every worker's discovery record, so its memory
+          # grows with the workers: 0.5 GiB at 512, and 1.3 to 1.7 GiB at 2048.
+          # Requesting less let the scheduler pack nodes past their memory.
           resources:
             requests:
               cpu: 100m
-              memory: 512Mi
+              memory: 1536Mi
             limits:
               memory: 4Gi
           volumeMounts:
@@ -122,6 +125,20 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
+        # Spread the arm's workers over the nodes. Each requests little, so
+        # without this the scheduler put up to 382 of 2048 workers on one node.
+        # A soft anti-affinity, because Grove rejects topologySpreadConstraints.
+        # run.sh also caps them per node (MAX_WORKERS_PER_NODE).
+        affinity:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-graph-deployment-name: qwen-b
+                    nvidia.com/dynamo-component-type: decode
 ---
 # The Gateway sends arm B's requests to the InferencePool the operator creates
 # for this DGD, so the EPP picks the worker. The matches are the same as arm

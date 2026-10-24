@@ -82,10 +82,10 @@ benchmarks/results/gateway_epp_ab/<UTC time>/
    |---|---|---|
    | Worker pods | 2048 | 2048 |
    | Containers per worker pod | mocker | mocker and Frontend sidecar |
-   | Requests of all worker pods | 205 CPU, 1 TiB | 410 CPU, 2 TiB |
+   | Requests of all worker pods | 205 CPU, 1 TiB | 410 CPU, 4 TiB |
    | Router pod | Frontend: 8 CPU, 16 GiB | EPP: 8 CPU, 16 GiB |
    | aiperf pod | 16 CPU, 16 GiB | 16 CPU, 16 GiB |
-   | Nodes, at the default 110 pods per node | at least 19 for the workers | at least 19 for the workers |
+   | Schedulable nodes for the workers | at least 16, at 128 workers per node; 19 at the default 110 pods per node | the same |
 
 5. **Hugging Face access for the aiperf pod.** It downloads the session corpus, 1.85 GB, and the
    tokenizer into a scratch volume, so it must reach huggingface.co, and its node needs about 4 GB
@@ -126,7 +126,8 @@ $B teardown a  # delete the DGD, the HTTPRoute and the Job
 
 `deploy` scales the workers up `RAMP_STEP` at a time and waits for each step to be ready. An arm
 that is already deployed scales from its current size. `deploy` warns when the other arm is also
-deployed. `bench` starts the aiperf Job, waits for it, copies its results out of the pod, and
+deployed, and stops before the next step when a node holds more than `MAX_WORKERS_PER_NODE` of the
+arm's workers. `teardown` scales the workers down `RAMP_STEP` at a time before it deletes the DGD. `bench` starts the aiperf Job, waits for it, copies its results out of the pod, and
 records what was deployed. The pod keeps the results until a copy succeeds, so if `bench` stops
 before that, `$B collect a` copies them.
 
@@ -299,13 +300,22 @@ Keep these limits in mind when reading the results:
 - **One mocker per pod.** The EPP maps the worker it picks to a pod through the hash of the pod's
   name. Several mockers in one pod (`--num-workers`) would share that identity. Arm A uses the same
   layout, so the workers of the two arms match.
-- **Pods per node.** Kubernetes allows 110 pods per node by default, so 2048 worker pods need at
-  least 19 nodes. Give the router pod and the aiperf pod room on nodes of their own if you can. The
-  aiperf Job prefers a node without the router.
-- **Discovery traffic.** Every Dynamo process (each mocker, each sidecar, the Frontend or the EPP)
-  watches every worker's discovery record in the namespace. The traffic at startup therefore grows
-  with the square of the number of pods. `deploy` adds `RAMP_STEP` workers (512) at a time. Lower it
-  if the API server throttles.
+- **Workers per node.** Every Dynamo process (each mocker, each sidecar, the Frontend or the EPP)
+  watches every worker's discovery record in the namespace. Whenever many workers change at once, a
+  node therefore works in proportion to its workers times all the workers. On a shared cluster, the
+  scheduler put up to 382 of arm B's 2048 workers on one node, because each requests little. When
+  the arm was deleted, the nodes with 186 to 382 of them stopped reporting for several minutes,
+  along with other teams' pods on them; nodes with 100 or fewer kept going. So both manifests
+  spread each arm's workers over the nodes with a soft pod anti-affinity (Grove rejects
+  topology spread constraints), and `run.sh` allows at most
+  `MAX_WORKERS_PER_NODE` (128) on one node: `deploy` refuses to start without enough schedulable
+  nodes (16 for 2048 workers), and stops before the next step when a node holds more. Kubernetes
+  also allows only 110 pods per node by default, which makes 19 nodes. Give the router pod and the
+  aiperf pod room on nodes of their own if you can. The aiperf Job prefers a node without the
+  router.
+- **Discovery traffic.** The same watches make the traffic at startup grow with the square of the
+  number of pods. `deploy` adds `RAMP_STEP` workers (256) at a time, and `teardown` removes them
+  the same way. Lower it if the API server throttles.
 - **The sidecars skip the workers' load reports.** Every Frontend subscribes to the load reports
   (`kv_metrics`) of every worker, one ZMQ socket each, though only busy thresholds use them. With a
   sidecar in every worker pod, that grows with the square of the workers. At 2048 workers each
@@ -329,11 +339,17 @@ Keep these limits in mind when reading the results:
   A starved client reports its own delays as server latency. Replaying 2 sessions on minikube, it
   used up to 6.1 GB of memory and 3.5 GB of scratch space.
 - **The Gateway.** One agentgateway replica serves both arms. If it saturates, scale it for both.
-- **Resource requests.** The mocker and the sidecar each request 100m CPU, with no CPU limit, and
-  512 MiB of memory. With 64 workers on minikube, a mocker used 200–230 MiB (peak 280 MiB), a
-  sidecar 245–300 MiB (peak 306 MiB) and the EPP 200 MiB. Each process also keeps every worker's
-  discovery record, so expect more at 2048 workers. Measure your own with `kubectl top pods`, and
-  edit both manifests.
+- **One failed warmup request ends the run.** The AgentX scenario stops a run at the first warmup
+  request that fails, before it measures anything. With 2048 workers, the burst warmup kept seven
+  sidecars from answering their liveness probes in time, and the kubelet restarted them. One request
+  reached a sidecar while it restarted, got HTTP 503, and the run ended. Fewer workers per node
+  leave the sidecars more CPU.
+- **Resource requests.** The mocker and the sidecar each request 100m CPU, with no CPU limit. The
+  mocker requests 512 MiB of memory and the sidecar 1.5 GiB. Each process keeps every worker's
+  discovery record, so its memory grows with the workers. At 2048 workers, a mocker used 423 MiB
+  (median) and a sidecar 1.4 GiB (median, at most 1.7 GiB), up from 197 MiB and 487 MiB at 512
+  workers, and the EPP used 2.7 GiB. Measure your own with `kubectl top pods`, and edit both
+  manifests.
 
 ## Settings
 
@@ -344,7 +360,8 @@ Keep these limits in mind when reading the results:
 | `KUBE_CONTEXT` | current context | kubectl context |
 | `NAMESPACE` | `default` | namespace of the DGDs, the model cache and the aiperf Job |
 | `WORKERS` | `2048` | mocker workers per arm |
-| `RAMP_STEP` | `512` | workers added at a time; `0` adds them all at once |
+| `RAMP_STEP` | `256` | workers added, or removed, at a time; `0` adds and removes them all at once |
+| `MAX_WORKERS_PER_NODE` | `128` | most workers of an arm on one node; `0` turns the check off |
 | `DYNAMO_VERSION` | `1.5.1` | tag of the default images |
 | `FRONTEND_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION` | Frontend, EPP and sidecar; 1.5 images lack the latency fixes |
 | `WORKER_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION` | mocker workers |
@@ -384,6 +401,8 @@ tests fail if their workers differ.
 | Symptom | Cause and fix |
 |---|---|
 | `deploy` waits for workers that never become ready | Usually an image pull, a full node, or a missing model cache. Check `kubectl describe pod` on a pending worker. |
+| `deploy` says the workers need more schedulable nodes | Fewer nodes are Ready, uncordoned and free of `NoSchedule` and `NoExecute` taints than `WORKERS` / `MAX_WORKERS_PER_NODE`. Lower `WORKERS`, or raise the cap only if your nodes can take that many workers changing at once. |
+| `deploy` stops because a node holds more than `MAX_WORKERS_PER_NODE` workers | The scheduler packed the workers unevenly, often because other pods fill some nodes. Tear the arm down with `$B teardown <arm>`, which scales it down in steps, then lower `WORKERS`. |
 | `bench` reports that the aiperf pod is not running yet | `run.sh` prints the scheduler's or the container's reason. A common one is `Insufficient cpu`: the pod requests 16 CPUs, which must fit on a node next to the workers. |
 | The smoke request fails with HTTP 404 | The HTTPRoute is not attached, or another route takes the request. Check `kubectl get httproute qwen-a -o yaml` for `Accepted`. |
 | The smoke request fails with HTTP 500 or 503 on arm B | The EPP has not found the workers yet. Check `kubectl logs -l nvidia.com/dynamo-component-type=epp`. |

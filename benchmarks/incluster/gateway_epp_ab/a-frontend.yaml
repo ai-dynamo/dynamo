@@ -92,6 +92,20 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
+        # Spread the arm's workers over the nodes. Each requests little, so
+        # without this the scheduler put up to 382 of 2048 workers on one node.
+        # A soft anti-affinity, because Grove rejects topologySpreadConstraints.
+        # run.sh also caps them per node (MAX_WORKERS_PER_NODE).
+        affinity:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-graph-deployment-name: qwen-a
+                    nvidia.com/dynamo-component-type: decode
 ---
 # The Gateway sends arm A's requests to the Frontend's Service. The route
 # matches the model header, as the GAIE routes do, and the arm header, so A and

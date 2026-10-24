@@ -27,7 +27,8 @@ MODEL=Qwen/Qwen3-0.6B
 KUBE_CONTEXT=${KUBE_CONTEXT:-$(kubectl config current-context)}
 NAMESPACE=${NAMESPACE:-default}
 WORKERS=${WORKERS:-2048}
-RAMP_STEP=${RAMP_STEP:-512}
+RAMP_STEP=${RAMP_STEP:-256}
+MAX_WORKERS_PER_NODE=${MAX_WORKERS_PER_NODE:-128}
 DYNAMO_VERSION=${DYNAMO_VERSION:-1.5.1}
 FRONTEND_IMAGE=${FRONTEND_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION}
 WORKER_IMAGE=${WORKER_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION}
@@ -69,7 +70,7 @@ BURST_PHASE_STARTS=${BURST_PHASE_STARTS:-1}
 
 # Every setting above. deploy and bench record them with the arm's results.
 SETTINGS=(
-  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE RUNTIME_VERSION
+  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP MAX_WORKERS_PER_NODE DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE RUNTIME_VERSION
   AIPERF_IMAGE MODEL_CACHE_PVC IMAGE_PULL_SECRET GATEWAY_NAME GATEWAY_NAMESPACE READY_TIMEOUT SETTLE_SECONDS
   BENCH_TIMEOUT ORDER KEEP SESSIONS DURATION_S ROUNDS DATASET MAX_CONTEXT TRACES COOLDOWN_S SEED
   SMOKE_TIMEOUT_S SAMPLE_WORKERS SERVER_METRICS_FORMATS BURST_PHASE_STARTS
@@ -113,7 +114,7 @@ validate_settings() {
   for name in WORKERS DURATION_S ROUNDS MAX_CONTEXT READY_TIMEOUT BENCH_TIMEOUT; do
     [[ ${!name} =~ ^[1-9][0-9]*$ ]] || invalid "$name must be a positive integer, not '${!name}'"
   done
-  for name in RAMP_STEP COOLDOWN_S SEED SETTLE_SECONDS SMOKE_TIMEOUT_S SAMPLE_WORKERS; do
+  for name in RAMP_STEP MAX_WORKERS_PER_NODE COOLDOWN_S SEED SETTLE_SECONDS SMOKE_TIMEOUT_S SAMPLE_WORKERS; do
     [[ ${!name} =~ ^[0-9]+$ ]] || invalid "$name must be a whole number, not '${!name}'"
   done
   IFS=, read -ra values <<< "$SESSIONS"
@@ -181,26 +182,69 @@ render_arm() {
       --arm-header "$(arm_header "$1")"
 }
 
-# Worker pods as name, Ready status and deletion time. A terminating pod can
-# still be Ready while the arm scales down, so the counts below leave it out.
+# Worker pods as name, Ready status, deletion time and node. A terminating pod
+# can still be Ready while the arm scales down, so the counts below leave it out.
 worker_readiness() {
   k get pods -l "$(dgd_pods "$1"),nvidia.com/dynamo-component-type=decode" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}'
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.spec.nodeName}{"\n"}{end}'
 }
 ready_workers() { worker_readiness "$1" | awk -F'\t' '$3 == "" && $2 == "True"' | wc -l; }
 unready_workers() { worker_readiness "$1" | awk -F'\t' '$3 == "" && $2 != "True" {print $1}' | head -20 | xargs; }
+# Every worker pod, terminating ones too.
+worker_count() { worker_readiness "$1" | wc -l; }
+# The node with the most of the arm's workers, as "<count> <node>".
+busiest_node() {
+  worker_readiness "$1" | awk -F'\t' '$3 == "" && $4 != "" {n[$4]++}
+    END {for (node in n) if (n[node] > max) {max = n[node]; busiest = node}; if (max) print max, busiest}'
+}
+
+# Nodes a worker can land on: Ready, not cordoned, and without a NoSchedule or
+# NoExecute taint, which the workers do not tolerate.
+schedulable_nodes() {
+  kubectl --context "$KUBE_CONTEXT" get nodes \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\t"}{.spec.unschedulable}{"\t"}{.spec.taints[*].effect}{"\n"}{end}' |
+    awk -F'\t' '$1 == "True" && $2 != "true" && $3 !~ /(^| )(NoSchedule|NoExecute)( |$)/ {n++} END {print n + 0}'
+}
+
+# An arm's workers, at most MAX_WORKERS_PER_NODE to a node, must fit on the
+# schedulable nodes; README.md explains the cap.
+check_capacity() {
+  local needed nodes
+  ((MAX_WORKERS_PER_NODE > 0)) || return 0
+  needed=$(((WORKERS + MAX_WORKERS_PER_NODE - 1) / MAX_WORKERS_PER_NODE))
+  if ! nodes=$(schedulable_nodes); then
+    log "warning: cannot list the nodes, so cannot check that $needed of them can take $WORKERS workers"
+    return 0
+  fi
+  ((nodes >= needed)) ||
+    die "$WORKERS workers, at most $MAX_WORKERS_PER_NODE per node, need $needed schedulable nodes, and the cluster has $nodes. Lower WORKERS, or raise MAX_WORKERS_PER_NODE if your nodes can take it"
+}
+
+# The workers spread over the nodes (see the manifests), but the scheduler
+# still packs them unevenly when other pods fill some nodes. Stop before the
+# next step adds to a node that already holds too many.
+check_spread() {
+  local count node
+  ((MAX_WORKERS_PER_NODE > 0)) || return 0
+  read -r count node <<< "$(busiest_node "$1")"
+  if [[ -n $count ]] && ((count > MAX_WORKERS_PER_NODE)); then
+    die "$(label_of "$1"): node $node holds $count workers, more than MAX_WORKERS_PER_NODE ($MAX_WORKERS_PER_NODE); tear the arm down with: $0 teardown $1"
+  fi
+}
 
 deploy() {
   local arm=$1 label replicas current ready deadline accepted last since
   label=$(label_of "$arm")
+  check_capacity
   if deployed "$(other_arm "$arm")"; then
     log "warning: $(dgd_of "$(other_arm "$arm")") is also deployed in $NAMESPACE; its workers add discovery load and take capacity from this arm"
   fi
   record_settings "$RESULTS/$label/deploy.env"
   render_arm "$arm" "$WORKERS" > "$RESULTS/$label/manifest.json"
   # Workers come up RAMP_STEP at a time: every Dynamo process watches every
-  # worker's discovery record, so a smaller burst spares the API server. An arm
-  # that is already up starts from its current size instead of shrinking first.
+  # worker's discovery record, so a smaller burst spares the API server and the
+  # nodes. An arm that is already up starts from its current size instead of
+  # shrinking first.
   replicas=$WORKERS
   if ((RAMP_STEP > 0 && RAMP_STEP < WORKERS)); then replicas=$RAMP_STEP; fi
   current=$(k get dynamographdeployment "$(dgd_of "$arm")" \
@@ -227,6 +271,7 @@ deploy() {
       log "$label: $ready/$replicas workers ready"
       sleep 15
     done
+    check_spread "$arm"
     if ((replicas == WORKERS)); then break; fi
     replicas=$((replicas + RAMP_STEP > WORKERS ? WORKERS : replicas + RAMP_STEP))
   done
@@ -398,6 +443,29 @@ record_deployment() {
     > "$dir/operator-image.txt" 2>/dev/null || true
 }
 
+# Workers leave RAMP_STEP at a time, as they came: deleting 2048 at once
+# flooded the nodes with discovery events (see README.md).
+scale_down() {
+  local arm=$1 dgd index replicas pods deadline
+  dgd=$(dgd_of "$arm")
+  index=$(k get dynamographdeployment "$dgd" -o jsonpath='{range .spec.components[*]}{.type}{"\n"}{end}' 2>/dev/null |
+    awk '$1 == "decode" {print NR - 1; exit}') || return 0
+  [[ -n $index ]] || return 0
+  replicas=$(k get dynamographdeployment "$dgd" -o jsonpath="{.spec.components[$index].replicas}") || return 0
+  [[ $replicas =~ ^[0-9]+$ ]] || return 0
+  while ((RAMP_STEP > 0 && replicas > RAMP_STEP)); do
+    replicas=$((replicas - RAMP_STEP))
+    log "$(label_of "$arm"): scaling down to $replicas workers"
+    k patch dynamographdeployment "$dgd" --type=json \
+      -p "[{\"op\": \"replace\", \"path\": \"/spec/components/$index/replicas\", \"value\": $replicas}]" >&2
+    deadline=$((SECONDS + READY_TIMEOUT))
+    until pods=$(worker_count "$arm") && ((pods <= replicas)); do
+      ((SECONDS < deadline)) || die "$(label_of "$arm"): workers did not scale down to $replicas within ${READY_TIMEOUT}s"
+      sleep 10
+    done
+  done
+}
+
 teardown() {
   local arm=$1 dgd deadline
   dgd=$(dgd_of "$arm")
@@ -405,6 +473,7 @@ teardown() {
   k delete job "$dgd-aiperf" --ignore-not-found --wait=false >&2
   k delete configmap "$dgd-bench" --ignore-not-found >&2
   k delete httproute "$dgd" --ignore-not-found >&2
+  scale_down "$arm"
   k delete dynamographdeployment "$dgd" --ignore-not-found >&2
   deadline=$((SECONDS + READY_TIMEOUT))
   while [[ -n $(k get pods -l "$(dgd_pods "$arm")" -o name) ]]; do

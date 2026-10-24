@@ -84,6 +84,13 @@ def test_workers_differ_only_by_the_frontend_sidecar(arm_a, arm_b):
     sidecar = worker_b.pop("frontendSidecar")
     spec = worker_b["podTemplate"]["spec"]
     spec["containers"] = [c for c in spec["containers"] if c["name"] != sidecar]
+    # Each arm's anti-affinity counts the arm's own workers, by DGD name.
+    (term,) = spec["affinity"]["podAntiAffinity"][
+        "preferredDuringSchedulingIgnoredDuringExecution"
+    ]
+    term["podAffinityTerm"]["labelSelector"]["matchLabels"][
+        "nvidia.com/dynamo-graph-deployment-name"
+    ] = by_kind(arm_a, "DynamoGraphDeployment")["metadata"]["name"]
     assert worker_a == worker_b
 
 
@@ -141,6 +148,27 @@ def test_each_arm_runs_2048_qwen_mockers(arm):
     assert main["command"] == ["python3", "-m", "dynamo.mocker"]
     assert arg_value(main["args"], "--model-path") == MODEL
     assert arg_value(main["args"], "--model-name") == MODEL
+
+
+@pytest.mark.parametrize("arm", ["a-frontend.yaml", "b-epp.yaml"])
+def test_each_arm_spreads_its_workers_over_the_nodes(arm):
+    # Each worker requests little, so without a spread the scheduler packed up
+    # to 382 of them on one node, which stopped reporting when they were deleted.
+    dgd = by_kind(load_docs(arm), "DynamoGraphDeployment")
+    spec = component(dgd, "decode")["podTemplate"]["spec"]
+    # Grove's webhook rejects topologySpreadConstraints, so a soft anti-affinity
+    # spreads them instead.
+    assert "topologySpreadConstraints" not in spec
+    anti_affinity = spec["affinity"]["podAntiAffinity"]
+    (term,) = anti_affinity["preferredDuringSchedulingIgnoredDuringExecution"]
+    assert term["podAffinityTerm"]["topologyKey"] == "kubernetes.io/hostname"
+    # Counted per arm: the arm's own worker pods, by DGD and component type.
+    assert term["podAffinityTerm"]["labelSelector"] == {
+        "matchLabels": {
+            "nvidia.com/dynamo-graph-deployment-name": dgd["metadata"]["name"],
+            "nvidia.com/dynamo-component-type": "decode",
+        }
+    }
 
 
 def test_routes_differ_only_in_backend_and_arm_header(arm_a, arm_b):
@@ -411,6 +439,10 @@ def run_script(tmp_path, args, settings=None, extra_env=None, kubectl_body="exit
         ({"WORKERS": "0"}, "WORKERS must be a positive integer, not '0'"),
         ({"COOLDOWN_S": "-1"}, "COOLDOWN_S must be a whole number, not '-1'"),
         (
+            {"MAX_WORKERS_PER_NODE": "many"},
+            "MAX_WORKERS_PER_NODE must be a whole number, not 'many'",
+        ),
+        (
             {"RUNTIME_VERSION": "nightly"},
             "RUNTIME_VERSION must be empty or a version such as 1.6.0, not 'nightly'",
         ),
@@ -484,6 +516,115 @@ def test_preflight_warns_about_agentgateway_before_1_2(tmp_path, image, warned):
     # preflight stops at the missing model cache, after the Gateway checks.
     assert "PVC model-cache is missing" in result.stderr, result.stderr
     assert ("opens a new TLS connection to the EPP" in result.stderr) == warned
+
+
+# A kubectl for deploy b: it passes preflight, prints $NODES for the nodes and
+# $PODS for arm B's worker pods (printf formats), and accepts what deploy applies.
+DEPLOY_KUBECTL = """case "$*" in
+  *"get dynamographdeployments,"*) exit 0 ;;
+  *" get gateway "*) echo True ;;
+  *" get pvc "*) exit 0 ;;
+  *" get nodes "*) printf "$NODES" ;;
+  *" create --dry-run=client "*)
+    echo '{"kind": "DynamoGraphDeployment", "metadata": {"name": "qwen-b"}, "spec": {"components": []}}' ;;
+  *" apply "*) cat >/dev/null ;;
+  *"dynamo-component-type=decode"*) printf "$PODS" ;;
+  *) exit 1 ;;
+esac"""
+
+
+def test_deploy_needs_enough_schedulable_nodes_for_the_cap(tmp_path):
+    # Ready, uncordoned, and without a NoSchedule or NoExecute taint.
+    nodes = [
+        "True\\t\\t",
+        "True\\t\\tPreferNoSchedule",
+        "True\\t\\tNoSchedule",
+        "True\\t\\tPreferNoSchedule NoExecute",
+        "False\\t\\t",
+        "True\\ttrue\\t",
+    ]
+    result, calls = run_script(
+        tmp_path,
+        ["deploy", "b"],
+        {"WORKERS": "300", "MAX_WORKERS_PER_NODE": "128"},
+        extra_env={"NODES": "\\n".join(nodes) + "\\n", "PODS": ""},
+        kubectl_body=DEPLOY_KUBECTL,
+    )
+    assert result.returncode == 1, result.stderr
+    assert (
+        "300 workers, at most 128 per node, need 3 schedulable nodes, and the cluster has 2"
+        in result.stderr
+    )
+    assert " apply " not in calls.read_text()
+
+
+@pytest.mark.parametrize("cap, stops", [("2", True), ("3", False)])
+def test_deploy_stops_before_a_node_takes_more_workers_than_the_cap(
+    tmp_path, cap, stops
+):
+    # Three workers on node-a and one on node-b; a terminating one on node-a
+    # does not count.
+    pods = [
+        "w1\\tTrue\\t\\tnode-a",
+        "w2\\tTrue\\t\\tnode-a",
+        "w3\\tTrue\\t\\tnode-a",
+        "w4\\tTrue\\t2026-10-24T04:10:03Z\\tnode-a",
+        "w5\\tTrue\\t\\tnode-b",
+    ]
+    result, calls = run_script(
+        tmp_path,
+        ["deploy", "b"],
+        {"WORKERS": "4", "RAMP_STEP": "2", "MAX_WORKERS_PER_NODE": cap},
+        extra_env={
+            "NODES": "True\\t\\t\\nTrue\\t\\t\\n",
+            "PODS": "\\n".join(pods) + "\\n",
+        },
+        kubectl_body=DEPLOY_KUBECTL,
+    )
+    message = "node node-a holds 3 workers, more than MAX_WORKERS_PER_NODE (2)"
+    assert (message in result.stderr) == stops, result.stderr
+    # Without the cap the ramp goes on to its second step, then stops at the
+    # DGD's Ready condition, which this kubectl does not report.
+    applies = calls.read_text().count(" apply ")
+    assert applies == (1 if stops else 2)
+    assert result.returncode != 0
+
+
+# A kubectl for teardown b: arm B's DGD has 600 workers, and every pod is gone.
+TEARDOWN_KUBECTL = """case "$*" in
+  *" delete "*) exit 0 ;;
+  *"jsonpath={range .spec.components[*]}{.type}"*) printf 'epp\\ndecode\\n' ;;
+  *"jsonpath={.spec.components[1].replicas}"*) echo 600 ;;
+  *" patch "*) exit 0 ;;
+  *" get pods "*) exit 0 ;;
+  *) exit 1 ;;
+esac"""
+
+
+@pytest.mark.parametrize(
+    "ramp_step, steps", [("256", [344, 88]), ("1000", []), ("0", [])]
+)
+def test_teardown_scales_the_workers_down_in_steps(tmp_path, ramp_step, steps):
+    result, calls = run_script(
+        tmp_path,
+        ["teardown", "b"],
+        {"RAMP_STEP": ramp_step},
+        kubectl_body=TEARDOWN_KUBECTL,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = calls.read_text().splitlines()
+    patches = [i for i, line in enumerate(lines) if " patch " in line]
+    assert [
+        json.loads(lines[i].split(" -p ", 1)[1])[0]["value"] for i in patches
+    ] == steps
+    for i in patches:
+        assert "/spec/components/1/replicas" in lines[i]
+    (delete,) = [
+        i
+        for i, line in enumerate(lines)
+        if "delete dynamographdeployment qwen-b" in line
+    ]
+    assert all(i < delete for i in patches)
 
 
 # The params.env that run.sh writes for an arm, with the default workload.
