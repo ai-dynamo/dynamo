@@ -7,7 +7,6 @@
 
 use bytemuck::cast_slice;
 use derive_getters::Dissolve;
-use rayon::prelude::*;
 use std::ops::Range;
 
 /// A token is represented as a 32-bit unsigned integer.
@@ -957,10 +956,13 @@ impl TokenBlockSequence {
         salt_hash: u64,
     ) -> (Vec<TokenBlock>, PartialTokenBlock) {
         assert!(block_size > 0, "block_size must be greater than 0");
-        // Use Rayon for parallel computation of block chunks (hashes)
+        // One xxh3 over a 32-token block costs tens of nanoseconds, so even a
+        // million-token prompt hashes in well under a millisecond serially.
+        // Fanning this out over the global rayon pool costs more than the work
+        // and leaves every pool thread spinning in the steal loop afterwards.
         let chunks: Vec<TokenBlockChunk> = tokens
             .as_ref()
-            .par_chunks_exact(block_size as usize)
+            .chunks_exact(block_size as usize)
             .map(|chunk| TokenBlockChunk::from_tokens(chunk, salt_hash))
             .collect();
 
