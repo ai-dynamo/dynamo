@@ -136,5 +136,5 @@ python3 docs/fern/pages/recipes/_catalog/validate.py  # recipe or benchmark chan
 ```
 
 The first three mirror the pre-merge jobs — `Docs Lint`, `Fern Configuration Check`, and
-`Fern Broken Links Check`. The catalog validator is not wired into CI — run it by hand for any
-`_catalog/` change.
+`Fern Broken Links Check`. The catalog validator runs in the `Recipe Check` job for any `_catalog/`
+change; run it locally first.
