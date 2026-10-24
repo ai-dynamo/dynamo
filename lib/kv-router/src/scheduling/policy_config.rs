@@ -5,11 +5,15 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
+use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::sequences::WorkerLoadProjection;
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::RequestClassifierConfig;
 use crate::plugins::worker_selection::RawWorkerSelectionConfig;
@@ -41,8 +45,8 @@ pub struct PolicyClassConfig {
     pub name: String,
     pub queue_policy: RouterQueuePolicy,
     pub quantum: usize,
-    pub prefill_busy_threshold: Option<usize>,
-    pub prefill_busy_threshold_frac: Option<f64>,
+    /// The limits this class waits on.
+    pub busy_thresholds: BusyThresholds,
     pub request_queue_limit_per_worker: Option<usize>,
     pub raw_isl_token_queue_limit_per_worker: Option<usize>,
     pub cached_token_queue_limit_per_worker: Option<usize>,
@@ -50,7 +54,7 @@ pub struct PolicyClassConfig {
 
 impl PolicyClassConfig {
     pub fn queueing_enabled(&self) -> bool {
-        self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
+        self.busy_thresholds.is_configured()
     }
 
     /// Any zero per-worker limit means `queue_rejection` rejects every queued
@@ -61,15 +65,55 @@ impl PolicyClassConfig {
             || self.raw_isl_token_queue_limit_per_worker == Some(0)
             || self.cached_token_queue_limit_per_worker == Some(0)
     }
+}
 
-    pub fn worker_is_busy(&self, active_tokens: usize, max_batched_tokens: u64) -> bool {
-        let absolute_busy = self
+/// Per-rank load limits. A rank is full once its booked load passes any configured limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BusyThresholds {
+    /// Booked prefill tokens above which a rank is full.
+    pub prefill_busy_threshold: Option<usize>,
+    /// Fraction of the rank's `max_num_batched_tokens` above which it is full. When the
+    /// rank does not report it, the fraction is taken of
+    /// [`DEFAULT_MAX_BATCHED_TOKENS`](crate::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS).
+    pub prefill_busy_threshold_frac: Option<f64>,
+}
+
+impl BusyThresholds {
+    /// Whether any limit is set.
+    pub fn is_configured(&self) -> bool {
+        self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
+    }
+
+    /// Whether a rank with this `LOAD` row and capacity is within every configured limit.
+    pub fn has_room(&self, load: &WorkerLoadInput, capacity: WorkerCapacity) -> bool {
+        let tokens = load.active_prefill_tokens();
+        let prefill_budget = capacity.prefill_budget();
+        let absolute_full = self
             .prefill_busy_threshold
-            .is_some_and(|threshold| active_tokens > threshold);
-        let fractional_busy = self.prefill_busy_threshold_frac.is_some_and(|threshold| {
-            (active_tokens as f64) > threshold * (max_batched_tokens as f64)
-        });
-        absolute_busy || fractional_busy
+            .is_some_and(|threshold| tokens > threshold);
+        let fractional_full = self
+            .prefill_busy_threshold_frac
+            .is_some_and(|threshold| (tokens as f64) > threshold * (prefill_budget as f64));
+        !(absolute_full || fractional_full)
+    }
+
+    /// Whether no rank of `worker_id` has room, judged on the `LOAD` rows in `loads`. A rank
+    /// without a projection counts as idle. The policy-class queue, offline replay, and the
+    /// reject scan share this loop so they enumerate ranks and read rows the same way.
+    pub fn worker_is_full<C: WorkerConfigLike>(
+        &self,
+        worker_id: WorkerId,
+        config: &C,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool {
+        let capacity = WorkerCapacity::of(config);
+        let start = config.data_parallel_start_rank();
+        let end = start.saturating_add(config.data_parallel_size());
+        (start..end).all(|dp_rank| {
+            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+            let load = WorkerLoadInput::for_worker(loads, worker, WorkerLoadProjection::default);
+            !self.has_room(&load, capacity)
+        })
     }
 }
 
@@ -146,8 +190,10 @@ impl PolicyProfile {
             name: SYNTHETIC_POLICY_CLASS.to_string(),
             queue_policy: router_queue_policy,
             quantum: 1,
-            prefill_busy_threshold: None,
-            prefill_busy_threshold_frac: router_queue_threshold,
+            busy_thresholds: BusyThresholds {
+                prefill_busy_threshold: None,
+                prefill_busy_threshold_frac: router_queue_threshold,
+            },
             request_queue_limit_per_worker: None,
             raw_isl_token_queue_limit_per_worker: None,
             cached_token_queue_limit_per_worker: None,
@@ -619,8 +665,10 @@ fn resolve_policy_class(
             name: raw.name,
             queue_policy: raw.queue_policy,
             quantum: raw.quantum,
-            prefill_busy_threshold: raw.prefill_busy_threshold,
-            prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
+            busy_thresholds: BusyThresholds {
+                prefill_busy_threshold: raw.prefill_busy_threshold,
+                prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
+            },
             request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
             raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
             cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
@@ -706,6 +754,14 @@ pub(crate) fn validate_identifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequences::WorkerLoadProjection;
+
+    fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {
+        WorkerLoadInput::from_projection(WorkerLoadProjection {
+            active_prefill_tokens,
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn worker_selection_only_config_preserves_parameter_mapping() {
@@ -912,7 +968,13 @@ models:
         let exact = config.resolve_profile(Some("exact-model"), Some(3.0), RouterQueuePolicy::Wspt);
         assert_eq!(exact.classes().len(), 2);
         assert_eq!(exact.default_class().name, "model-cached");
-        assert_eq!(exact.default_class().prefill_busy_threshold_frac, None);
+        assert_eq!(
+            exact
+                .default_class()
+                .busy_thresholds
+                .prefill_busy_threshold_frac,
+            None
+        );
         assert!(!exact.default_class().queueing_enabled());
         assert!(
             exact
@@ -934,8 +996,34 @@ models:
 
         let unmatched = config.resolve_profile(Some("other"), Some(3.0), RouterQueuePolicy::Fcfs);
         assert_eq!(unmatched.default_class().name, "root-default");
-        assert_eq!(unmatched.default_class().prefill_busy_threshold, Some(100));
-        assert_eq!(unmatched.default_class().prefill_busy_threshold_frac, None);
+        assert_eq!(
+            unmatched
+                .default_class()
+                .busy_thresholds
+                .prefill_busy_threshold,
+            Some(100)
+        );
+        assert_eq!(
+            unmatched
+                .default_class()
+                .busy_thresholds
+                .prefill_busy_threshold_frac,
+            None
+        );
+    }
+
+    #[test]
+    fn has_room_without_limits_or_reported_budget() {
+        let mut limits = BusyThresholds::default();
+        assert!(!limits.is_configured());
+        assert!(limits.has_room(&prefill_load(usize::MAX), WorkerCapacity::default()));
+
+        // An unreported budget is taken as DEFAULT_MAX_BATCHED_TOKENS.
+        limits.prefill_busy_threshold_frac = Some(0.5);
+        let half_default =
+            (crate::plugins::worker_selection::inputs::DEFAULT_MAX_BATCHED_TOKENS / 2) as usize;
+        assert!(limits.has_room(&prefill_load(half_default), WorkerCapacity::default()));
+        assert!(!limits.has_room(&prefill_load(half_default + 1), WorkerCapacity::default()));
     }
 
     #[test]
@@ -960,14 +1048,19 @@ models:
         .unwrap();
 
         let exact = config.resolve_profile(Some("exact-model"), Some(7.0), RouterQueuePolicy::Wspt);
-        assert!(exact.default_class().worker_is_busy(11, 10_000_000));
-        assert!(exact.default_class().worker_is_busy(6, 10));
-        assert!(!exact.default_class().worker_is_busy(5, 10));
+        let limits = exact.default_class().busy_thresholds;
+        let budget = |tokens| WorkerCapacity::new(Some(tokens), None);
+        assert!(!limits.has_room(&prefill_load(11), budget(10_000_000)));
+        assert!(!limits.has_room(&prefill_load(6), budget(10)));
+        assert!(limits.has_room(&prefill_load(5), budget(10)));
 
         let fallback = config.resolve_profile(Some("other"), Some(7.0), RouterQueuePolicy::Wspt);
         assert_eq!(fallback.default_class().name, SYNTHETIC_POLICY_CLASS);
         assert_eq!(
-            fallback.default_class().prefill_busy_threshold_frac,
+            fallback
+                .default_class()
+                .busy_thresholds
+                .prefill_busy_threshold_frac,
             Some(7.0)
         );
         assert_eq!(
@@ -1171,7 +1264,12 @@ policy_classes:
             "custom_priority",
             "explicit classes intentionally bypass cache classification"
         );
-        assert_eq!(root.default_class().prefill_busy_threshold_frac, Some(16.0));
+        assert_eq!(
+            root.default_class()
+                .busy_thresholds
+                .prefill_busy_threshold_frac,
+            Some(16.0)
+        );
 
         let model = config.resolve_profile(
             Some("example/large-model"),
@@ -1200,5 +1298,77 @@ policy_classes:
                 .all(|class| class.name != "custom_priority"),
             "model profiles must completely replace root classes"
         );
+    }
+
+    #[test]
+    fn prefill_budget_defaults_when_unreported() {
+        use crate::plugins::worker_selection::inputs::DEFAULT_MAX_BATCHED_TOKENS;
+        assert_eq!(
+            WorkerCapacity::default().prefill_budget(),
+            DEFAULT_MAX_BATCHED_TOKENS
+        );
+        assert_eq!(WorkerCapacity::new(Some(64), None).prefill_budget(), 64);
+        assert_eq!(WorkerCapacity::default().max_num_batched_tokens(), None);
+        // Every reported value round-trips; there is no sentinel.
+        let max = WorkerCapacity::new(Some(u64::MAX), Some(u64::MAX));
+        assert_eq!(max.max_num_batched_tokens(), Some(u64::MAX));
+        assert_eq!(max.total_kv_blocks(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn unobserved_rank_row_is_unavailable_and_idle() {
+        let seen = WorkerWithDpRank::new(1, 0);
+        let unseen = WorkerWithDpRank::new(1, 1);
+        let mut loads = FxHashMap::default();
+        loads.insert(
+            seen,
+            WorkerLoadProjection {
+                active_prefill_tokens: 7,
+                ..Default::default()
+            },
+        );
+        let unobserved = || WorkerLoadProjection {
+            additional_active_blocks: 3,
+            ..Default::default()
+        };
+
+        let row = WorkerLoadInput::for_worker(&loads, seen, unobserved);
+        assert!(row.is_available());
+        assert_eq!(row.active_prefill_tokens(), 7);
+
+        let row = WorkerLoadInput::for_worker(&loads, unseen, unobserved);
+        assert!(!row.is_available());
+        assert_eq!(row.active_prefill_tokens(), 0);
+        assert_eq!(row.decode_cost_blocks(), 3.0);
+    }
+
+    #[test]
+    fn worker_is_full_only_when_every_rank_is_full() {
+        let limits = BusyThresholds {
+            prefill_busy_threshold: Some(10),
+            ..Default::default()
+        };
+        let config = crate::test_utils::SimpleWorkerConfig {
+            data_parallel_start_rank: 2,
+            data_parallel_size: 2,
+            ..Default::default()
+        };
+        let busy = WorkerLoadProjection {
+            active_prefill_tokens: 11,
+            ..Default::default()
+        };
+        let mut loads = FxHashMap::default();
+
+        loads.insert(WorkerWithDpRank::new(5, 2), busy);
+        // Rank 3 has no projection and counts as idle.
+        assert!(!limits.worker_is_full(5, &config, &loads));
+
+        loads.insert(WorkerWithDpRank::new(5, 3), busy);
+        assert!(limits.worker_is_full(5, &config, &loads));
+
+        // A rank outside the worker's range does not stand in for one inside it.
+        loads.remove(&WorkerWithDpRank::new(5, 3));
+        loads.insert(WorkerWithDpRank::new(5, 0), busy);
+        assert!(!limits.worker_is_full(5, &config, &loads));
     }
 }

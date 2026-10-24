@@ -426,8 +426,12 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 | Accessor | Meaning |
 |---|---|
 | `WorkerCandidate::worker()` | Candidate worker ID and data-parallel rank |
+| `WorkerCandidate::info()` | Candidate `WorkerInfo` |
 | `ScoredWorkerCandidate::worker()` | Picker row worker ID and data-parallel rank |
 | `ScoredWorkerCandidate::cost()` | Sum of all scorer contributions for the picker row |
+| `WorkerInputView::info(row)` | Picker row `WorkerInfo`, or `None` for an out-of-range row |
+
+`WorkerInfo` holds static facts about a worker rank, so no component declares an input group to read it. `worker()` returns the worker ID and data-parallel rank. `max_num_batched_tokens()` and `total_kv_blocks()` return what the worker's runtime config advertises, or `None` if unreported; `total_kv_blocks()` is capacity, not free blocks. The values change only when a worker registers again. For filters, scorers, and pickers Dynamo looks them up in its cached worker configs on each `info()` call, so a component that never calls it pays nothing. Classifier rows outlive that map, so they carry each rank's capacity (32 bytes per rank) whenever a classifier declares an input group.
 
 ### Optional Worker Inputs
 
@@ -448,6 +452,8 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
+
+`BusyThresholds::has_room(load, info.capacity())` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD` can run the same check.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
 

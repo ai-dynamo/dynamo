@@ -34,10 +34,14 @@ fn core_with_workers(
     runtime: &tokio::runtime::Runtime,
     workers: u64,
     hints: bool,
+    queue_gate: bool,
 ) -> SelectionCore {
     let config = KvRouterConfig {
         use_kv_events: true,
-        router_queue_threshold: None,
+        // A fractional queue threshold of 1.0 enables the class-queue gate on every
+        // admission without ever holding a request: the bench measures the gate's
+        // projection, not queueing.
+        router_queue_threshold: queue_gate.then_some(1.0),
         ..Default::default()
     };
     let core = SelectionCore::try_new_local(
@@ -150,7 +154,7 @@ fn bench_select_and_reserve(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     for &workers in &[8u64, 64, 512] {
         for hints in [false, true] {
-            let core = core_with_workers(&runtime, workers, hints);
+            let core = core_with_workers(&runtime, workers, hints, false);
             let mut sequence = 0u64;
             group.bench_with_input(
                 BenchmarkId::new(if hints { "hints" } else { "no_hints" }, workers),
@@ -177,5 +181,37 @@ fn bench_select_and_reserve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_select_and_reserve);
+/// The class-queue gate on the admission path: `has_room` over a request-agnostic load
+/// projection of every worker, before selection projects again for the request.
+fn bench_queue_gate(c: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let mut group = c.benchmark_group("selection_core/select_and_reserve_then_free");
+    group.measurement_time(Duration::from_secs(5));
+    group.throughput(Throughput::Elements(1));
+    for &workers in &[64u64, 512, 4096] {
+        let core = core_with_workers(&runtime, workers, false, true);
+        let mut sequence = 0u64;
+        group.bench_with_input(
+            BenchmarkId::new("no_hints_queue_gate", workers),
+            &core,
+            |b, core| {
+                b.iter(|| {
+                    sequence += 1;
+                    let id = format!("gate-{sequence}");
+                    let request = reserve_request(id.clone());
+                    runtime.block_on(async {
+                        core.select_and_reserve(request).await.expect("reserve");
+                        core.free_reservation(&id).await.expect("free");
+                    });
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_select_and_reserve, bench_queue_gate);
 criterion_main!(benches);
