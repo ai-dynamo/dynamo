@@ -120,7 +120,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
 FROM ${DOCKER_PROXY}library/python:3.12-slim AS licenses
 
 WORKDIR /
-RUN mkdir -p /legal /sboms
+RUN pip install --no-cache-dir PyYAML==6.0.3 \
+    && mkdir -p /legal /sboms
 # Copy the contents of container/compliance/ into /opt/compliance/. With
 # PYTHONPATH=/opt, python3 -m compliance.<sub> resolves to /opt/compliance/<sub>/.
 COPY --from=compliance . /opt/compliance
