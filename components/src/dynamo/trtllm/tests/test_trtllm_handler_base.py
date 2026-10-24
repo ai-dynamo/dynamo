@@ -6,6 +6,7 @@ import logging
 import os
 import re as re_mod
 import threading
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -2061,3 +2062,127 @@ def test_trtllm_handler_matches_shared():
     )
     assert wrapper_lp == direct_lp
     assert wrapper_top == direct_top
+
+
+class TestMultimodalPreprocessingPool:
+    @pytest.fixture
+    def pool_handler(self):
+        handler = TestGenerateLocally()._make_handler()
+        yield handler
+        if handler._mm_preprocess_pool is not None:
+            handler._mm_preprocess_pool.shutdown(wait=True, cancel_futures=True)
+
+    @pytest.mark.asyncio
+    async def test_preprocessing_thread_preserves_request_context(self, pool_handler):
+        request_context = ContextVar("request_context", default=None)
+        request_context.set("one-request")
+        loop_thread = threading.get_ident()
+
+        def preprocess(*args):
+            return (
+                threading.get_ident(),
+                threading.current_thread().name,
+                request_context.get(),
+            )
+
+        pool_handler.engine.llm.preprocess = preprocess
+        thread, name, value = await pool_handler._preprocess_multimodal_input(
+            {}, None, None
+        )
+        assert thread != loop_thread
+        assert name.startswith("mm-preprocess")
+        assert value == "one-request"
+
+    @pytest.mark.asyncio
+    async def test_invalid_media_remains_a_request_error(self, pool_handler):
+        def preprocess(*args):
+            raise ValueError("invalid media")
+
+        pool_handler.engine.llm.preprocess = preprocess
+        pool_handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={
+                "prompt_token_ids": [1, 2, 3],
+                "multi_modal_data": {"image": [object()]},
+            }
+        )
+        pool_handler._handle_fatal_error = mock.AsyncMock()
+        pool_handler.engine.llm.generate_async = MagicMock()
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 8},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in pool_handler.generate_locally(
+                request, TestGenerateLocally()._make_context()
+            )
+        ]
+        assert chunks[-1]["finish_reason"] == {"error": "invalid media"}
+        pool_handler.engine.llm.generate_async.assert_not_called()
+        pool_handler._handle_fatal_error.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_preprocessing_consumes_exported_handles(
+        self, pool_handler
+    ):
+        entered, release, cleaned = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        params = SimpleNamespace(
+            to_tensor=MagicMock(side_effect=lambda _: cleaned.set())
+        )
+
+        def preprocess(*args):
+            entered.set()
+            assert release.wait(timeout=5)
+            return SimpleNamespace(multimodal_params=params)
+
+        pool_handler.engine.llm.preprocess = preprocess
+        task = asyncio.create_task(
+            pool_handler._preprocess_multimodal_input({}, None, None)
+        )
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(cleaned.wait, 2)
+        params.to_tensor.assert_called_once_with("multimodal_data")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_preprocessing_failure_is_consumed(self, pool_handler):
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        loop = asyncio.get_running_loop()
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _, context: errors.append(context))
+
+        def preprocess(*args):
+            entered.set()
+            assert release.wait(timeout=5)
+            raise ValueError("cancelled invalid media")
+
+        pool_handler.engine.llm.preprocess = preprocess
+        try:
+            task = asyncio.create_task(
+                pool_handler._preprocess_multimodal_input({}, None, None)
+            )
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            release.set()
+            await asyncio.to_thread(pool_handler._mm_preprocess_pool.shutdown, True)
+            await asyncio.sleep(0)
+            assert not errors
+        finally:
+            release.set()
+            loop.set_exception_handler(previous)
+
+    def test_zero_workers_disables_offload(self, monkeypatch):
+        monkeypatch.setenv("DYN_TRTLLM_MM_PREPROCESS_WORKERS", "0")
+        handler = TestGenerateLocally()._make_handler()
+        assert handler._mm_preprocess_pool is None

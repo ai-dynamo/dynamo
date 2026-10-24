@@ -20,8 +20,11 @@ import inspect
 import logging
 import os
 import re
+import weakref
 from collections.abc import AsyncGenerator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
@@ -356,6 +359,46 @@ class HandlerBase(BaseGenerativeHandler):
         self._no_inflight_requests.set()
         self._pause_controller = TRTLLMEnginePauseController(config.engine)
         self._reject_new_requests = False
+        workers = int(os.environ.get("DYN_TRTLLM_MM_PREPROCESS_WORKERS", "1"))
+        if workers < 0:
+            raise ValueError("DYN_TRTLLM_MM_PREPROCESS_WORKERS must be non-negative")
+        self._mm_preprocess_pool = (
+            ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mm-preprocess")
+            if workers
+            else None
+        )
+        if self._mm_preprocess_pool is not None:
+            weakref.finalize(
+                self, self._mm_preprocess_pool.shutdown, wait=False, cancel_futures=True
+            )
+
+    async def _preprocess_multimodal_input(
+        self, inputs, sampling_params, disaggregated_params
+    ):
+        """Keep synchronous input processing off the event loop."""
+        call = functools.partial(
+            self.engine.llm.preprocess, inputs, sampling_params, disaggregated_params
+        )
+        submitted = self._mm_preprocess_pool.submit(copy_context().run, call)
+        pending = asyncio.wrap_future(submitted)
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            pending.cancel()
+            if not submitted.cancel():
+                submitted.add_done_callback(self._release_preprocessed_inputs)
+            raise
+
+    @staticmethod
+    def _release_preprocessed_inputs(completed: Future) -> None:
+        if completed.cancelled() or completed.exception() is not None:
+            return
+        multimodal_params = getattr(completed.result(), "multimodal_params", None)
+        if multimodal_params is not None:
+            try:
+                multimodal_params.to_tensor("multimodal_data")
+            except RuntimeError:
+                logging.exception("Failed to release cancelled preprocessing tensors")
 
     def check_error(self, result: dict) -> bool:
         """
@@ -1332,6 +1375,12 @@ class HandlerBase(BaseGenerativeHandler):
             }
             generate_async = self.engine.llm.generate_async
             try:
+                if self._mm_preprocess_pool is not None and self._request_has_images(
+                    processed_input
+                ):
+                    generate_kwargs["inputs"] = await self._preprocess_multimodal_input(
+                        processed_input, sampling_params, disaggregated_params
+                    )
                 generation_result = generate_async(**generate_kwargs)
             except (ValueError, TypeError, NotImplementedError) as e:
                 # TRT-LLM performs request validation and preprocessing synchronously in
