@@ -18,6 +18,10 @@ use super::StructuralTagBuildRequest;
 pub(crate) struct StructuralTagBuilder(&'static InnerBuilder);
 
 impl StructuralTagBuilder {
+    pub(super) fn supports_reasoning_gate_override(self) -> bool {
+        self.0.supports_reasoning_gate_override()
+    }
+
     pub(super) fn for_parser(parser_name: &str) -> Option<Self> {
         dynamo_parsers_v2::structural_tag_builder_for_family(tool_parser_v2::canonical_family(
             parser_name,
@@ -45,7 +49,10 @@ impl StructuralTagBuilder {
             }
         };
         let reasoning_boundary = match request.reasoning_boundary {
-            super::ResolvedReasoningBoundary::StructuralTag => ReasoningBoundaryV2::StructuralTag,
+            super::ResolvedReasoningBoundary::StructuralTag
+            | super::ResolvedReasoningBoundary::StructuralTagWithBackendOverride => {
+                ReasoningBoundaryV2::StructuralTag
+            }
             super::ResolvedReasoningBoundary::Backend => ReasoningBoundaryV2::External,
         };
 
@@ -57,6 +64,7 @@ impl StructuralTagBuilder {
                 schema_mode,
                 structured_output_schema: request.structured_output_schema,
                 starts_in_reasoning: request.starts_in_reasoning,
+                allow_unprefilled_reasoning: request.allow_unprefilled_reasoning,
             },
             &StructuralTagOptions {
                 exclude_special_tokens: request.exclude_special_tokens,

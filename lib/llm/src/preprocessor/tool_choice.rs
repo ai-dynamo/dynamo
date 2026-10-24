@@ -5,7 +5,9 @@
 
 use std::borrow::Cow;
 
-use crate::preprocessor::structural_tag::requires_native_tool_call_format;
+use crate::preprocessor::structural_tag::{
+    StructuralTagReasoning, requires_native_tool_call_format,
+};
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::{
@@ -111,11 +113,24 @@ impl OpenAIPreprocessor {
             gd.json = None;
         }
 
+        let allow_unprefilled_reasoning =
+            Self::is_minimax_m3_family(None, self.tool_call_parser.as_deref())
+                && !prompt_injected_reasoning
+                && request
+                    .chat_template_args
+                    .as_ref()
+                    .and_then(|args| args.get("thinking_mode"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|mode| mode == "adaptive");
+
         if self.apply_tool_choice_structural_tag(
             &parser_tool_choice,
             &convert_tools(tools.as_ref()),
             request.inner.parallel_tool_calls,
-            prompt_injected_reasoning,
+            StructuralTagReasoning {
+                starts_in_reasoning: prompt_injected_reasoning,
+                allow_unprefilled_reasoning,
+            },
             request.inner.response_format.as_ref(),
             common_request,
         )? {
@@ -421,6 +436,43 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    fn reasoning_backend_preprocessor(
+        parser: &str,
+        capability: Option<Value>,
+        boundary: crate::local_model::runtime_config::StructuralTagReasoningBoundary,
+    ) -> Arc<OpenAIPreprocessor> {
+        use crate::local_model::runtime_config::{
+            StructuralTagConfig, StructuralTagScope,
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
+        };
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = Some(parser.into());
+        mdc.runtime_config.reasoning_parser = Some(parser.into());
+        mdc.runtime_config.structural_tag = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            reasoning_boundary: boundary,
+            ..Default::default()
+        });
+        mdc.runtime_config
+            .set_engine_specific(
+                TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                true,
+            )
+            .unwrap();
+        if let Some(capability) = capability {
+            mdc.runtime_config
+                .set_engine_specific(
+                    TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
+                    capability,
+                )
+                .unwrap();
+        }
+        OpenAIPreprocessor::new(mdc).unwrap()
     }
 
     #[test]
@@ -833,6 +885,482 @@ mod tests {
                 .and_then(|guided| guided.json.as_ref())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn minimax_m3_native_tags_and_relaxed_schema_fallback() {
+        const CHILD: &str = "DYNAMO_M3_STRUCTURAL_TAG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "preprocessor::tool_choice::tests::minimax_m3_native_tags_and_relaxed_schema_fallback", "--nocapture"])
+                .env(CHILD, "1")
+                .env(dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION, "2")
+                .output().unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let preprocessor = preprocessor("minimax_m3", StructuralTagMode::On);
+        for strict in [None, Some(true), Some(false)] {
+            for named in [false, true] {
+                let mut definitions = tools();
+                definitions[0]["function"]["parameters"]["additionalProperties"] = json!(false);
+                definitions[0]["function"]["parameters"]["properties"]["location"]["enum"] =
+                    json!(["Paris", "Tokyo"]);
+                if let Some(strict) = strict {
+                    definitions[0]["function"]["strict"] = json!(strict);
+                }
+                let choice = if named {
+                    json!({"type": "function", "function": {"name": "get_weather"}})
+                } else {
+                    json!("required")
+                };
+                let request = request(json!({"tools": definitions, "tool_choice": choice}));
+                let mut common = preprocessed_request();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                    .unwrap();
+                let grammar = common.sampling_options.guided_decoding.unwrap();
+                if strict == Some(false) {
+                    assert_eq!(
+                        constraint,
+                        if named {
+                            GuidedToolConstraint::GuidedJsonNamed {
+                                tool_name: "get_weather".into(),
+                            }
+                        } else {
+                            GuidedToolConstraint::GuidedJsonRequired
+                        }
+                    );
+                    assert!(grammar.json.is_some());
+                    assert!(grammar.structural_tag.is_none());
+                } else {
+                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                    assert!(
+                        grammar
+                            .structural_tag
+                            .unwrap()
+                            .to_string()
+                            .contains("minimax_m3_xml")
+                    );
+                    assert!(grammar.json.is_none());
+                }
+            }
+        }
+        for schema in [
+            json!({"type":"object","properties":{"location":{"type":"string"}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"location":{"type":"string"}},"additionalProperties":true}),
+            json!({"type":"object","properties":{"location":{"type":"string","minLength":1}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"location":{"type":["string","integer"]}},"additionalProperties":false}),
+        ] {
+            let mut definitions = tools();
+            definitions[0]["function"]["parameters"] = schema;
+            let request = request(json!({"tools":definitions,"tool_choice":"required"}));
+            let mut common = preprocessed_request();
+            let constraint = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                .unwrap();
+            assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
+            let grammar = common.sampling_options.guided_decoding.unwrap();
+            assert!(grammar.json.is_some() && grammar.structural_tag.is_none());
+        }
+    }
+
+    #[test]
+    fn minimax_m3_structural_tags_preserve_effective_reasoning_mode() {
+        let export = std::env::var("MINIMAX_M3_ADAPTIVE_GRAMMARS").ok();
+        let mut env = vec![(
+            dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+            "2",
+        )];
+        if let Some(path) = export.as_deref() {
+            env.push(("MINIMAX_M3_ADAPTIVE_GRAMMARS", path));
+        }
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::minimax_m3_structural_tags_preserve_effective_reasoning_mode"
+            ),
+            &env,
+        ) {
+            return;
+        }
+        let processor = reasoning_backend_preprocessor(
+            "minimax_m3",
+            Some(json!(true)),
+            crate::local_model::runtime_config::StructuralTagReasoningBoundary::Auto,
+        );
+        // Recorded from the matched v1 BFCL simple_1 control. These outputs
+        // begin with model-generated reasoning, not a prompt-prefilled opener.
+        let thought =
+            "The user wants me to calculate the factorial of 5 using the math_factorial function.";
+        let call = "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"math_factorial\">]<]minimax[>[<number>5]<]minimax[>[</number>]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>";
+        let answer =
+            "The factorial of 5 is **120**.\n\nThis is calculated as: 5 × 4 × 3 × 2 × 1 = 120";
+        let mut cases = Vec::new();
+        for (choice_name, choice) in [
+            ("auto", json!("auto")),
+            ("required", json!("required")),
+            (
+                "named",
+                json!({"type":"function","function":{"name":"math_factorial"}}),
+            ),
+        ] {
+            for (mode, controls, default_mode, optional, prefilled) in [
+                ("default", json!({}), None, choice_name == "auto", false),
+                (
+                    "adaptive",
+                    json!({"chat_template_kwargs":{"thinking_mode":"adaptive"}}),
+                    None,
+                    true,
+                    false,
+                ),
+                (
+                    "adaptive-object",
+                    json!({"thinking":{"type":"adaptive"}}),
+                    None,
+                    true,
+                    false,
+                ),
+                (
+                    "disabled",
+                    json!({"chat_template_kwargs":{"thinking_mode":"disabled"}}),
+                    None,
+                    false,
+                    false,
+                ),
+                (
+                    "disabled-object",
+                    json!({"thinking":{"type":"disabled"}}),
+                    None,
+                    false,
+                    false,
+                ),
+                (
+                    "disabled-alias",
+                    json!({"chat_template_kwargs":{"enable_thinking":false}}),
+                    None,
+                    false,
+                    false,
+                ),
+                (
+                    "enabled",
+                    json!({"chat_template_kwargs":{"thinking_mode":"enabled"}}),
+                    None,
+                    false,
+                    true,
+                ),
+                (
+                    "runtime-disabled",
+                    json!({}),
+                    Some("disabled"),
+                    false,
+                    false,
+                ),
+                (
+                    "adaptive-over-runtime-disabled",
+                    json!({"chat_template_kwargs":{"thinking_mode":"adaptive"}}),
+                    Some("disabled"),
+                    true,
+                    false,
+                ),
+            ] {
+                let mut body = json!({"tool_choice":choice,"tools":[{"type":"function","function":{
+                    "name":"math_factorial","parameters":{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"],"additionalProperties":false}
+                }}]});
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(controls.as_object().unwrap().clone());
+                let mut request = request(body);
+                request.normalize_reasoning_template_args().unwrap();
+                let from_client = OpenAIPreprocessor::request_has_client_thinking_control(&request);
+                OpenAIPreprocessor::apply_default_thinking_mode_value(
+                    default_mode,
+                    &mut request.chat_template_args,
+                    from_client,
+                );
+                OpenAIPreprocessor::normalize_thinking_arg_with_source(
+                    &mut request,
+                    Some("minimax_m3"),
+                    Some("minimax_m3"),
+                    from_client,
+                );
+                let effective_mode = request
+                    .chat_template_args
+                    .as_ref()
+                    .and_then(|args| args.get("thinking_mode"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("adaptive");
+                assert_eq!(
+                    effective_mode,
+                    if prefilled {
+                        "enabled"
+                    } else if optional {
+                        "adaptive"
+                    } else {
+                        "disabled"
+                    },
+                    "{choice_name}/{mode}"
+                );
+                let mut common = preprocessed_request();
+                let required_before = common.require_reasoning;
+                assert_eq!(
+                    processor
+                        .apply_tool_choice_guided_decoding(&request, &mut common, prefilled)
+                        .unwrap(),
+                    GuidedToolConstraint::StructuralTag
+                );
+                assert_eq!(common.require_reasoning, required_before);
+                let wire = serde_json::to_value(&common).unwrap();
+                assert_eq!(
+                    wire["extra_args"]["reasoning_ended"], true,
+                    "{choice_name}/{mode} must activate its full grammar from token zero"
+                );
+                let tag = common
+                    .sampling_options
+                    .guided_decoding
+                    .unwrap()
+                    .structural_tag
+                    .unwrap();
+                let mut accepted = Vec::new();
+                let mut rejected = Vec::new();
+                let prefixes = if prefilled {
+                    vec![format!("{thought}</mm:think>")]
+                } else if optional {
+                    vec![String::new(), format!("<mm:think>{thought}</mm:think>")]
+                } else {
+                    vec![String::new()]
+                };
+                for prefix in &prefixes {
+                    accepted.push(format!("{prefix}{call}"));
+                    rejected.push(format!(
+                        "{prefix}{}",
+                        call.replace("[<number>5", "[<number>banana")
+                    ));
+                    if choice_name == "auto" {
+                        accepted.push(format!("{prefix}{answer}"));
+                        accepted.push(format!(
+                            "{prefix}I'll calculate the factorial of 5 for you.{call}"
+                        ));
+                    } else {
+                        rejected.push(format!("{prefix}{answer}"));
+                    }
+                }
+                if !prefilled && !optional {
+                    rejected.push(format!("<mm:think>{thought}</mm:think>{call}"));
+                    rejected.push(format!("<mm:think>{thought}</mm:think>{answer}"));
+                }
+                let mut masks = vec![
+                    json!({"prefix":"","tokens":{"<mm:think>":optional || prefilled,"</mm:think>":prefilled}}),
+                ];
+                if optional || prefilled {
+                    let prefix = if prefilled {
+                        format!("{thought}</mm:think>")
+                    } else {
+                        format!("<mm:think>{thought}</mm:think>")
+                    };
+                    masks.push(
+                        json!({"prefix":prefix,"tokens":{"<mm:think>":false,"</mm:think>":false}}),
+                    );
+                }
+                cases.push(json!({"case":format!("{choice_name}/{mode}"),"tag":tag,"accepted":accepted,"rejected":rejected,"token_masks":masks,"optional":optional,"prefilled":prefilled,"thinking_mode":effective_mode,"extra_args":wire["extra_args"]}));
+            }
+        }
+        if let Some(path) = export {
+            std::fs::write(path, serde_json::to_vec_pretty(&cases).unwrap()).unwrap();
+        }
+        fn has_reasoning_opener(value: &Value) -> bool {
+            (value.get("type").and_then(Value::as_str) == Some("tag")
+                && value.get("begin").and_then(Value::as_str) == Some("<mm:think>"))
+                || value
+                    .as_object()
+                    .is_some_and(|object| object.values().any(has_reasoning_opener))
+                || value
+                    .as_array()
+                    .is_some_and(|array| array.iter().any(has_reasoning_opener))
+        }
+        for case in &cases {
+            assert_eq!(
+                has_reasoning_opener(&case["tag"]),
+                case["optional"] == true,
+                "{}",
+                case["case"]
+            );
+            if case["prefilled"] == true {
+                assert_eq!(
+                    case["tag"]["format"]["type"], "sequence",
+                    "{}",
+                    case["case"]
+                );
+                assert_eq!(case["tag"]["format"]["elements"][0]["begin"], "");
+                assert_eq!(case["tag"]["format"]["elements"][0]["end"], "</mm:think>");
+            }
+        }
+        for family in ["qwen3", "deepseek_v4", "glm47"] {
+            let mut other = preprocessor(family, StructuralTagMode::On);
+            Arc::get_mut(&mut other)
+                .unwrap()
+                .runtime_config
+                .structural_tag
+                .as_mut()
+                .unwrap()
+                .scope = crate::local_model::runtime_config::StructuralTagScope::Always;
+            let mut tags = Vec::new();
+            for adaptive in [false, true] {
+                let mut body = json!({"tools":[{"type":"function","function":{
+                    "name":"math_factorial","strict":true,"parameters":{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"],"additionalProperties":false}
+                }}]});
+                if adaptive {
+                    body["chat_template_kwargs"] = json!({"thinking_mode":"adaptive"});
+                }
+                let mut common = preprocessed_request();
+                other
+                    .apply_tool_choice_guided_decoding(&request(body), &mut common, false)
+                    .unwrap();
+                tags.push(
+                    common
+                        .sampling_options
+                        .guided_decoding
+                        .unwrap()
+                        .structural_tag
+                        .unwrap(),
+                );
+            }
+            assert_eq!(
+                tags[0], tags[1],
+                "{family} must retain its existing grammar"
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_m3_reasoning_override_requires_native_tag_and_backend_capability() {
+        use crate::local_model::runtime_config::StructuralTagReasoningBoundary;
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::minimax_m3_reasoning_override_requires_native_tag_and_backend_capability"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for (parser, capability, boundary, override_expected) in [
+            (
+                "minimax_m3",
+                None,
+                StructuralTagReasoningBoundary::Auto,
+                false,
+            ),
+            (
+                "minimax_m3",
+                Some(json!(false)),
+                StructuralTagReasoningBoundary::Auto,
+                false,
+            ),
+            (
+                "minimax_m3",
+                Some(json!("true")),
+                StructuralTagReasoningBoundary::Auto,
+                false,
+            ),
+            (
+                "minimax_m3",
+                Some(json!(true)),
+                StructuralTagReasoningBoundary::Auto,
+                true,
+            ),
+            (
+                "minimax_m3",
+                Some(json!(true)),
+                StructuralTagReasoningBoundary::Backend,
+                false,
+            ),
+            (
+                "qwen3",
+                Some(json!(true)),
+                StructuralTagReasoningBoundary::Auto,
+                false,
+            ),
+        ] {
+            let processor = reasoning_backend_preprocessor(parser, capability, boundary);
+            for scenario in [
+                "native",
+                "relaxed",
+                "unsupported_schema",
+                "intersection",
+                "negation",
+                "invalid_ref",
+                "guided_only",
+                "tools_disabled",
+                "no_tools",
+            ] {
+                let mut definitions = tools();
+                definitions[0]["function"]["parameters"]["additionalProperties"] = json!(false);
+                definitions[0]["function"]["parameters"]["properties"]["location"]["enum"] =
+                    json!(["Paris", "Tokyo"]);
+                let mut body = json!({"tools":definitions,"tool_choice":"auto","chat_template_kwargs":{"thinking_mode":"adaptive"}});
+                match scenario {
+                    "relaxed" => body["tools"][0]["function"]["strict"] = json!(false),
+                    "unsupported_schema" => {
+                        body["tools"][0]["function"]["parameters"]["properties"]["location"]["minLength"] =
+                            json!(1)
+                    }
+                    "intersection" => {
+                        body["tools"][0]["function"]["parameters"]["properties"]["location"] =
+                            json!({"allOf":[{"type":"integer"},{"minimum":1}]});
+                    }
+                    "negation" => {
+                        body["tools"][0]["function"]["parameters"]["properties"]["location"] =
+                            json!({"type":"integer","not":{"const":1}});
+                    }
+                    "invalid_ref" => {
+                        body["tools"][0]["function"]["parameters"]["properties"]["location"] =
+                            json!({"$ref":"#/$defs/missing"});
+                    }
+                    "guided_only" => body["guided_regex"] = json!("[a-z]+"),
+                    "tools_disabled" => body["tool_choice"] = json!("none"),
+                    "no_tools" => {
+                        body.as_object_mut().unwrap().remove("tools");
+                    }
+                    _ => {}
+                }
+                let mut common = preprocessed_request();
+                common.extra_args =
+                    Some(json!({"reasoning_ended":false,"nvext":{"cache_salt":"preserve"}}));
+                let constraint = processor
+                    .apply_tool_choice_guided_decoding(&request(body), &mut common, false)
+                    .unwrap();
+                let overridden = override_expected && scenario == "native";
+                let wire = serde_json::to_value(&common).unwrap();
+                assert_eq!(
+                    wire["extra_args"]["reasoning_ended"], overridden,
+                    "{parser}/{boundary:?}/{scenario}"
+                );
+                assert_eq!(wire["extra_args"]["nvext"]["cache_salt"], "preserve");
+                if parser == "minimax_m3"
+                    && matches!(scenario, "intersection" | "negation" | "invalid_ref")
+                {
+                    assert_ne!(constraint, GuidedToolConstraint::StructuralTag);
+                }
+                if overridden {
+                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                    assert!(
+                        wire["sampling_options"]["guided_decoding"]["structural_tag"]
+                            .to_string()
+                            .contains("<mm:think>")
+                    );
+                }
+            }
+        }
     }
 
     #[test]

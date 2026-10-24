@@ -83,7 +83,10 @@ from .embedding_worker_processes import (
     start_embedding_parent_watchdog,
 )
 from .engine_generate import publish_engine_generate_capability
-from .handlers import apply_data_parallel_runtime_config
+from .handlers import (
+    _engine_generate_reasoning_support,
+    apply_data_parallel_runtime_config,
+)
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
@@ -111,6 +114,9 @@ shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
+)
+TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY = (
+    "tool_call_structural_tag_reasoning_override"
 )
 
 
@@ -145,7 +151,7 @@ def should_prefetch_model(config: Config) -> bool:
 
 
 def publish_vllm_structural_tag_reasoning_policy(
-    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
+    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig, engine_client: Any
 ) -> None:
     """Tell the frontend whether the vLLM tool tag must exclude reasoning.
 
@@ -162,6 +168,15 @@ def publish_vllm_structural_tag_reasoning_policy(
     runtime_config.set_engine_specific(
         TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
         json.dumps(has_reasoning_parser and not enable_in_reasoning),
+    )
+    support = (
+        _engine_generate_reasoning_support(engine_client)
+        if hasattr(engine_client, "generate")
+        else None
+    )
+    runtime_config.set_engine_specific(
+        TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
+        json.dumps(bool(support and support[0])),
     )
 
 
@@ -902,7 +917,7 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
-    publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+    publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config, engine_client)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)

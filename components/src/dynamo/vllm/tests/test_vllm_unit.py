@@ -525,11 +525,53 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
     runtime_config = SimpleNamespace(set_engine_specific=Mock())
     vllm_config = SimpleNamespace(structured_outputs_config=structured_outputs_config)
 
-    vllm_main.publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+    def generate(prompt, *, reasoning_ended=None):
+        pass
 
-    runtime_config.set_engine_specific.assert_called_once_with(
+    vllm_main.publish_vllm_structural_tag_reasoning_policy(
+        runtime_config, vllm_config, SimpleNamespace(generate=generate)
+    )
+
+    runtime_config.set_engine_specific.assert_any_call(
         vllm_main.TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
         json.dumps(expected_excludes_reasoning),
+    )
+    runtime_config.set_engine_specific.assert_any_call(
+        vllm_main.TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
+        json.dumps(True),
+    )
+
+
+@pytest.mark.parametrize(
+    "support", ["legacy", "parser_kwargs_only", "uninspectable", "missing"]
+)
+def test_vllm_does_not_advertise_unavailable_reasoning_override(support):
+    vllm_main = _load_vllm_main()
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(
+            enable_in_reasoning=False, reasoning_parser="minimax_m3"
+        )
+    )
+
+    def legacy_generate(prompt):
+        pass
+
+    def parser_kwargs_generate(prompt, *, reasoning_parser_kwargs=None):
+        pass
+
+    engine = {
+        "legacy": SimpleNamespace(generate=legacy_generate),
+        "parser_kwargs_only": SimpleNamespace(generate=parser_kwargs_generate),
+        "uninspectable": SimpleNamespace(generate=object()),
+        "missing": SimpleNamespace(),
+    }[support]
+    vllm_main.publish_vllm_structural_tag_reasoning_policy(
+        runtime_config, vllm_config, engine
+    )
+    runtime_config.set_engine_specific.assert_any_call(
+        vllm_main.TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
+        json.dumps(False),
     )
 
 

@@ -47,6 +47,12 @@ pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
 
+/// The backend accepts `extra_args.reasoning_ended = true` to activate the tool
+/// grammar from the start of generation, bypassing its separate reasoning gate.
+/// Missing metadata must not select a grammar that relies on this override.
+pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_reasoning_override";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false

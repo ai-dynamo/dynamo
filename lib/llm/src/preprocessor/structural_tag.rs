@@ -12,6 +12,7 @@ use crate::local_model::runtime_config::{
     ModelRuntimeConfig, StructuralTagConfig, StructuralTagReasoningBoundary, StructuralTagScope,
     TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
     TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
+    TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
@@ -20,6 +21,13 @@ use dynamo_parsers::tool_calling::{StructuralTagSchemaMode, ToolChoice, ToolDefi
 use dynamo_protocols::types::ResponseFormat;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{DynamoError, ErrorType};
+
+/// Prompt state and permission for a model-opened reasoning block are independent.
+#[derive(Clone, Copy, Default)]
+pub(super) struct StructuralTagReasoning {
+    pub starts_in_reasoning: bool,
+    pub allow_unprefilled_reasoning: bool,
+}
 
 struct StructuralTagBuildRequest<'a> {
     tool_choice: &'a ToolChoice,
@@ -30,12 +38,16 @@ struct StructuralTagBuildRequest<'a> {
     reasoning_boundary: ResolvedReasoningBoundary,
     tool_arguments_any_order: bool,
     starts_in_reasoning: bool,
+    allow_unprefilled_reasoning: bool,
     structured_output_schema: Option<&'a serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ResolvedReasoningBoundary {
     StructuralTag,
+    /// The tag owns reasoning only if the backend's gate is bypassed. Apply
+    /// that override after successful construction, never for JSON fallback.
+    StructuralTagWithBackendOverride,
     Backend,
 }
 
@@ -63,6 +75,10 @@ pub(crate) enum SelectedStructuralTagBuilder {
 }
 
 impl SelectedStructuralTagBuilder {
+    fn supports_reasoning_gate_override(self) -> bool {
+        matches!(self, Self::V2(builder) if builder.supports_reasoning_gate_override())
+    }
+
     fn for_parser(parser_name: &str) -> Option<Self> {
         if v2::enabled()
             && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
@@ -268,7 +284,7 @@ impl OpenAIPreprocessor {
         tool_choice: &ToolChoice,
         tools: &[ToolDefinition],
         parallel_tool_calls: Option<bool>,
-        prompt_injected_reasoning: bool,
+        reasoning: StructuralTagReasoning,
         response_format: Option<&ResponseFormat>,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
@@ -301,6 +317,19 @@ impl OpenAIPreprocessor {
         };
         let parser_name = parser_name.expect("Required decision implies a parser name");
 
+        // Both the family grammar and backend must explicitly support bypassing
+        // the backend gate. Reasoning delimiters alone do not opt a family in.
+        let reasoning_boundary = if builder.supports_reasoning_gate_override()
+            && !matches!(tool_choice, ToolChoice::None)
+            && config.reasoning_boundary == StructuralTagReasoningBoundary::Auto
+            && self.structural_tag_reasoning_metadata(
+                TOOL_CALL_STRUCTURAL_TAG_REASONING_OVERRIDE_RUNTIME_KEY,
+            ) {
+            ResolvedReasoningBoundary::StructuralTagWithBackendOverride
+        } else {
+            reasoning_boundary
+        };
+
         let structured_output_schema = if matches!(tool_choice, ToolChoice::Auto)
             && config.allow_tool_calls_with_structured_output
         {
@@ -325,7 +354,8 @@ impl OpenAIPreprocessor {
             exclude_special_tokens: config.exclude_special_tokens,
             reasoning_boundary,
             tool_arguments_any_order: config.tool_arguments_any_order,
-            starts_in_reasoning: prompt_injected_reasoning,
+            starts_in_reasoning: reasoning.starts_in_reasoning,
+            allow_unprefilled_reasoning: reasoning.allow_unprefilled_reasoning,
             structured_output_schema: structured_output_schema.as_deref(),
         };
 
@@ -344,6 +374,20 @@ impl OpenAIPreprocessor {
             result => result,
         };
         let applied = apply_structural_tag(parser_name, built_tag, preprocessed_request)?;
+        if applied
+            && reasoning_boundary == ResolvedReasoningBoundary::StructuralTagWithBackendOverride
+        {
+            let extra_args = preprocessed_request
+                .extra_args
+                .get_or_insert_with(|| serde_json::json!({}));
+            let extra_args = extra_args.as_object_mut().ok_or_else(|| {
+                DynamoError::builder()
+                    .error_type(ErrorType::Unknown)
+                    .message("preprocessed extra_args must be an object")
+                    .build()
+            })?;
+            extra_args.insert("reasoning_ended".to_string(), true.into());
+        }
         if applied && structured_output_schema.is_some() {
             // Request preprocessing materializes `response_format` as guided JSON.
             // The composite structural tag now owns that schema.
@@ -354,7 +398,7 @@ impl OpenAIPreprocessor {
                 .json = None;
         }
         if applied
-            && prompt_injected_reasoning
+            && reasoning.starts_in_reasoning
             && config.reasoning_boundary != StructuralTagReasoningBoundary::Auto
         {
             preprocessed_request.require_reasoning =
@@ -572,7 +616,10 @@ mod tests {
                     &ToolChoice::Required,
                     &tools,
                     None,
-                    true,
+                    StructuralTagReasoning {
+                        starts_in_reasoning: true,
+                        ..Default::default()
+                    },
                     None,
                     &mut request,
                 )
@@ -847,7 +894,7 @@ mod tests {
                 &ToolChoice::Required,
                 &tools,
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -891,7 +938,7 @@ mod tests {
                 &ToolChoice::Required,
                 &tools,
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -919,7 +966,7 @@ mod tests {
                 &ToolChoice::Required,
                 &[],
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -941,7 +988,7 @@ mod tests {
                 &ToolChoice::Required,
                 &[],
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -965,7 +1012,7 @@ mod tests {
                 &ToolChoice::Named("does_not_exist".to_string()),
                 &tools,
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -987,7 +1034,7 @@ mod tests {
                 &ToolChoice::Required,
                 &[],
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -1014,7 +1061,7 @@ mod tests {
                 &ToolChoice::Named("does_not_exist".to_string()),
                 &tools,
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -1038,7 +1085,7 @@ mod tests {
                 &ToolChoice::None,
                 &[],
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -1051,7 +1098,7 @@ mod tests {
                 &ToolChoice::Auto,
                 &[],
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -1099,7 +1146,7 @@ mod tests {
                 &ToolChoice::None,
                 &tools,
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -1115,7 +1162,7 @@ mod tests {
                 &ToolChoice::None,
                 &tools,
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
@@ -1189,7 +1236,10 @@ mod tests {
                         &choice,
                         &tools,
                         None,
-                        prompt_injected_reasoning,
+                        StructuralTagReasoning {
+                            starts_in_reasoning: prompt_injected_reasoning,
+                            ..Default::default()
+                        },
                         None,
                         &mut request,
                     )
@@ -1281,7 +1331,14 @@ mod tests {
             let mut request = preprocessed_request();
 
             let applied = preprocessor
-                .apply_tool_choice_structural_tag(&choice, &tools, None, false, None, &mut request)
+                .apply_tool_choice_structural_tag(
+                    &choice,
+                    &tools,
+                    None,
+                    StructuralTagReasoning::default(),
+                    None,
+                    &mut request,
+                )
                 .unwrap();
 
             assert!(applied, "{parser} + {choice:?} must retain its native tag");
@@ -1322,7 +1379,7 @@ mod tests {
                 &ToolChoice::Auto,
                 &tools,
                 None,
-                false,
+                StructuralTagReasoning::default(),
                 None,
                 &mut request,
             )
