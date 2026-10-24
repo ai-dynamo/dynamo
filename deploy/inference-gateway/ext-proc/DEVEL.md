@@ -137,6 +137,7 @@ The common local environment variables are:
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
 | `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. `container` (intra-pod GMS failover) is supported under the default `DYN_EPP_MODE=dynamo`, which resolves per-container worker identities from reflected Pods. `DYN_EPP_MODE=standalone` rejects it at startup: standalone selects workers from the Pod's aggregate `Ready` condition, which a pod holding an intentionally-standby engine container never satisfies. Standalone support is planned rather than ruled out, tracked by [DEP #11661](https://github.com/ai-dynamo/dynamo/issues/11661) (EPP Embedded SelectionService Interface). |
+| `DYN_EPP_STATIC_ENDPOINT` | unset | Local testing only, Dynamo mode. An `ip:port` (IPv6 bracketed) that every picked worker resolves to, replacing the Kubernetes pod reflector, so the EPP runs without an API server. Point it at a single `--router-mode direct` Frontend: the EPP still picks the worker and prefill worker and sends their ids in the routing headers, and that Frontend forwards to them. Used by `benchmarks/gateway_ab --backend local`. |
 | `RUST_LOG` | `info` | Tracing log filter. |
 
 ## Cleaning

@@ -24,6 +24,7 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
@@ -41,6 +42,7 @@ use crate::picker::{
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+const DYN_EPP_STATIC_ENDPOINT: &str = "DYN_EPP_STATIC_ENDPOINT";
 
 /// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
 /// only one prompt of a multi-prompt text batch (routing-only, matching
@@ -68,6 +70,36 @@ fn validate_kube_discovery_mode() -> Result<bool> {
             anyhow::bail!("{DYN_KUBE_DISCOVERY_MODE} must be valid Unicode")
         }
     }
+}
+
+/// Read `DYN_EPP_STATIC_ENDPOINT`, a fixed `ip:port` that every worker
+/// resolves to in place of the Kubernetes pod reflector.
+///
+/// For running the Dynamo-mode EPP without a Kubernetes API server, such as
+/// local testing with mocker workers behind a single direct-mode Frontend.
+/// Routing is unchanged: the EPP still picks the worker (and prefill worker)
+/// and sends their ids in the routing headers, and the direct-mode Frontend
+/// at this address forwards to exactly that worker. Only the step that turns
+/// a worker id into a pod address is replaced. Unset in Kubernetes.
+fn static_endpoint_from_env() -> Result<Option<String>> {
+    match std::env::var(DYN_EPP_STATIC_ENDPOINT) {
+        Ok(value) if value.is_empty() => Ok(None),
+        Ok(value) => parse_static_endpoint(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_EPP_STATIC_ENDPOINT} must be valid Unicode")
+        }
+    }
+}
+
+/// Parse a static endpoint as a `SocketAddr` and render it the way the worker
+/// index stores pod addresses (IPv6 bracketed). A hostname is rejected: the
+/// gateway forwards to the address verbatim.
+fn parse_static_endpoint(value: &str) -> Result<String> {
+    let address: SocketAddr = value.parse().map_err(|e| {
+        anyhow::anyhow!("{DYN_EPP_STATIC_ENDPOINT}={value:?} is not an ip:port: {e}")
+    })?;
+    Ok(address.to_string())
 }
 
 /// `Ok(true)` for container discovery, `Ok(false)` for pod discovery (the
@@ -119,6 +151,8 @@ pub struct Router {
     runtime: Runtime,
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
+    /// Set from `DYN_EPP_STATIC_ENDPOINT`; replaces the pod reflector.
+    static_endpoint: Option<String>,
     served_model: String,
 }
 
@@ -150,6 +184,7 @@ impl Router {
         component: &str,
     ) -> Result<Self> {
         let container_discovery = validate_kube_discovery_mode()?;
+        let static_endpoint = static_endpoint_from_env()?;
 
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -235,8 +270,21 @@ impl Router {
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
         // would silently match zero pods during/after a DGD rolling update.
-        let (worker_index, pod_store_ready) =
-            spawn_pod_reflector(&namespace_filter, container_discovery).await?;
+        let (worker_index, pod_store_ready) = match &static_endpoint {
+            Some(endpoint) => {
+                tracing::warn!(
+                    endpoint = %endpoint,
+                    "{DYN_EPP_STATIC_ENDPOINT} is set: skipping the Kubernetes pod \
+                     reflector and resolving every worker to this endpoint. \
+                     For local testing only."
+                );
+                (
+                    Arc::new(RwLock::new(WorkerEndpointIndex::new(container_discovery))),
+                    Arc::new(AtomicBool::new(true)),
+                )
+            }
+            None => spawn_pod_reflector(&namespace_filter, container_discovery).await?,
+        };
 
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
@@ -251,6 +299,7 @@ impl Router {
             runtime,
             worker_index,
             pod_store_ready,
+            static_endpoint,
             served_model: model_name,
         })
     }
@@ -414,6 +463,9 @@ impl Router {
     /// worker index — O(1), no K8s API calls, no pod scan, no worker-ID
     /// rehashing (see [`WorkerEndpointIndex`]).
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
+        if let Some(endpoint) = &self.static_endpoint {
+            return Some(endpoint.clone());
+        }
         read_index(&self.worker_index)
             .endpoints
             .get(&worker_id)
@@ -423,6 +475,9 @@ impl Router {
     /// Resolve any available worker to its endpoint address (ip:port).
     /// Used for body-less requests (GET /v1/models) where we just need any backend.
     pub fn resolve_any_worker_endpoint(&self) -> Option<String> {
+        if let Some(endpoint) = &self.static_endpoint {
+            return Some(endpoint.clone());
+        }
         read_index(&self.worker_index)
             .endpoints
             .values()
@@ -454,11 +509,7 @@ impl Router {
     /// splits into garbage on `:`, silently never matching a bare `fd00::2`
     /// candidate.
     fn subset_to_worker_ids(&self, candidate_subset: &[String]) -> HashSet<u64> {
-        let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
-        let candidate_ips: HashSet<IpAddr> = candidate_subset
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let (candidates, candidate_ips) = candidate_sets(candidate_subset);
         let index = read_index(&self.worker_index);
         index
             .endpoints
@@ -830,10 +881,7 @@ async fn fetch_preprocessor_from_discovery(
             let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    if card.model_type.supports_prefill()
-                        && !card.model_type.supports_chat()
-                        && !card.model_type.supports_completions()
-                    {
+                    if is_prefill_card(&card) {
                         continue;
                     }
                     model_card = Some((card, actual_namespace));
@@ -1251,6 +1299,31 @@ async fn spawn_pod_reflector(
     Ok((index, ready))
 }
 
+/// Whether a discovered card belongs to a prefill worker.
+///
+/// Reads the card's `worker_type`, resolving legacy cards through
+/// [`ModelDeploymentCard::effective_worker_type`]. The legacy
+/// `ModelType::Prefill` bit alone is not enough: it is a cross-version compat
+/// marker that current workers are not required to emit (the mocker does not),
+/// so keying on it leaves those prefill workers undiscovered and every
+/// disaggregated request fails at the decode worker for want of a prefill
+/// worker id.
+fn is_prefill_card(card: &ModelDeploymentCard) -> bool {
+    card.effective_worker_type() == WorkerType::Prefill
+}
+
+/// A `candidate_subset` hint (`ip:port` or bare `ip` entries) as the sets
+/// [`endpoint_in_subset`] matches an endpoint against.
+fn candidate_sets(candidate_subset: &[String]) -> (HashSet<&str>, HashSet<IpAddr>) {
+    (
+        candidate_subset.iter().map(String::as_str).collect(),
+        candidate_subset
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect(),
+    )
+}
+
 fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
@@ -1282,10 +1355,7 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
+                        if !is_prefill_card(&card) {
                             continue;
                         }
 
@@ -1363,6 +1433,19 @@ impl EndpointPicker for Router {
         // subset.
         let (allowed_worker_ids, worker_map) = if endpoints.is_empty() {
             if req.candidate_subset.is_empty() {
+                (None, Vec::new())
+            } else if let Some(endpoint) = &self.static_endpoint {
+                // One endpoint fronts every worker, so a subset hint either
+                // names it (no narrowing) or excludes everything.
+                let (candidates, candidate_ips) = candidate_sets(&req.candidate_subset);
+                if !endpoint_in_subset(endpoint, &candidates, &candidate_ips) {
+                    tracing::warn!(
+                        subset = ?req.candidate_subset,
+                        endpoint = %endpoint,
+                        "Subset hint excludes the static endpoint; refusing to route outside the subset"
+                    );
+                    return Err(PickError::NoEndpoints);
+                }
                 (None, Vec::new())
             } else {
                 let ids = self.subset_to_worker_ids(&req.candidate_subset);
@@ -1677,7 +1760,45 @@ mod tests {
     use std::sync::{Arc, atomic::Ordering};
 
     use super::*;
+    use dynamo_llm::model_type::ModelType;
     use k8s_openapi::api::core::v1::Pod;
+
+    fn card(worker_type: Option<WorkerType>, model_type: ModelType) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("m");
+        card.worker_type = worker_type;
+        card.model_type = model_type;
+        card
+    }
+
+    #[test]
+    fn static_endpoint_parses_ip_port_and_rejects_the_rest() {
+        assert_eq!(
+            parse_static_endpoint("127.0.0.1:8100").unwrap(),
+            "127.0.0.1:8100"
+        );
+        // Bracketed IPv6, rendered the way the worker index stores addresses.
+        assert_eq!(parse_static_endpoint("[::1]:8100").unwrap(), "[::1]:8100");
+        for bad in ["localhost:8100", "127.0.0.1", "::1:8100", "127.0.0.1:99999"] {
+            assert!(
+                parse_static_endpoint(bad).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn prefill_cards_are_recognized_by_worker_type() {
+        // The mocker registers prefill workers without the legacy marker bit.
+        // Legacy cards resolve as in lib/llm's effective_worker_type tests.
+        assert!(is_prefill_card(&card(
+            Some(WorkerType::Prefill),
+            ModelType::empty()
+        )));
+        assert!(!is_prefill_card(&card(
+            Some(WorkerType::Decode),
+            ModelType::Chat
+        )));
+    }
 
     #[test]
     fn global_namespace_discovery_does_not_restrict_worker_pod_labels() {
