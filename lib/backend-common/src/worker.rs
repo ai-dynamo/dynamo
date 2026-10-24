@@ -295,6 +295,26 @@ enum EngineRouteLifecycle {
     ShuttingDown,
 }
 
+/// Engine-facing steps that follow discovery unregister on shutdown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownPolicy {
+    /// In-process engine: sleep the grace period, drain prefill KV transfers,
+    /// then clean up. The worker owns the engine's memory, so it must wait.
+    GraceAndDrain,
+    /// Sidecar: clean up immediately. The engine is a separate process with
+    /// its own termination path, so the sidecar neither drains nor waits for it.
+    CleanupOnly,
+}
+
+impl ShutdownPolicy {
+    fn grace_secs(self) -> f64 {
+        match self {
+            Self::GraceAndDrain => grace_period_secs(),
+            Self::CleanupOnly => 0.0,
+        }
+    }
+}
+
 /// The engine a [`Worker`] drives, tagged by request modality. Both variants
 /// share the lifecycle (driven via the forwarders below); they differ only in
 /// the serve-loop adapter: `Llm` → token pipeline ([`EngineAdapter`]), `Raw` →
@@ -453,6 +473,8 @@ pub struct Worker {
     /// step. Always present once `start()` returns Ok, independent of
     /// whether the engine returned a component publisher.
     lifecycle: Option<crate::metrics::LifecycleGauges>,
+    /// Whether shutdown waits for the engine after discovery unregister.
+    shutdown_policy: ShutdownPolicy,
     /// This worker's backend admission gate, which its token pipeline admits
     /// network requests through. Created as the worker serves, for its
     /// component; anything else serving for this worker holds a clone.
@@ -483,6 +505,7 @@ impl Worker {
             engine_route_shutdown: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
+            shutdown_policy: ShutdownPolicy::GraceAndDrain,
             admission_gate: WorkerAdmissionGate::default(),
         }
     }
@@ -509,6 +532,8 @@ impl Worker {
     ///      are still reachable.
     ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
     ///      request-plane drain and transport teardown.
+    ///
+    /// Sidecars ([`Worker::run_with_drt`]) skip steps 2 and 3.
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
@@ -574,14 +599,19 @@ impl Worker {
     }
 
     /// Run on the sidecar's already-connected runtime and process shutdown token.
-    /// Registration, drain and cleanup retain the ordinary Worker behavior.
+    ///
+    /// Registration and cleanup retain the ordinary Worker behavior. Shutdown
+    /// skips the grace period and prefill drain: the engine is a separate
+    /// process with its own lifecycle, so the sidecar only withdraws discovery,
+    /// releases its own resources, and exits.
     pub async fn run_with_drt(
-        self,
+        mut self,
         drt: DistributedRuntime,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         validate_model_input(self.config.model_input, &self.engine)?;
         validate_route_to_encoder(&self.config)?;
+        self.shutdown_policy = ShutdownPolicy::CleanupOnly;
         self.run_with_shutdown(drt.runtime().clone(), Some(drt), shutdown)
             .await
     }
@@ -599,6 +629,7 @@ impl Worker {
         // risk), otherwise we exit(911). Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
+        let shutdown_policy = self.shutdown_policy;
         let outcome = {
             let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
@@ -608,7 +639,7 @@ impl Worker {
                 _ = shutdown_token.cancelled() => {
                     runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
-                    let grace = grace_period_secs();
+                    let grace = shutdown_policy.grace_secs();
                     let deadline = shutdown_deadline(timeout, grace);
                     tracing::debug!(
                         "graceful shutdown started; deadline {}s ({}s timeout + {:.2}s grace)",
@@ -1336,10 +1367,15 @@ impl Worker {
     /// Engine-facing shutdown sequence: grace period sleep → drain loop on
     /// `engine.is_quiescent()` → `cleanup_once()`. Each engine step swallows
     /// non-fatal failures so a misbehaving engine can't block the worker
-    /// from exiting.
+    /// from exiting. Sidecars go straight to `cleanup_once()`.
     async fn run_engine_shutdown_steps(&mut self) {
-        self.run_engine_shutdown_steps_with_grace(grace_period_secs())
-            .await
+        match self.shutdown_policy {
+            ShutdownPolicy::GraceAndDrain => {
+                self.run_engine_shutdown_steps_with_grace(grace_period_secs())
+                    .await
+            }
+            ShutdownPolicy::CleanupOnly => self.cleanup_once().await,
+        }
     }
 
     /// Same as [`run_engine_shutdown_steps`] but with an explicit grace
@@ -3349,6 +3385,28 @@ mod tests {
             vec!["start", "cleanup"],
             "non-prefill workers must not poll is_quiescent (no drain)"
         );
+    }
+
+    #[tokio::test]
+    async fn sidecar_shutdown_skips_grace_and_drain() {
+        // A prefill sidecar would otherwise sleep the grace period and poll
+        // is_quiescent. The engine is out of process, so the sidecar must go
+        // straight to its own cleanup however the grace period is configured.
+        temp_env::async_with_vars([(GRACE_PERIOD_ENV, Some("30"))], async {
+            let (engine, log) = OrderingMockEngine::new(false);
+            let mut worker = worker_with_prefill(engine);
+            worker.shutdown_policy = ShutdownPolicy::CleanupOnly;
+            worker.start_engine(0).await.unwrap();
+
+            tokio::time::timeout(Duration::from_secs(5), worker.run_engine_shutdown_steps())
+                .await
+                .expect("sidecar shutdown must not wait for a grace period");
+
+            assert_eq!(*log.lock().unwrap(), vec!["start", "cleanup"]);
+            assert_eq!(worker.state, LifecycleState::Stopped);
+            assert_eq!(ShutdownPolicy::CleanupOnly.grace_secs(), 0.0);
+        })
+        .await;
     }
 
     // The "drain skipped when engine never started" scenario isn't

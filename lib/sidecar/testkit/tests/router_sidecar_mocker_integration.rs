@@ -607,7 +607,8 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
         },
     )
     .await;
-    let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated);
+    let mut child =
+        env.spawn_with_long_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated);
     let router = env.ready("backend").await;
     let handle = control.request("shutdown-active", hold_after_token());
     let mut stream = router
@@ -624,12 +625,6 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
     peer.scheduler_active().await;
     child.signal(libc::SIGTERM);
     env.withdrawn("backend", &router).await;
-    assert!(child.is_running(), "withdrawal must precede process exit");
-    assert!(
-        !handle.reached(Event::Dropped),
-        "withdrawal must precede engine cleanup"
-    );
-    peer.scheduler_active().await;
     let tail = outputs(stream).await;
     assert!(
         tail.iter()
@@ -641,7 +636,16 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
     );
     bounded("shutdown remote release", handle.wait(Event::Dropped)).await;
     peer.scheduler_idle().await;
+    // Exiting within `Process::exit`'s bound proves the configured grace
+    // period was skipped; the engine stays up for the checks below.
     assert!(child.exit().await.success(), "{}", child.logs());
+    let logs = child.logs();
+    let withdrawn = logs.find("Endpoint unregistered from discovery");
+    let cleaned = logs.find("Engine cleanup complete");
+    assert!(
+        withdrawn.is_some() && cleaned.is_some() && withdrawn < cleaned,
+        "withdrawal must precede sidecar cleanup\n{logs}"
+    );
     let independent = peer.engine().await;
     independent.start(0).await.unwrap();
     independent.cleanup().await.unwrap();
