@@ -535,6 +535,8 @@ class routing_overhead:
     TOTAL_MS = "overhead_total_ms"
     # Time spent querying the shared KV cache (Mooncake)
     SHARED_CACHE_QUERY_MS = "overhead_shared_cache_query_ms"
+    # Time a request spent waiting in the router scheduler queue before admission
+    QUEUE_WAIT_MS = "overhead_queue_wait_ms"
     # Total shared cache failures (query and subscriber failures)
     SHARED_CACHE_ERRORS_TOTAL = "shared_cache_errors_total"
 

@@ -1296,7 +1296,13 @@ impl<
         // `queue_rejection` would reject with `limit: 0`. Admit directly instead
         // so selection reports the real condition, `NoEndpoints`.
         if self.workers_with_configs.borrow().is_empty() {
-            return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+            return self.admit_one(
+                request,
+                attempt_tx,
+                lifecycle_transfer,
+                decay_now,
+                Duration::ZERO,
+            );
         }
         // A class with any zero per-worker limit never queues: keep the direct
         // admission semantics by admitting while a worker has prefill capacity,
@@ -1321,7 +1327,13 @@ impl<
                     )
                 });
             if !should_queue {
-                return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+                return self.admit_one(
+                    request,
+                    attempt_tx,
+                    lifecycle_transfer,
+                    decay_now,
+                    Duration::ZERO,
+                );
             }
         }
         tracing::trace!(policy_class = class.name, "ordering request");
@@ -1650,7 +1662,8 @@ impl<
                 self.reject_due_time_passed(class_index, &mut request);
                 continue;
             }
-            let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
+            let queue_wait = queued.enqueue_at.elapsed();
+            let wait_ms = queue_wait.as_millis() as u64;
             if let Some(snapshot) = refreshed {
                 tracing::info!(
                     request_id = queued.request.mode.request_id().unwrap_or("unknown"),
@@ -1677,6 +1690,7 @@ impl<
                 queued.attempt_tx,
                 queued.lifecycle_transfer,
                 admit_now,
+                queue_wait,
             );
         }
     }
@@ -1801,6 +1815,7 @@ impl<
                     best_worker: selected.selection.worker,
                     effective_overlap_blocks: selected.selection.effective_overlap_blocks,
                     cached_tokens: selected.selection.cached_tokens,
+                    queue_wait: Duration::ZERO,
                     max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
                     selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
                     selected_worker_tiers: selected.selected_worker_tiers,
@@ -1821,9 +1836,10 @@ impl<
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         decay_now: Instant,
+        queue_wait: Duration,
     ) -> bool {
         self.with_projected_loads(request, decay_now, |actor, request| {
-            actor.admit_one_projected(request, attempt_tx, lifecycle_transfer)
+            actor.admit_one_projected(request, attempt_tx, lifecycle_transfer, queue_wait)
         })
     }
 
@@ -1832,6 +1848,7 @@ impl<
         request: &mut SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
+        queue_wait: Duration,
     ) -> bool {
         let selected = match self.select_worker_for_request(request, true) {
             Ok(s) => s,
@@ -1848,6 +1865,7 @@ impl<
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
             cached_tokens: selected.selection.cached_tokens,
+            queue_wait,
             max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
             selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
@@ -3650,7 +3668,10 @@ policy_classes:
                 assert_eq!(request.worker_loads, expected);
                 assert!(!request.worker_loads.contains_key(&stale));
                 let storage = request.worker_loads.get(&worker).unwrap() as *const _;
-                assert_eq!(actor.admit_one_projected(request, None, None), succeeds);
+                assert_eq!(
+                    actor.admit_one_projected(request, None, None, Duration::ZERO),
+                    succeeds
+                );
                 assert_eq!(rx.try_recv().unwrap().is_ok(), succeeds);
                 assert_eq!(request.worker_loads, expected);
                 storage

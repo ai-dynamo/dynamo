@@ -229,6 +229,12 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
         }
     });
 
+    let router_id = uuid::Uuid::new_v4().as_u128() as u64;
+    if let Err(error) = metrics::register_routing_overhead_metrics(router_id) {
+        tracing::warn!(%error, "failed to register routing overhead metrics");
+    }
+    metrics::ensure_preprocess_metrics_registered();
+
     // Start before router init so scrapes during a slow discovery bootstrap
     // return an empty exposition rather than a connection refusal.
     let metrics_port = parse_env(metrics::METRICS_PORT_ENV, metrics::DEFAULT_METRICS_PORT);

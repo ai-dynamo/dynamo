@@ -862,6 +862,7 @@ pub struct RoutingOverheadMetrics {
     pub scheduling: prometheus::Histogram,
     pub total: prometheus::Histogram,
     pub shared_cache_query: prometheus::Histogram,
+    pub queue_wait: prometheus::Histogram,
     pub shared_cache_errors_total: prometheus::IntCounter,
 }
 
@@ -922,9 +923,15 @@ impl RoutingOverheadMetrics {
             let shared_cache_query = make(
                 routing_overhead::SHARED_CACHE_QUERY_MS,
                 "Time spent querying the shared KV cache in milliseconds",
-                async_buckets,
+                async_buckets.clone(),
             )
             .expect("overhead_shared_cache_query_ms");
+            let queue_wait = make(
+                routing_overhead::QUEUE_WAIT_MS,
+                "Time spent waiting in the router scheduler queue in milliseconds",
+                async_buckets,
+            )
+            .expect("overhead_queue_wait_ms");
             let shared_cache_errors_total = {
                 let name = format!(
                     "{}_{}",
@@ -944,6 +951,7 @@ impl RoutingOverheadMetrics {
                 scheduling,
                 total,
                 shared_cache_query,
+                queue_wait,
                 shared_cache_errors_total,
             })
         });
@@ -953,6 +961,7 @@ impl RoutingOverheadMetrics {
         registry.register(Box::new(m.scheduling.clone()))?;
         registry.register(Box::new(m.total.clone()))?;
         registry.register(Box::new(m.shared_cache_query.clone()))?;
+        registry.register(Box::new(m.queue_wait.clone()))?;
         registry.register(Box::new(m.shared_cache_errors_total.clone()))?;
         Ok(())
     }
@@ -1861,6 +1870,7 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             scheduling: make("test_scheduling_ms"),
             total: make("test_total_ms"),
             shared_cache_query: make("test_shared_cache_query_ms"),
+            queue_wait: make("test_queue_wait_ms"),
             shared_cache_errors_total: prometheus::IntCounter::new(
                 "test_shared_cache_errors_total",
                 "test",
