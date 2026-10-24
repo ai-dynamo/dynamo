@@ -5016,6 +5016,15 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
+        // Chat-style input needs the model's chat template and multimodal
+        // processor, which only the worker runs.
+        if request.messages.is_some() {
+            return Err(invalid_argument_error(
+                "chat-style embedding input (`messages`) is not supported when the frontend \
+                 tokenizes embedding requests; serve the model without \
+                 --embedding-frontend-tokenization",
+            ));
+        }
         let embedding_tokenizers = self.embedding_tokenizers.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "embedding tokenization is unavailable; construct the preprocessor with \

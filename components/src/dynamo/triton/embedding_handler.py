@@ -17,6 +17,7 @@ import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.triton.pooling_common import PoolingWorkerHandlerBase
 
 
@@ -57,6 +58,15 @@ class EmbeddingWorkerHandler(PoolingWorkerHandlerBase):
         )
 
     def _pre_dispatch(self, request: dict) -> None:
+        # Chat-style multimodal input is rendered by vLLM embedding workers; a
+        # Triton model takes text tensors only. ``InvalidArgument`` (unlike a
+        # plain ``ValueError``) carries this message to the client.
+        if request.get("messages") is not None:
+            raise InvalidArgument(
+                "chat-style embedding input (`messages`) is supported on vLLM "
+                "embedding workers only; send `input` to the Triton embedding "
+                "worker"
+            )
         _validate_encoding_format(request.get("encoding_format"))
 
     def _row_from_output(self, arr_row: np.ndarray, inference_response: Any) -> dict:
