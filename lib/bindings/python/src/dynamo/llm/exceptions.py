@@ -17,6 +17,7 @@ from dynamo._core import SelectionServiceError as SelectionServiceError
 from dynamo._core import StreamIncomplete as StreamIncomplete
 from dynamo._core import Unknown as Unknown
 from dynamo._core import WorkerOverloaded as WorkerOverloaded
+from dynamo._core import WorkerShutdown as WorkerShutdown
 from dynamo._core import WorkerUnavailable as WorkerUnavailable
 
 logger = logging.getLogger(__name__)
