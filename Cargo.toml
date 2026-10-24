@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "lib/global-view-receiver",
     "lib/llm",
     "lib/rl",
     "lib/runtime",
