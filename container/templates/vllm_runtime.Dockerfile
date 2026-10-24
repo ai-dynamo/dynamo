@@ -81,6 +81,8 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
+# Compile newly installed packages during uv installs, including the Omni installer.
+ENV UV_COMPILE_BYTECODE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
@@ -648,6 +650,18 @@ RUN set -eu; \
         echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
     fi
 {% endif %}
+
+# Compile inherited dependencies too, after all installs and removals. Use the
+# same interpreter as uv above so CUDA's system packages and CPU/XPU's venv
+# packages keep their existing paths. The runtime stage inherits these caches.
+RUN {{ python_executable }} - <<'PY'
+import compileall
+import sysconfig
+
+for path in sorted({sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}):
+    if not compileall.compile_dir(path, quiet=1):
+        raise RuntimeError(f"Bytecode compilation failed in {path}")
+PY
 
 USER dynamo
 
