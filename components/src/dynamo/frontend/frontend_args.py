@@ -176,6 +176,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     kv_cache_block_size: Optional[int]
     http_host: str
     http_port: int
+    http_endpoint_drain_delay_secs: int
     batch_gateway_url: Optional[str] = None
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
@@ -268,6 +269,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             raise ValueError(
                 f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
             )
+        if self.http_endpoint_drain_delay_secs < 0:
+            raise ValueError("--http-endpoint-drain-delay-secs must be >= 0")
         if self.migration_max_seq_len is not None and (
             self.migration_max_seq_len < 1 or self.migration_max_seq_len > _U32_MAX
         ):
@@ -411,6 +414,17 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_HTTP_PORT",
             default=8000,
             help="HTTP port for the engine (u16).",
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--http-endpoint-drain-delay-secs",
+            env_var="DYN_HTTP_ENDPOINT_DRAIN_DELAY_SECS",
+            default=10,
+            help=(
+                "Seconds to keep serving after readiness fails during graceful "
+                "shutdown, allowing upstream endpoints to remove this frontend."
+            ),
             arg_type=int,
         )
         add_argument(

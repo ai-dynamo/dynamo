@@ -21,7 +21,6 @@ import asyncio
 import importlib.metadata
 import logging
 import os
-import signal
 import sys
 from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
@@ -36,6 +35,7 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     FrontendRoute,
+    FrontendShutdown,
     make_engine,
     run_input,
 )
@@ -44,6 +44,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import FrontendArgGroup, FrontendConfig
+from .shutdown import install_signal_handlers
 
 if TYPE_CHECKING:
     from .vllm_processor import EngineFactory
@@ -415,11 +416,12 @@ async def async_main():
         response_plane=config.response_plane,
     )
 
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
+    frontend_shutdown = (
+        FrontendShutdown()
+        if not (config.interactive or config.kserve_grpc_server)
+        else None
+    )
+    install_signal_handlers(loop, runtime, frontend_shutdown)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     # Shared with the backends so a worker's advertised config is built from the
@@ -497,18 +499,18 @@ async def async_main():
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
-            await run_input(runtime, "http", engine, frontend_route_extensions)
+            await run_input(
+                runtime,
+                "http",
+                engine,
+                frontend_route_extensions,
+                shutdown=frontend_shutdown,
+                http_endpoint_drain_delay_secs=config.http_endpoint_drain_delay_secs,
+            )
     except asyncio.exceptions.CancelledError:
         pass
-
-
-async def graceful_shutdown(runtime: DistributedRuntime) -> None:
-    """Handle graceful shutdown of the distributed runtime.
-
-    Args:
-        runtime: The DistributedRuntime instance to shut down.
-    """
-    runtime.shutdown()
+    finally:
+        runtime.shutdown()
 
 
 def main() -> None:

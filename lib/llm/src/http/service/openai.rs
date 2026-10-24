@@ -4647,7 +4647,7 @@ pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), Error
 
 // todo - abstract this to the top level lib.rs to be reused
 pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    if !state.is_ready() {
+    if !state.accepts_inference() {
         return Err(ErrorMessage::_service_unavailable());
     }
     Ok(())
@@ -6796,10 +6796,13 @@ mod tests {
     }
 
     #[test]
-    fn test_check_ready_rejects_draining_service() {
+    fn test_check_ready_admits_quiescing_and_rejects_draining_service() {
         let service = service_v2::HttpService::builder().build().unwrap();
         let state = service.state_clone();
 
+        assert!(check_ready(&state).is_ok());
+
+        state.start_quiescing();
         assert!(check_ready(&state).is_ok());
 
         state.start_draining();
