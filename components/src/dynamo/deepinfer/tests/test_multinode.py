@@ -24,10 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+import msgspec
 import pytest
 import zmq
 
 import dynamo.deepinfer
+from dynamo.common.backend.publisher import ZmqSource
 from dynamo.deepinfer.args import apply_env_defaults, parse_args
 from dynamo.deepinfer.controller import Controller
 from dynamo.deepinfer.controller_process import ControllerProcess
@@ -87,15 +89,15 @@ def _free_block(n: int) -> int:
 @dataclass
 class Topology:
     """One engine: ``dp`` ranks over ``nnodes`` nodes, all on localhost, with
-    its own ports (DeepInfer's store and the fake's DP rendezvous, and the
-    control port)."""
+    its own ports (DeepInfer's store and the fake's DP rendezvous, the
+    control port, and each node's KV event block)."""
 
     dp: int = 4
     nnodes: int = 2
 
     def __post_init__(self) -> None:
         self.per_node = self.dp // self.nnodes
-        self.base = _free_block(3)
+        self.base = _free_block(3 + self.nnodes * self.per_node)
 
     @property
     def master_port(self) -> int:
@@ -104,6 +106,9 @@ class Topology:
     @property
     def control_port(self) -> int:
         return self.base + 2
+
+    def kv_port(self, node: int) -> int:
+        return self.base + 3 + node * self.per_node
 
     def argv(self, node: int, *extra: str) -> list[str]:
         return [
@@ -125,6 +130,8 @@ class Topology:
             str(self.master_port),
             "--control-port",
             str(self.control_port),
+            "--kv-events-port-base",
+            str(self.kv_port(node)),
             "--max-model-len",
             "2048",
             "--node-timeout-s",
@@ -162,7 +169,9 @@ def start_head(
     args = parse_args(topo.argv(0, *extra))
     apply_env_defaults(args)
     launch = launch_ranks(args, on_fatal=on_fatal)
-    controller = Controller(launch.handles, launch.meta, on_fatal=on_fatal)
+    controller = Controller(
+        launch.handles, launch.meta, engine_type=args.engine_type, on_fatal=on_fatal
+    )
     return DeepInferEngine(args, controller, launch.meta, launch)
 
 
@@ -299,9 +308,11 @@ async def test_controller_process_drives_every_node(mn_env):
     --control-port; this process only serves requests."""
     os.environ["DEEPINFER_FAKE_STEP_DELAY_S"] = "0.005"
     topo = Topology(dp=4, nnodes=2)
-    node = start_node(mn_env, topo, 1, "2,3")
+    node = start_node(mn_env, topo, 1, "2,3", "--kv-cache-manager", "prefix")
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
-    engine, _ = await DeepInferEngine.from_args(topo.argv(0, "--no-rank0-in-process"))
+    engine, _ = await DeepInferEngine.from_args(
+        topo.argv(0, "--no-rank0-in-process", "--kv-cache-manager", "prefix")
+    )
     controller = engine.controller
     assert isinstance(controller, ControllerProcess)
     try:
@@ -314,6 +325,9 @@ async def test_controller_process_drives_every_node(mn_env):
         gpus = [(r, env["CUDA_VISIBLE_DEVICES"]) for r, _, env in ranks]
         assert gpus == [(0, "0"), (1, "1"), (2, "2"), (3, "3")]
         assert not rank_processes(os.getpid())
+        sources = [s.endpoint for s in await engine.kv_event_sources()]
+        node_kv = topo.kv_port(1)
+        assert sources[2:] == [f"tcp://127.0.0.1:{p}" for p in (node_kv, node_kv + 1)]
 
         # Abort a request running on the other node.
         ctx = Ctx()
@@ -327,6 +341,41 @@ async def test_controller_process_drives_every_node(mn_env):
         await engine.cleanup()
     assert controller.proc.returncode == 0  # a coordinated CLOSE
     assert node.wait(30) == 0
+
+
+@pytest.mark.timeout(120)
+async def test_kv_event_sources_point_at_each_node(mn_env):
+    topo = Topology(dp=4, nnodes=2)
+    start_node(mn_env, topo, 1, "0,1", "--kv-cache-manager", "prefix")
+    engine = start_head(topo, "0,1", "--kv-cache-manager", "prefix")
+    sub = zmq.Context.instance().socket(zmq.SUB)
+    sub.setsockopt(zmq.SUBSCRIBE, b"")
+    sub.setsockopt(zmq.LINGER, 0)
+    try:
+        await engine.start(worker_id=1)
+        head_kv, node_kv = topo.kv_port(0), topo.kv_port(1)
+        # Ranks on the head through loopback; the node's ranks at the address
+        # they advertised (here the route to 127.0.0.1) and their own port block.
+        assert await engine.kv_event_sources() == [
+            ZmqSource(endpoint=f"tcp://127.0.0.1:{head_kv}", topic="", dp_rank=0),
+            ZmqSource(endpoint=f"tcp://127.0.0.1:{head_kv + 1}", topic="", dp_rank=1),
+            ZmqSource(endpoint=f"tcp://127.0.0.1:{node_kv}", topic="", dp_rank=2),
+            ZmqSource(endpoint=f"tcp://127.0.0.1:{node_kv + 1}", topic="", dp_rank=3),
+        ]
+        # The remote endpoint really carries rank 3's events.
+        sub.connect(f"tcp://127.0.0.1:{node_kv + 1}")
+        for salt in range(20):  # PUB drops batches until the subscription is live
+            await tokens_of(engine, request(3, n=600, max_tokens=1, salt=salt))
+            if sub.poll(200):
+                break
+        frames = sub.recv_multipart()
+        assert len(frames) == 3
+        _, events, dp_rank = msgspec.msgpack.decode(frames[2])
+        assert dp_rank == 3 and events
+    finally:
+        sub.close()
+        await engine.cleanup()
+    assert mn_env[0].wait(30) == 0
 
 
 @pytest.mark.timeout(120)
@@ -505,18 +554,18 @@ def _is_zombie(pid: int) -> bool:
 
 @pytest.mark.timeout(180)
 async def test_two_engines_on_one_host_do_not_collide(mn_env):
-    """Two engines sharing a node: each has its own MASTER_PORT, control port
-    and GPUs."""
+    """Like two DEP2 prefill workers sharing a node: each engine has its own
+    MASTER_PORT, control port, KV event ports and GPUs."""
     engines: list[DeepInferEngine] = []
     nodes = []
     topos = [Topology(dp=4, nnodes=2), Topology(dp=4, nnodes=2)]
     gpus = ["0,1", "2,3"]
     for topo, g in zip(topos, gpus):
-        nodes.append(start_node(mn_env, topo, 1, g))
+        nodes.append(start_node(mn_env, topo, 1, g, "--kv-cache-manager", "prefix"))
     fatal: list[str] = []
     try:
         for topo, g in zip(topos, gpus):
-            engine = start_head(topo, g, fatal=fatal)
+            engine = start_head(topo, g, "--kv-cache-manager", "prefix", fatal=fatal)
             engines.append(engine)
             await engine.start(worker_id=len(engines))
         results = await asyncio.gather(
@@ -556,12 +605,12 @@ async def test_two_engines_on_one_host_do_not_collide(mn_env):
 
 @pytest.mark.timeout(120)
 async def test_two_single_node_engines_share_a_node(mn_env):
-    """Two DEP2 workers on GPUs 0,1 and 2,3 of one node."""
+    """Two DEP2 prefill-style workers on GPUs 0,1 and 2,3 of one node."""
     topos = [Topology(dp=2, nnodes=1), Topology(dp=2, nnodes=1)]
     engines = []
     try:
         for topo, g in zip(topos, ["0,1", "2,3"]):
-            engines.append(start_head(topo, g))
+            engines.append(start_head(topo, g, "--kv-cache-manager", "prefix"))
             await engines[-1].start(worker_id=len(engines))
         results = await asyncio.gather(
             *(tokens_of(e, request(r)) for e in engines for r in range(2))
@@ -573,6 +622,9 @@ async def test_two_single_node_engines_share_a_node(mn_env):
         }
         a, b = (str(t.master_port) for t in topos)
         assert placed == {(a, 1, "1"), (b, 1, "3")}
+        assert [s.endpoint for e in engines for s in await e.kv_event_sources()] == [
+            f"tcp://127.0.0.1:{t.kv_port(0) + r}" for t in topos for r in range(2)
+        ]
     finally:
         for engine in engines:
             await engine.cleanup()
@@ -615,6 +667,10 @@ def test_multinode_options(mn_env):
             "2",
             "--master-addr",
             "10.0.0.1",
+            "--kv-cache-manager",
+            "prefix",
+            "--kv-events-port-base",
+            "7000",
         ]
     )
     assert (args.ranks_per_node, args.local_ranks) == (4, range(0, 4))
@@ -628,12 +684,17 @@ def test_multinode_options(mn_env):
     assert rank5["engine_rank"] == 5 and rank5["data_parallel_size"] == 8
     assert rank5["expert_parallel_size"] == 8
     specs = args.rank_specs(args.engine_id())
+    assert [s.kv_events_endpoint for s in specs[3:6]] == [
+        "tcp://*:7003",
+        "tcp://*:7000",
+        "tcp://*:7001",
+    ]
     env: dict[str, str] = {"MASTER_ADDR": "elsewhere"}
     apply_env_defaults(args, env)
     assert (env["MASTER_ADDR"], env["MASTER_PORT"]) == ("10.0.0.1", "23333")
 
     # A non-head node derives the same specs from the same command line (plus
-    # head-only Dynamo flags, which it ignores).
+    # head-only Dynamo flags, which it ignores), except its KV event ports.
     opts, grace, ignored = parse_node_args(
         [
             "--model",
@@ -646,6 +707,10 @@ def test_multinode_options(mn_env):
             "1",
             "--master-addr",
             "10.0.0.1",
+            "--kv-cache-manager",
+            "prefix",
+            "--kv-events-port-base",
+            "9000",
             "--namespace",
             "ns",
             "--dyn-reasoning-parser",
@@ -657,6 +722,7 @@ def test_multinode_options(mn_env):
     assert opts.local_ranks == range(4, 8)
     node_specs = opts.rank_specs(opts.engine_id(), opts.local_ranks)
     assert [s.digest() for s in node_specs] == [s.digest() for s in specs[4:]]
+    assert node_specs[0].kv_events_endpoint == "tcp://*:9000"
 
     # MASTER_ADDR/MASTER_PORT from the environment when the flags are absent.
     os.environ.update(MASTER_ADDR="10.0.0.2", MASTER_PORT="24000")

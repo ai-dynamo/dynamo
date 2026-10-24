@@ -1,0 +1,84 @@
+diff --git a/csrc/engine/block_manager.hpp b/csrc/engine/block_manager.hpp
+index 51b92aa..027af7e 100644
+--- a/csrc/engine/block_manager.hpp
++++ b/csrc/engine/block_manager.hpp
+@@ -238,6 +238,40 @@ struct BlockManagerMutexAcquire {
+         return true;
+     }
+ 
++    /// Like try_allocate_seq, but the leading blocks are already-filled prefix blocks shared with
++    /// other holders (an external prefix cache). They are pinned (ref+1) instead of allocated.
++    bool try_allocate_seq_with_prefix(Sequence &seq, const std::vector<int> &prefix_blocks) {
++        TORCH_CHECK(seq.schedule.status == SequenceStatus::WAITING, "status ", int(seq.schedule.status));
++        TORCH_CHECK(seq.cache.block_table.empty(), "Block table not empty");
++        if (this->state_manager) {
++            TORCH_CHECK(seq.cache.state_id == -1, "state already allocated");
++        }
++
++        int num_blocks = seq.get_num_blocks();
++        int num_prefix = static_cast<int>(prefix_blocks.size());
++        TORCH_CHECK_LE(num_prefix, num_blocks);
++        int num_new = num_blocks - num_prefix;
++
++        bool state_alloc_status = this->state_manager ? this->state_manager->can_allocate_single_nolock() : true;
++        auto block_alloc_status = this->block_manager->can_allocate_nolock(num_new);
++        if (block_alloc_status != AllocStatus::OK || !state_alloc_status) {
++            TORCH_CHECK(block_alloc_status != AllocStatus::NEVER, "can never allocate ", num_new, " blocks");
++            return false;
++        }
++
++        this->block_manager->pin_blocks_nolock(prefix_blocks);
++        auto new_blocks = this->block_manager->allocate_nolock(num_new);
++        std::vector<int> block_table;
++        block_table.reserve(num_blocks);
++        block_table.insert(block_table.end(), prefix_blocks.begin(), prefix_blocks.end());
++        block_table.insert(block_table.end(), new_blocks.begin(), new_blocks.end());
++        seq.cache.block_table = std::move(block_table);
++        if (this->state_manager) {
++            seq.cache.state_id = this->state_manager->allocate_single_nolock();
++        }
++        return true;
++    }
++
+     std::shared_ptr<BlockManager> &block_manager;
+     std::shared_ptr<BlockManager> &state_manager;
+ };
+\ No newline at end of file
+diff --git a/csrc/engine/pybind_scheduler.cpp b/csrc/engine/pybind_scheduler.cpp
+index a379e85..d6bc865 100644
+--- a/csrc/engine/pybind_scheduler.cpp
++++ b/csrc/engine/pybind_scheduler.cpp
+@@ -90,6 +90,18 @@ void pybind_engine_scheduler(pybind11::module &engine) {
+                 return guard.try_allocate_seq(seq);
+             },
+             py::arg("seq"))
++        .def(
++            "try_allocate_seq_with_prefix",
++            [](Scheduler &self, Sequence &seq, const std::vector<int> &prefix_blocks) -> bool {
++                py::gil_scoped_release _gil_release;
++                BlockManagerMutexAcquire guard(self.block_manager, self.state_manager);
++                return guard.try_allocate_seq_with_prefix(seq, prefix_blocks);
++            },
++            py::arg("seq"), py::arg("prefix_blocks"))
++        .def(
++            "add_prompted", [](Scheduler &self, std::shared_ptr<Sequence> seq) { self.prompted.emplace_back(std::move(seq), false); },
++            py::arg("seq"), "Queue an already-prefilled WAITING seq (blocks + state filled externally) for decode admission.")
++        .def("map_engram", &Scheduler::map_engram, py::arg("token_id"))
+         .def("add_sequence", &Scheduler::add_sequence, py::arg("seq"))
+         .def("abort_sequence", &Scheduler::abort_sequence, py::arg("request_ids"))
+         .def("has_unfinished_seqs", &Scheduler::has_unfinished_seqs)
+diff --git a/csrc/engine/pybind_sequence.cpp b/csrc/engine/pybind_sequence.cpp
+index 7d628dc..cd9de23 100644
+--- a/csrc/engine/pybind_sequence.cpp
++++ b/csrc/engine/pybind_sequence.cpp
+@@ -135,6 +135,10 @@ void pybind_engine_sequence(pybind11::module &engine) {
+     bind_sequence_readonly(sequence, "chunked_rest_len", [](const Sequence &seq) -> const auto & { return seq.schedule.chunked_rest_len; });
+     bind_sequence_property(sequence, "chunk_checkpoints", [](Sequence &seq) -> auto & { return seq.schedule.chunk_checkpoints; });
+     bind_sequence_property(sequence, "branch_id", [](Sequence &seq) -> auto & { return seq.schedule.branch_id; });
++    // External KV management (prefix cache, prefill->decode handoff).
++    bind_sequence_property(sequence, "block_table", [](Sequence &seq) -> auto & { return seq.cache.block_table; });
++    sequence.def("append_token_id", &Sequence::append_token_id, py::arg("token_id"));
++    sequence.def("append_compressed_token_id", &Sequence::append_compressed_token_id, py::arg("token_id"));
+ 
+     py::class_<SequenceMetadata>(engine, "SequenceMetadata")
+         .def(py::init<std::string &&, int64_t, bool, SequenceData *, SequenceData *, py::object, py::object, std::vector<int> &&,
