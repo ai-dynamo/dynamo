@@ -28,6 +28,7 @@ linters:
     - gocyclo
     - govet
     - ineffassign
+    - kubeapilinter
     - lll
     - misspell
     - modernize
@@ -38,6 +39,44 @@ linters:
     - unparam
     - unused
   settings:
+    custom:
+      kubeapilinter:
+        path: "bin/kube-api-linter.so"
+        description: Kube API Linter lints Kube like APIs based on API conventions and best practices.
+        original-url: sigs.k8s.io/kube-api-linter
+        settings:
+          linters:
+            # nofloats, nomaps, and nophase are deliberately NOT enabled: every
+            # existing finding would require a breaking CRD change (SLA float
+            # fields, map-keyed Services/Checkpoints/Components, status Phase
+            # enums). Revisit with a future API version.
+            enable:
+              - conflictingmarkers
+              - duplicatemarkers
+              - optionalorrequired
+              - statussubresource
+              - uniquemarkers
+              - statusoptional
+              - nonullable
+              - forbiddenmarkers
+            disable:
+              - "*"
+          lintersConfig:
+            conflictingmarkers:
+              conflicts:
+                - name: default_vs_required
+                  sets:
+                    - ["default", "kubebuilder:default"]
+                    - ["required", "kubebuilder:validation:Required", "k8s:required"]
+                  description: "A field with a default value cannot be required"
+            forbiddenmarkers:
+              markers:
+                - identifier: "+kubebuilder:pruning:PreserveUnknownFields"
+                - identifier: "+kubebuilder:validation:XPreserveUnknownFields"
+                - identifier: "+kubebuilder:validation:items:XPreserveUnknownFields"
+                - identifier: "+kubebuilder:validation:EmbeddedResource"
+                - identifier: "+kubebuilder:validation:XEmbeddedResource"
+                - identifier: "+kubebuilder:validation:items:XEmbeddedResource"
     staticcheck:
       # SA* matches the v1 staticcheck linter and S1* the v1 gosimple linter.
       # ST* (v1 stylecheck) and QF* (quickfix) were never enabled here.
@@ -118,6 +157,20 @@ linters:
         linters:
           - goconst
           - prealloc
+      # kube-api-linter checks CRD API conventions; only API type packages are in scope.
+      # Path is matched relative to the golangci-lint run directory (deploy/operator/).
+      - linters:
+          - kubeapilinter
+        path-except: ^api/
+      # DynamoGraphDeploymentScalingAdapterStatus.Replicas is intentionally
+      # required: the scale subresource contract reads status.replicas and the
+      # controller always sets it (see the field doc). K8s convention prefers
+      # optional status fields, but relaxing this one would weaken the scale
+      # subresource guarantee.
+      - linters:
+          - kubeapilinter
+        path: ^api/v1beta1/dynamographdeploymentscalingadapter_types\.go$
+        text: "^statusoptional: status field \"Replicas\""
     paths:
       - third_party$
       - builtin$

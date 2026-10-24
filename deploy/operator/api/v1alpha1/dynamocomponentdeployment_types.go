@@ -43,6 +43,7 @@ const (
 type DynamoComponentDeploymentSpec struct {
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
+	// +optional
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
@@ -71,20 +72,25 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// Annotations to add to generated Kubernetes resources for this component
 	// (such as Pod, Service, and Ingress when applicable).
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// Labels to add to generated Kubernetes resources for this component.
+	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// The name of the component
+	// +optional
 	ServiceName string `json:"serviceName,omitempty"`
 
 	// ComponentType indicates the role of this component (for example, "main").
 	//
 	// The DGD-only "lpx" type is experimental, requires the operator's
 	// lpx.enabled setting, and may change incompatibly.
+	// +optional
 	ComponentType string `json:"componentType,omitempty"`
 
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
+	// +optional
 	SubComponentType string `json:"subComponentType,omitempty"`
 
 	// RuntimeVersionOverride declares the Dynamo runtime version in this component's
@@ -102,28 +108,35 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// DynamoNamespace is deprecated and will be removed in a future version.
 	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
-	// +kubebuilder:validation:Optional
+	// +optional
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 
 	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
+	// +optional
 	Resources *Resources `json:"resources,omitempty"`
 	// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
 	// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
 	// for migration guidance. This field will be removed in a future API version.
+	// +optional
 	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
+	// +optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
 	// EnvFromSecret references a Secret whose key/value pairs will be exposed as
 	// environment variables in the component containers.
+	// +optional
 	EnvFromSecret *string `json:"envFromSecret,omitempty"`
 	// VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
+	// +optional
 	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
 
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
+	// +optional
 	Ingress *IngressSpec `json:"ingress,omitempty"`
 
 	// ModelRef references a model that this component serves
@@ -132,6 +145,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
 	// SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
+	// +optional
 	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
 
 	// +optional
@@ -146,13 +160,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ExtraPodSpec *ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
+	// +optional
 	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`
 	// ReadinessProbe to signal when the container is ready to receive traffic.
+	// +optional
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 	// Replicas is the desired number of Pods for this component.
 	// When scalingAdapter is enabled, this field is managed by the
 	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
 	// MinAvailable maps to Grove PodClique minAvailable for single-node and
@@ -176,6 +193,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// Multinode configures worker, prefill, or decode components that span
 	// multiple Pods.
+	// +optional
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// Roles expose the named Pod-producing parts inside a compound component.
 	// When set for a multinode component, this list must contain exactly one
@@ -253,34 +271,46 @@ type MultinodeSpec struct {
 	// Total number of GPUs is NumberOfNodes * GPU limit.
 	// Must be greater than 1 and is immutable after creation.
 	// +kubebuilder:validation:Minimum=2
+	// +optional
 	NodeCount int32 `json:"nodeCount"`
 }
 
 type IngressTLSSpec struct {
 	// SecretName is the name of a Kubernetes Secret containing the TLS certificate and key.
+	// +optional
 	SecretName string `json:"secretName,omitempty"`
 }
 
 type IngressSpec struct {
 	// Enabled exposes the component through an ingress or virtual service when true.
+	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 	// Host is the base host name to route external traffic to this component.
+	// +optional
 	Host string `json:"host,omitempty"`
 	// UseVirtualService indicates whether to configure a service-mesh VirtualService instead of a standard Ingress.
+	// +optional
 	UseVirtualService bool `json:"useVirtualService,omitempty"`
 	// VirtualServiceGateway optionally specifies the gateway name to attach the VirtualService to.
+	// +optional
 	VirtualServiceGateway *string `json:"virtualServiceGateway,omitempty"`
 	// HostPrefix is an optional prefix added before the host.
+	// +optional
 	HostPrefix *string `json:"hostPrefix,omitempty"`
 	// Annotations to set on the generated Ingress/VirtualService resources.
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// Labels to set on the generated Ingress/VirtualService resources.
+	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 	// TLS holds the TLS configuration used by the Ingress/VirtualService.
+	// +optional
 	TLS *IngressTLSSpec `json:"tls,omitempty"`
 	// HostSuffix is an optional suffix appended after the host.
+	// +optional
 	HostSuffix *string `json:"hostSuffix,omitempty"`
 	// IngressControllerClassName selects the ingress controller class (e.g., "nginx").
+	// +optional
 	IngressControllerClassName *string `json:"ingressControllerClassName,omitempty"`
 }
 
@@ -302,10 +332,12 @@ type DynamoComponentDeploymentStatus struct {
 
 	// Conditions captures the latest observed state of the component (including
 	// availability and readiness) using standard Kubernetes condition types.
+	// +optional
 	Conditions []metav1.Condition `json:"conditions"`
 
 	// PodSelector contains the labels that can be used to select Pods belonging to
 	// this component deployment.
+	// +optional
 	PodSelector map[string]string `json:"podSelector,omitempty"`
 
 	// Service contains replica status information for this service.
@@ -324,12 +356,15 @@ type DynamoComponentDeploymentStatus struct {
 // +kubebuilder:resource:shortName=dcd
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 type DynamoComponentDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// Spec defines the desired state for this Dynamo component deployment.
+	// +optional
 	Spec DynamoComponentDeploymentSpec `json:"spec,omitempty"`
 	// Status reflects the current observed state of the component deployment.
+	// +optional
 	Status DynamoComponentDeploymentStatus `json:"status,omitempty"`
 }
 
@@ -512,7 +547,7 @@ func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName st
 // ModelReference identifies a model served by this component
 type ModelReference struct {
 	// Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
-	// +kubebuilder:validation:Required
+	// +required
 	Name string `json:"name"`
 
 	// Revision is the model revision/version (optional)
@@ -547,7 +582,7 @@ type EPPConfig struct {
 // and Dynamo env vars) to produce a fully configured sidecar container.
 type FrontendSidecarSpec struct {
 	// Image is the container image for the frontend sidecar.
-	// +kubebuilder:validation:Required
+	// +required
 	Image string `json:"image"`
 
 	// Args overrides the default frontend arguments. When specified, these replace

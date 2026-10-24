@@ -654,18 +654,24 @@ func isGoodputMetric(metric v1beta2.ObjectiveMetric) bool {
 }
 
 type fuzzAISimulateParameters struct {
-	Search   *fuzzAISimulateSearch   `json:"search,omitempty"`
+	// +optional
+	Search *fuzzAISimulateSearch `json:"search,omitempty"`
+	// +optional
 	Workload *fuzzAISimulateWorkload `json:"workload,omitempty"`
 }
 
 type fuzzAISimulateSearch struct {
+	// +optional
 	MaxTrials int32 `json:"max_trials,omitempty"`
-	StrictSLA bool  `json:"strict_sla,omitempty"`
+	// +optional
+	StrictSLA bool `json:"strict_sla,omitempty"`
 }
 
 type fuzzAISimulateWorkload struct {
-	RequestCount int32             `json:"request_count,omitempty"`
-	Custom       map[string]string `json:"custom,omitempty"`
+	// +optional
+	RequestCount int32 `json:"request_count,omitempty"`
+	// +optional
+	Custom map[string]string `json:"custom,omitempty"`
 }
 
 func fuzzAISimulateSpec(s *v1beta2.AISimulateSpec, c randfill.Continue) {

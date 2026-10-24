@@ -29,12 +29,12 @@ import (
 // DynamoModelSpec defines the desired state of DynamoModel
 type DynamoModelSpec struct {
 	// ModelName is the full model identifier (e.g., "meta-llama/Llama-3.3-70B-Instruct-lora")
-	// +kubebuilder:validation:Required
+	// +required
 	ModelName string `json:"modelName"`
 
 	// BaseModelName is the base model identifier that matches the service label
 	// This is used to discover endpoints via headless services
-	// +kubebuilder:validation:Required
+	// +required
 	BaseModelName string `json:"baseModelName"`
 
 	// ModelType specifies the type of model (e.g., "base", "lora", "adapter")
@@ -55,13 +55,14 @@ type ModelSource struct {
 	// - S3: s3://bucket/path/to/model
 	// - HuggingFace: hf://org/model@revision_sha
 	// - Local filesystem: file:///path/to/model
-	// +kubebuilder:validation:Required
+	// +required
 	URI string `json:"uri"`
 }
 
 // EndpointInfo represents a single endpoint (pod) serving the model
 type EndpointInfo struct {
 	// Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090")
+	// +required
 	Address string `json:"address"`
 
 	// PodName is the name of the pod serving this endpoint
@@ -71,6 +72,7 @@ type EndpointInfo struct {
 	// Ready indicates whether this endpoint is ready to serve traffic.
 	// For LoRA models: true only if this endpoint's lifecycle request succeeded.
 	// For base models: always false (no probing performed).
+	// +required
 	Ready bool `json:"ready"`
 
 	// LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage
@@ -87,6 +89,7 @@ type DynamoModelStatus struct {
 	Endpoints []EndpointInfo `json:"endpoints,omitempty"`
 
 	// ReadyEndpoints is the count of endpoints that are ready
+	// +optional
 	ReadyEndpoints int `json:"readyEndpoints"`
 
 	// LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints
@@ -96,6 +99,7 @@ type DynamoModelStatus struct {
 	LoRAFallbackCoveredEndpoints int `json:"loraFallbackCoveredEndpoints,omitempty"`
 
 	// TotalEndpoints is the total count of endpoints
+	// +optional
 	TotalEndpoints int `json:"totalEndpoints"`
 
 	// Conditions represents the latest available observations of the model's state
@@ -115,10 +119,13 @@ type DynamoModelStatus struct {
 // +kubebuilder:resource:shortName=dm
 // DynamoModel is the Schema for the dynamo models API
 type DynamoModel struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoModelSpec   `json:"spec,omitempty"`
+	// +optional
+	Spec DynamoModelSpec `json:"spec,omitempty"`
+	// +optional
 	Status DynamoModelStatus `json:"status,omitempty"`
 }
 

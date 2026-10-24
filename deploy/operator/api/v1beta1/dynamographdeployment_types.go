@@ -69,6 +69,7 @@ type DynamoGraphDeploymentSpec struct {
 
 	// backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
+	// +optional
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// restart specifies the restart policy for the graph deployment.
@@ -109,6 +110,7 @@ type DynamoGraphDeploymentStatus struct {
 
 	// state is a high-level textual status of the graph deployment lifecycle.
 	// +kubebuilder:default=initializing
+	// +optional
 	State DGDState `json:"state"`
 
 	// conditions contains the latest observed conditions of the graph deployment.
@@ -187,12 +189,15 @@ const (
 // to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoGraphDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// spec defines the desired state for this graph deployment.
+	// +optional
 	Spec DynamoGraphDeploymentSpec `json:"spec,omitempty"`
 	// status reflects the current observed state of this graph deployment.
+	// +optional
 	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 

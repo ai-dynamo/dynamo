@@ -413,7 +413,6 @@ type HardwareSpec struct {
 	// restricted to nodes matching this SKU.
 	// The legacy value gb200_sxm is deprecated; use gb200 instead.
 	// +optional
-	// +kubebuilder:validation:Enum=vr_nvl72;gb200;gb200_sxm;gb10;b300_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
@@ -490,7 +489,6 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 	// Backend specifies the inference backend to use for profiling and deployment.
 	// +optional
 	// +python-default=auto
-	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (planner image).
@@ -538,7 +536,6 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 	// "rapid" performs a fast sweep; "thorough" explores more configurations.
 	// +optional
 	// +python-default=rapid
-	// +kubebuilder:validation:Enum=rapid;thorough
 	SearchStrategy SearchStrategy `json:"searchStrategy,omitempty"`
 
 	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
@@ -574,6 +571,7 @@ type ParetoConfig struct {
 	// Config is the full deployment configuration for this Pareto point.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
+	// +required
 	Config runtime.RawExtension `json:"config"`
 }
 
@@ -685,13 +683,16 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta2) || has(self.status.phase) || has(self.status.profilingPhase) || has(self.status.dgdName) || has(self.status.profilingJobName) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.deploymentInfo) || has(self.status.observedGeneration)) || has(self.spec.v1beta2) == has(self.status.v1beta2)",message="nonempty status must use the representation selected by spec"
 type DynamoGraphDeploymentRequest struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// Spec defines the desired state for this deployment request.
+	// +optional
 	Spec DynamoGraphDeploymentRequestSpec `json:"spec,omitempty"`
 
 	// Status reflects the current observed state of this deployment request.
+	// +optional
 	Status DynamoGraphDeploymentRequestStatus `json:"status,omitempty"`
 }
 
