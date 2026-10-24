@@ -41,6 +41,14 @@ pub struct RouterParams {
     /// Target inter-token latency in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub itl_target: Option<f64>,
+
+    /// Client estimate of prompt tokens that will require fresh prefill
+    /// computation, i.e. tokens not served from any KV cache. A routing
+    /// hint only: the router may use it to steer requests toward
+    /// compute-isolated pools and never validates it against the actual
+    /// cache state. Absent means the client provides no estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncached_tokens: Option<u32>,
 }
 
 /// Causal trigger that produced an incoming agent request.
@@ -2246,5 +2254,24 @@ mod tests {
             serde_json::json!([10, 11, 12, 13, 14, 15])
         );
         assert_eq!(aggregated["worker_id"]["decode_worker_id"], 7);
+    }
+
+    #[test]
+    fn router_params_round_trip_uncached_tokens() {
+        let params: RouterParams =
+            serde_json::from_str(r#"{"ttft_target": 100.0, "uncached_tokens": 131072}"#).unwrap();
+        assert_eq!(params.ttft_target, Some(100.0));
+        assert_eq!(params.itl_target, None);
+        assert_eq!(params.uncached_tokens, Some(131072));
+
+        // Absent stays absent so routers can distinguish "no estimate" from 0.
+        let params: RouterParams = serde_json::from_str(r#"{"ttft_target": 100.0}"#).unwrap();
+        assert_eq!(params.uncached_tokens, None);
+
+        let wire = serde_json::to_value(&params).unwrap();
+        assert!(wire.get("uncached_tokens").is_none());
+
+        // Negative estimates are rejected like any other malformed router hint.
+        assert!(serde_json::from_str::<RouterParams>(r#"{"uncached_tokens": -1}"#).is_err());
     }
 }
