@@ -17,6 +17,24 @@ This separation provides:
 - Progress for requests whose token cost is much larger than their class quantum.
 - Bounded arbitration work that does not loop once per token or DRR round.
 
+## Replica Scope
+
+PolicyClass queues, DRR deficits, and the ring cursor are local to each router
+replica. Replica synchronization does not create a shared PolicyClass queue or
+DRR budget across router replicas.
+
+PolicyClass configuration therefore does not provide an ingress-independent
+aggregate weighted-share guarantee across replicas. Aggregate behavior depends
+on how each class's scheduling-cost demand and backlog reach each router.
+Balancing total HTTP request counts does not ensure that competing classes reach
+every local scheduler. Dynamo does not enforce per-class ingress distribution.
+
+In the tested configuration, the aggregate share remained near the configured
+ratio when each router received sustained demand from both classes. Dynamo does
+not enforce that ingress condition or define a general cross-replica fairness
+bound. This documents the current behavior; it does not add scheduler
+coordination, synchronization, metrics, or a cross-replica fairness guarantee.
+
 ## Request Cost and Quantum
 
 Each request receives an immutable queue snapshot when it is enqueued:
