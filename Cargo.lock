@@ -2574,6 +2574,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
+ "dynamo-multimodal",
  "dynamo-parsers",
  "dynamo-parsers-v2",
  "dynamo-protocols",
@@ -2735,6 +2736,22 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "dynamo-multimodal"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de29c14a8d1952ceb6dbeebfb144be1d7167d333008f3f829c1324c78dde6344"
+dependencies = [
+ "blake3",
+ "gif",
+ "image",
+ "png",
+ "serde",
+ "serde_json",
+ "turbojpeg",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -3738,6 +3755,12 @@ dependencies = [
  "defmac",
  "unchecked-index",
 ]
+
+[[package]]
+name = "gcd"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d758ba1b47b00caf47f24925c0074ecb20d6dfcffe7f6d53395c0465674841a"
 
 [[package]]
 name = "generic-array"
@@ -10310,6 +10333,29 @@ dependencies = [
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
+]
+
+[[package]]
+name = "turbojpeg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81313fcd64aaa30ddfd59eaa122968136b2dd9cd41d9619b126cf71e67a01702"
+dependencies = [
+ "gcd",
+ "libc",
+ "thiserror 1.0.69",
+ "turbojpeg-sys",
+]
+
+[[package]]
+name = "turbojpeg-sys"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49b5a974bc59382d35927e3a07eef2ba9a24fe7227cefe52ec44b508e1b90f86"
+dependencies = [
+ "anyhow",
+ "cmake",
+ "libc",
 ]
 
 [[package]]
