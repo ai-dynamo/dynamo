@@ -3,16 +3,16 @@
 
 //! Dynamo backend for SGLang's native `sglang.runtime.v1` gRPC server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
-    KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
-    PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
+    AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, EngineServingState,
+    EngineServingStates, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
+    LLMEngineOutputExt, LlmRegistration, ModelInput, PreprocessedRequest, RuntimeConfig,
+    WorkerConfig, usage,
 };
 use dynamo_llm::local_model::runtime_config::{
     TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
@@ -22,7 +22,8 @@ use dynamo_sidecar_common::{
 };
 use futures::stream::BoxStream;
 use serde_json::Value;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell, watch};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -35,16 +36,23 @@ use crate::protocol::{
     meta_u32, output_ids_to_u32, terminal_from_meta,
 };
 
-const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const POLICY_TAINT_PREFIX: &str = "dynamo.policy/";
 
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
+    http_api_key: Option<String>,
+    grpc_auth: client::ApiKeyAuth,
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
+    unregister_on_pause: bool,
+    policy_namespace: Option<String>,
+    observations: watch::Sender<Option<EngineServingState>>,
+    watcher_cancel: CancellationToken,
     native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
+    state_watcher: Mutex<Option<JoinHandle<()>>>,
     cancel: CancellationToken,
 }
 
@@ -52,6 +60,7 @@ struct StartedState {
     pool: Pool,
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
+    instance_id: u64,
     combined_token_limit: Option<u32>,
 }
 
@@ -124,6 +133,11 @@ impl SglangSidecarEngine {
     }
 
     pub(crate) fn validate_args(args: &Args) -> Result<(), DynamoError> {
+        if (args.controller_managed || args.policy_version_taints) && !args.unregister_on_pause {
+            return Err(client::invalid_arg(
+                "controller admission or policy-version taints mode requires --unregister-on-pause=true",
+            ));
+        }
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
@@ -136,10 +150,12 @@ impl SglangSidecarEngine {
         args: Args,
         bootstrap: bool,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let auth = client::ApiKeyAuth::new(args.sglang_api_key.as_deref())?;
         let discovery = bootstrap_discover(
             &args.sidecar.grpc_endpoint,
             &args.sidecar.grpc.config(),
             bootstrap,
+            &auth,
         )
         .await?;
         Self::from_discovered(args, discovery)
@@ -152,6 +168,7 @@ impl SglangSidecarEngine {
         Self::validate_args(&args)?;
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
+        let grpc_auth = client::ApiKeyAuth::new(args.sglang_api_key.as_deref())?;
         let disaggregation_mode = client::discovery_mode(&discovery.server_info)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(
@@ -176,9 +193,11 @@ impl SglangSidecarEngine {
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
+        let policy_namespace = args.policy_version_taints.then(|| common.namespace.clone());
         let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
             runtime: common.runtime,
+            controller_managed: args.controller_managed,
             namespace: common.namespace,
             component: if disaggregation_mode == DisaggregationMode::Aggregated {
                 common.component
@@ -209,74 +228,76 @@ impl SglangSidecarEngine {
             Self {
                 endpoint,
                 transport,
+                http_api_key: args.sglang_api_key,
+                grpc_auth,
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
+                unregister_on_pause: args.unregister_on_pause,
+                policy_namespace,
+                observations: watch::channel(None).0,
+                watcher_cancel: CancellationToken::new(),
                 native_http_max_event_bytes,
                 state: OnceCell::new(),
+                state_watcher: Mutex::new(None),
                 cancel: CancellationToken::new(),
             },
             config,
         ))
     }
-
-    async fn await_ready(&self, client: &mut Client, deadline: Instant) -> Result<(), DynamoError> {
-        let started = Instant::now();
-        let mut attempt = 0_u64;
-        let mut last_logged_at: Option<Instant> = None;
-        loop {
-            attempt += 1;
-            let retry_message = match client::health_check(client, deadline).await {
-                Ok(healthy) => {
-                    if healthy {
-                        return Ok(());
-                    }
-                    "SGLang reported unhealthy".to_string()
-                }
-                Err(error) => format!("HealthCheck RPC failed: {error}"),
-            };
-            if Instant::now() >= deadline {
-                return Err(client::engine_shutdown(format!(
-                    "SGLang did not become healthy within {:?}: {retry_message}",
-                    self.transport.startup_deadline
-                )));
-            }
-            let now = Instant::now();
-            if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
-                // WARN, not silent: this loop previously logged nothing at all on a
-                // failed attempt, so a SGLang engine that's slow (or never becomes)
-                // healthy produced zero visible output anywhere for up to
-                // startup_deadline (default 300s) -- indistinguishable from a hang.
-                // Rate-limited like GrpcChannelPool::connect_until_ready: a normal
-                // slow startup retries every retry_interval (default 1s) and would
-                // otherwise spam hundreds of lines.
-                tracing::warn!(
-                    attempt,
-                    elapsed = ?started.elapsed(),
-                    remaining = ?deadline.saturating_duration_since(now),
-                    retry_interval = ?self.transport.retry_interval,
-                    reason = %retry_message,
-                    "SGLang not healthy yet; retrying"
-                );
-                last_logged_at = Some(now);
-            }
-            tokio::time::sleep_until((now + self.transport.retry_interval).min(deadline)).await;
-        }
-    }
 }
 
 #[async_trait]
 impl LLMEngine for SglangSidecarEngine {
+    fn serving_states(&self) -> Option<EngineServingStates> {
+        Some(self.observations.subscribe())
+    }
+
+    fn managed_taint_prefix(&self) -> Option<&'static str> {
+        self.policy_namespace.as_ref().map(|_| POLICY_TAINT_PREFIX)
+    }
+
+    async fn verify_serving_admission(
+        &self,
+        expected: &dynamo_backend_common::admission::AdmissionIdentity,
+    ) -> Result<(), DynamoError> {
+        let state = self
+            .state
+            .get()
+            .ok_or_else(|| client::engine_shutdown("sglang sidecar not started"))?;
+        let mut control = state.pool.control_client();
+        let deadline = Instant::now() + self.transport.connect_attempt_timeout;
+        client::verify_admission(&mut control, expected, deadline).await
+    }
+
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         if self.state.initialized() {
             return Err(client::engine_shutdown("sglang sidecar already started"));
         }
 
         let deadline = Instant::now() + self.transport.startup_deadline;
-        let pool = Pool::connect(&self.endpoint, &self.transport, deadline).await?;
+        let pool =
+            Pool::connect(&self.endpoint, &self.transport, deadline, &self.grpc_auth).await?;
         let mut control = pool.control_client();
-        self.await_ready(&mut control, deadline).await?;
-        let discovery = client::discover(&mut control, deadline).await?;
+        let mut stream = client::watch_engine_state(&mut control, deadline).await?;
+        let engine_state = loop {
+            let snapshot = tokio::time::timeout_at(deadline, stream.message())
+                .await
+                .map_err(|_| client::engine_shutdown("SGLang engine-state startup timed out"))?
+                .map_err(|status| client::status_to_dynamo("WatchEngineState", status))?
+                .ok_or_else(|| {
+                    client::engine_shutdown("SGLang closed the engine-state stream during startup")
+                })?;
+            let state = if snapshot.healthy {
+                client::discover_engine_state(&mut control, snapshot, deadline).await?
+            } else {
+                client::parse_engine_state(snapshot)?
+            };
+            if state.healthy {
+                break state;
+            }
+        };
+        let discovery = &engine_state.discovery;
         let observed_mode = client::discovery_mode(&discovery.server_info)?;
         if observed_mode != self.disaggregation_mode {
             return Err(client::invalid_arg(format!(
@@ -286,18 +307,22 @@ impl LLMEngine for SglangSidecarEngine {
         }
 
         let mut config = build_engine_config(
-            &discovery,
+            discovery,
             self.disaggregation_mode,
             self.bootstrap_host.clone(),
             self.bootstrap_port,
         )?;
         let native_http = match NativeHttp::discover(
             &self.endpoint,
-            &discovery,
+            discovery,
             self.transport.connect_attempt_timeout,
             self.native_http_max_event_bytes,
         )? {
             Some(native_http) => {
+                let native_http = native_http.with_api_key(
+                    self.http_api_key.as_deref(),
+                    self.transport.connect_attempt_timeout,
+                )?;
                 match native_http
                     .await_ready(deadline, self.transport.retry_interval)
                     .await
@@ -320,10 +345,10 @@ impl LLMEngine for SglangSidecarEngine {
                 .insert("sglang_generate".into(), true.into());
         }
         let kv_event_sources =
-            discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
+            discover_kv_event_sources(discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
-        let combined_token_limit = combined_token_limit(&discovery);
+        let combined_token_limit = combined_token_limit(discovery);
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
@@ -332,6 +357,7 @@ impl LLMEngine for SglangSidecarEngine {
                 pool,
                 native_http,
                 kv_event_sources,
+                instance_id: engine_state.instance_id,
                 combined_token_limit,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
@@ -602,9 +628,50 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
+        self.stop_state_watcher().await;
         self.cancel.cancel();
         tracing::info!("sglang sidecar shutdown complete");
         Ok(())
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        _endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let state = self
+            .state
+            .get()
+            .ok_or_else(|| client::engine_shutdown("endpoint ready before SGLang startup"))?;
+        let mut task = self.state_watcher.lock().await;
+        if task.is_some() {
+            return Err(client::engine_shutdown(
+                "SGLang engine-state watcher already started",
+            ));
+        }
+        let control = state.pool.control_client();
+        let transport = self.transport;
+        let cancel = self.watcher_cancel.clone();
+        let observations = self.observations.clone();
+        let policy_namespace = self.policy_namespace.clone();
+        let unregister_on_pause = self.unregister_on_pause;
+        let instance_id = state.instance_id;
+        *task = Some(tokio::spawn(async move {
+            watch_engine_state(
+                control,
+                observations,
+                transport,
+                cancel,
+                unregister_on_pause,
+                instance_id,
+                policy_namespace,
+            )
+            .await;
+        }));
+        Ok(())
+    }
+
+    async fn begin_shutdown(&self) {
+        self.stop_state_watcher().await;
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
@@ -626,12 +693,176 @@ impl LLMEngine for SglangSidecarEngine {
     }
 }
 
+/// Withdraw even if the task unwinds; the engine retains another sender.
+struct ObservationGuard(watch::Sender<Option<EngineServingState>>);
+impl Drop for ObservationGuard {
+    fn drop(&mut self) {
+        self.0.send_replace(None);
+    }
+}
+
+fn serving_observation(
+    state: &client::EngineState,
+    unregister_on_pause: bool,
+    policy_namespace: Option<&str>,
+) -> EngineServingState {
+    let mut ready = should_register_engine(state.healthy, state.is_pause, unregister_on_pause);
+    let mut taints = HashSet::new();
+    if let Some(namespace) = policy_namespace {
+        match state
+            .discovery
+            .model_info
+            .get("weight_version")
+            .and_then(Value::as_str)
+            .filter(|version| !version.trim().is_empty())
+        {
+            Some(version) => {
+                let encode = |value: &str| {
+                    url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+                };
+                taints.insert(format!(
+                    "{POLICY_TAINT_PREFIX}version={}:{}",
+                    encode(namespace),
+                    encode(version)
+                ));
+            }
+            None => ready = false,
+        }
+    }
+    EngineServingState {
+        instance_id: state.instance_id,
+        revision: state.revision,
+        ready,
+        // The persistent observer assigns a new epoch for every connection.
+        observation_epoch: 0,
+        weight_version: state
+            .discovery
+            .model_info
+            .get("weight_version")
+            .and_then(Value::as_str)
+            .filter(|version| !version.trim().is_empty())
+            .map(str::to_owned),
+        taints,
+    }
+}
+
+async fn watch_engine_state(
+    mut control: Client,
+    observations: watch::Sender<Option<EngineServingState>>,
+    transport: GrpcTransportConfig,
+    cancel: CancellationToken,
+    unregister_on_pause: bool,
+    mut instance_id: u64,
+    policy_namespace: Option<String>,
+) {
+    let observations = ObservationGuard(observations);
+    let mut revision = 0;
+    let mut observation_epoch = 0_u64;
+    loop {
+        let deadline = Instant::now() + transport.connect_attempt_timeout;
+        let stream = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            result = client::watch_engine_state(&mut control, deadline) => result,
+        };
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                observations.0.send_replace(None);
+                tracing::warn!(%error, "SGLang engine-state stream connection failed; retrying");
+                if wait_for_retry(&cancel, transport.retry_interval).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        let Some(next_epoch) = observation_epoch.checked_add(1) else {
+            tracing::error!("SGLang observation epoch exhausted; withdrawing membership");
+            return;
+        };
+        observation_epoch = next_epoch;
+        let mut first_snapshot = true;
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                result = stream.message() => result,
+            };
+            let snapshot = match message {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    tracing::warn!("SGLang closed the engine-state stream; reconnecting");
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "SGLang engine-state stream failed; reconnecting");
+                    break;
+                }
+            };
+            let state = match client::parse_engine_state(snapshot) {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::warn!(%error, "invalid SGLang engine-state snapshot; reconnecting");
+                    break;
+                }
+            };
+            if state.instance_id == instance_id
+                && (state.revision < revision || (!first_snapshot && state.revision == revision))
+            {
+                tracing::warn!(
+                    instance_id,
+                    revision = state.revision,
+                    previous_revision = revision,
+                    "non-increasing SGLang engine-state revision; reconnecting"
+                );
+                break;
+            }
+            first_snapshot = false;
+            instance_id = state.instance_id;
+            revision = state.revision;
+            let mut observation =
+                serving_observation(&state, unregister_on_pause, policy_namespace.as_deref());
+            observation.observation_epoch = observation_epoch;
+            observations.0.send_replace(Some(observation));
+        }
+        observations.0.send_replace(None);
+        if wait_for_retry(&cancel, transport.retry_interval).await {
+            return;
+        }
+    }
+}
+
+fn should_register_engine(healthy: bool, is_pause: bool, unregister_on_pause: bool) -> bool {
+    healthy && (!unregister_on_pause || !is_pause)
+}
+
+async fn wait_for_retry(cancel: &CancellationToken, retry_interval: std::time::Duration) -> bool {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => true,
+        _ = tokio::time::sleep(retry_interval) => false,
+    }
+}
+
+impl SglangSidecarEngine {
+    async fn stop_state_watcher(&self) {
+        self.watcher_cancel.cancel();
+        if let Some(task) = self.state_watcher.lock().await.take()
+            && let Err(error) = task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "SGLang engine-state watcher failed during shutdown");
+        }
+    }
+}
+
 async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
     bootstrap: bool,
+    auth: &client::ApiKeyAuth,
 ) -> Result<Discovery, DynamoError> {
-    match client::bootstrap_discover(endpoint, transport, bootstrap).await? {
+    match client::bootstrap_discover(endpoint, transport, bootstrap, auth).await? {
         client::StartupDiscovery::Leader(discovery) => Ok(*discovery),
         client::StartupDiscovery::Follower => {
             Err(client::invalid_arg("inference engine requires node_rank=0"))
@@ -1224,7 +1455,46 @@ mod tests {
         SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
         discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
         omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        should_register_engine,
     };
+
+    #[test]
+    fn streamed_startup_preserves_model_context_in_engine_config() {
+        for input_limit in [8186, 4090] {
+            let state = crate::client::parse_engine_state_with_models(
+                crate::proto::EngineStateSnapshot {
+                    instance_id: 42,
+                    revision: 1,
+                    healthy: true,
+                    is_pause: false,
+                    model_info: Some(crate::proto::GetModelInfoResponse {
+                        model_path: "model-repo".into(),
+                        json_info: "{}".into(),
+                    }),
+                    server_info: Some(crate::proto::GetServerInfoResponse {
+                        json_info: serde_json::json!({
+                            "incremental_streaming_output": true,
+                            "context_length": null,
+                            "max_req_input_len": input_limit,
+                        })
+                        .to_string(),
+                    }),
+                },
+                vec![crate::proto::ModelCard {
+                    id: "served-model".into(),
+                    root: "model-repo".into(),
+                    max_model_len: Some(8192),
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+            let config =
+                build_engine_config(&state.discovery, DisaggregationMode::Aggregated, None, None)
+                    .unwrap();
+            assert_eq!(config.llm.unwrap().context_length, Some(8192));
+            assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+        }
+    }
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
         Discovery {
@@ -2133,6 +2403,111 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn discovery_registration_follows_health_and_pause_policy() {
+        assert!(should_register_engine(true, false, true));
+        assert!(!should_register_engine(false, false, true));
+        assert!(!should_register_engine(true, true, true));
+        assert!(should_register_engine(true, true, false));
+    }
+
+    #[test]
+    fn policy_versions_are_observed_scoped_and_required_only_when_enabled() {
+        let mut state = super::client::EngineState {
+            instance_id: 9,
+            revision: 1,
+            healthy: true,
+            is_pause: false,
+            discovery: discovery(json!({})),
+        };
+        for value in [json!(null), json!(""), json!("   "), json!(1)] {
+            state.discovery.model_info["weight_version"] = value;
+            assert!(!super::serving_observation(&state, true, Some("run-a")).ready);
+            let legacy = super::serving_observation(&state, true, None);
+            assert!(legacy.ready);
+            assert!(legacy.taints.is_empty());
+        }
+        state.discovery.model_info["weight_version"] = json!("step:1");
+        let observed = super::serving_observation(&state, true, Some("run/a"));
+        assert!(observed.ready);
+        assert!(
+            observed
+                .taints
+                .contains("dynamo.policy/version=run%2Fa:step%3A1")
+        );
+        assert_ne!(
+            observed.taints,
+            super::serving_observation(&state, true, Some("run/b")).taints
+        );
+        state.is_pause = true;
+        assert!(!super::serving_observation(&state, true, Some("run/a")).ready);
+        state.is_pause = false;
+        state.healthy = false;
+        assert!(!super::serving_observation(&state, true, Some("run/a")).ready);
+    }
+
+    #[test]
+    fn watcher_exit_withdraws_even_when_engine_retains_a_sender() {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let state = super::client::EngineState {
+            instance_id: 9,
+            revision: 1,
+            healthy: true,
+            is_pause: false,
+            discovery: discovery(json!({})),
+        };
+        let guard = super::ObservationGuard(tx.clone());
+        tx.send_replace(Some(super::serving_observation(&state, true, None)));
+        assert!(rx.borrow().is_some());
+        drop(guard);
+        assert!(rx.borrow().is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_observations_does_not_cancel_generation_before_drain() {
+        use super::*;
+        let engine = SglangSidecarEngine {
+            endpoint: GrpcEndpoint::parse("http://127.0.0.1:1", "test").unwrap(),
+            transport: GrpcTransportConfig::default(),
+            http_api_key: None,
+            grpc_auth: client::ApiKeyAuth::default(),
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            bootstrap_host: None,
+            bootstrap_port: None,
+            unregister_on_pause: true,
+            policy_namespace: None,
+            observations: watch::channel(None).0,
+            watcher_cancel: CancellationToken::new(),
+            native_http_max_event_bytes: crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get(),
+            state: OnceCell::new(),
+            state_watcher: Mutex::new(None),
+            cancel: CancellationToken::new(),
+        };
+        let generation = engine.cancel.child_token();
+        engine.begin_shutdown().await;
+        assert!(engine.watcher_cancel.is_cancelled());
+        assert!(!generation.is_cancelled());
+        engine.cleanup().await.unwrap();
+        assert!(generation.is_cancelled());
+    }
+
+    #[test]
+    fn policy_mode_rejects_keep_registered_on_pause_before_connecting() {
+        use clap::Parser;
+        let args = super::Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            "http://127.0.0.1:1",
+            "--policy-version-taints",
+            "--unregister-on-pause=false",
+        ])
+        .unwrap();
+        let Err(error) = super::SglangSidecarEngine::from_parsed(args) else {
+            panic!("invalid configuration accepted");
+        };
+        assert!(error.to_string().contains("requires --unregister-on-pause"));
     }
 
     #[tokio::test]

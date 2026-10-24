@@ -18,12 +18,46 @@ use dynamo_sidecar_common::{
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
+use tonic::metadata::{Ascii, MetadataValue};
+use tonic::service::{Interceptor, interceptor::InterceptedService};
 use tonic::transport::Channel;
 
 use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
 
-pub type Client = SglangServiceClient<Channel>;
+pub type Client = SglangServiceClient<InterceptedService<Channel, ApiKeyAuth>>;
+
+#[derive(Clone, Default)]
+pub struct ApiKeyAuth(Option<MetadataValue<Ascii>>);
+
+impl ApiKeyAuth {
+    pub fn new(api_key: Option<&str>) -> Result<Self, DynamoError> {
+        let authorization = api_key
+            .map(|key| {
+                let mut value = format!("Bearer {key}")
+                    .parse::<MetadataValue<Ascii>>()
+                    .map_err(|_| invalid_arg("SGLang API key is not valid gRPC metadata"))?;
+                value.set_sensitive(true);
+                Ok::<_, DynamoError>(value)
+            })
+            .transpose()?;
+        Ok(Self(authorization))
+    }
+}
+
+impl Interceptor for ApiKeyAuth {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        if let Some(value) = &self.0 {
+            request
+                .metadata_mut()
+                .insert("authorization", value.clone());
+        }
+        Ok(request)
+    }
+}
 
 pub(crate) const WORKER_GROUP_KEY: &str = "sglang_worker_group_id";
 pub(crate) const KV_CONFIG_KEY: &str = "sglang_sidecar_kv_events";
@@ -251,6 +285,15 @@ pub struct Discovery {
     pub server_info: Value,
 }
 
+#[derive(Clone, Debug)]
+pub struct EngineState {
+    pub instance_id: u64,
+    pub revision: u64,
+    pub healthy: bool,
+    pub is_pause: bool,
+    pub discovery: Discovery,
+}
+
 #[derive(Debug)]
 pub(crate) enum StartupDiscovery {
     Leader(Box<Discovery>),
@@ -261,9 +304,10 @@ pub(crate) async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
     bootstrap: bool,
+    auth: &ApiKeyAuth,
 ) -> Result<StartupDiscovery, DynamoError> {
     let deadline = Instant::now() + transport.startup_deadline;
-    let mut client = connect(endpoint, transport, deadline, bootstrap).await?;
+    let mut client = connect(endpoint, transport, deadline, bootstrap, auth).await?;
     let server_info = get_server_info(&mut client, deadline).await?;
     if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
         // Followers expose metadata only. Their local KV sources are
@@ -283,13 +327,14 @@ pub async fn connect(
     cfg: &GrpcTransportConfig,
     deadline: Instant,
     bootstrap: bool,
+    auth: &ApiKeyAuth,
 ) -> Result<Client, DynamoError> {
     let cfg = GrpcTransportConfig {
         connections: NonZeroUsize::MIN,
         ..*cfg
     };
     let pool = connect_pool(uri, cfg, deadline, bootstrap).await?;
-    Ok(client_from_channel(pool.next_channel()))
+    Ok(client_from_channel(pool.next_channel(), auth.clone()))
 }
 
 /// `GrpcChannelPool` starts its own deadline from `cfg.startup_deadline`;
@@ -313,8 +358,8 @@ async fn connect_pool(
     })?
 }
 
-fn client_from_channel(channel: Channel) -> Client {
-    SglangServiceClient::new(channel)
+fn client_from_channel(channel: Channel, auth: ApiKeyAuth) -> Client {
+    SglangServiceClient::with_interceptor(channel, auth)
         .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
         .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
 }
@@ -334,10 +379,11 @@ impl Pool {
         uri: &GrpcEndpoint,
         cfg: &GrpcTransportConfig,
         deadline: Instant,
+        auth: &ApiKeyAuth,
     ) -> Result<Self, DynamoError> {
         let pool = connect_pool(uri, *cfg, deadline, false).await?;
         let clients = (0..pool.len())
-            .map(|_| client_from_channel(pool.next_channel()))
+            .map(|_| client_from_channel(pool.next_channel(), auth.clone()))
             .collect();
         Ok(Self {
             clients,
@@ -382,16 +428,22 @@ async fn discover_with_server_info(
     )
     .await?
     .into_inner();
-    let models = rpc_with_deadline(
+    let models = list_models(client, deadline).await?;
+    parse_discovery(model, server_info, models)
+}
+
+async fn list_models(
+    client: &mut Client,
+    deadline: Instant,
+) -> Result<Vec<pb::ModelCard>, DynamoError> {
+    Ok(rpc_with_deadline(
         "ListModels",
         deadline,
         client.list_models(pb::ListModelsRequest {}),
     )
     .await?
     .into_inner()
-    .models;
-
-    parse_discovery(model, server_info, models)
+    .models)
 }
 
 /// Follower engines implement only this RPC, not model discovery or health
@@ -410,14 +462,112 @@ pub(crate) async fn get_server_info(
     parse_json_object("GetServerInfo.json_info", &server.json_info)
 }
 
-pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool, DynamoError> {
+/// Complete startup metadata with the model context window, not the scheduler's
+/// input-token limit. Lifecycle observations do not need to fetch this model list.
+pub async fn discover_engine_state(
+    client: &mut Client,
+    snapshot: pb::EngineStateSnapshot,
+    deadline: Instant,
+) -> Result<EngineState, DynamoError> {
+    parse_engine_state_with_models(snapshot, list_models(client, deadline).await?)
+}
+
+pub async fn watch_engine_state(
+    client: &mut Client,
+    deadline: Instant,
+) -> Result<tonic::Streaming<pb::EngineStateSnapshot>, DynamoError> {
     rpc_with_deadline(
-        "HealthCheck",
+        "WatchEngineState",
         deadline,
-        client.health_check(pb::HealthCheckRequest {}),
+        client.watch_engine_state(pb::WatchEngineStateRequest {}),
     )
     .await
-    .map(|response| response.into_inner().healthy)
+    .map(tonic::Response::into_inner)
+}
+
+/// Point-in-time check, not a tensor checksum or a per-request version fence.
+/// Bracket a fresh GetModelInfo with instance snapshots so a restarted engine
+/// cannot inherit approval just because it reports the same weight version.
+pub async fn verify_admission(
+    client: &mut Client,
+    expected: &dynamo_backend_common::admission::AdmissionIdentity,
+    deadline: Instant,
+) -> Result<(), DynamoError> {
+    async fn check_instance(
+        client: &mut Client,
+        expected: u64,
+        deadline: Instant,
+    ) -> Result<(), DynamoError> {
+        let mut stream = watch_engine_state(client, deadline).await?;
+        let snapshot = rpc_with_deadline("WatchEngineState snapshot", deadline, stream.message())
+            .await?
+            .ok_or_else(|| {
+                protocol_error("engine-state stream closed before admission snapshot")
+            })?;
+        let state = parse_engine_state(snapshot)?;
+        if state.instance_id != expected || !state.healthy || state.is_pause {
+            return Err(invalid_arg(
+                "admission requires the expected healthy, unpaused engine instance",
+            ));
+        }
+        Ok(())
+    }
+
+    check_instance(client, expected.engine_instance_id, deadline).await?;
+    let model = rpc_with_deadline(
+        "GetModelInfo admission",
+        deadline,
+        client.get_model_info(pb::GetModelInfoRequest {}),
+    )
+    .await?
+    .into_inner();
+    let info = parse_json_object("GetModelInfo.json_info", &model.json_info)?;
+    if expected.weight_version.trim().is_empty()
+        || info.get("weight_version").and_then(Value::as_str)
+            != Some(expected.weight_version.as_str())
+    {
+        return Err(invalid_arg(
+            "live engine weight_version does not match controller admission",
+        ));
+    }
+    check_instance(client, expected.engine_instance_id, deadline).await
+}
+
+pub fn parse_engine_state(snapshot: pb::EngineStateSnapshot) -> Result<EngineState, DynamoError> {
+    parse_engine_state_with_models(snapshot, Vec::new())
+}
+
+pub(crate) fn parse_engine_state_with_models(
+    snapshot: pb::EngineStateSnapshot,
+    models: Vec<pb::ModelCard>,
+) -> Result<EngineState, DynamoError> {
+    if snapshot.instance_id == 0 {
+        return Err(protocol_error(
+            "SGLang WatchEngineState returned a zero instance_id",
+        ));
+    }
+    if snapshot.revision == 0 {
+        return Err(protocol_error(
+            "SGLang WatchEngineState returned a zero revision",
+        ));
+    }
+    let model = snapshot
+        .model_info
+        .ok_or_else(|| protocol_error("SGLang engine state omitted model_info"))?;
+    let server = snapshot
+        .server_info
+        .ok_or_else(|| protocol_error("SGLang engine state omitted server_info"))?;
+    Ok(EngineState {
+        instance_id: snapshot.instance_id,
+        revision: snapshot.revision,
+        healthy: snapshot.healthy,
+        is_pause: snapshot.is_pause,
+        discovery: parse_discovery(
+            model,
+            parse_json_object("GetServerInfo.json_info", &server.json_info)?,
+            models,
+        )?,
+    })
 }
 
 pub async fn abort(
@@ -618,10 +768,155 @@ mod tests {
     use tonic::transport::Endpoint;
 
     use super::{
-        NodeMetadata, client_from_channel, discover, discovery_mode, json_u32, json_u64,
-        parse_discovery, rpc_with_deadline, status_to_dynamo, worker_group_id_from_addresses,
+        NodeMetadata, client_from_channel, discover, discover_engine_state, discovery_mode,
+        json_u32, json_u64, parse_discovery, parse_engine_state, rpc_with_deadline,
+        status_to_dynamo, worker_group_id_from_addresses,
     };
     use crate::proto as pb;
+
+    #[test]
+    fn credentials_are_sensitive_and_invalid_metadata_fails_without_echoing_it() {
+        use tonic::service::Interceptor;
+        let mut auth = super::ApiKeyAuth::new(Some("local-secret")).unwrap();
+        let request = auth.call(tonic::Request::new(())).unwrap();
+        let value = request.metadata().get("authorization").unwrap();
+        assert_eq!(value, "Bearer local-secret");
+        assert!(value.is_sensitive());
+        assert!(
+            super::ApiKeyAuth::default()
+                .call(tonic::Request::new(()))
+                .unwrap()
+                .metadata()
+                .is_empty()
+        );
+        let error = match super::ApiKeyAuth::new(Some("secret\ninvalid")) {
+            Ok(_) => panic!("invalid credential accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(!error.contains("secret"));
+    }
+
+    #[derive(Clone)]
+    struct AuthProbe;
+
+    impl tonic::server::NamedService for AuthProbe {
+        const NAME: &'static str = "sglang.runtime.v1.SglangService";
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>> for AuthProbe {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            let status = if request
+                .headers()
+                .get("authorization")
+                .is_some_and(|value| value == "Bearer wire-key")
+            {
+                tonic::Status::unimplemented("authenticated request reached the service")
+            } else {
+                tonic::Status::unauthenticated("Unauthorized")
+            };
+            std::future::ready(Ok(status.into_http()))
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_and_pool_clients_authenticate_all_rpc_shapes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = dynamo_sidecar_common::GrpcEndpoint::parse(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "test endpoint",
+        )
+        .unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            let result = listener.accept().await.map(|(socket, _)| socket);
+            Some((result, listener))
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server_cancel = cancel.clone();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(AuthProbe)
+                .serve_with_incoming_shutdown(incoming, server_cancel.cancelled())
+                .await
+                .unwrap();
+        });
+        let transport = dynamo_sidecar_common::GrpcTransportConfig::default();
+        for key in [None, Some("wrong"), Some("wire-key")] {
+            let auth = super::ApiKeyAuth::new(key).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let bootstrap = super::connect(&endpoint, &transport, deadline, true, &auth)
+                .await
+                .unwrap();
+            let pool = super::Pool::connect(&endpoint, &transport, deadline, &auth)
+                .await
+                .unwrap();
+            let expected = if key == Some("wire-key") {
+                tonic::Code::Unimplemented
+            } else {
+                tonic::Code::Unauthenticated
+            };
+            for mut client in [bootstrap, pool.control_client(), pool.stream_client()] {
+                assert_eq!(
+                    client
+                        .get_server_info(pb::GetServerInfoRequest {})
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    expected
+                );
+                assert_eq!(
+                    client
+                        .get_model_info(pb::GetModelInfoRequest {})
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    expected
+                );
+                assert_eq!(
+                    client
+                        .generate(pb::GenerateRequest::default())
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    expected
+                );
+                assert_eq!(
+                    client
+                        .watch_engine_state(pb::WatchEngineStateRequest {})
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    expected
+                );
+                assert_eq!(
+                    client
+                        .abort(pb::AbortRequest::default())
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    expected
+                );
+            }
+        }
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn numeric_discovery_fields_accept_numbers_and_strings() {
@@ -1097,6 +1392,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn engine_state_requires_an_instance_and_full_discovery_snapshot() {
+        let snapshot = pb::EngineStateSnapshot {
+            instance_id: 42,
+            revision: 7,
+            healthy: true,
+            is_pause: true,
+            model_info: Some(pb::GetModelInfoResponse {
+                model_path: "model-repo".to_string(),
+                json_info: json!({"tokenizer_path": "tokenizer-repo"}).to_string(),
+            }),
+            server_info: Some(pb::GetServerInfoResponse {
+                json_info: json!({"incremental_streaming_output": true}).to_string(),
+            }),
+        };
+        let state = parse_engine_state(snapshot).unwrap();
+        assert_eq!(state.instance_id, 42);
+        assert_eq!(state.revision, 7);
+        assert!(state.healthy);
+        assert!(state.is_pause);
+        assert_eq!(state.discovery.tokenizer_path, "tokenizer-repo");
+
+        assert!(parse_engine_state(pb::EngineStateSnapshot::default()).is_err());
+    }
+
     #[tokio::test]
     async fn discovery_deadline_bounds_a_half_open_peer() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1108,12 +1428,20 @@ mod tests {
         let channel = Endpoint::from_shared(format!("http://{address}"))
             .unwrap()
             .connect_lazy();
-        let mut client = client_from_channel(channel);
+        let mut client = client_from_channel(channel, super::ApiKeyAuth::default());
         let started = Instant::now();
         let result = discover(&mut client, started + Duration::from_millis(100)).await;
+        let startup_error = discover_engine_state(
+            &mut client,
+            pb::EngineStateSnapshot::default(),
+            Instant::now() + Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
         peer.abort();
 
         assert!(result.is_err());
+        assert!(startup_error.to_string().contains("ListModels"));
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

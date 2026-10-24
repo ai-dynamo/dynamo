@@ -67,10 +67,13 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
             )
             .await?;
             tracing::info!("Sidecar runtime connected; discovering engine metadata");
+            let auth = client::ApiKeyAuth::new(args.sglang_api_key.as_deref())
+                .map_err(SidecarStartupError::from)?;
             let discovery = client::bootstrap_discover(
                 &args.sidecar.grpc_endpoint,
                 &args.sidecar.grpc.config(),
                 false,
+                &auth,
             )
             .await
             .map_err(SidecarStartupError::from)?;
