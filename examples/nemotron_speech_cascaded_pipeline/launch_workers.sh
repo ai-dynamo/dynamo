@@ -15,17 +15,22 @@
 # limitations under the License.
 
 # Launch Dynamo endpoints for a cascaded Nemotron speech pipeline.
-# ASR and TTS NIMs must already be reachable over their gRPC APIs.
+# ASR and TTS NIMs must already be running locally with their gRPC ports exposed.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 source "$SCRIPT_DIR/../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../common/launch_utils.sh"
 
-ASR_NIM_SERVER="${ASR_NIM_SERVER:-localhost:50152}"
-TTS_NIM_SERVER="${TTS_NIM_SERVER:-localhost:50151}"
+SPEECH_NIM_SIDECAR_BIN="${SPEECH_NIM_SIDECAR_BIN:-${SCRIPT_DIR}/speech_nim/target/release/dynamo-speech-nim-sidecar}"
+if ! command -v "$SPEECH_NIM_SIDECAR_BIN" >/dev/null 2>&1; then
+  echo "Build the speech worker with cargo build --release --locked --manifest-path ${SCRIPT_DIR}/speech_nim/Cargo.toml, or set SPEECH_NIM_SIDECAR_BIN" >&2
+  exit 1
+fi
+
+ASR_NIM_PORT="${ASR_NIM_PORT:-50152}"
+TTS_NIM_PORT="${TTS_NIM_PORT:-50151}"
 ASR_MODEL_NAME="${ASR_MODEL_NAME:-nemotron-asr-streaming}"
 TTS_MODEL_NAME="${TTS_MODEL_NAME:-nvidia/magpie-tts-multilingual}"
 LLM_MODEL_PATH="${LLM_MODEL_PATH:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8}"
@@ -43,11 +48,11 @@ print_launch_banner --no-curl \
   "LLM:          http://localhost:${HTTP_PORT}/v1/chat/completions" \
   "TTS:          http://localhost:${HTTP_PORT}/v1/audio/speech"
 
-python -m nemotron_speech.asr.worker \
-  --nim-server "$ASR_NIM_SERVER" --model-name "$ASR_MODEL_NAME" &
+"$SPEECH_NIM_SIDECAR_BIN" asr \
+  --grpc-endpoint "127.0.0.1:$ASR_NIM_PORT" --model-name "$ASR_MODEL_NAME" &
 
-python -m nemotron_speech.tts.worker \
-  --nim-server "$TTS_NIM_SERVER" --model-name "$TTS_MODEL_NAME" \
+"$SPEECH_NIM_SIDECAR_BIN" tts \
+  --grpc-endpoint "127.0.0.1:$TTS_NIM_PORT" --model-name "$TTS_MODEL_NAME" \
   --sample-rate-hz 24000 &
 
 # Word splitting is intentional for optional CLI argument strings.

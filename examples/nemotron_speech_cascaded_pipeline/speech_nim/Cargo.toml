@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "dynamo-speech-nim-sidecar"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Example-local Dynamo ASR and TTS workers for the Speech NIM gRPC API"
+
+[package.metadata.cargo-machete]
+# Referenced by protobuf code generated into OUT_DIR.
+ignored = ["prost"]
+
+# Keep example dependencies and builds independent of the main workspace.
+# Promotion to lib/sidecar can retain this package and executable name.
+[workspace]
+resolver = "3"
+
+[dependencies]
+dynamo-backend-common = { path = "../../../lib/backend-common" }
+dynamo-llm = { path = "../../../lib/llm", default-features = false }
+dynamo-runtime = { path = "../../../lib/runtime" }
+dynamo-sidecar-common = { path = "../../../lib/sidecar/common" }
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+prost = "0.13.5"
+serde_json = "1"
+tokio = { version = "=1.54.0", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7.17", features = ["rt"] }
+tonic = "0.13.1"
+tracing = "0.1"
+uuid = { version = "1.18.1", features = ["v4"] }
+
+[build-dependencies]
+tonic-build = "0.13.1"
+
+[dev-dependencies]
+dynamo-backend-common = { path = "../../../lib/backend-common", features = ["testing"] }
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
