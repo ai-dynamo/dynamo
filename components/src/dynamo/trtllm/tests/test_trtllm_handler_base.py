@@ -25,6 +25,7 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
+from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
@@ -1124,6 +1125,69 @@ class TestGenerateLocally:
         handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.core
+    async def test_presubmit_request_error_raises_invalid_argument(self):
+        """Preserve an engine rejection as a client error without shutting down."""
+        handler = self._make_handler()
+        error = RequestError(
+            "The prompt length (5.0) should not exceed max_num_tokens (4)"
+        )
+        handler.engine.llm.generate_async = MagicMock(side_effect=error)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3, 4, 5],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+
+        assert str(exc_info.value) == str(error)
+        assert exc_info.value.__cause__ is error
+        handler.engine.llm.generate_async.assert_called_once()
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.core
+    async def test_long_encoder_prompt_reaches_engine(self):
+        """Let the engine validate decoder length after encoder preprocessing."""
+        handler = self._make_handler()
+        handler.engine.llm.args = SimpleNamespace(
+            backend="pytorch",
+            enable_chunked_prefill=False,
+            max_num_tokens=4,
+            parallel_config=SimpleNamespace(cp_size=1),
+        )
+        handler.engine.llm._is_encoder_decoder_model.return_value = True
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+        handler._initiate_shutdown = mock.AsyncMock()
+        request = {
+            "token_ids": [1, 2, 3, 4, 5],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks[-1]["token_ids"] == [42]
+        handler.engine.llm.generate_async.assert_called_once()
+        assert handler.engine.llm.generate_async.call_args.kwargs["inputs"] == [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ]
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_presubmit_signature_type_error_is_fatal(self):
         handler = self._make_handler()
 
@@ -1162,9 +1226,15 @@ class TestGenerateLocally:
         assert str(shutdown_error) == error_message
 
     @pytest.mark.asyncio
-    async def test_validation_error_during_iteration_remains_fatal(self):
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        "error",
+        [ValueError("invalid executor result"), RequestError("request failed")],
+        ids=["fatal-error", "request-error"],
+    )
+    async def test_error_during_iteration_keeps_existing_handling(self, error):
+        """Only pre-submission RequestError is translated to InvalidArgument."""
         handler = self._make_handler()
-        error = ValueError("invalid executor result")
         generation_result = MagicMock()
         generation_result.abort = MagicMock()
 
@@ -1192,7 +1262,10 @@ class TestGenerateLocally:
                 "token_ids": [],
             }
         ]
-        handler._initiate_shutdown.assert_awaited_once_with(error)
+        if isinstance(error, RequestError):
+            handler._initiate_shutdown.assert_not_awaited()
+        else:
+            handler._initiate_shutdown.assert_awaited_once_with(error)
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(10)

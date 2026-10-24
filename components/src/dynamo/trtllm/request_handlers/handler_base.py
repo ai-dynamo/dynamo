@@ -1333,6 +1333,10 @@ class HandlerBase(BaseGenerativeHandler):
             generate_async = self.engine.llm.generate_async
             try:
                 generation_result = generate_async(**generate_kwargs)
+            except RequestError as e:
+                # The engine owns request validation, including its token budget.
+                # Surface pre-submission rejections as 400 without copying its rules.
+                raise InvalidArgument(str(e)) from e
             except (ValueError, TypeError, NotImplementedError) as e:
                 # TRT-LLM performs request validation and preprocessing synchronously in
                 # `generate_async()`, before executor submission. A TypeError can also mean
@@ -1605,8 +1609,8 @@ class HandlerBase(BaseGenerativeHandler):
                 "token_ids": [],
             }
 
-        # 3. EngineShutdown - let it propagate to the Rust bridge
-        except EngineShutdown:
+        # 3. Typed errors - let the Rust bridge preserve their error codes
+        except (EngineShutdown, InvalidArgument):
             raise
 
         # 4. ALL OTHER ERRORS - graceful shutdown
