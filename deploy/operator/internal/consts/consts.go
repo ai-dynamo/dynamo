@@ -107,6 +107,9 @@ const (
 	KubeAnnotationDynamoEngineGroupPodClique    = "nvidia.com/dynamo-engine-group-pod-clique"
 	KubeAnnotationDynamoEngineGroupPodCliqueUID = "nvidia.com/dynamo-engine-group-pod-clique-uid"
 	KubeAnnotationDynamoEngineGroupProfile      = "nvidia.com/dynamo-engine-group-profile"
+	// VLLM capacity bindings retain exact physical slot occupants after a Pod disappears.
+	KubeAnnotationDynamoVLLMCapacityBindings = "nvidia.com/dynamo-vllm-capacity-bindings"
+	InitialVLLMCapacityBindings              = `{"version":1,"cliqueUID":"","slots":{}}`
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.
