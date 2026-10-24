@@ -235,11 +235,22 @@ class TestEmbeddingRowSize:
                 role=MagicMock(),
             )
 
-    def _save_all(self, conn, encoder_cache: dict[str, torch.Tensor]) -> None:
-        meta = mod.MultimodalEmbeddingCacheConnectorMetadata(saves=list(encoder_cache))
+    def _run_worker_step(
+        self,
+        conn,
+        meta: "mod.MultimodalEmbeddingCacheConnectorMetadata",
+        encoder_cache: dict[str, torch.Tensor],
+    ) -> None:
+        # Same order as vLLM's model runner: loads and evicts, then one save
+        # per embedding the encoder computed this step.
         with patch.object(conn, "_get_connector_metadata", return_value=meta):
+            conn.start_load_caches(encoder_cache=encoder_cache)
             for mm_hash in encoder_cache:
                 conn.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
+
+    def _save_all(self, conn, encoder_cache: dict[str, torch.Tensor]) -> None:
+        meta = mod.MultimodalEmbeddingCacheConnectorMetadata(saves=list(encoder_cache))
+        self._run_worker_step(conn, meta, encoder_cache)
 
     def test_text_model_uses_hidden_size(self):
         assert self._make_connector()._bytes_per_embed == 4096 * 2
@@ -266,15 +277,27 @@ class TestEmbeddingRowSize:
 
     def test_deepstack_capacity_bounds_stored_bytes(self):
         conn = self._make_connector(_deepstack_hf_config())
-        image_bytes = 945 * 4 * 4096 * 2
+        image_bytes = 10 * 4 * 4096 * 2
         conn._capacity_bytes = 2 * image_bytes
 
+        # Three new images in one step with room for two: "a" is evicted
+        # in the same step it was planned for saving.
         for mm_hash in ("a", "b", "c"):
-            conn.update_state_after_alloc(_make_request([(mm_hash, 945)]), 0)
+            conn.update_state_after_alloc(_make_request([(mm_hash, 10)]), 0)
         meta = conn.build_connector_meta(MagicMock())
 
         assert meta.evicts == ["a"]
+        assert sorted(meta.saves) == ["b", "c"]
         assert conn._num_used_bytes == 2 * image_bytes
+
+        encoder_cache = {
+            mm_hash: torch.zeros(10, 4 * 4096, dtype=torch.float16)
+            for mm_hash in ("a", "b", "c")
+        }
+        self._run_worker_step(conn, meta, encoder_cache)
+
+        assert set(conn._cpu_store) == {"b", "c"}
+        assert sum(t.nbytes for t in conn._cpu_store.values()) == 2 * image_bytes
 
     def test_matching_rows_do_not_warn(self):
         conn = self._make_connector(_deepstack_hf_config())

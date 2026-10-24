@@ -340,6 +340,9 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
             evicted_hash, evicted_bytes = self._cache_order.popitem(last=False)
             self._num_used_bytes -= evicted_bytes
             self._evicts_this_step.add(evicted_hash)
+            # The worker applies evicts before the encoder runs, so a save
+            # planned earlier this step would store an untracked entry.
+            self._saves_this_step.discard(evicted_hash)
             num_evicted += 1
 
         self._cache_order[mm_hash] = size_bytes
