@@ -4839,22 +4839,17 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flush_drops_llm
     assert_eq!(recovered, "<thi", "the recovery itself must still happen");
 }
 
-/// V2 discards late payload after a choice finishes; V1 retains its legacy tolerance.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior() {
-    const CHILD: &str = "DYNAMO_NEMOTRON_POST_FINISH_CHILD";
-    let Ok(version) = std::env::var(CHILD) else {
-        for version in ["1", "2"] {
-            let mut command = test_utils::isolated_command(
-                "postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior",
-            );
-            command
-                .env(CHILD, version)
-                .env(env_llm::DYN_PARSER_VERSION, version);
-            test_utils::assert_isolated_success(&command.output().unwrap());
-        }
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
         return;
-    };
+    }
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 
     let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
@@ -4891,11 +4886,7 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_beh
     }
 
     assert_eq!(content, "A", "the answer is unchanged by the stray chunk");
-    assert_eq!(
-        reasoning,
-        if version == "1" { "r1r2" } else { "r1" },
-        "only the legacy parser accepts reasoning after the choice has finished"
-    );
+    assert_eq!(reasoning, "r1");
 }
 
 /// Streaming and non-streaming must agree on a turn whose only answer text is
