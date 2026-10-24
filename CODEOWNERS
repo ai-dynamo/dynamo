@@ -373,6 +373,9 @@
 /deploy/operator/internal/namespace_scope/                                                              @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/controller_common/                                                            @ai-dynamo/dynamo-operator-codeowners
 
+# === lpx  (@ai-dynamo/dynamo-lpx-codeowners) ===
+/lib/sidecar/lpx/                                                                                       @ai-dynamo/dynamo-lpx-codeowners
+
 # === gms  (@ai-dynamo/dynamo-gms-codeowners) ===
 /lib/gpu_memory_service/                                                                                @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/cli/                                                                            @ai-dynamo/dynamo-gms-codeowners
@@ -710,6 +713,7 @@ requirements.txt                                                                
 /lib/kv-router/src/services/shared_cache/                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kv-router/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/runtime/src/metrics/frontend_perf.rs                                                               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/lib/sidecar/testkit/tests/support/lpx.rs                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-lpx-codeowners
 /tests/fault_tolerance/migration/utils.py                                                               @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/test_generate_kustomize_openapi.py                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
 /components/src/dynamo/sglang/publisher.py                                                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners

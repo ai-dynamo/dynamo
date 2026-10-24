@@ -29,7 +29,8 @@ mod support;
 
 use process::{Environment, Frontend, Gate, outputs};
 use support::{
-    DiscoveryFixture, FixtureConfig, HandoffFixture, ProcessFixture, SidecarFixture, sglang, vllm,
+    DiscoveryFixture, FixtureConfig, HandoffFixture, ProcessFixture, Rejection, SidecarFixture,
+    lpx, sglang, vllm,
 };
 
 async fn healthy<F: ProcessFixture>(
@@ -110,11 +111,20 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
     let rejected = control.request("unsupported", RequestPlan::default());
     let mut request = env.request("unsupported", 3);
     request.sampling_options.n = Some(2);
-    let error = match bounded("unsupported request ingress", router.generate(request)).await {
-        Err(error) => error
+    let ingress = bounded("unsupported request ingress", router.generate(request)).await;
+    let error = match (F::REJECTION, ingress) {
+        (Rejection::Returned, Err(error)) => error
             .downcast::<dynamo_backend_common::DynamoError>()
             .unwrap(),
-        Ok(_) => panic!("unsupported request must fail before a response stream"),
+        (Rejection::Returned, Ok(_)) => {
+            panic!("unsupported request must fail before a response stream")
+        }
+        (Rejection::FirstStreamItem, Ok(stream)) => {
+            failure(outputs(stream).await, &[], BackendError::InvalidArgument)
+        }
+        (Rejection::FirstStreamItem, Err(error)) => {
+            panic!("unsupported request must be refused inside its response stream: {error}")
+        }
     };
     assert!(
         dynamo_runtime::error::match_error_chain(
@@ -167,7 +177,7 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
                     pause: false,
                 }),
             },
-            BackendError::CannotConnect,
+            F::read_error(),
         ),
         (
             "early-eof",
@@ -675,11 +685,14 @@ async fn ready(router: &PrefillRouter) {
     .await;
 }
 
-async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFixture>() {
+async fn prefill_router_preserves_handoff_failure_and_cancellation<
+    P: HandoffFixture<D>,
+    D: ProcessFixture,
+>() {
     let env = Environment::new().await;
     let prefill_control = Controller::default();
     let decode_control = Controller::default();
-    let mut prefill_peer = F::start(
+    let mut prefill_peer = P::start(
         prefill_control.clone(),
         FixtureConfig {
             model: env.model.clone(),
@@ -688,7 +701,7 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
         },
     )
     .await;
-    let mut decode_peer = F::start(
+    let mut decode_peer = D::start(
         decode_control.clone(),
         FixtureConfig {
             model: env.model.clone(),
@@ -697,8 +710,8 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
         },
     )
     .await;
-    let mut prefill = env.spawn::<F>(&prefill_peer.endpoint(), DisaggregationMode::Prefill, 5);
-    let mut decode = env.spawn::<F>(&decode_peer.endpoint(), DisaggregationMode::Decode, 5);
+    let mut prefill = env.spawn::<P>(&prefill_peer.endpoint(), DisaggregationMode::Prefill, 5);
+    let mut decode = env.spawn::<D>(&decode_peer.endpoint(), DisaggregationMode::Decode, 5);
     let prefill_router = env.ready("prefill").await;
     let decode_router = env.ready("backend").await;
     let cards = env.cards().await;
@@ -709,8 +722,8 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
             .find(|card| card.worker_type == Some(role))
             .unwrap();
         assert_eq!(card.name(), env.model);
-        assert_eq!(card.kv_cache_block_size, F::KV_BLOCK_SIZE);
-        if F::HAS_BOOTSTRAP && role == WorkerType::Prefill {
+        assert_eq!(card.kv_cache_block_size, P::KV_BLOCK_SIZE);
+        if P::HAS_BOOTSTRAP && role == WorkerType::Prefill {
             let endpoint = card.runtime_config.disaggregated_endpoint.as_ref().unwrap();
             assert!(
                 endpoint
@@ -726,7 +739,7 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
         activated,
         Arc::new(ModelManager::new()),
         RouterMode::RoundRobin,
-        F::KV_BLOCK_SIZE,
+        P::KV_BLOCK_SIZE,
         None,
         None,
         None,
@@ -738,9 +751,17 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
     );
     activation.send(env.endpoint("prefill")).unwrap();
     ready(&router).await;
+    let prefill_plan = RequestPlan {
+        open: if P::HAS_BOOTSTRAP {
+            OpenAction::Hold
+        } else {
+            OpenAction::Continue
+        },
+        stream: None,
+    };
 
     for id in ["handoff", "handoff-repeat"] {
-        let observed_prefill = prefill_control.request(id, prefill_plan::<F>());
+        let observed_prefill = prefill_control.request(id, prefill_plan);
         let observed_decode = decode_control.request(id, RequestPlan::default());
         let stream = bounded(
             "prefill/decode handoff",
@@ -748,7 +769,7 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
         )
         .await
         .unwrap();
-        if F::HAS_BOOTSTRAP {
+        if P::HAS_BOOTSTRAP {
             bounded(
                 "prefill native acceptance",
                 observed_prefill.wait(Event::Received),
@@ -769,7 +790,7 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
             4,
             FinishReason::Length,
         );
-        F::assert_handoff(&observed_prefill, &observed_decode, id);
+        P::assert_handoff(&observed_prefill, &observed_decode, id);
     }
 
     let failed = prefill_control.request(
@@ -785,7 +806,7 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
         router.generate(env.request("failed-prefill", 3), decode_router.clone()),
     )
     .await;
-    if !F::HAS_BOOTSTRAP {
+    if !P::HAS_BOOTSTRAP {
         assert!(
             result.is_err(),
             "failed prefill must not produce a successful handoff"
@@ -809,13 +830,13 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
             );
         }
     }
-    if !F::HAS_BOOTSTRAP {
+    if !P::HAS_BOOTSTRAP {
         assert!(!unsubmitted.reached(Event::Received));
     }
     bounded("failed prefill native release", failed.wait(Event::Dropped)).await;
     ready(&router).await;
 
-    let prefill_observation = prefill_control.request("cancel-handoff", prefill_plan::<F>());
+    let prefill_observation = prefill_control.request("cancel-handoff", prefill_plan);
     let decode_observation = decode_control.request(
         "cancel-handoff",
         RequestPlan {
@@ -845,10 +866,24 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
     .await;
     context.stop_generating();
     assert!(prefill_observation.reached(Event::Received));
-    if F::HAS_BOOTSTRAP {
+    if P::HAS_BOOTSTRAP {
         assert!(!prefill_observation.reached(Event::Dropped));
-        F::assert_handoff(&prefill_observation, &decode_observation, "cancel-handoff");
+        P::assert_handoff(&prefill_observation, &decode_observation, "cancel-handoff");
         prefill_observation.release();
+    } else {
+        // The prefill has finished, so only the decode leg releases its KV.
+        // Nothing reports when the stop reaches the decode worker, so allow it
+        // a settle period: a Worker or sidecar that abandoned the pending
+        // Generate would drop the held native call well within it.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                decode_observation.wait(Event::Dropped)
+            )
+            .await
+            .is_err(),
+            "the decode leg's Generate must stay open after the client leaves"
+        );
     }
     decode_observation.release();
     bounded("handoff cancellation completion", async {
@@ -891,22 +926,11 @@ async fn prefill_router_preserves_handoff_failure_and_cancellation<F: HandoffFix
     decode_peer.shutdown().await;
 }
 
-fn prefill_plan<F: HandoffFixture>() -> RequestPlan {
-    RequestPlan {
-        open: if F::HAS_BOOTSTRAP {
-            OpenAction::Hold
-        } else {
-            OpenAction::Continue
-        },
-        stream: None,
-    }
-}
-
 #[tokio::test]
 async fn vllm_prefill_router_preserves_handoff_failure_and_cancellation() {
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        prefill_router_preserves_handoff_failure_and_cancellation::<vllm::Fixture>(),
+        prefill_router_preserves_handoff_failure_and_cancellation::<vllm::Fixture, vllm::Fixture>(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");
@@ -966,7 +990,10 @@ async fn sglang_sigterm_withdraws_worker_and_releases_active_native_request() {
 async fn sglang_prefill_router_preserves_handoff_failure_and_cancellation() {
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        prefill_router_preserves_handoff_failure_and_cancellation::<sglang::Fixture>(),
+        prefill_router_preserves_handoff_failure_and_cancellation::<
+            sglang::Fixture,
+            sglang::Fixture,
+        >(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");
@@ -1280,7 +1307,10 @@ async fn trtllm_sigterm_withdraws_worker_and_releases_active_native_request() {
 async fn trtllm_prefill_router_preserves_handoff_failure_and_cancellation() {
     tokio::time::timeout(
         Duration::from_secs(60),
-        prefill_router_preserves_handoff_failure_and_cancellation::<support::trtllm::Fixture>(),
+        prefill_router_preserves_handoff_failure_and_cancellation::<
+            support::trtllm::Fixture,
+            support::trtllm::Fixture,
+        >(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");
@@ -1291,6 +1321,67 @@ async fn trtllm_native_errors_reach_http_and_recover() {
     tokio::time::timeout(
         Duration::from_secs(60),
         native_errors_reach_http_and_recover::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_registration_and_errors_recover_through_worker_ingress() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        registration_and_errors_recover_through_worker_ingress::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_delayed_startup_publishes_only_after_native_readiness() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        delayed_startup_publishes_only_after_native_readiness::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_failed_and_interrupted_startup_leave_no_registration() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        failed_and_interrupted_startup_leave_no_registration::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_worker_cancel_and_consumer_drop_release_only_the_target() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        worker_cancel_and_consumer_drop_release_only_the_target::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_sigterm_withdraws_worker_and_releases_active_native_request() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        sigterm_withdraws_worker_and_releases_active_native_request::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// LPX has no prefill role, so a vLLM prefill worker hands off to it.
+#[tokio::test]
+async fn vllm_lpx_prefill_router_preserves_handoff_failure_and_cancellation() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        prefill_router_preserves_handoff_failure_and_cancellation::<vllm::Fixture, lpx::Fixture>(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");

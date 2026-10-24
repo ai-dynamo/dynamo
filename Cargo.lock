@@ -2665,6 +2665,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-lpx-sidecar"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-runtime",
+ "dynamo-sidecar-common",
+ "dynamo-trtllm-sidecar",
+ "futures",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dynamo-memory"
 version = "1.7.0"
 dependencies = [
@@ -2990,10 +3015,14 @@ dependencies = [
  "prost-types 0.14.3",
  "serde_json",
  "temp-env",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
+ "tonic-health 0.13.1",
+ "tower 0.5.3",
  "tracing",
  "url",
 ]
@@ -3006,6 +3035,7 @@ dependencies = [
  "async-stream",
  "dynamo-backend-common",
  "dynamo-llm",
+ "dynamo-lpx-sidecar",
  "dynamo-mocker",
  "dynamo-runtime",
  "dynamo-sglang-mocker",
