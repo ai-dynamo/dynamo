@@ -62,12 +62,30 @@ type DGDRDefaulter struct {
 	// dynamo-planner:<operatorVersion> tag does not exist (pre-release charts:
 	// rc, nightly); empty keeps the derived default.
 	DefaultImage string
+	// v1beta2 configures the defaults of Requests submitted as v1beta2, which reach this
+	// handler as a v1beta1 object carrying the spec.v1beta2 envelope.
+	v1beta2 DGDRV1beta2Options
 }
 
 // NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version
 // and optional explicit default profiler image.
 func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 	return &DGDRDefaulter{OperatorVersion: operatorVersion, DefaultImage: defaultImage}
+}
+
+// WithV1beta2 sets the defaults of v1beta2 Requests and returns the defaulter.
+func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
+	// The operator refuses to start with a configuration that does not resolve, so a failure here
+	// only happens to a caller that skipped ValidateAISimulateDefault: keep the image and let
+	// validation report what the Request lacks.
+	if image, version, err := resolveAISimulateDefault(
+		d.OperatorVersion, options.AISimulateImage, options.AISimulateVersionOverride); err == nil {
+		options.AISimulateImage, options.AISimulateVersionOverride = image, version
+	} else {
+		options.AISimulateImage = defaultPlannerImageFor(d.OperatorVersion, options.AISimulateImage)
+	}
+	d.v1beta2 = options
+	return d
 }
 
 // Default implements admission.CustomDefaulter.
@@ -87,11 +105,23 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		logger.Error(err, "failed to get admission request from context, skipping defaulting")
-		return nil
+		return fmt.Errorf("get admission request: %w", err)
 	}
+	requestVersion := internalwebhook.RequestedVersion(req)
 
-	if dgdr.Spec.V1Beta2 != nil {
+	// The original request version decides what spec.v1beta2 means. A native v1beta2 Request
+	// is defaulted from its carrier on CREATE and UPDATE; only CREATE
+	// and an UPDATE that changes spec.hardware read the cluster.
+	if requestVersion == internalwebhook.VersionV1Beta2 && dgdr.Spec.V1Beta2 != nil {
+		oldSpec, err := decodeOldSpecV1beta2(req.Operation, req.OldObject.Raw)
+		if err != nil {
+			return err
+		}
+		return defaultDynamoGraphDeploymentRequestV1beta2(ctx, dgdr, req.Operation, oldSpec, d.v1beta2)
+	}
+	// A foreign-version view (a carrier written or updated through the wrong API version, or
+	// a v1beta1 payload written through v1beta2) is read-only; validation enforces that.
+	if requestVersion == internalwebhook.VersionV1Beta2 || dgdr.Spec.V1Beta2 != nil {
 		return nil
 	}
 
@@ -110,7 +140,7 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// Image derivation remains create-only so updates do not rewrite an
 	// intentionally cleared image.
 	if req.Operation == admissionv1.Create && dgdr.Spec.Image == "" {
-		if img := d.defaultImageFor(); img != "" {
+		if img := defaultPlannerImageFor(d.OperatorVersion, d.DefaultImage); img != "" {
 			dgdr.Spec.Image = img
 			logger.Info("defaulted spec.image from operator version",
 				"name", dgdr.Name,
@@ -123,14 +153,13 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-// defaultImageFor returns the profiler image for spec.image: DefaultImage when
-// set, else the derived image with a canonical semver tag, or an empty string
-// when the operator version cannot be parsed.
-func (d *DGDRDefaulter) defaultImageFor() string {
-	if d.DefaultImage != "" {
-		return d.DefaultImage
+// defaultPlannerImageFor returns explicitImage when set, else the planner image with a
+// canonical operator-version tag, or an empty string when the version cannot be parsed.
+func defaultPlannerImageFor(operatorVersion, explicitImage string) string {
+	if explicitImage != "" {
+		return explicitImage
 	}
-	version, err := semver.NewVersion(d.OperatorVersion)
+	version, err := semver.NewVersion(operatorVersion)
 	if err != nil {
 		return ""
 	}
