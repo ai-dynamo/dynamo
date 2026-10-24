@@ -199,6 +199,40 @@ MTP (`--ais-nextn`).
   Mooncake JSONL trace whose `output_token_ids` provide response replay annotations.
 </ParamField>
 
+### Prefix-aware NPZ profiles
+
+Mocker-format NPZ files contain `prefill_isl`, `prefill_ttft_ms`,
+`decode_active_kv_tokens`, `decode_context_length`, and `decode_itl`.
+The default prefill model interpolates latency using the total number of new
+tokens in the batch. To also account for cached context, add these three arrays
+to the same NPZ file and pass it to `--planner-profile-data`:
+
+| Array | Shape | Meaning |
+| --- | --- | --- |
+| `prefill2d_new` | `(N,)` | Total new-token counts across the batch |
+| `prefill2d_prefix` | `(P,)` | Mean cached prefix lengths per request, in tokens |
+| `prefill2d_ms` | `(N, P)` | Measured prefill latency in milliseconds; rows index new-token counts, columns index prefix lengths |
+
+Use `float64` arrays. Each axis must contain at least two finite, nonnegative,
+strictly increasing values. Latencies must be finite and nonnegative. Supply all
+three arrays together; partial tables or invalid values fail profile loading.
+
+When present, the table replaces one-dimensional prefill timing with bilinear
+interpolation. Prefix lengths outside the measured range use the nearest
+endpoint. Positive new-token counts below the measured minimum use that minimum;
+counts above the maximum extrapolate using the final segment's slope. Predictions
+are floored at zero, and batches with no new tokens take zero prefill time.
+Keep the original five arrays so older readers can still load the profile. Files
+without the optional arrays retain their existing behavior; decode timing is
+unchanged.
+
+Cached prefix tokens do not need their K/V recomputed, but new queries in full
+attention layers still attend to the cached K/V. This can make latency depend on
+both dimensions. Calibrate the table for the model and hardware being simulated.
+The lookup uses the scheduler's total new tokens and mean prefix length; it does
+not model each request's length separately in heterogeneous batches. The prefix
+also includes earlier chunks already computed for the same request.
+
 ## AIS performance model
 
 <ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
