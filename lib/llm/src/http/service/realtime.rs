@@ -28,7 +28,7 @@
 //! On selected engine:
 //! - The handler forwards all frames including `session.update` onto the engine's input stream.
 //! - The handler drains the engine's response stream onto the WebSocket.
-//! - WebSocket stream close procedure is encapsulated in the `ScopedWsWriter` wrapper.
+//! - The upgrade task closes the WebSocket within its shutdown deadline.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,8 +46,11 @@ use axum::{
     routing::get,
 };
 use dynamo_runtime::engine::AsyncEngineContextProvider;
-use dynamo_runtime::pipeline::{Context, RequestStream};
-use futures::{SinkExt, StreamExt, stream::SplitSink};
+use dynamo_runtime::pipeline::{AsyncEngineContext, Context, RequestStream};
+use futures::{
+    SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -56,7 +59,7 @@ use tokio_stream::wrappers::ReceiverStream;
 /// a slow engine.
 const REQUEST_CHANNEL_CAPACITY: usize = 64;
 
-/// Bound on the time the outbound task waits for the WebSocket sink to
+/// Bound on the time the connection task waits for the WebSocket sink to
 /// drain a final Close frame before tearing down the transport. Keeps a
 /// half-broken peer from parking the connection indefinitely.
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,24 +99,48 @@ async fn realtime_ws_handler(
     }
 
     upgrade
-        .on_upgrade(move |socket| handle_socket(socket, state, permit))
+        .on_upgrade(move |socket| async move {
+            let (mut ws_tx, mut ws_rx) = socket.split();
+            let close_reason = Mutex::new(None);
+            let cancel = state.cancel_token();
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    *close_reason.lock() = Some(close_message(close_code::RESTART, "service restarting"));
+                },
+                _ = handle_socket(&mut ws_tx, &mut ws_rx, &state, &close_reason) => {},
+            }
+            let message = close_reason.into_inner()
+                .unwrap_or_else(|| close_message(close_code::NORMAL, "stream complete"));
+            // At the deadline, attempt the close once without waiting on a backpressured peer.
+            tokio::select! {
+                biased;
+                _ = async {
+                    let _ = ws_tx.send(message).await;
+                    let _ = ws_tx.close().await;
+                } => {},
+                _ = cancel.cancelled() => {},
+                _ = tokio::time::sleep(CLOSE_DRAIN_TIMEOUT) => {},
+            }
+            drop(permit);
+        })
         .into_response()
 }
 
-async fn handle_socket(
-    socket: WebSocket,
-    state: Arc<service_v2::State>,
-    // Held for the full WebSocket task lifetime so realtime sessions are
-    // visible to graceful shutdown after the 101 upgrade response completes.
-    _permit: service_v2::InflightPermit,
-) {
-    // Inbound writes a non-NORMAL close message to `close_reason` on protocol errors
-    // before cancelling the engine; the ScopedWsWriter takes it on Drop.
-    // Empty slot ⇒ NORMAL completion.
-    let close_reason: Arc<Mutex<Option<Message>>> = Arc::new(Mutex::new(None));
-    let (ws_tx, mut ws_rx) = socket.split();
-    let mut writer = ScopedWsWriter::new(ws_tx, close_reason.clone());
+struct StopOnDrop(Arc<dyn AsyncEngineContext>);
 
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.stop_generating();
+    }
+}
+
+async fn handle_socket(
+    writer: &mut SplitSink<WebSocket, Message>,
+    ws_rx: &mut SplitStream<WebSocket>,
+    state: &service_v2::State,
+    close_reason: &Mutex<Option<Message>>,
+) {
     // OpenAI Realtime spec requires `session.created` to be the first server
     // frame on the wire, before any client event arrives. The handler synthesizes
     // it here so the connection handshake works regardless of which engine is
@@ -141,9 +168,7 @@ async fn handle_socket(
         return;
     }
 
-    let Some((engine, session_update)) =
-        select_engine(&mut ws_rx, &mut *writer, state.as_ref()).await
-    else {
+    let Some((engine, session_update)) = select_engine(ws_rx, writer, state).await else {
         // Client disconnected before an engine was selected.
         return;
     };
@@ -165,6 +190,7 @@ async fn handle_socket(
 
     let request_stream = Box::pin(ReceiverStream::new(req_rx));
     let input = Context::new(RequestStream::new(request_stream));
+    let _request_stop = StopOnDrop(input.context());
 
     let mut response_stream = match engine.generate(input).await {
         Ok(s) => s,
@@ -178,14 +204,14 @@ async fn handle_socket(
         }
     };
     let resp_ctx = response_stream.context();
+    let _response_stop = StopOnDrop(resp_ctx.clone());
 
-    // Outbound task: drain the engine response stream onto the WebSocket.
+    // Drain the engine response stream onto the WebSocket.
     // Peels off the Dynamo-side `Annotated` envelope so clients receive bare
     // `RealtimeServerEvent` frames as the OpenAI Realtime spec requires. Engine
     // errors surfaced via `Annotated::error` are mapped to a synthesized
     // `RealtimeServerEvent::Error` so they remain visible on the wire.
-    let outbound = tokio::spawn(async move {
-        let mut writer = writer;
+    let outbound = async {
         while let Some(annotated) = response_stream.next().await {
             let event = if let Some(event) = annotated.data {
                 event
@@ -221,56 +247,62 @@ async fn handle_socket(
                 break;
             }
         }
-        // writer dropped at end of scope → spawned cleanup sends Close + drains.
-    });
+    };
 
-    while let Some(msg) = ws_rx.next().await {
-        let msg = match msg {
-            Ok(m) => m,
-            Err(err) => {
-                tracing::debug!(%err, "/v1/realtime inbound frame error; treating as disconnect");
-                break;
-            }
-        };
-        match msg {
-            Message::Text(text) => {
-                match serde_json::from_str::<DynamoRealtimeClientEvent>(text.as_str()) {
-                    Ok(event) => {
-                        if req_tx.send(event).await.is_err() {
-                            tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
+    let inbound = async {
+        while let Some(msg) = ws_rx.next().await {
+            let msg = match msg {
+                Ok(m) => m,
+                Err(err) => {
+                    tracing::debug!(%err, "/v1/realtime inbound frame error; treating as disconnect");
+                    break;
+                }
+            };
+            match msg {
+                Message::Text(text) => {
+                    match serde_json::from_str::<DynamoRealtimeClientEvent>(text.as_str()) {
+                        Ok(event) => {
+                            if req_tx.send(event).await.is_err() {
+                                tracing::debug!(
+                                    "/v1/realtime engine receiver dropped; ending inbound"
+                                );
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
+                            *close_reason.lock() =
+                                Some(close_message(close_code::INVALID, "malformed JSON frame"));
                             break;
                         }
                     }
-                    Err(err) => {
-                        tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
-                        *close_reason.lock() =
-                            Some(close_message(close_code::INVALID, "malformed JSON frame"));
-                        break;
-                    }
                 }
+                Message::Binary(_) => {
+                    tracing::warn!(
+                        "/v1/realtime received binary frame; not supported in this slice"
+                    );
+                    *close_reason.lock() = Some(close_message(
+                        close_code::UNSUPPORTED,
+                        "binary frames not supported",
+                    ));
+                    break;
+                }
+                Message::Close(_) => break,
+                Message::Ping(_) | Message::Pong(_) => {} // axum handles ping replies
             }
-            Message::Binary(_) => {
-                tracing::warn!("/v1/realtime received binary frame; not supported in this slice");
-                *close_reason.lock() = Some(close_message(
-                    close_code::UNSUPPORTED,
-                    "binary frames not supported",
-                ));
-                break;
-            }
-            Message::Close(_) => break,
-            Message::Ping(_) | Message::Pong(_) => {} // axum handles ping replies
         }
+
+        // Inbound loop ended (client close, EOF, error, or unsupported frame).
+        // Cancel any in-flight engine work, then drop the sender so the engine's
+        // input stream completes before the upgrade task closes the socket.
+        resp_ctx.stop_generating();
+        drop(req_tx);
+    };
+    tokio::pin!(outbound);
+    tokio::select! {
+        _ = inbound => { outbound.await; },
+        _ = &mut outbound => {},
     }
-
-    // Inbound loop ended (client close, EOF, error, or unsupported frame).
-    // Cancel any in-flight engine work, then drop the sender so the engine's
-    // input stream completes; outbound picks up the close-reason left in the
-    // shared slot (or NORMAL on natural completion).
-    resp_ctx.stop_generating();
-    drop(req_tx);
-
-    // Wait for outbound to finish flushing.
-    let _ = outbound.await;
 }
 
 fn close_message(code: u16, reason: &str) -> Message {
@@ -278,82 +310,6 @@ fn close_message(code: u16, reason: &str) -> Message {
         code,
         reason: Utf8Bytes::from(reason.to_string()),
     }))
-}
-
-/// RAII wrapper around the outbound side of the WebSocket. Owns the
-/// [`SplitSink`] plus the inbound-supplied close-reason slot, and on `Drop`
-/// spawns a detached cleanup that sends the Close frame (inbound-supplied
-/// reason, or `NORMAL`) and drives the sink to completion under
-/// [`CLOSE_DRAIN_TIMEOUT`]. Without that drain step axum can tear down the TCP
-/// socket mid-frame and the client sees EOF instead of an in-band Close.
-///
-/// The wrapper [`Deref`]s to its inner sink so callers use it as if it were
-/// the sink: `writer.send(...).await`, `&mut *writer` for fns that take
-/// `&mut Sink<Message>`. There is no explicit close API — the close sequence
-/// is bound to the wrapper's lifecycle, including panic / early-return paths.
-///
-/// `Drop` is sync and the close sequence is async, so the cleanup runs on
-/// a spawned task that outlives the dropping scope. The task owns `ws_tx`
-/// exclusively, so the WebSocket's underlying TCP socket stays open until
-/// the cleanup writes the Close frame, drains the sink under
-/// `CLOSE_DRAIN_TIMEOUT`, and drops `ws_tx`. `handle_socket`'s
-/// `outbound.await` returns *before* the Close frame is on the wire, but
-/// the client still sees the in-band Close — the only scenario the cleanup
-/// can't complete is runtime shutdown racing connection teardown, which
-/// doesn't happen on axum's long-lived global runtime.
-struct ScopedWsWriter {
-    ws_tx: Option<SplitSink<WebSocket, Message>>,
-    close_reason: Arc<Mutex<Option<Message>>>,
-}
-
-impl ScopedWsWriter {
-    fn new(
-        ws_tx: SplitSink<WebSocket, Message>,
-        close_reason: Arc<Mutex<Option<Message>>>,
-    ) -> Self {
-        Self {
-            ws_tx: Some(ws_tx),
-            close_reason,
-        }
-    }
-}
-
-impl std::ops::Deref for ScopedWsWriter {
-    type Target = SplitSink<WebSocket, Message>;
-    fn deref(&self) -> &Self::Target {
-        self.ws_tx
-            .as_ref()
-            .expect("ScopedWsWriter sink only taken by Drop; no other consumer should exist")
-    }
-}
-
-impl std::ops::DerefMut for ScopedWsWriter {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.ws_tx
-            .as_mut()
-            .expect("ScopedWsWriter sink only taken by Drop; no other consumer should exist")
-    }
-}
-
-impl Drop for ScopedWsWriter {
-    fn drop(&mut self) {
-        let Some(mut ws_tx) = self.ws_tx.take() else {
-            return;
-        };
-        let close_reason = self.close_reason.clone();
-        // Spawn detached because Drop is sync but the close sequence is
-        // async. Tokio's runtime outlives the per-connection task so the
-        // cleanup task gets a chance to run; if the runtime is shutting
-        // down we get a best-effort attempt.
-        tokio::spawn(async move {
-            let msg = close_reason
-                .lock()
-                .take()
-                .unwrap_or_else(|| close_message(close_code::NORMAL, "stream complete"));
-            let _ = ws_tx.send(msg).await;
-            let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, ws_tx.close()).await;
-        });
-    }
 }
 
 /// Drive engine selection by looping over inbound client frames until either
