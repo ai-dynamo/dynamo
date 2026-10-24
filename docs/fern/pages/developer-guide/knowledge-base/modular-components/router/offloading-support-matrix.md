@@ -148,5 +148,5 @@ See [Configuration and Tuning](configuration-and-tuning.md) for the cache-hit we
 - [Router Guide](router-guide.md) — routing modes, deployment modes, and event transport
 - [Native KV Offloading](../backends/vllm/native-kv-offloading.md) — vLLM detail page
 - [Using HiCache](../backends/sglang/hicache.md) — SGLang detail page
-- [KV Cache Offloading](../backends/vllm/kv-cache-offloading.md) — vLLM offloading backend catalog (native, KVBM, LMCache, FlexKV)
+- [KV Cache Offloading](../backends/vllm/kv-cache-offloading.md) — vLLM offloading backend catalog (LMCache, FlexKV)
 - [Feature Matrix](../../../../reference/general/compatibility.mdx) — per-backend feature support across Dynamo
