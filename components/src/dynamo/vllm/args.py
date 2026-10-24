@@ -631,23 +631,36 @@ def _set_state_agent_topic(
         events.topic = topic
 
 
-def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
-    """Check if the user-provided --kv-transfer-config uses NixlConnector.
+# These NIXL connectors need the side-channel handshake: pull and push mode
+# share vLLM's NIXL base scheduler, which publishes side_channel_host/port in
+# the params it hands the decode side.
+_NIXL_CONNECTOR_NAMES = (
+    "NixlConnector",
+    "NixlPullConnector",
+    "NixlPushConnector",
+)
 
-    Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside MultiConnector or PdConnector (kv_connector_extra_config.connectors contains
-    "NixlConnector").
+
+def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
+    """Check if the user-provided --kv-transfer-config uses a NIXL connector.
+
+    Covers NixlConnector and its NixlPullConnector alias (pull), plus
+    NixlPushConnector (push), both directly and nested inside MultiConnector
+    or PdConnector (kv_connector_extra_config.connectors).
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
         return False
-    if kv_cfg.kv_connector == "NixlConnector":
+    if kv_cfg.kv_connector in _NIXL_CONNECTOR_NAMES:
         return True
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
     if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
-            if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
+            if (
+                isinstance(entry, dict)
+                and entry.get("kv_connector") in _NIXL_CONNECTOR_NAMES
+            ):
                 return True
     return False
 
