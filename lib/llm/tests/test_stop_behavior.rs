@@ -28,6 +28,31 @@ const OTHER: u32 = 16;
 const A: u32 = 20;
 const B: u32 = 21;
 
+// Fragments of a `STOP_HERE`-style marker, used to test stop strings that span tokens at
+// several granularities (word pieces, single characters, multi-byte characters).
+const ALPHA: u32 = 30; // "alpha"
+const SP_STOP: u32 = 31; // " STOP"
+const UND_HERE: u32 = 32; // "_HERE"
+const BETA: u32 = 33; // " beta"
+const ALPHA_SP: u32 = 34; // "alpha "
+const ALPHA_STOP: u32 = 35; // "alpha STOP"
+const UND_OTHER: u32 = 36; // "_OTHER beta"
+const CH_S: u32 = 40;
+const CH_T: u32 = 41;
+const CH_O: u32 = 42;
+const CH_P: u32 = 43;
+const CH_UND: u32 = 44;
+const CH_H: u32 = 45;
+const CH_E: u32 = 46;
+const CH_R: u32 = 47;
+const HELLO: u32 = 50; // "hello "
+const E_ACUTE: u32 = 51; // "é"
+const ZHONG: u32 = 52; // "终"
+const ZHI_TAIL: u32 = 53; // "止 tail"
+// One token whose text contains several complete stop strings at once.
+const BIG_STOP_TOKEN: u32 = 60; // "alpha STOP_TOKEN beta"
+const BIG_ABCDE: u32 = 61; // "ABCDE tail"
+
 struct TestTokenizer;
 
 impl tokenizer_traits::Encoder for TestTokenizer {
@@ -58,6 +83,27 @@ impl tokenizer_traits::Decoder for TestTokenizer {
                 OTHER => Some("there"),
                 A => Some("a"),
                 B => Some("b"),
+                ALPHA => Some("alpha"),
+                SP_STOP => Some(" STOP"),
+                UND_HERE => Some("_HERE"),
+                BETA => Some(" beta"),
+                ALPHA_SP => Some("alpha "),
+                ALPHA_STOP => Some("alpha STOP"),
+                UND_OTHER => Some("_OTHER beta"),
+                CH_S => Some("S"),
+                CH_T => Some("T"),
+                CH_O => Some("O"),
+                CH_P => Some("P"),
+                CH_UND => Some("_"),
+                CH_H => Some("H"),
+                CH_E => Some("E"),
+                CH_R => Some("R"),
+                HELLO => Some("hello "),
+                E_ACUTE => Some("é"),
+                ZHONG => Some("终"),
+                ZHI_TAIL => Some("止 tail"),
+                BIG_STOP_TOKEN => Some("alpha STOP_TOKEN beta"),
+                BIG_ABCDE => Some("ABCDE tail"),
                 _ => Some("?"),
             })
             .collect();
@@ -388,5 +434,123 @@ fn no_stop_trim_preserves_seed_order_and_special_token_policy() {
             result.stop_trigger,
             Some(StopTrigger::HiddenStopTokenDetected(EOS))
         ));
+    }
+}
+
+/// A marker split into word pieces (`" STOP"` + `"_HERE"`) must not leak `" STOP"`.
+#[test]
+fn stop_here_split_into_word_pieces_is_not_leaked() {
+    let mut decoder = make_decoder(None, None, None, Some(vec!["STOP_HERE"]), false);
+    let result = decoder
+        .process_token_ids(&[ALPHA, SP_STOP, UND_HERE, BETA])
+        .unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("alpha "));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == "STOP_HERE"
+    ));
+}
+
+/// The worst case for withholding: one character per token.
+#[test]
+fn stop_here_split_one_character_per_token_is_not_leaked() {
+    let mut decoder = make_decoder(None, None, None, Some(vec!["STOP_HERE"]), false);
+    let result = decoder
+        .process_token_ids(&[
+            ALPHA_SP, CH_S, CH_T, CH_O, CH_P, CH_UND, CH_H, CH_E, CH_R, CH_E,
+        ])
+        .unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("alpha "));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == "STOP_HERE"
+    ));
+}
+
+/// With `include_stop_str_in_output`, a split marker is returned whole, in order, and
+/// nothing after it is emitted.
+#[test]
+fn visible_stop_here_split_across_tokens_is_returned_whole() {
+    let mut decoder = make_decoder(None, None, None, Some(vec!["STOP_HERE"]), true);
+    let result = decoder
+        .process_token_ids(&[ALPHA, SP_STOP, UND_HERE, BETA])
+        .unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("alpha STOP_HERE"));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::VisibleStopSequenceDetected(ref s)) if s == "STOP_HERE"
+    ));
+}
+
+/// A candidate prefix that is followed by non-matching text is released unchanged.
+#[test]
+fn split_stop_prefix_followed_by_other_text_is_released() {
+    let mut decoder = make_decoder(None, None, None, Some(vec!["STOP_HERE"]), false);
+    let result = decoder.process_token_ids(&[ALPHA_STOP, UND_OTHER]).unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("alpha STOP_OTHER beta"));
+    assert!(result.stop_trigger.is_none());
+}
+
+/// Withholding must cut on character boundaries when a multi-byte stop string is split
+/// across tokens and a shorter overlapping stop string is also configured.
+#[test]
+fn multibyte_stop_split_across_tokens_with_overlapping_stop() {
+    let mut decoder = make_decoder(None, None, None, Some(vec!["é终止", "终止"]), false);
+    let result = decoder
+        .process_token_ids(&[HELLO, E_ACUTE, ZHONG, ZHI_TAIL])
+        .unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("hello "));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == "é终止"
+    ));
+}
+
+/// When one decoded token contains several complete stop strings, the first one in the
+/// request's `stop` list is reported. This matches SGLang; vLLM instead selects the stop
+/// that completes earliest in the text, so the two engines differ here. Pinning the
+/// current order keeps a change in either direction deliberate.
+#[test]
+fn several_stops_in_one_token_follow_list_order() {
+    for (stops, expected_text, expected_stop) in [
+        (vec!["STOP_TOKEN", "STOP"], "alpha ", "STOP_TOKEN"),
+        (vec!["STOP", "STOP_TOKEN"], "alpha ", "STOP"),
+    ] {
+        let mut decoder = make_decoder(None, None, None, Some(stops.clone()), false);
+        let result = decoder.process_token_ids(&[BIG_STOP_TOKEN]).unwrap();
+        assert_eq!(result.text.as_deref(), Some(expected_text), "{stops:?}");
+        assert!(
+            matches!(
+                result.stop_trigger,
+                Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == expected_stop
+            ),
+            "{stops:?}"
+        );
+    }
+
+    // The stops complete at different offsets: list order still wins.
+    for (stops, expected_text, expected_stop) in [
+        (vec!["ABCDE", "BC"], "", "ABCDE"),
+        (vec!["BC", "ABCDE"], "A", "BC"),
+    ] {
+        let mut decoder = make_decoder(None, None, None, Some(stops.clone()), false);
+        let result = decoder.process_token_ids(&[BIG_ABCDE]).unwrap();
+        assert_eq!(
+            result.text.as_deref().unwrap_or(""),
+            expected_text,
+            "{stops:?}"
+        );
+        assert!(
+            matches!(
+                result.stop_trigger,
+                Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == expected_stop
+            ),
+            "{stops:?}"
+        );
     }
 }
