@@ -38,8 +38,11 @@ const LOAD_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ModelLimits {
     /// Maximum input + output tokens; backs both the registered context window
-    /// and the default `max_tokens`. Absent when neither source supplied one,
-    /// which leaves requests that omit `max_tokens` to be rejected.
+    /// and the default `max_tokens`. `None` only before `engine::start`
+    /// resolves it: `--context-length` fills it in, and without that flag an
+    /// engine answer with no positive window makes `start` fail, so the worker
+    /// never registers. Every serving worker therefore has a value; a request's
+    /// `max_tokens` cannot make up for a missing one.
     pub(crate) context_length: Option<u32>,
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
