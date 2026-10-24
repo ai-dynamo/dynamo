@@ -641,13 +641,26 @@ fn decode_terminal(meta: &Value, finish: &Value) -> LLMEngineOutput {
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
+    let details = error_chain(&error);
     if error.is_timeout() {
-        client::connection_timeout(format!("SGLang /generate HTTP request timed out: {error}"))
+        client::connection_timeout(format!(
+            "SGLang /generate HTTP request timed out: {details}"
+        ))
     } else if error.is_connect() {
-        client::cannot_connect(format!("could not connect to SGLang /generate: {error}"))
+        client::cannot_connect(format!("could not connect to SGLang /generate: {details}"))
     } else {
-        client::protocol_error(format!("SGLang /generate HTTP request failed: {error}"))
+        client::protocol_error(format!("SGLang /generate HTTP request failed: {details}"))
     }
+}
+
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut details = vec![error.to_string()];
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        details.push(error.to_string());
+        cause = error.source();
+    }
+    details.join(": ")
 }
 
 fn authentication_error(operation: &str, status: StatusCode) -> DynamoError {
@@ -672,7 +685,7 @@ fn response_error(status: StatusCode, detail: String) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{error::Error, fmt, time::Duration};
 
     use dynamo_backend_common::engine::RoutingHints;
     use dynamo_backend_common::{
@@ -690,12 +703,47 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, build_http_client, output, request,
-        response_error, response_has_output,
+        NativeHttp, NativeRequest, authentication_error, build_http_client, error_chain, output,
+        request, response_error, response_has_output,
     };
     use crate::client::Discovery;
 
     const MAX_EVENT_BYTES: usize = crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get();
+
+    #[derive(Debug)]
+    struct TestCause(&'static str);
+
+    impl fmt::Display for TestCause {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(self.0)
+        }
+    }
+
+    impl Error for TestCause {}
+
+    #[derive(Debug)]
+    struct TestRequestError(TestCause);
+
+    impl fmt::Display for TestRequestError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("request failed")
+        }
+    }
+
+    impl Error for TestRequestError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn request_error_diagnostics_include_the_full_cause_chain() {
+        let error = TestRequestError(TestCause("connection reset by peer"));
+        assert_eq!(
+            error_chain(&error),
+            "request failed: connection reset by peer"
+        );
+    }
 
     fn canonical_request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
