@@ -17,6 +17,7 @@ SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"
 SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
 SNAPSHOT_RESTORE_STANDBY_ENV = "SNAPSHOT_RESTORE_STANDBY"
+SERVED_MODEL_NAME_ENV = "DYN_SERVED_MODEL_NAME"
 
 # Must match the public file-name constants in
 # github.com/ai-dynamo/snapshot/api/podcontract.
@@ -50,6 +51,9 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # Kubernetes discovery mode env read when the restored runtime registers.
     "DYN_KUBE_DISCOVERY_MODE",
     "CONTAINER_NAME",
+    # Served model name a restored worker registers under: one snapshot can
+    # back many deployments, each naming its model.
+    SERVED_MODEL_NAME_ENV,
     # Target identity and failover policy consumed after engine construction.
     "ENGINE_ID",
     "FAILOVER_LOCK_PATH",

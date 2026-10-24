@@ -6,6 +6,10 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from dynamo.common.snapshot.restore_context import (
+    apply_snapshot_restore_env,
+    write_snapshot_restore_context,
+)
 from dynamo.vllm import snapshot
 from dynamo.vllm.publisher import StatLoggerFactory
 
@@ -48,3 +52,33 @@ async def test_prepare_snapshot_preserves_engine_stat_loggers(monkeypatch):
     assert isinstance(stat_logger_factory, StatLoggerFactory)
     setup_vllm_engine.assert_called_once_with(config, stat_logger_factory)
     assert config.engine_args.enable_sleep_mode is True
+
+
+def _restore_served_model_name(monkeypatch, tmp_path, restore_pod_name):
+    monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", str(tmp_path))
+    if restore_pod_name is None:
+        monkeypatch.delenv("DYN_SERVED_MODEL_NAME", raising=False)
+    else:
+        monkeypatch.setenv("DYN_SERVED_MODEL_NAME", restore_pod_name)
+    write_snapshot_restore_context()
+    # The restored process still carries the env it was captured with.
+    monkeypatch.setenv("DYN_SERVED_MODEL_NAME", "captured")
+    apply_snapshot_restore_env()
+
+    config = SimpleNamespace(served_model_name="captured", served_model_aliases=[])
+    snapshot.apply_restore_served_model_name(config)
+    return config
+
+
+def test_restore_serves_restore_pod_model_name(monkeypatch, tmp_path):
+    config = _restore_served_model_name(monkeypatch, tmp_path, "tenant-a,alias-a")
+
+    assert config.served_model_name == "tenant-a"
+    assert config.served_model_aliases == ["alias-a"]
+
+
+def test_restore_without_model_name_keeps_captured_name(monkeypatch, tmp_path):
+    config = _restore_served_model_name(monkeypatch, tmp_path, None)
+
+    assert config.served_model_name == "captured"
+    assert config.served_model_aliases == []
