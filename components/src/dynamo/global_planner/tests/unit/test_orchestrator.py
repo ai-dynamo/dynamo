@@ -14,6 +14,7 @@ import pytest
 
 from dynamo.global_planner.capacity_manager import CapacityManager, PoolSpec
 from dynamo.global_planner.orchestrator import Orchestrator
+from dynamo.global_planner.priority import PriorityConfig, PriorityResolver
 from dynamo.planner import SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleStatus
 
@@ -196,6 +197,132 @@ def test_falls_back_to_cross_participant_when_no_intra_candidate():
         "decode",
         3,
     )
+
+
+def _priority(**kwargs) -> PriorityResolver:
+    return PriorityResolver(PriorityConfig(**kwargs))
+
+
+def test_scale_up_takes_from_the_least_important_donor_first():
+    """A scale-up is served by donors, so the expendable pool should give first.
+
+    Also pins that priority outranks the intra-participant preference: ns/b is
+    a separate participant and would lose the locality tiebreak,
+    but the operator declared it expendable and ns/a important.
+    """
+    pools = _pools(ns__a=(2, 5, 1), ns__b=(None, 5, 1))  # 2 + 5 + 5 = 12
+
+    def run(resolver):
+        orch = _decider(
+            max_total_gpus=12, min_total_gpus=12, priority_resolver=resolver
+        )
+        # Two equally sized pending scale-downs, one per participant.
+        orch.update_intent_cache("ns/a", _targets(decode=3), pools["ns/a"])
+        orch.update_intent_cache("ns/b", _targets(decode=3), pools["ns/b"])
+        return _mediate(orch, "ns/a", _targets(prefill=4), pools)  # +2
+
+    # Control: with no priorities declared, the intra-participant partner wins.
+    assert run(_priority()).selected_partners[0].participant_id == "ns/a"
+
+    # ns/b is declared expendable, so it donates before the important pool.
+    resolver = _priority(
+        pools=[
+            {"selector": "ns/a", "priority": 900},
+            {"selector": "ns/b", "priority": 10},
+        ]
+    )
+    assert run(resolver).selected_partners[0].participant_id == "ns/b"
+
+
+def test_scale_down_gives_to_the_most_important_recipient_first():
+    """A scale-down below the floor is paired with recipients, so the ordering
+    must invert: freed capacity goes to the most important pool first."""
+    pools = _pools(ns__a=(None, 3, 1), ns__b=(None, 3, 1), ns__c=(None, 3, 1))  # 9
+
+    def run(resolver):
+        orch = _decider(max_total_gpus=9, min_total_gpus=9, priority_resolver=resolver)
+        # Two equally sized pending scale-ups competing for the freed GPUs.
+        orch.update_intent_cache("ns/b", _targets(decode=5), pools["ns/b"])
+        orch.update_intent_cache("ns/c", _targets(decode=5), pools["ns/c"])
+        return _mediate(orch, "ns/a", _targets(decode=1), pools)  # -2
+
+    # No unprioritized control here: with equal priorities the two candidates
+    # tie on every sort term, and _iter_pair_partners yields in unspecified
+    # order, so pinning the winner would test an unsupported behavior.
+    resolver = _priority(
+        pools=[
+            {"selector": "ns/b", "priority": 10},
+            {"selector": "ns/c", "priority": 900},
+        ]
+    )
+    result = run(resolver)
+    assert [p.participant_id for p in result.selected_partners] == ["ns/c"]
+
+
+def test_unconfigured_priorities_leave_arbitration_unchanged():
+    """Every pool resolving to the same priority must make the leading sort term
+    constant, so an unconfigured GlobalPlanner arbitrates exactly as before."""
+    pools = _pools(ns__a=(2, 5, 1), ns__b=(None, 5, 1))
+
+    def run(resolver):
+        orch = _decider(
+            max_total_gpus=12, min_total_gpus=12, priority_resolver=resolver
+        )
+        orch.update_intent_cache("ns/a", _targets(decode=1), pools["ns/a"])
+        orch.update_intent_cache("ns/b", _targets(decode=4), pools["ns/b"])
+        res = _mediate(orch, "ns/a", _targets(prefill=4), pools)
+        return [
+            (p.participant_id, p.sub_type, p.applied_desired)
+            for p in res.selected_partners
+        ]
+
+    # A uniform non-default value must behave the same as declaring nothing.
+    uniform = _priority(pools=[{"selector": "ns/*", "priority": 42}])
+    assert run(_priority()) == run(uniform)
+
+
+def test_priority_order_skips_coarse_recipient_and_uses_finer_one():
+    resolver = _priority(
+        pools=[
+            {"selector": "ns/a/decode", "priority": 900},
+            {"selector": "ns/b/decode", "priority": 10},
+        ]
+    )
+    orch = _decider(max_total_gpus=8, min_total_gpus=8, priority_resolver=resolver)
+    pools = {
+        "ns/a": {
+            "prefill": PoolSpec("prefill", 2, 1),
+            "decode": PoolSpec("decode", 1, 4),
+        },
+        "ns/b": {"decode": PoolSpec("decode", 2, 1)},
+    }
+    orch.update_intent_cache("ns/a", _targets(decode=2), pools["ns/a"])
+    orch.update_intent_cache("ns/b", _targets(decode=3), pools["ns/b"])
+
+    result = _mediate(orch, "ns/a", _targets(prefill=1), pools)
+
+    assert result.approved
+    assert [
+        (partner.participant_id, partner.applied_desired)
+        for partner in result.selected_partners
+    ] == [("ns/b", 3)]
+
+
+def test_rejection_reports_priority_of_net_delta_target(caplog):
+    resolver = _priority(
+        pools=[
+            {"selector": "ns/a/prefill", "priority": 10},
+            {"selector": "ns/a/decode", "priority": 900},
+        ]
+    )
+    orch = _decider(max_total_gpus=5, min_total_gpus=5, priority_resolver=resolver)
+    pools = _pools(ns__a=(3, 2, 1))
+
+    result = _mediate(orch, "ns/a", _targets(prefill=0, decode=3), pools)
+
+    assert not result.approved
+    assert "priority 10 via ns/a/prefill" in caplog.text
+    assert "priority 900" not in caplog.text
 
 
 def test_intent_cache_ttl_expiry_blocks_pairing():
