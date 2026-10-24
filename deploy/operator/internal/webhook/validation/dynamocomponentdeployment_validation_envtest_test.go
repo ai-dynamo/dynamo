@@ -19,11 +19,13 @@ package validation_test
 
 import (
 	"maps"
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -59,17 +61,18 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	)
 
 	type dcdAdmissionTestCase struct {
-		name               string
-		deployment         runtime.Object
-		oldDeployment      runtime.Object
-		checkpointOff      bool
-		seedWithoutWebhook bool
-		wantSchemaErr      string
-		wantCELErr         string
-		wantWebhookErrs    []string
-		wantWarnings       []string
-		wantPodAnnotations map[string]string
-		wantRoleReplicas   map[string]int32
+		name                string
+		deployment          runtime.Object
+		oldDeployment       runtime.Object
+		checkpointOff       bool
+		seedWithoutWebhook  bool
+		wantSchemaErr       string
+		wantCELErr          string
+		wantWebhookErrs     []string
+		wantWarnings        []string
+		wantPodAnnotations  map[string]string
+		wantRoleReplicas    map[string]int32
+		wantDynamoNamespace *string
 	}
 	tests := []dcdAdmissionTestCase{
 		{name: "DGD-owned vLLM multi-GPU automatic candidate is admitted without checkpointRef", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
@@ -1325,7 +1328,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWarnings: []string{"spec.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md"},
 		},
 		{
-			name: "deprecated dynamo namespace warning shows calculated namespace",
+			name: "legacy namespace warning preserves the runtime identity",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Namespace = "hannahz"
 				dcd.OwnerReferences = []metav1.OwnerReference{{
@@ -1336,7 +1339,80 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				}}
 				dcd.Spec.DynamoNamespace = new("my-custom-namespace")
 			}),
-			wantWarnings: []string{`spec.dynamoNamespace is deprecated and ignored. Value "my-custom-namespace" will be replaced with "hannahz-trtllm-disagg". Remove this field from your configuration`},
+			wantWarnings: []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "my-custom-namespace" remains the Dynamo namespace`},
+		},
+
+		// Legacy DCD namespaces remain runtime identities and must be valid labels.
+		{
+			name: "legacy namespace at the label length limit is preserved",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.DynamoNamespace = k8sptr.To(strings.Repeat("a", 63))
+			}),
+			wantDynamoNamespace: k8sptr.To(strings.Repeat("a", 63)),
+			wantWarnings:        []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "` + strings.Repeat("a", 63) + `" remains the Dynamo namespace`},
+		},
+		{
+			name: "legacy namespace exceeding the label length limit is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.DynamoNamespace = k8sptr.To(strings.Repeat("a", 64))
+			}),
+			wantWebhookErrs: []string{`spec.dynamoNamespace: Invalid value: "` + strings.Repeat("a", 64) + `": must be no more than 63 bytes`},
+			wantWarnings:    []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "` + strings.Repeat("a", 64) + `" remains the Dynamo namespace`},
+		},
+		{
+			name: "legacy namespace with invalid label characters is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.DynamoNamespace = k8sptr.To("invalid/namespace")
+			}),
+			wantWebhookErrs: []string{`spec.dynamoNamespace: Invalid value: "invalid/namespace": a valid label must be an empty string or consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyValue',  or 'my_value',  or '12345', regex used for validation is '(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?')`},
+			wantWarnings:    []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "invalid/namespace" remains the Dynamo namespace`},
+		},
+		{
+			name: "legacy namespace validation also applies on update",
+			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.DynamoNamespace = k8sptr.To("legacy-custom")
+			}),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.DynamoNamespace = k8sptr.To(strings.Repeat("a", 64))
+			}),
+			wantWebhookErrs: []string{`spec.dynamoNamespace: Invalid value: "` + strings.Repeat("a", 64) + `": must be no more than 63 bytes`},
+			wantWarnings:    []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "` + strings.Repeat("a", 64) + `" remains the Dynamo namespace`},
+		},
+
+		{
+			name: "legacy namespace with valid label punctuation is preserved",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.DynamoNamespace = k8sptr.To("Legacy_Custom.v1")
+			}),
+			wantDynamoNamespace: k8sptr.To("Legacy_Custom.v1"),
+			wantWarnings:        []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "Legacy_Custom.v1" remains the Dynamo namespace`},
+		},
+		{
+			name: "empty legacy namespace remains accepted without a warning",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.DynamoNamespace = k8sptr.To("")
+			}),
+			wantDynamoNamespace: k8sptr.To(""),
+		},
+		{
+			name:            "beta request rejects an oversized preserved legacy namespace",
+			deployment:      betaDCDWithLegacyNamespace(t, strings.Repeat("a", 64)),
+			wantWebhookErrs: []string{`spec.dynamoNamespace: Invalid value: "` + strings.Repeat("a", 64) + `": must be no more than 63 bytes`},
+			wantWarnings:    []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "` + strings.Repeat("a", 64) + `" remains the Dynamo namespace`},
+		},
+		{
+			name:                "beta request retains a valid preserved legacy namespace on update",
+			oldDeployment:       betaDCDWithLegacyNamespace(t, "legacy-custom"),
+			deployment:          betaDCDWithLegacyNamespace(t, "legacy-custom"),
+			wantDynamoNamespace: k8sptr.To("legacy-custom"),
+			wantWarnings:        []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "legacy-custom" remains the Dynamo namespace`},
+		},
+		{
+			name:            "beta request rejects an oversized preserved legacy namespace on update",
+			oldDeployment:   betaDCDWithLegacyNamespace(t, "legacy-custom"),
+			deployment:      betaDCDWithLegacyNamespace(t, strings.Repeat("a", 64)),
+			wantWebhookErrs: []string{`spec.dynamoNamespace: Invalid value: "` + strings.Repeat("a", 64) + `": must be no more than 63 bytes`},
+			wantWarnings:    []string{`spec.dynamoNamespace is deprecated but preserved for compatibility. Value "` + strings.Repeat("a", 64) + `" remains the Dynamo namespace`},
 		},
 
 		// EPP rules and their source-version ownership.
@@ -2127,6 +2203,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				test.seedGates = &seedGates
 			}
 			actual := runAdmissionTest(t, test)
+			if tt.wantDynamoNamespace != nil {
+				t.Log("Verify the admitted legacy namespace still selects the same runtime identity")
+				if got := dynamo.GetDCDDynamoNamespace(admittedBetaDCD(t, actual)); got != *tt.wantDynamoNamespace {
+					t.Fatalf("Dynamo namespace = %q, want %q", got, *tt.wantDynamoNamespace)
+				}
+			}
 			if tt.wantPodAnnotations != nil || tt.wantRoleReplicas != nil {
 				actualDCD := admittedBetaDCD(t, actual)
 				if tt.wantRoleReplicas != nil {
@@ -2258,4 +2340,18 @@ func nativeDCDForAdmission(t *testing.T, alpha bool, mutate func(*nvidiacomv1bet
 		t.Fatal(err)
 	}
 	return spoke
+}
+
+func betaDCDWithLegacyNamespace(t *testing.T, namespace string) *nvidiacomv1beta1.DynamoComponentDeployment {
+	t.Helper()
+	alpha := alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+		dcd.Spec.DynamoNamespace = k8sptr.To(namespace)
+	})
+	beta := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	if err := alpha.ConvertTo(beta); err != nil {
+		t.Fatalf("preserve legacy namespace in a beta request: %v", err)
+	}
+	beta.APIVersion = nvidiacomv1beta1.GroupVersion.String()
+	beta.Kind = "DynamoComponentDeployment"
+	return beta
 }
