@@ -154,6 +154,8 @@ def add_argument(
         value_type_for_env = arg_type
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None
+    elif isinstance(default, list) and env_value_type is None and callable(arg_type):
+        value_type_for_env = _split_env_list(arg_type)
     default_with_env = env_or_default(env_var, default, value_type=value_type_for_env)
 
     names = [flag_name]
@@ -255,3 +257,14 @@ def _get_dest_name(flag_name: str, dest: Optional[str] = None) -> str:
     Get the destination name for the flag.
     """
     return dest if dest else flag_name.lstrip("-").replace("-", "_")
+
+
+def _split_env_list(item_type: Callable[[str], Any]) -> Callable[[str], list[Any]]:
+    """
+    Parse a whitespace-separated env value into a list, converting each item.
+    """
+
+    def parse(value: str) -> list[Any]:
+        return [item_type(item) for item in value.split()]
+
+    return parse
