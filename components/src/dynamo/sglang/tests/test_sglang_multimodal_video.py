@@ -4,6 +4,7 @@
 import asyncio
 import importlib
 import json
+import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -830,13 +831,22 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
 
     monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
     monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
-    monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
+    loop_thread = threading.get_ident()
+    probe_threads = []
+
+    def probe(content):
+        probe_threads.append(threading.get_ident())
+        return "vp9"
+
+    monkeypatch.setattr(ewh, "probe_video_codec", probe)
     monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(ewh.importlib, "import_module", _selective_import({"decord"}))
 
     handler = _bare_handler()
     result = await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
 
+    assert len(probe_threads) == 1
+    assert probe_threads[0] != loop_thread
     assert result == b"vp9-bytes"
 
 

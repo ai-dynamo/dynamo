@@ -51,23 +51,286 @@ def _fake_pynv(num_frames: int = 10, h: int = 4, w: int = 6):
     return mod
 
 
+def _mp4_box(
+    kind: bytes, payload: bytes = b"", *, extended: bool = False, to_end: bool = False
+) -> bytes:
+    if extended:
+        return b"\0\0\0\1" + kind + (len(payload) + 16).to_bytes(8, "big") + payload
+    size = 0 if to_end else len(payload) + 8
+    return size.to_bytes(4, "big") + kind + payload
+
+
+def _mp4_track(
+    codec: bytes,
+    handler: bytes = b"vide",
+    *,
+    entry_count: int = 1,
+    entry_payload: bytes = bytes(78),
+) -> bytes:
+    entry = _mp4_box(codec, entry_payload)
+    stsd = _mp4_box(b"stsd", bytes(4) + entry_count.to_bytes(4, "big") + entry)
+    mdia = _mp4_box(b"hdlr", bytes(8) + handler + bytes(12))
+    mdia += _mp4_box(b"minf", _mp4_box(b"stbl", stsd))
+    return _mp4_box(b"trak", _mp4_box(b"mdia", mdia))
+
+
 @pytest.mark.parametrize(
-    "data,expected",
+    "fourcc,expected",
     [
-        (b"\x00\x00\x00\x18ftypisom....avc1", "h264"),
-        (b"....hev1....", "hevc"),
-        (b"....hvc1....", "hevc"),
-        (b"....vp09....", "vp9"),
-        (b"....av01....", "av1"),
-        (b"\x1aE\xdf\xa3....V_VP9....", "vp9"),
-        (b"....V_MPEG4/ISO/AVC....", "h264"),
-        (b"....V_MPEGH/ISO/HEVC....", "hevc"),
-        (b"random bytes, no codec marker", None),
-        (b"", None),
+        (b"avc1", "h264"),
+        (b"avc3", "h264"),
+        (b"hev1", "hevc"),
+        (b"hvc1", "hevc"),
+        (b"av01", "av1"),
+        (b"vp09", "vp9"),
+        (b"vp08", "vp8"),
     ],
 )
-def test_probe_video_codec(data, expected):
+def test_probe_mp4_video_track(fourcc, expected):
+    moov = _mp4_box(b"moov", _mp4_track(fourcc))
+    # Conflicting markers in media data must not override the sample entry.
+    mdat = _mp4_box(b"mdat", b"av01 hev1 avc1 V_AV1")
+    data = _mp4_box(b"ftyp", b"isom\0\0\0\0isomavc1")
+    data += moov + mdat
     assert nd.probe_video_codec(data) == expected
+
+
+def test_probe_mp4_moov_after_mdat():
+    # A non-faststart clip has its track metadata after the media payload.
+    fake_moov = _mp4_box(b"moov", _mp4_track(b"av01"))
+    data = _mp4_box(b"mdat", fake_moov, extended=True)
+    data += _mp4_box(b"moov", _mp4_track(b"avc1"))
+    assert nd.probe_video_codec(data) == "h264"
+
+
+@pytest.mark.parametrize("location", ["title", "padding"])
+def test_probe_mp4_ignores_non_codec_markers(location):
+    text = b"ordinary av01 demo"
+    if location == "padding":
+        data = _mp4_box(b"free", text) + _mp4_box(b"moov", _mp4_track(b"avc1"))
+    else:
+        value = _mp4_box(b"data", b"\0\0\0\1" + bytes(4) + text)
+        ilst = _mp4_box(b"ilst", _mp4_box(b"\xa9nam", value))
+        metadata = _mp4_box(b"udta", _mp4_box(b"meta", bytes(4) + ilst))
+        data = _mp4_box(b"moov", metadata + _mp4_track(b"avc1"))
+    assert nd.probe_video_codec(data) == "h264"
+
+
+@pytest.mark.parametrize(
+    "entry_count,entry_payload",
+    [
+        (0, bytes(78)),
+        (2, bytes(78)),
+        (1, b"av01"),
+    ],
+)
+def test_probe_mp4_rejects_invalid_sample_entries(entry_count, entry_payload):
+    track = _mp4_track(b"avc1", entry_count=entry_count, entry_payload=entry_payload)
+    assert nd.probe_video_codec(_mp4_box(b"moov", track)) is None
+
+
+@pytest.mark.parametrize("extended,to_end", [(True, False), (False, True)])
+def test_probe_mp4_box_size_variants(extended, to_end):
+    data = _mp4_box(b"moov", _mp4_track(b"avc1"), extended=extended, to_end=to_end)
+    assert nd.probe_video_codec(data) == "h264"
+
+
+def test_probe_mp4_ignores_audio_tracks_and_nested_metadata():
+    fake_video = _mp4_track(b"av01")
+    tracks = _mp4_box(b"udta", fake_video) + _mp4_track(b"av01", b"soun")
+    tracks += _mp4_track(b"avc1")
+    data = _mp4_box(b"moov", tracks)
+    assert nd.probe_video_codec(data) == "h264"
+
+
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        (b"vp09", b"avc1", "h264"),
+        (b"avc1", b"vp09", "h264"),
+        (b"avc1", b"av01", "av1"),
+        (b"avc1", b"hvc1", "hevc"),
+        (b"xxxx", b"avc1", "h264"),
+    ],
+)
+def test_probe_mp4_preserves_multi_track_routing(first, second, expected):
+    data = _mp4_box(b"moov", _mp4_track(first) + _mp4_track(second))
+    assert nd.probe_video_codec(data) == expected
+
+
+def _ebml_element(
+    kind: int, payload: bytes = b"", *, unknown_size: bool = False
+) -> bytes:
+    element_id = kind.to_bytes((kind.bit_length() + 7) // 8, "big")
+    if unknown_size:
+        return element_id + b"\xff" + payload
+    width = next(n for n in range(1, 9) if len(payload) < (1 << (7 * n)) - 1)
+    size = ((1 << (7 * width)) | len(payload)).to_bytes(width, "big")
+    return element_id + size + payload
+
+
+def _matroska_track(codec: bytes, track_type: int = 1, extra: bytes = b"") -> bytes:
+    return _ebml_element(
+        0xAE,
+        _ebml_element(0x83, bytes([track_type])) + _ebml_element(0x86, codec) + extra,
+    )
+
+
+def _matroska(tracks: bytes, *, unknown_size: bool = False) -> bytes:
+    return _ebml_element(
+        0x1A45DFA3, _ebml_element(0x4282, b"matroska")
+    ) + _ebml_element(
+        0x18538067, _ebml_element(0x1654AE6B, tracks), unknown_size=unknown_size
+    )
+
+
+@pytest.mark.parametrize(
+    "codec,expected",
+    [
+        (b"V_MPEG4/ISO/AVC", "h264"),
+        (b"V_MPEGH/ISO/HEVC", "hevc"),
+        (b"V_AV1", "av1"),
+        (b"V_VP9", "vp9"),
+        (b"V_VP8", "vp8"),
+    ],
+)
+def test_probe_matroska_video_track(codec, expected):
+    extra = _ebml_element(0x536E, b"title av01 hev1 V_AV1") + _ebml_element(
+        0x63A2, b"V_AV1 avc1"
+    )
+    data = _matroska(_matroska_track(codec, extra=extra))
+    assert nd.probe_video_codec(data) == expected
+
+
+@pytest.mark.parametrize(
+    "codec_id,expected",
+    [
+        (b"V_MPEG4/ISO/AVC" + bytes(18), "h264"),
+        (b"V_MPEGH/ISO/HEVC" + bytes(1024), "hevc"),
+    ],
+)
+def test_probe_matroska_null_padded_codec_id(codec_id, expected):
+    assert nd.probe_video_codec(_matroska(_matroska_track(codec_id))) == expected
+
+
+@pytest.mark.parametrize(
+    "codec_id,expected",
+    [
+        (b"V_AV1\0ignored", "av1"),
+        (b"V_MPEGH/ISO/HEVC" + b"X" * 1024, None),
+    ],
+)
+def test_probe_matroska_codec_id_termination(codec_id, expected):
+    assert nd.probe_video_codec(_matroska(_matroska_track(codec_id))) == expected
+
+
+@pytest.mark.parametrize("size_bytes", [b"\xff", b"\x01" + b"\xff" * 7])
+def test_probe_matroska_unknown_segment_size(size_bytes):
+    tracks = _ebml_element(0x1654AE6B, _matroska_track(b"V_MPEG4/ISO/AVC"))
+    data = _ebml_element(0x1A45DFA3) + b"\x18\x53\x80\x67" + size_bytes + tracks
+    assert nd.probe_video_codec(data) == "h264"
+
+
+@pytest.mark.parametrize("cluster_unknown_size", [False, True])
+def test_probe_matroska_tracks_after_cluster(cluster_unknown_size):
+    # Track metadata can follow Cluster. Marker-looking bytes inside a block
+    # still belong to the compressed payload, not to the container hierarchy.
+    block = _ebml_element(0xA3, _ebml_element(0x1654AE6B, _matroska_track(b"V_AV1")))
+    cluster = _ebml_element(0x1F43B675, block, unknown_size=cluster_unknown_size)
+    tracks = _ebml_element(0x1654AE6B, _matroska_track(b"V_MPEG4/ISO/AVC"))
+
+    # Late Tracks must be indexed by a preceding SeekHead. Fixed-width seek
+    # offsets keep its length stable while computing the Tracks position.
+    def seek_head(position):
+        seek = _ebml_element(0x53AB, b"\x16\x54\xae\x6b")
+        seek += _ebml_element(0x53AC, position.to_bytes(8, "big"))
+        return _ebml_element(0x114D9B74, _ebml_element(0x4DBB, seek))
+
+    seek = seek_head(len(seek_head(0)) + len(cluster))
+    segment = _ebml_element(0x18538067, seek + cluster + tracks, unknown_size=True)
+    assert nd.probe_video_codec(_ebml_element(0x1A45DFA3) + segment) == "h264"
+
+
+def test_probe_matroska_ignores_non_video_tracks_and_fake_nested_entries():
+    tracks = _ebml_element(0xEC, _matroska_track(b"V_AV1"))
+    tracks += _matroska_track(b"V_AV1", track_type=2) + _matroska_track(
+        b"V_MPEG4/ISO/AVC"
+    )
+    assert nd.probe_video_codec(_matroska(tracks)) == "h264"
+
+
+@pytest.mark.parametrize("first", [b"V_VP9", b"V_UNKNOWN"])
+def test_probe_matroska_considers_later_video_tracks(first):
+    data = _matroska(_matroska_track(first) + _matroska_track(b"V_MPEG4/ISO/AVC"))
+    assert nd.probe_video_codec(data) == "h264"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",
+        b"ordinary title av01",
+        b"....avc1....",
+        b"\0\0\0\7moovavc1",
+        b"\0\0\0\xffmoovavc1",
+        b"\0\0\0\1moov",
+        _mp4_box(b"mdat", b"avc1"),
+        _mp4_box(
+            b"moov", _mp4_box(b"trak", _mp4_box(b"mdia", _mp4_box(b"hdlr", b"vide")))
+        ),
+        _ebml_element(0x1A45DFA3) + b"\x18\x53",
+        _ebml_element(0x1A45DFA3) + b"\0avc1",
+        _ebml_element(0x1A45DFA3) + b"\x18\x53\x80\x67\x90avc1",
+        b"".join(
+            (
+                _ebml_element(0x1A45DFA3),
+                _ebml_element(
+                    0x18538067,
+                    _ebml_element(0x1F43B675, b"V_AV1", unknown_size=True),
+                    unknown_size=True,
+                ),
+            )
+        ),
+    ],
+)
+def test_probe_malformed_or_unrecognized_container(data):
+    assert nd.probe_video_codec(data) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _mp4_box(b"moov", _mp4_track(b"avc1")),
+        _matroska(_matroska_track(b"V_MPEG4/ISO/AVC")),
+    ],
+)
+def test_probe_truncated_container_does_not_raise(data):
+    for end in range(len(data)):
+        assert nd.probe_video_codec(data[:end]) is None
+
+
+@pytest.mark.parametrize("trailer", [b"\0", b"\0\0\0\x20freeav01"])
+def test_probe_mp4_preserves_codec_with_invalid_trailer(trailer):
+    data = _mp4_box(b"moov", _mp4_track(b"avc1")) + trailer
+    assert nd.probe_video_codec(data) == "h264"
+
+
+@pytest.mark.parametrize("unknown_size", [False, True])
+def test_probe_matroska_preserves_codec_with_invalid_trailer(unknown_size):
+    tracks = _ebml_element(0x1654AE6B, _matroska_track(b"V_MPEG4/ISO/AVC"))
+    segment = _ebml_element(0x18538067, tracks + b"\0V_AV1", unknown_size=unknown_size)
+    data = _ebml_element(0x1A45DFA3) + segment + b"\0"
+    assert nd.probe_video_codec(data) == "h264"
+
+
+def test_probe_mp4_rejects_invalid_trailer_inside_moov():
+    data = _mp4_box(b"moov", _mp4_track(b"avc1") + b"\0")
+    assert nd.probe_video_codec(data) is None
+
+
+def test_probe_matroska_rejects_invalid_trailer_inside_tracks():
+    data = _matroska(_matroska_track(b"V_MPEG4/ISO/AVC") + b"\0")
+    assert nd.probe_video_codec(data) is None
 
 
 def test_nvdec_available_false_when_disabled(monkeypatch):

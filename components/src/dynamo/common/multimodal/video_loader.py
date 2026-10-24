@@ -212,7 +212,7 @@ class VideoLoader:
         ``media_io_kwargs`` contract, so it is reached for royalty-free codecs,
         or for every clip when ``DYN_DISABLE_NVDEC=1``.
         """
-        codec = probe_video_codec(content)
+        codec = await asyncio.to_thread(probe_video_codec, content)
         if should_use_nvdec(codec):
             try:
                 return await asyncio.to_thread(
