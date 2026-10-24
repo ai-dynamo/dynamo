@@ -51,6 +51,12 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/status
+  verbs:
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - secrets
   - serviceaccounts
   verbs:
@@ -250,6 +256,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments
+  - dynamographdeploymentenginegroups
   - dynamographdeploymentrequests
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
@@ -285,16 +292,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamographdeploymentenginegroups
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - nvidia.com
   resources:

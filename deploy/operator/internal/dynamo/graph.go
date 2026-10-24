@@ -2618,10 +2618,34 @@ func GenerateGrovePodCliqueSet(
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	var resourceClaimTemplates []grovev1alpha1.ResourceClaimTemplateConfig
+	engineGroups := groveEngineGroupRenderer{
+		operatorConfig: operatorConfig, runtimeConfig: runtimeConfig, secretsRetriever: secretsRetriever,
+	}
 
 	for i := range dynamoDeployment.Spec.Components {
-		component := dynamoDeployment.Spec.Components[i].DeepCopy()
+		component := &dynamoDeployment.Spec.Components[i]
 		componentName := component.ComponentName
+		// Engine Groups render their own launch layout; graph assembly only combines Grove resources.
+		if component.EngineGroup != nil {
+			if dynamoDeployment.Spec.ProviderOverride != nil || len(checkpointInfoByComponent) != 0 {
+				return nil, fmt.Errorf("Engine Group workloads do not support provider overrides or checkpoint startup")
+			}
+			if updateStrategy != nil && *updateStrategy != grovev1alpha1.OnDeleteStrategy {
+				return nil, fmt.Errorf("Engine Group workloads require Grove OnDelete update strategy")
+			}
+			clique, world, err := engineGroups.Render(dynamoDeployment, component, validatedQueueName,
+				groveClusterTopologyDomains, restartState, existingRestartAnnotations)
+			if err != nil {
+				return nil, fmt.Errorf("component %q: %w", componentName, err)
+			}
+			gangSet.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.OnDeleteStrategy}
+			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
+			scalingGroups = append(scalingGroups, world)
+			continue
+		}
+
+		// Ordinary components retain the existing role expansion and backend rendering path.
+		component = component.DeepCopy()
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 
 		propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)

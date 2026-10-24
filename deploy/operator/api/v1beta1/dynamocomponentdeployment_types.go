@@ -370,7 +370,7 @@ func (s *DynamoComponentDeploymentSharedSpec) IsGroveScalingGroupForced() bool {
 // UsesPCSG reports whether Grove renders this component as a
 // PodCliqueScalingGroup rather than a standalone PodClique.
 func (s *DynamoComponentDeploymentSharedSpec) UsesPCSG() bool {
-	return s.GetNumberOfNodes() > 1 || s.IsInterPodGMSEnabled() || s.IsGroveScalingGroupForced()
+	return s.EngineGroup != nil || s.GetNumberOfNodes() > 1 || s.IsInterPodGMSEnabled() || s.IsGroveScalingGroupForced()
 }
 
 // IsInterPodFailoverEnabled reports whether inter-pod GMS failover is configured.

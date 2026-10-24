@@ -7,6 +7,7 @@ package enginegroup
 
 import (
 	"fmt"
+	"net/http"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -19,10 +20,13 @@ type SetupOptions struct {
 
 // Setup registers the Engine Group subsystem with the operator manager.
 func Setup(mgr ctrl.Manager, opts SetupOptions) error {
-	// Fail closed until a production provider is registered by the integration layer.
+	// Resolve the production provider unless the caller supplies another implementation.
 	provider := opts.RuntimeProvider
 	if provider == nil {
 		provider = unavailableEngineGroupRuntimeProvider{}
+		if opts.GroveEnabled {
+			provider = &groveRuntimeProvider{Client: mgr.GetClient(), HTTP: &http.Client{}}
+		}
 	}
 
 	// Register reconciliation and watches together at the subsystem composition root.

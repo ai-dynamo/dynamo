@@ -24,6 +24,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	enginegroupcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/enginegroup"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
@@ -44,6 +45,7 @@ type groveWorkloadsReconciler struct {
 	renderer        *groveWorkloadRenderer
 	scaler          *groveScaler
 	stableResources *groveStableResourcesReconciler
+	engineGroups    *enginegroupcontroller.GroveChildrenReconciler
 }
 
 func newGroveWorkloadsReconciler(
@@ -66,6 +68,7 @@ func newGroveWorkloadsReconciler(
 		),
 		scaler:          newGroveScaler(kubeClient),
 		stableResources: newGroveStableResourcesReconciler(kubeClient, recorder, config),
+		engineGroups:    &enginegroupcontroller.GroveChildrenReconciler{Client: kubeClient},
 	}
 }
 
@@ -142,6 +145,9 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	resources := append(stableResources, podCliqueSetResource)
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
+	if err := r.reconcileEngineGroups(ctx, dgd, syncedPodCliqueSet, &result); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 

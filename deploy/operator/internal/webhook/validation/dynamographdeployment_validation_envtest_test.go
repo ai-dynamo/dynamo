@@ -80,7 +80,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept"},
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: Engine Groups require a supported SGLang or vLLM backend"},
 		},
 		{
 			name: "initialSize must satisfy the template policy independently of world count",

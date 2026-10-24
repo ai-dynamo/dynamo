@@ -64,6 +64,45 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	providerOverridesSupported        bool
 	workloadProvider                  string
 	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	engineGroupsSupported             bool
+}
+
+type componentEngineGroupSpecValidationOptions struct {
+	component        *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	backendFramework string
+	parentEnv        []corev1.EnvVar
+	hasRootOverride  bool
+}
+
+// validateComponentEngineGroupSpec validates the child against its component and graph context.
+// spec, options.component and fldPath must not be nil; spec must be options.component.EngineGroup.
+func (v *sharedValidation) validateComponentEngineGroupSpec(
+	spec *nvidiacomv1beta1.ComponentEngineGroupSpec,
+	fldPath *field.Path,
+	options componentEngineGroupSpecValidationOptions,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Validate graph prerequisites independently of the physical launch geometry.
+	if options.hasRootOverride {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "Engine Group workload overrides cannot bypass the resolved launch profile"))
+	}
+
+	// Resolving geometry requires a positive explicit creation seed, not the runtime's infer-size convention.
+	if spec.InitialSize < 1 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("initialSize"), spec.InitialSize, "must be positive"))
+	}
+
+	// Backend-owned resolvers prove the effective geometry; neither runtime is a fallback for the other.
+	var err error
+	switch dynamo.BackendFramework(options.backendFramework) {
+	default:
+		allErrs = append(allErrs, field.Forbidden(fldPath, "Engine Groups require a supported SGLang or vLLM backend"))
+	}
+	if err != nil {
+		allErrs = append(allErrs, field.Forbidden(fldPath, err.Error()))
+	}
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -89,11 +128,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 
-	// Reject the declarative opt-in until its DGD workload pathway is implemented.
-	if spec.EngineGroup != nil {
+	// Only the DGD's Grove program owns independently scalable world creation.
+	if spec.EngineGroup != nil && !options.engineGroupsSupported {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("engineGroup"),
-			"DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept",
+			"Engine Groups require the DGD Grove workload pathway",
 		))
 	}
 
