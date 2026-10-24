@@ -196,6 +196,24 @@ def test_region_uses_gms_pool_only_for_rw_managed_tags(
     assert pool_calls == expected_pool_calls
 
 
+@pytest.mark.parametrize(
+    "backup_options",
+    [
+        {"enable_cpu_backup": True},
+        {"enable_disk_backup": True},
+        {"enable_cpu_backup": True, "cpu_backup_backend": "pinned"},
+    ],
+)
+def test_region_rejects_enabled_backup_options(build_impl, backup_options):
+    impl, _, _, pool_calls = build_impl()
+
+    with pytest.raises(ValueError, match="unsupported option"):
+        with impl.region("weights", **backup_options):
+            pass
+
+    assert pool_calls == []
+
+
 def test_pause_resume_routes_only_managed_tags(build_impl):
     impl, weights, kv_cache, _ = build_impl(
         weights_lock=GrantedLockType.RO,
