@@ -148,6 +148,7 @@ worker_selection:
         overlap_score_credit_decay: 0.0
         prefill_load_scale: 1.0
         decode_active_request_weight: 0.0
+        prefix_affinity_weight: 0.0
         shared_cache_multiplier: 0.5
         router_temperature: 0.0
 ```
@@ -555,6 +556,8 @@ Use `decode_active_request_weight` when decode forward-pass time depends more on
 
 This setting is experimental and defaults to `0`, which preserves block-only decode scoring. A positive value trades some KV locality for batch-size balance and can help model, runtime, and hardware combinations near a compute-bound roofline knee, including some MLA or MTP configurations. It can regress throughput, TTFT, and ITL when decode remains primarily memory-bound, so benchmark representative traffic and start with a small weight before increasing it.
 
+Use `prefix_affinity_weight` for multi-turn or agentic traffic where a resumed request should usually stay on the worker that already holds its prefix. The overlap credit only offsets the request's own prefill cost, so it can be worth at most about one request of load: one extra in-flight sequence on the cache-holding worker can send the next turn to a cold worker that recomputes the whole prefix. This parameter adds `prefix_affinity_weight * missing_prefix_blocks` to each candidate's score, where `missing_prefix_blocks` is the number of prompt blocks the worker does not hold on device. The term is not capped, so it keeps a session on its cache holder until the load gap exceeds the weighted cost of the missing blocks. It defaults to `0`, which preserves the existing scoring. Values between `1` and `4` worked well in a mocker replay of 16 sessions with 12 turns and a 3K-token prefix; benchmark representative traffic before raising it, since a large weight trades load balance for locality. Cache-aware decode scoring, used by conditional disaggregation and by aggregated routing without prefill tracking, charges it the same way. Load-only decode routing ignores it.
+
 Use `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight` when the backend exposes lower-tier prefix cache via a KV connector (for example, vLLM's `OffloadingConnector` for CPU offload, or a disk-backed tier). These multipliers control how much each lower-tier hit credits against the prefill load, mirroring the role of `overlap_score_credit` for the device tier. A worker holding a full prefix in CPU offload gets `host_cache_hit_weight * matched_blocks` credit against its prefill cost; raising the weight makes the router more willing to route prefix-matched requests to that worker even if a different worker has a partial device-local match.
 
 Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly. In this mode the router falls back to approximate routing. Keep the default TTL policy unless you are explicitly testing the experimental per-rank capacity-bounded LRU with workers that publish a positive `total_kv_blocks` value.
@@ -630,8 +633,8 @@ Use a returned `router_id` and revision in `PATCH /router_policy`:
 
 The default policy accepts the following finite, non-negative parameters:
 `overlap_score_credit`, `overlap_score_credit_decay`, `prefill_load_scale`,
-`decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`,
-`shared_cache_multiplier`, and `router_temperature`. These change policy scoring only;
+`decode_active_request_weight`, `prefix_affinity_weight`, `host_cache_hit_weight`,
+`disk_cache_hit_weight`, `shared_cache_multiplier`, and `router_temperature`. These change policy scoring only;
 host-owned load accounting and queue settings remain unchanged.
 
 Omitted parameters retain their current values. A parameter set to `null` restores that

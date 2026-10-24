@@ -346,7 +346,14 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             // avoids inverting taint preference among negative-score workers.
             let overlap_adjusted_decode_blocks =
                 (decode_cost_blocks - overlap_credit_blocks).max(0.0);
-            let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+            let mut logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+            // The credit here only offsets decode load, so it has the same cap as the
+            // prefill path below; charge missing prefix blocks the same way.
+            if kv_router_config.prefix_affinity_weight != 0.0 {
+                let missing_prefix_blocks =
+                    (context.request_blocks as f64 - device_overlap_blocks).max(0.0);
+                logit += kv_router_config.prefix_affinity_weight * missing_prefix_blocks;
+            }
             // Stamped for the same reason as the two rows below: this row is emitted from the
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
@@ -378,7 +385,19 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let raw_prefill_blocks = raw_prefill_tokens as f64 / context.block_size as f64;
         let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
-        let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
+        let mut logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
+        // Load-only decode routing (decode without prefill tracking and with zero overlap
+        // credit) ignores the prompt, so it never charges missing prefix blocks.
+        if kv_router_config.prefix_affinity_weight != 0.0
+            && (self.worker_type != "decode" || context.track_prefill_tokens)
+        {
+            // Charge each prompt block this worker lacks. The overlap credit is capped at the
+            // request's own prefill, so it alone cannot outweigh transient decode load on the
+            // worker that already holds a resumed prefix.
+            let missing_prefix_blocks =
+                (context.request_blocks as f64 - device_overlap_blocks).max(0.0);
+            logit += kv_router_config.prefix_affinity_weight * missing_prefix_blocks;
+        }
 
         // These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue`
         // spawns without the caller's request span, so the logging layer cannot attach

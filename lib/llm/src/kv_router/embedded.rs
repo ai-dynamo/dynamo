@@ -324,7 +324,9 @@ impl EmbeddedSelection {
             queue_metrics.clone(),
             cancellation_token.child_token(),
         );
-        if worker_type == WorkerType::Prefill
+        // Decode routers ignore prompt overlap by design, so only routers that place
+        // prompt work (prefill pools and single-pool aggregated serving) report it.
+        if matches!(worker_type, WorkerType::Prefill | WorkerType::Aggregated)
             && !partition
                 .scheduler()
                 .set_non_max_overlap_selection_observer(non_max_overlap_observer(

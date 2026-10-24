@@ -105,6 +105,155 @@ fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
     assert_eq!(select(&policy), 0);
 }
 
+/// Issue 16194: a resumed turn whose prefix is cached on one worker. The overlap credit is
+/// capped at the request's own prefill, so slightly higher decode load on the cache holder
+/// sends the turn to a cold worker unless `prefix_affinity_weight` charges the missing blocks.
+#[test]
+fn prefix_affinity_weight_keeps_resumed_prefix_on_cache_holder() {
+    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    use serde_json::json;
+
+    let (workers, mut request) = fixture(2, 47 * 64);
+    for (worker, load) in &mut request.worker_loads {
+        let holder = worker.worker_id == 0;
+        load.active_prefill_tokens = 0;
+        load.active_requests = 0;
+        load.active_decode_blocks = if holder { 143 } else { 95 };
+        load.additional_active_blocks = 0;
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if holder { 46 } else { 0 });
+    }
+    let select = |config: KvRouterConfig| {
+        let policy = default_policy(config, "prefill");
+        policy
+            .select_worker(selection_input(&workers, &request, 64))
+            .unwrap()
+            .worker
+            .worker_id
+    };
+    let base = KvRouterConfig {
+        host_cache_hit_weight: 0.0,
+        disk_cache_hit_weight: 0.0,
+        ..Default::default()
+    };
+    assert_eq!(select(base.clone()), 1, "default weights move the session");
+    assert_eq!(
+        select(KvRouterConfig {
+            prefix_affinity_weight: 0.25,
+            ..base.clone()
+        }),
+        0
+    );
+    let mut policy = default_policy(base, "prefill");
+    let revision = policy.runtime_config().unwrap().revision();
+    let patch = json!({"prefix_affinity_weight": 0.25})
+        .as_object()
+        .unwrap()
+        .clone();
+    policy
+        .update_runtime_config(RuntimePolicyUpdate::patch(revision, patch))
+        .unwrap();
+    assert_eq!(
+        policy
+            .select_worker(selection_input(&workers, &request, 64))
+            .unwrap()
+            .worker
+            .worker_id,
+        0
+    );
+    let negative = json!({"prefix_affinity_weight": -1.0})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(
+        policy
+            .update_runtime_config(RuntimePolicyUpdate::patch(revision + 1, negative))
+            .is_err()
+    );
+
+    // A large enough load gap still wins, so the weight is a bias, not a pin.
+    for (worker, load) in &mut request.worker_loads {
+        if worker.worker_id == 0 {
+            load.active_decode_blocks = 400;
+        }
+    }
+    assert_eq!(
+        policy
+            .select_worker(selection_input(&workers, &request, 64))
+            .unwrap()
+            .worker
+            .worker_id,
+        1
+    );
+}
+
+/// Cache-aware decode scoring subtracts the overlap credit from decode load instead of
+/// prefill, so the credit has the same cap there. Conditional disaggregation and aggregated
+/// serving without prefill tracking both take that path and must charge missing blocks too.
+/// Plain decode routing stays load-only and never asks for cache inputs.
+#[test]
+fn prefix_affinity_weight_applies_to_cache_aware_decode_scoring() {
+    let (workers, mut request) = fixture(2, 47 * 64);
+    request.track_prefill_tokens = false;
+    for (worker, load) in &mut request.worker_loads {
+        let holder = worker.worker_id == 0;
+        *load = Default::default();
+        load.active_decode_blocks = if holder { 50 } else { 0 };
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if holder { 46 } else { 0 });
+    }
+    for (role, conditional_disagg_enabled) in
+        [(WorkerType::Decode, true), (WorkerType::Aggregated, false)]
+    {
+        let select = |prefix_affinity_weight: f64| {
+            let config = KvRouterConfig {
+                conditional_disagg_enabled,
+                host_cache_hit_weight: 0.0,
+                disk_cache_hit_weight: 0.0,
+                router_temperature: 0.0,
+                prefix_affinity_weight,
+                ..Default::default()
+            };
+            dynamo_custom_policy_builtin::default_factory()(
+                &config,
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            )
+            .select_worker(selection_input(&workers, &request, 64))
+            .unwrap()
+            .worker
+            .worker_id
+        };
+        assert_eq!(select(0.0), 1, "{role:?}: default weights move the session");
+        assert_eq!(select(1.0), 0, "{role:?}: affinity keeps the cache holder");
+    }
+
+    let plain_decode = dynamo_custom_policy_builtin::default_factory()(
+        &KvRouterConfig {
+            prefix_affinity_weight: 1.0,
+            ..Default::default()
+        },
+        WorkerType::Decode,
+        RoutingPartitionRef::new("model", "default"),
+    );
+    assert!(
+        !<WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(
+            &plain_decode
+        )
+        .contains(WorkerInputs::CACHE)
+    );
+    assert_eq!(
+        plain_decode.runtime_config().unwrap().parameters()["prefix_affinity_weight"],
+        0.0
+    );
+}
+
 #[test]
 fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
     use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
@@ -145,6 +294,7 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
             "host_cache_hit_weight",
             "disk_cache_hit_weight",
             "shared_cache_multiplier",
+            "prefix_affinity_weight",
         ] {
             assert_eq!(initial.parameters()[name], 0.0);
             assert!(
@@ -247,53 +397,135 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
     }
 }
 
+#[derive(Clone)]
+struct TaintedWorker(HashSet<String>);
+impl dynamo_kv_router::protocols::WorkerConfigLike for TaintedWorker {
+    fn data_parallel_start_rank(&self) -> u32 {
+        0
+    }
+    fn data_parallel_size(&self) -> u32 {
+        2
+    }
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        None
+    }
+    fn total_kv_blocks(&self) -> Option<u64> {
+        Some(16384)
+    }
+    fn taints(&self) -> &HashSet<String> {
+        &self.0
+    }
+}
+
+/// An empty prompt has no prefix to miss, so the affinity weight must not charge a block.
+/// The preferred-taint multiplier scales that phantom charge differently per worker, which
+/// would flip the pick toward the worker with more decode load but a smaller multiplier.
 #[test]
-fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
-    for temperature in [0.0, 0.7] {
-        for prompt in [1, 17, 127, 2048] {
-            for mode in 0..32 {
-                let (workers, mut request) = fixture(16, prompt);
+fn prefix_affinity_weight_charges_nothing_for_empty_prompt() {
+    let (_, mut request) = fixture(2, 0);
+    request
+        .routing_constraints
+        .preferred_taints
+        .insert("slow".into(), -1.0);
+    let workers: HashMap<u64, TaintedWorker> = HashMap::from([
+        (0, TaintedWorker(HashSet::from(["slow".to_owned()]))),
+        (1, TaintedWorker(HashSet::new())),
+    ]);
+    for (worker, load) in &mut request.worker_loads {
+        load.active_prefill_tokens = 0;
+        load.active_requests = 0;
+        load.active_decode_blocks = if worker.worker_id == 0 { 1 } else { 3 };
+        load.additional_active_blocks = 0;
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, 0);
+    }
+    for label in ["prefill", "decode"] {
+        for track_prefill_tokens in [true, false] {
+            request.track_prefill_tokens = track_prefill_tokens;
+            for weight in [0.0, 4.0] {
                 let config = KvRouterConfig {
-                    router_temperature: temperature,
-                    overlap_score_credit_decay: 0.6,
-                    host_cache_hit_weight: 0.25,
-                    disk_cache_hit_weight: 0.1,
-                    decode_active_request_weight: if mode & 8 == 0 { 0.0 } else { 0.7 },
-                    shared_cache_multiplier: Some(if mode & 16 == 0 { 0.0 } else { 0.6 }),
+                    host_cache_hit_weight: 0.0,
+                    disk_cache_hit_weight: 0.0,
+                    router_temperature: 0.0,
+                    prefix_affinity_weight: weight,
                     ..Default::default()
                 };
-                if mode % 8 >= 4 {
-                    request.shared_cache_hits =
-                        Some(dynamo_kv_router::SharedCacheHits::from_ranges(vec![
-                            1..3,
-                            5..12,
-                        ]));
-                }
-                match mode % 4 {
-                    1 => request.overlap.tier_overlap_blocks = Default::default(),
-                    2 => request.worker_loads.clear(),
-                    3 => request.track_prefill_tokens = false,
-                    _ => {}
-                }
+                let input = || {
+                    WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16)
+                };
                 let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
                     Some(config.clone()),
-                    "test",
+                    label,
                     42,
                 );
-                let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
-                for _ in 0..64 {
-                    let input = support::selection_input(&workers, &request, 16);
-                    let expected = reference.select_worker(input).unwrap();
-                    let actual = plugin.select_worker(input).unwrap();
-                    assert_eq!(
-                        actual.worker, expected.worker,
-                        "temperature={temperature} prompt={prompt} mode={mode}"
+                let plugin = DefaultWorkerSelector::new_seeded(Some(config), label, 42);
+                let expected = reference.select_worker(input()).unwrap().worker;
+                let actual = plugin.select_worker(input()).unwrap().worker;
+                let case = format!("label={label} track={track_prefill_tokens} weight={weight}");
+                assert_eq!(actual, expected, "{case}");
+                assert_eq!(actual.worker_id, 0, "{case}");
+            }
+        }
+    }
+}
+
+#[test]
+fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
+    // "decode" also covers the cache-aware decode subtraction path when prefill tracking is off.
+    for label in ["test", "decode"] {
+        for temperature in [0.0, 0.7] {
+            for prompt in [1, 17, 127, 2048] {
+                for mode in 0..64 {
+                    if label == "decode" && mode % 4 != 3 {
+                        continue;
+                    }
+                    let (workers, mut request) = fixture(16, prompt);
+                    let config = KvRouterConfig {
+                        router_temperature: temperature,
+                        overlap_score_credit_decay: 0.6,
+                        host_cache_hit_weight: 0.25,
+                        disk_cache_hit_weight: 0.1,
+                        decode_active_request_weight: if mode & 8 == 0 { 0.0 } else { 0.7 },
+                        shared_cache_multiplier: Some(if mode & 16 == 0 { 0.0 } else { 0.6 }),
+                        prefix_affinity_weight: if mode & 32 == 0 { 0.0 } else { 0.9 },
+                        ..Default::default()
+                    };
+                    if mode % 8 >= 4 {
+                        request.shared_cache_hits =
+                            Some(dynamo_kv_router::SharedCacheHits::from_ranges(vec![
+                                1..3,
+                                5..12,
+                            ]));
+                    }
+                    match mode % 4 {
+                        1 => request.overlap.tier_overlap_blocks = Default::default(),
+                        2 => request.worker_loads.clear(),
+                        3 => request.track_prefill_tokens = false,
+                        _ => {}
+                    }
+                    let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+                        Some(config.clone()),
+                        label,
+                        42,
                     );
-                    assert_eq!(actual.cached_tokens, expected.cached_tokens);
-                    assert_eq!(
-                        actual.potential_decode_blocks,
-                        expected.potential_decode_blocks
-                    );
+                    let plugin = DefaultWorkerSelector::new_seeded(Some(config), label, 42);
+                    for _ in 0..64 {
+                        let input = support::selection_input(&workers, &request, 16);
+                        let expected = reference.select_worker(input).unwrap();
+                        let actual = plugin.select_worker(input).unwrap();
+                        assert_eq!(
+                            actual.worker, expected.worker,
+                            "label={label} temperature={temperature} prompt={prompt} mode={mode}"
+                        );
+                        assert_eq!(actual.cached_tokens, expected.cached_tokens);
+                        assert_eq!(
+                            actual.potential_decode_blocks,
+                            expected.potential_decode_blocks
+                        );
+                    }
                 }
             }
         }
