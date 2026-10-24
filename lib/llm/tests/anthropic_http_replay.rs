@@ -853,6 +853,60 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
 
 #[tokio::test]
 #[serial]
+async fn text_before_tool_result_keeps_tool_result_after_its_call() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([load_agent_fixture("text.sse").await.unwrap()]).await;
+
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 64,
+                "stream": false,
+                "tools": [tool("list_directory")],
+                "messages": [
+                    {"role": "user", "content": "List /tmp"},
+                    {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "list_directory",
+                        "input": {"path": "/tmp"}
+                    }]},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "Here you go."},
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.txt"}
+                    ]}
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        match &requests[0].inner.messages[..] {
+            [
+                ChatCompletionRequestMessage::User(_),
+                ChatCompletionRequestMessage::Assistant(_),
+                ChatCompletionRequestMessage::Tool(tool_result),
+                ChatCompletionRequestMessage::User(user),
+            ] => {
+                assert_eq!(tool_result.tool_call_id, "toolu_1");
+                assert!(matches!(
+                    &user.content,
+                    ChatCompletionRequestUserMessageContent::Text(text) if text == "Here you go."
+                ));
+            }
+            other => panic!("unexpected translated messages: {other:#?}"),
+        }
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn count_tokens_returns_exact_estimate_without_calling_engine() {
     temp_env::async_with_vars(ENV, async {
         let svc = HarnessService::start(Vec::<Script>::new()).await;

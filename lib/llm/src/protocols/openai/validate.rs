@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Cow, fmt::Display, sync::LazyLock};
+use std::{borrow::Cow, collections::HashSet, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
     ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
@@ -604,7 +604,83 @@ pub fn validate_messages(
             }
         }
     }
-    Ok(())
+    validate_tool_results(messages)
+}
+
+struct PendingToolCalls<'a> {
+    message_index: usize,
+    issued: HashSet<&'a str>,
+    unanswered: HashSet<&'a str>,
+    has_results: bool,
+}
+
+impl PendingToolCalls<'_> {
+    fn ensure_answered(&self) -> Result<(), anyhow::Error> {
+        if !self.unanswered.is_empty() {
+            let mut unanswered: Vec<&str> = self.unanswered.iter().copied().collect();
+            unanswered.sort_unstable();
+            anyhow::bail!(
+                "`messages[{}].tool_calls` must be followed by tool messages responding to each \
+                 `tool_call_id`; missing responses for: {}",
+                self.message_index,
+                unanswered.join(", ")
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Each `tool` message must answer a call issued by the assistant message right before its run
+/// of tool messages, and that run must answer every call. Results may arrive in any order.
+/// A trailing assistant message whose calls have no results yet is accepted.
+fn validate_tool_results(
+    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ChatCompletionRequestMessage;
+
+    let mut pending: Option<PendingToolCalls> = None;
+    for (message_index, message) in messages.iter().enumerate() {
+        if let ChatCompletionRequestMessage::Tool(tool) = message {
+            let Some(calls) = pending.as_mut() else {
+                anyhow::bail!(
+                    "`messages[{message_index}]` with role 'tool' must be a response to a \
+                     preceding assistant message with `tool_calls`"
+                );
+            };
+            let id = tool.tool_call_id.as_str();
+            if !calls.issued.contains(id) {
+                anyhow::bail!(
+                    "`messages[{message_index}].tool_call_id` '{id}' does not match any \
+                     `tool_calls` id of `messages[{}]`",
+                    calls.message_index
+                );
+            }
+            calls.unanswered.remove(id);
+            calls.has_results = true;
+            continue;
+        }
+        if let Some(calls) = pending.take() {
+            calls.ensure_answered()?;
+        }
+        if let ChatCompletionRequestMessage::Assistant(assistant) = message
+            && let Some(tool_calls) = assistant
+                .tool_calls
+                .as_ref()
+                .filter(|calls| !calls.is_empty())
+        {
+            let issued: HashSet<&str> = tool_calls.iter().map(|call| call.id.as_str()).collect();
+            pending = Some(PendingToolCalls {
+                message_index,
+                unanswered: issued.clone(),
+                issued,
+                has_results: false,
+            });
+        }
+    }
+    match pending {
+        Some(calls) if calls.has_results => calls.ensure_answered(),
+        _ => Ok(()),
+    }
 }
 
 fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow::Error> {

@@ -1718,6 +1718,130 @@ mod tests {
         }
     }
 
+    fn assistant_tool_calls(ids: &[&str]) -> serde_json::Value {
+        let tool_calls: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"}
+                })
+            })
+            .collect();
+        json!({"role": "assistant", "content": null, "tool_calls": tool_calls})
+    }
+
+    fn tool_result(id: &str) -> serde_json::Value {
+        json!({"role": "tool", "tool_call_id": id, "content": "sunny"})
+    }
+
+    fn user(content: &str) -> serde_json::Value {
+        json!({"role": "user", "content": content})
+    }
+
+    fn validate_history(messages: Vec<serde_json::Value>) -> Result<(), anyhow::Error> {
+        ValidateRequest::validate(&chat_request_with(&json!({"messages": messages})))
+    }
+
+    #[test]
+    fn test_validate_messages_accepts_paired_tool_results() {
+        let histories = [
+            vec![
+                user("weather?"),
+                assistant_tool_calls(&["call_1"]),
+                tool_result("call_1"),
+            ],
+            vec![
+                user("weather?"),
+                assistant_tool_calls(&["call_1", "call_2"]),
+                tool_result("call_2"),
+                tool_result("call_1"),
+                user("and tomorrow?"),
+                assistant_tool_calls(&["call_1"]),
+                tool_result("call_1"),
+            ],
+            vec![
+                user("weather?"),
+                assistant_tool_calls(&["call_1", "call_2"]),
+            ],
+        ];
+        for messages in histories {
+            validate_history(messages.clone())
+                .unwrap_or_else(|err| panic!("{messages:?} should validate: {err}"));
+        }
+    }
+
+    #[test]
+    fn test_validate_messages_rejects_unknown_tool_call_id() {
+        let err = validate_history(vec![
+            user("weather?"),
+            assistant_tool_calls(&["call_1"]),
+            tool_result("call_999_wrong"),
+        ])
+        .expect_err("unknown tool_call_id should fail validation");
+        assert!(
+            err.to_string()
+                .contains("`messages[2].tool_call_id` 'call_999_wrong' does not match"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_messages_rejects_tool_message_without_tool_calls() {
+        let histories = [
+            vec![user("weather?"), tool_result("call_1")],
+            vec![
+                user("weather?"),
+                assistant_tool_calls(&["call_1"]),
+                tool_result("call_1"),
+                user("thanks"),
+                tool_result("call_1"),
+            ],
+        ];
+        for messages in histories {
+            let err = validate_history(messages.clone())
+                .expect_err("tool message outside a tool-call turn should fail validation");
+            assert!(
+                err.to_string()
+                    .contains("must be a response to a preceding"),
+                "unexpected error for {messages:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_messages_rejects_missing_tool_results() {
+        let histories = [
+            vec![
+                user("weather?"),
+                assistant_tool_calls(&["call_1", "call_2"]),
+                tool_result("call_1"),
+            ],
+            vec![
+                user("weather?"),
+                assistant_tool_calls(&["call_1", "call_2"]),
+                tool_result("call_1"),
+                user("and tomorrow?"),
+            ],
+            vec![
+                user("weather?"),
+                assistant_tool_calls(&["call_1", "call_2"]),
+                user("never mind"),
+            ],
+        ];
+        for messages in histories {
+            let err = validate_history(messages.clone())
+                .expect_err("unanswered tool calls should fail validation");
+            let err = err.to_string();
+            assert!(
+                err.contains("`messages[1].tool_calls` must be followed by tool messages")
+                    && err.contains("call_2"),
+                "unexpected error for {messages:?}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn test_validate_tools_valid_names() {
         fn make_tool(name: &str) -> ChatCompletionTool {
