@@ -464,8 +464,10 @@ def send_inference_request(prompt: str, max_tokens: int = 50) -> str:
         pytest.fail(f"[ETCD HA regression?] Inference request failed: {e}")
 
 
+# Lease-loss shutdown can take up to the runtime's 30s default ETCD_LEASE_TTL
+# (reconnect deadline), plus teardown, so the default budget must exceed it.
 def wait_for_processes_to_terminate(
-    processes: dict, timeout: int = 30, poll_interval: int = 1
+    processes: dict, timeout: int = 60, poll_interval: int = 1
 ) -> None:
     """
     Wait for multiple processes to terminate and fail if they don't within timeout.

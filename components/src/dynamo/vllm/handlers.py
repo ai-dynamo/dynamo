@@ -3273,7 +3273,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
-            ValueError: If decoding fails or format is invalid
+            ValueError: If the input is not a string
+            InvalidArgument: If the payload cannot be decoded as a PyTorch tensor
         """
         if not isinstance(prompt_embeds_base64, str):
             raise ValueError(
@@ -3295,8 +3296,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raise
         except Exception as e:
             logger.error(f"Failed to decode prompt_embeds: {e}")
-            raise ValueError(
-                f"Failed to decode prompt_embeds as PyTorch tensor: {e}"
+            # Static message keeps library-internal decoder text (logged above)
+            # private; a plain ValueError would reach the client as "Invalid request".
+            raise InvalidArgument(
+                "Failed to decode prompt_embeds as PyTorch tensor"
             ) from e
 
     def _create_prompt_from_embeddings(
@@ -3314,7 +3317,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             - tensor: The decoded tensor (for logging shape/dtype)
 
         Raises:
-            ValueError: If decoding fails or tensor is invalid
+            InvalidArgument: If decoding fails
+            ValueError: If the input is not a string or the tensor is invalid
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
         if embeddings_tensor.dim() != 2:
@@ -3350,8 +3354,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             The vLLM prompt built from prompt embeddings or token IDs.
 
         Raises:
-            InvalidArgument: Prompt embeddings are disabled.
-            ValueError: Prompt embeddings cannot be decoded or validated.
+            InvalidArgument: Prompt embeddings are disabled or cannot be decoded.
+            ValueError: Prompt embeddings fail type or shape validation.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
