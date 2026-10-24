@@ -28,8 +28,11 @@ impl RoutingHost {
             .map(to_worker_selection_session_context);
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
-        let selection_future = self
-            .select_worker_outcome(
+        // Router queue and selection spans run on the router actor; the scoped
+        // trace lets them join this request's trace under the selection span.
+        let selection_future = LifecycleTrace::scope(
+            request_lifecycle(request),
+            self.select_worker_outcome(
                 &context_id,
                 request,
                 routing_parts,
@@ -50,7 +53,8 @@ impl RoutingHost {
                     admission,
                 },
             )
-            .instrument(tracing::info_span!("kv_router.select_worker"));
+            .instrument(tracing::info_span!("kv_router.select_worker")),
+        );
 
         await_with_cleanup_policy(
             request_context.as_ref(),
@@ -548,6 +552,17 @@ impl RoutingHost {
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
+        let request_dispatch = start_request_dispatch(&request, phase);
+        request_dispatch.record(
+            "dynamo.dispatch.destination.worker.id",
+            selection.worker.worker_id,
+        );
+        request_dispatch.record(
+            "dynamo.dispatch.destination.dp.rank",
+            selection.worker.dp_rank as u64,
+        );
+        request_dispatch.record("dynamo.dispatch.route", "kv");
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
         backend_input.kv_hint = selection.kv_hint;
@@ -557,26 +572,30 @@ impl RoutingHost {
         let dispatch = self
             .inner
             .dispatch_kv_admitted(updated_request, selection.worker.worker_id);
-        let route_span = tracing::info_span!(
-            target: "request_span",
-            "kv_router.route_request",
-            otel.kind = "client",
-            request_id = %context_id,
-            worker_id = tracing::field::Empty,
-            dp_rank = selection.worker.dp_rank,
-            overlap_blocks = selection.overlap_amount,
-            phase = ?phase,
-            "request.attempt" = tracing::field::Empty,
-            "request.outcome" = tracing::field::Empty,
-            "migration.is_retry" = tracing::field::Empty,
-            "migration.reason" = tracing::field::Empty,
-            "migration.from_worker_id" = tracing::field::Empty,
-            "migration.tokens_completed" = tracing::field::Empty,
-            "cancellation.signal" = tracing::field::Empty,
-            "error.type" = tracing::field::Empty,
-            otel.status_code = tracing::field::Empty,
-            otel.status_description = tracing::field::Empty,
-        );
+        // Under request.dispatch, as on the built-in path, so worker spans nest
+        // the same way on both. Without a lifecycle root nothing is entered.
+        let route_span = request_dispatch.in_scope(|| {
+            tracing::info_span!(
+                target: "request_span",
+                "kv_router.route_request",
+                otel.kind = "client",
+                request_id = %context_id,
+                worker_id = tracing::field::Empty,
+                dp_rank = selection.worker.dp_rank,
+                overlap_blocks = selection.overlap_amount,
+                phase = ?phase,
+                "request.attempt" = tracing::field::Empty,
+                "request.outcome" = tracing::field::Empty,
+                "migration.is_retry" = tracing::field::Empty,
+                "migration.reason" = tracing::field::Empty,
+                "migration.from_worker_id" = tracing::field::Empty,
+                "migration.tokens_completed" = tracing::field::Empty,
+                "cancellation.signal" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
+            )
+        });
         record_route_span_start(
             &route_span,
             route_trace_context.as_deref(),
@@ -588,10 +607,21 @@ impl RoutingHost {
             staged_kv,
             "kv.dispatch",
             budget,
-            dispatch.instrument(route_span.clone()),
+            dispatch
+                .instrument(route_span.clone())
+                .instrument(request_dispatch.clone()),
         )
         .await
         .and_then(|result| result);
+        request_dispatch.record(
+            "dynamo.dispatch.result",
+            match &dispatch_result {
+                Ok(_) => completed_dispatch_result(request_context.as_ref()),
+                Err(error) if is_cancelled(error) => "cancelled",
+                Err(_) => "failed",
+            },
+        );
+        drop(request_dispatch);
         let response_stream = match dispatch_result {
             Ok(stream) => stream,
             Err(error) => {

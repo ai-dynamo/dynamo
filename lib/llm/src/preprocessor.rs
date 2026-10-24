@@ -22,6 +22,7 @@ pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
 
+use crate::http::service::terminal_outcome_for_stage_error;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
@@ -33,7 +34,9 @@ use dynamo_runtime::config::{
     env_is_falsey, environment_names::llm as env_llm, is_truthy, parse_bool_opt,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
-use dynamo_runtime::telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTrace};
+use dynamo_runtime::telemetry::{
+    LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTrace, TerminalOutcome,
+};
 use either::Either;
 use futures::Stream;
 use futures::stream::{self, StreamExt};
@@ -7738,7 +7741,8 @@ impl
         // unpack the request
         let (mut request, context) = request.into_parts();
         let lifecycle = preprocessing_lifecycle(&context);
-        let preprocessing = lifecycle.start(LifecycleStage::RequestPreprocessing);
+        let mut preprocessing = lifecycle.observe_stage(LifecycleStage::RequestPreprocessing);
+        preprocessing.checkpoint("prepare");
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
@@ -7795,6 +7799,7 @@ impl
         };
 
         // convert the chat completion request to a common completion request
+        preprocessing.checkpoint("preprocess_request");
         let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
             .preprocess_request_with_options(
                 &request,
@@ -7806,20 +7811,25 @@ impl
                     .flatten()
                     .map(|name| name.as_ref().clone()),
             )
-            .instrument(preprocessing.clone())
-            .await?;
+            .instrument(preprocessing.span().clone())
+            .await
+            .inspect_err(|e| preprocessing.finish(terminal_outcome_for_stage_error(e.as_ref())))?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
         }
         attach_request_context_metadata(&mut common_request, &context);
 
-        let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
-            &request,
-            &mut common_request,
-            prompt_injected_reasoning.unified,
-        )?;
-        let tool_processing_route =
-            self.tool_processing_route(&request, &guided_tool_constraint)?;
+        preprocessing.checkpoint("tool_constraints");
+        let guided_tool_constraint = self
+            .apply_tool_choice_guided_decoding(
+                &request,
+                &mut common_request,
+                prompt_injected_reasoning.unified,
+            )
+            .inspect_err(|e| preprocessing.finish(terminal_outcome_for_stage_error(e)))?;
+        let tool_processing_route = self
+            .tool_processing_route(&request, &guided_tool_constraint)
+            .inspect_err(|e| preprocessing.finish(terminal_outcome_for_stage_error(e.as_ref())))?;
         let payload_parsing_options = payload_handle.as_ref().map(|_| {
             context
                 .get_optional::<ParsingOptions>(REQUEST_PARSING_OPTIONS_CONTEXT_KEY)
@@ -7843,6 +7853,7 @@ impl
                         )
                 })
         });
+        preprocessing.checkpoint("validate_choices");
         validate_legacy_jail_nvext_choice_count(
             request.inner.n.unwrap_or(1),
             request
@@ -7850,7 +7861,8 @@ impl
                 .as_ref()
                 .and_then(|nvext| nvext.extra_fields.as_deref()),
             tool_processing_route.uses_legacy_jail(),
-        )?;
+        )
+        .inspect_err(|e| preprocessing.finish(terminal_outcome_for_stage_error(e.as_ref())))?;
 
         tracing::trace!(model = %common_request.model, token_count = common_request.token_ids.len(), ?prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -7886,6 +7898,8 @@ impl
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();
         let annotations_stream = stream::iter(annotations);
+        preprocessing.checkpoint("ready");
+        preprocessing.finish(TerminalOutcome::Success);
         drop(preprocessing);
 
         // forward the common completion request to the next operator
