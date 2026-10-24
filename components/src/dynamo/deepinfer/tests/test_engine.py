@@ -361,6 +361,12 @@ def test_parse_args_defaults(fake_env):
     with pytest.raises(ValueError):
         make_args("--kv-transfer", "nixl")
 
+    tier = make_args("--kv-cache-manager", "prefix", "--prefix-host-bytes", "80GiB")
+    options = tier.rank_specs("e")[0].cache_options
+    assert options["host_bytes"] == 80 << 30 and options["snapshot_device"] is None
+    with pytest.raises(ValueError, match="--kv-cache-manager prefix"):
+        make_args("--prefix-host-bytes", "1G")
+
 
 def test_launch_env_defaults(fake_env):
     env = deepinfer_env(make_args("--kv-cache-manager", "prefix"))
