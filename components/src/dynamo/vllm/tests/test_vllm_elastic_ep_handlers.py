@@ -16,20 +16,23 @@ lazily and CI lacks it).
 import asyncio
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 pytest.importorskip("torch")
 pytest.importorskip("vllm.config")
 
+from vllm.entrypoints.serve.elastic_ep import middleware  # noqa: E402
 from vllm.v1.engine.exceptions import EngineDeadError  # noqa: E402
 
+from dynamo.vllm.engine_group import EngineGroupServing  # noqa: E402
 from dynamo.vllm.handlers import BaseWorkerHandler  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -55,13 +58,105 @@ def _make_handler(
                 # Elastic EP enabled + Ray backend so the capability gate passes.
                 enable_elastic_ep=True,
                 data_parallel_backend="ray",
+                data_parallel_external_lb=False,
             ),
         ),
         scale_elastic_ep=AsyncMock(),
     )
     handler._scale_ep_lock = asyncio.Lock()
     handler._scale_ep_in_progress = False
+    handler.engine_group_serving = None
     return handler
+
+
+async def _successful_serving_probe():
+    yield SimpleNamespace(finished=True, outputs=[SimpleNamespace(token_ids=[1])])
+
+
+@pytest.mark.parametrize(
+    ("scaling", "retired", "can_serve"),
+    [(False, False, True), (True, False, False), (False, True, False)],
+)
+def test_managed_worker_honors_native_admission(
+    monkeypatch, scaling, retired, can_serve
+):
+    handler = _make_handler(tensor_parallel_size=1)
+    handler._pause_controller = SimpleNamespace(is_paused=False)
+    handler.engine_client.is_running = True
+    handler.engine_client.errored = False
+    monkeypatch.setattr(middleware, "_scaling_elastic_ep", scaling)
+    monkeypatch.setattr(middleware, "_elastic_ep_rank_retired", retired)
+
+    assert handler.can_serve_engine_group() is can_serve
+
+
+@pytest.mark.asyncio
+async def test_managed_probe_uses_the_real_local_engine_without_controller_action():
+    handler = _make_handler(tensor_parallel_size=1)
+    handler._pause_lock = asyncio.Lock()
+    handler.dp_range = (2, 1)
+    engine = handler.engine_client
+    engine.get_external_elastic_ep_status = AsyncMock(
+        return_value={
+            "instance_id": "engine-2",
+            "operation_id": None,
+            "epoch": None,
+            "phase": "idle",
+            "requested_data_parallel_size": None,
+            "effective_data_parallel_size": 3,
+            "topology_known": True,
+            "error": None,
+        }
+    )
+    engine.generate = Mock(return_value=_successful_serving_probe())
+    engine.check_health = AsyncMock()
+    handler.can_serve_engine_group = Mock(return_value=True)
+    admission = EngineGroupServing(
+        engine,
+        Mock(
+            register_endpoint_instance=AsyncMock(),
+            unregister_endpoint_instance=AsyncMock(),
+            connection_id=Mock(return_value=7),
+        ),
+        "pod-2",
+        2,
+        Mock(instance_ids=Mock(return_value=[])),
+        handler.can_serve_engine_group,
+        handler.probe_engine_group,
+    )
+    admission.is_ready = True
+    handler.engine_group_serving = admission
+
+    result = await handler.probe_engine_group()
+
+    assert result
+    assert engine.generate.call_args.kwargs["data_parallel_rank"] == 0
+    assert not admission.is_admitted
+    admission.endpoint.register_endpoint_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_external_prepare_does_not_force_a_serving_withdrawal():
+    handler = _make_handler(tensor_parallel_size=1)
+    handler._pause_lock = asyncio.Lock()
+    handler.engine_client.vllm_config.parallel_config.data_parallel_external_lb = True
+    admission = SimpleNamespace(withdraw=AsyncMock())
+    handler.engine_group_serving = admission
+
+    handler.engine_client.scale_elastic_ep.side_effect = TimeoutError(
+        "ambiguous resize"
+    )
+    with pytest.raises(TimeoutError, match="ambiguous resize"):
+        await handler.scale_elastic_ep(
+            {
+                "new_data_parallel_size": 3,
+                "operation_id": "grow",
+                "expected_instance_id": "engine-0",
+            }
+        )
+
+    admission.withdraw.assert_not_awaited()
+    handler.engine_client.scale_elastic_ep.assert_awaited_once()
 
 
 @pytest.fixture
@@ -217,6 +312,7 @@ class _FakeVllmEngine:
                 tensor_parallel_size=tensor_parallel_size,
                 enable_elastic_ep=enable_elastic_ep,
                 data_parallel_backend=data_parallel_backend,
+                data_parallel_external_lb=False,
             )
         )
         self._fail_sizes = list(fail_sizes)
@@ -329,3 +425,78 @@ def test_engine_dead_restarts_the_worker(stub_ray):
     assert result is _RESTARTED
     assert shutdown == ["engine_dead"]
     assert engine.calls == [3]  # no rollback call
+
+
+@pytest.fixture
+def external_handler():
+    handler = _make_handler(tensor_parallel_size=1, data_parallel_size=2)
+    parallel = handler.engine_client.vllm_config.parallel_config
+    parallel.data_parallel_backend = "mp"
+    parallel.data_parallel_external_lb = True
+    status = {
+        "instance_id": "api-0",
+        "operation_id": "grow-three",
+        "epoch": "native-epoch",
+        "phase": "completed",
+        "requested_data_parallel_size": 3,
+        "effective_data_parallel_size": 3,
+        "topology_known": True,
+        "error": None,
+    }
+    handler.engine_client.scale_elastic_ep.return_value = status
+    handler.engine_client.get_external_elastic_ep_status = AsyncMock(
+        return_value=status
+    )
+    handler._shutdown_worker = Mock()
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_external_scale_bypasses_ray_and_legacy_resize_lock(external_handler):
+    handler = external_handler
+    async with handler._scale_ep_lock:
+        result = await asyncio.wait_for(
+            handler.scale_elastic_ep(
+                {
+                    "new_data_parallel_size": 3,
+                    "operation_id": "grow-three",
+                    "expected_instance_id": "api-0",
+                }
+            ),
+            timeout=1,
+        )
+    assert result["phase"] == "completed"
+    handler.engine_client.scale_elastic_ep.assert_awaited_once_with(
+        3,
+        drain_timeout=120,
+        operation_id="grow-three",
+        expected_instance_id="api-0",
+    )
+    assert not handler._scale_ep_in_progress
+    handler._shutdown_worker.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_external_timeout_does_not_take_ray_restart_path(external_handler):
+    handler = external_handler
+    handler.engine_client.scale_elastic_ep.side_effect = TimeoutError("response lost")
+    with pytest.raises(TimeoutError, match="response lost"):
+        await handler.scale_elastic_ep(
+            {
+                "new_data_parallel_size": 3,
+                "operation_id": "grow-three",
+                "expected_instance_id": "api-0",
+            }
+        )
+    handler._shutdown_worker.assert_not_called()
+    result = await handler.is_scaling_elastic_ep({})
+    assert result["phase"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_ray_worker_rejects_external_status_without_touching_engine():
+    handler = _make_handler(tensor_parallel_size=1)
+    result = await handler.is_scaling_elastic_ep({})
+    assert result["status"] == "error"
+    handler.engine_client.scale_elastic_ep.assert_not_awaited()

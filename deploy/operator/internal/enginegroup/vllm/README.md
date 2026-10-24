@@ -3,95 +3,114 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# vLLM Engine Group membership adapter
+# vLLM Engine Group integration
 
-This package implements the Go membership adapter for vLLM's correlated external
-Elastic EP API in [vLLM #62082](https://github.com/vllm-project/vllm/pull/62082).
-It owns neither process launch, discovery registration nor physical release.
+The runtime image must include the native correlated controls in
+[vLLM #62082](https://github.com/vllm-project/vllm/pull/62082) and native automatic
+bootstrap in [#62973](https://github.com/vllm-project/vllm/pull/62973).
+The managed deployment uses the existing `python3 -m dynamo.vllm` worker.
 
-## Membership contract
+## Startup and growth
 
-The adapter calls every existing rank, including retirees, with the same operation
-ID and absolute DP target plus each rank's frozen API instance ID. Native vLLM
-status is authoritative for transaction phase, effective topology, process identity
-and operation epoch.
+Engine Groups reuse the standard operator Pod renderer for environment,
+discovery, service accounts, shared memory, security and image-pull configuration.
+The Engine Group path adds no command wrapper or engine-argument rewriting.
+The template explicitly declares
+`--elastic-ep-auto-bootstrap`, the immutable initial DP size, and references to
+`$(DYNAMO_RANK)` and `$(DYNAMO_LEADER_ADDRESS)`. It omits `--data-parallel-size`: vLLM learns the complete
+growth target through its native handshake, not from the joining rank or a
+controller-published command.
 
-Dynamo persists target/profile/process bindings and terminal correlation receipts.
-It observes before replaying an ambiguous request and resubmits only the identical
-target. It does not implement a second native collective state machine.
+```text
+DGD declaration → one Grove template → native vLLM automatic bootstrap
+                                         │
+                               complete initial world
 
-Supported shapes are contiguous append, high-rank-suffix retirement and re-append
-of a fully retired suffix. ReplicaLayout maps each allocation to its complete
-native-member range, including packed protocol layouts. Sparse survivor masking,
-arbitrary selected retirement, native remapping and complete-world retirement
-are unsupported. Membership support does
-not imply safe physical shrink.
+Engine Group target → Grove /scale → joiner waits in native bootstrap
+                  └→ correlated resize on every old rank → membership commit
+```
 
-Direct native HTTP and existing Dynamo worker control routes share the same
-request/status codec and transaction authority.
+There is no Dynamo bootstrap process, command annotation, receipt file or receipt
+probe. Pod allocation/readiness and native inference readiness remain independent;
+an API-unready joiner must not block submission of the resize that initializes it.
 
-## Ownership
+The current launch profile has one local DP member per non-restarting Pod, with
+its fixed TP subgroup filling the GPU allocation. Packed launching, multi-node TP,
+fault-tolerant masking and arbitrary selected retirement are not enabled. Initial
+DP must exceed one, and the native MP/external-DP profile reserves an explicit maximum.
+
+See [`poc.yaml`](poc.yaml) for the worker template. It declares the
+Downward API engine identity, native mode environment and retention readiness gate;
+standard infrastructure settings do not need repeating. The `DYNAMO_ENGINE_GROUP=1`
+entry enables the worker integration; it is not an Engine Group object identity.
+Parent `spec.env` entries use the standard component-over-parent merge.
+The operator supplies `DYNAMO_RANK` as the allocation index and
+`DYNAMO_LEADER_ADDRESS` as this world's allocation-zero hostname. The mapping to
+Grove stays inside the renderer; user commands need no `GROVE_*` references.
+Both aliases precede user environment entries and cannot be overridden, including
+through parent `spec.env`. In this profile one allocation owns one native DP member.
+
+Engine Group main containers do not inherit the generated inference probes;
+explicit caller probes are preserved. Choose allocation/process health appropriate to the
+engine: a joiner need not be inference-ready before resize submission, and an
+expected inference pause should not accidentally trigger Grove gang termination.
+Normal Kubernetes defaults and Grove scheduling/identity injection still apply;
+the operator retains its ownership, discovery and revision labels.
+
+## Identity and ownership
 
 | Owner | Responsibility |
 |---|---|
-| Engine Group controller | Persist targets, order operations, correlate evidence and authorize exact release. |
-| Workload manager | Allocate capacity, expose slots/Pod UIDs and enforce the supported release contract. |
-| vLLM bootstrap | Start the native engine from the shared template and resolve its allocation role. |
-| vLLM | Commit membership and report native topology, lifetime and serving state. |
-| Dynamo serving runtime | Verify serving progress and register eligible endpoints from native evidence and runtime/KV prerequisites. Honor outstanding withdrawal intent. |
+| Engine Group controller | Persist targets, correlate evidence, order operations and authorize exact release. |
+| Grove | Place and create Pods; expose stable slots and Pod UIDs. |
+| vLLM | Bootstrap processes, serialize collective changes, commit membership and report native identity/state. |
+| Dynamo worker | Verify native serving progress, register eligible endpoints and honor withdrawal/drain intent. |
 
-The serving runtime does not wait for a second controller permission,
-acknowledgment or status write. Preparation may leave existing members serving;
-native readiness determines whether inference is actually available.
+The Engine Group retains a clique-UID/slot/Pod-UID catalog across Pod disappearance.
+A new occupant or missing catalog requires recovery; it cannot inherit an old
+process's evidence. This catalog records physical identity, not launch commands
+or native transaction phases. Process restart counts and native API instance IDs
+provide additional fences.
 
-Engine-managed drain requires an integration-supplied ManagedDrainValidator.
-It validates every frozen native process identity before effects and submission.
-The native adapter does not query worker-specific endpoints; without a validator,
-it rejects EngineManagedDrain.
+The worker does not need the Engine Group CR's UID to start. Its status identifies
+the exact Pod UID and native member, while the operator proves their ownership
+chain and correlates the native API instance. Registration never waits for a
+second controller permission or status write.
 
-## Integration boundaries
+## Membership and release
 
-[#16929](https://github.com/ai-dynamo/dynamo/pull/16929) composes native automatic
-bootstrap, Grove capacity, DGD rendering and native runtime resolution.
-[#17018](https://github.com/ai-dynamo/dynamo/pull/17018) enables the existing
-Python worker's readiness-driven serving and the narrow managed-growth pathway.
+The adapter fans the same operation ID and absolute target to every existing
+rank, including retirees, with each server's expected instance ID. Native status
+is authoritative for pending/unknown/terminal outcomes, effective topology and epoch.
+The journal retains exact target and native identity correlation; it does not
+run a second collective state machine.
 
-Allocated capacity is not inference readiness. A joiner's API can depend on
-membership preparation, so preparing the resize cannot wait for that API to
-become ready.
+Native protocol support covers contiguous append, healthy suffix retirement and
+suffix restoration. The composed planner enables healthy growth and suffix shrink
+down to the configured initial size; reusing a released slot remains unsupported.
+Group deletion is not a supported terminal-retirement operation.
 
-Retirement needs durable withdrawal and exact-incarnation terminal drain, not
-discovery absence or a wrapper-local request count. Physical release additionally
-requires the coordinator's exact Pod-UID/topology authorization.
+Healthy shrink requires native request draining, durable incarnation-bound drain
+evidence, committed smaller membership, and exact Pod-UID/topology release evidence.
+`VLLM_ELASTIC_EP_DRAIN_REQUESTS=1` must be declared on every worker. Serving verification is
+topology-bound and established by the runtime independently of controller availability.
+
+Grove scale-in steering is isolated behind its capacity adapter. The retention
+readiness gate marks the engine-retired victim NotReady before lowering the
+clique count. This remains steering, not atomic deletion authorization; the adapter
+checks the exact victim UID and fails closed on mismatch.
+
+## Validation and scope
+
+Go tests cover native request/status codecs, all-rank fan-out, preflight, ambiguous
+transport outcomes, restart recovery, exact process bindings, serving/drain evidence,
+native-template rendering and real API-server Scale/Pod identity behavior.
+Worker tests cover registration from native readiness without controller permission.
+
+GPU validation requires images built with both native prerequisites and this
+worker integration. Existing functional-test image pins do not qualify the native
+bootstrap path; rebuild and rerun the manual fixtures before claiming GPU validation.
 
 Sidecar integration follows [DEP #14657](https://github.com/ai-dynamo/dynamo/issues/14657)
-and [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897). Remote native
-controls, identity correlation, serving evidence and durable withdrawal must compose
-with the serving runtime's health and KV lifecycle. This adapter's HTTP protocol
-does not establish native gRPC or sidecar conformance.
-
-## Validation
-
-Tests cover native protocol validation, exact all-rank fan-out, plan-specific
-preflight, ambiguous transport outcomes and restart recovery of durable bindings.
-
-## Grove deployment
-
-The image must also include native automatic bootstrap from
-[vLLM #62973](https://github.com/vllm-project/vllm/pull/62973). The template declares
-the native command, `--elastic-ep-auto-bootstrap`, the immutable initial DP size,
-and `$(DYNAMO_RANK)` / `$(DYNAMO_LEADER_ADDRESS)` references. It omits
-`--data-parallel-size`: the joiner learns the complete target through vLLM's
-native handshake. The operator neither rewrites that command nor distributes
-an executable launch assignment.
-
-The standard Pod renderer supplies infrastructure defaults. The Engine Group
-renderer maps the portable topology references to Grove identity and preserves
-explicit user probes instead of adding inference probes to waiting joiners.
-Each Pod owns one native DP member and its complete fixed TP subgroup.
-
-The capacity adapter retains the clique UID and each slot's exact Pod UID across
-Pod disappearance. A replacement occupant requires recovery; it cannot inherit
-an old process's evidence. This is a physical identity catalog, not a launch
-command or native transaction journal. Container restarts, packed launches,
-replacement recovery and complete-world retirement are unsupported.
+and [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897). This HTTP/worker
+integration does not establish native gRPC or sidecar conformance.

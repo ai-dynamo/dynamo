@@ -27,8 +27,9 @@ from typing import Any, Callable
 
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine import utils as engine_utils
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
+from vllm.v1.engine.utils import launch_core_engines
 from vllm.v1.executor import Executor
 
 logger = logging.getLogger(__name__)
@@ -420,7 +421,7 @@ def create_shared_embedding_engine_client(
         vllm_config.parallel_config._api_process_count = process_count
         vllm_config.parallel_config._api_process_rank = -1
         executor_class = Executor.get_class(vllm_config)
-        addresses = get_engine_zmq_addresses(vllm_config, process_count)
+        addresses = engine_utils.get_engine_zmq_addresses(vllm_config, process_count)
 
         parent_logger_config = _client_config(
             vllm_config,

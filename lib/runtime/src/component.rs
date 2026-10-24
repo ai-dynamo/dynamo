@@ -68,7 +68,7 @@ pub mod service;
 pub(crate) use client::EndpointDiscoverySource;
 pub(crate) use client::RoutingInstances;
 pub use client::{Client, RoutingInstanceCounts};
-pub use endpoint::{StartedEndpoint, build_transport_type};
+pub use endpoint::{EndpointConfigBuilder, StartedEndpoint, build_transport_type};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]

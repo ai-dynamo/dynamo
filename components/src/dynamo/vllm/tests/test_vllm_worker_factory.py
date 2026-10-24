@@ -293,6 +293,7 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
             else None
         )
     )
+    handler_constructor.return_value.engine_group_serving = None
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.DecodeWorkerHandler",
         handler_constructor,
@@ -1738,7 +1739,9 @@ def _decode_benchmark_factory(monkeypatch, tmp_path, register_fn):
     )
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.DecodeWorkerHandler",
-        Mock(return_value=Mock(embedding_cache_manager=None)),
+        Mock(
+            return_value=Mock(embedding_cache_manager=None, engine_group_serving=None)
+        ),
     )
     runtime = Mock()
     runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="worker-id"))

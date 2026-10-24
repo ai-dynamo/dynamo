@@ -43,6 +43,7 @@ def _make_handler() -> _TestWorkerHandler:
     )
     handler._pause_controller = VllmEnginePauseController(handler.engine_client)
     handler._pause_lock = asyncio.Lock()
+    handler.engine_group_serving = None
     return handler
 
 
@@ -56,6 +57,25 @@ async def test_wake_up_before_sleep_is_noop():
     handler.engine_client.wake_up.assert_not_awaited()
     handler.engine_client.resume_generation.assert_not_awaited()
     handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_managed_withdrawal_does_not_leave_an_awake_engine_paused():
+    handler = _make_handler()
+    admission = SimpleNamespace(
+        is_paused=False,
+        withdraw=AsyncMock(side_effect=TimeoutError("discovery unavailable")),
+        refresh=AsyncMock(),
+    )
+    handler.engine_group_serving = admission
+
+    result = await handler.sleep({})
+
+    assert result["status"] == "error"
+    assert not admission.is_paused
+    assert not handler._pause_controller.is_paused
+    admission.refresh.assert_awaited_once()
+    handler.engine_client.pause_generation.assert_not_awaited()
 
 
 @pytest.mark.asyncio

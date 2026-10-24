@@ -17,6 +17,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
+    pytest.mark.core,
 ]
 
 
@@ -27,6 +28,7 @@ def mock_engine():
     engine.log_stats = True
     engine.do_log_stats = AsyncMock()
     engine.check_health = AsyncMock()
+    engine.should_keep_api_server_alive = False
     return engine
 
 
@@ -194,6 +196,27 @@ async def test_run_health_check_times_out(mock_engine):
 
     with pytest.raises(asyncio.TimeoutError):
         await monitor._run_health_check()
+
+
+@pytest.mark.asyncio
+async def test_retired_engine_keeps_control_api_alive(mock_engine):
+    mock_engine.should_keep_api_server_alive = True
+    mock_engine.check_health.side_effect = EngineDeadError()
+    shutdown_event = asyncio.Event()
+    monitor = _make_monitor(mock_engine, shutdown_event)
+    monitor._shutdown_engine = MagicMock()
+
+    await monitor._run_health_check()
+    with patch.dict("os.environ", {"VLLM_LOG_STATS_INTERVAL": "0.01"}):
+        task = asyncio.create_task(monitor._periodic_log_stats())
+        await asyncio.sleep(0.03)
+        shutdown_event.set()
+        await task
+
+    mock_engine.check_health.assert_not_awaited()
+    mock_engine.do_log_stats.assert_not_awaited()
+    monitor._shutdown_engine.assert_not_called()
+    monitor.runtime.shutdown.assert_not_called()
 
 
 @pytest.mark.asyncio

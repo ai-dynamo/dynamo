@@ -143,6 +143,11 @@ class DistributedRuntime:
         ...
 
 
+class StartedEndpoint:
+    async def wait(self) -> None:
+        """Wait once for listener termination. Stop it through Endpoint.shutdown()."""
+        ...
+
 class Endpoint:
     """
     An Endpoint is a single API endpoint
@@ -151,6 +156,12 @@ class Endpoint:
     ...
 
     async def first_token_source(self, worker_type: WorkerType) -> Optional[FirstTokenSource]: ...
+
+    async def start_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None, *, register: bool = True) -> StartedEndpoint:
+        """Return once the listener is callable. register=False withholds discovery only;
+        the caller must gate requests and authorize subsequent registration explicitly.
+        """
+        ...
 
     async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
