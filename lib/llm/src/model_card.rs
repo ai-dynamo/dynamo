@@ -672,15 +672,38 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
 /// 1 GiB cap on metadata fetch — realistic files are <20 MiB. Bounds
 /// disk usage if a worker advertises a bogus `CheckedFile.size`, and is
 /// the fallback when `size` is absent on a `CheckedFile`.
-const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
+/// Workers skip larger files when harvesting extras, since no frontend
+/// could fetch them.
+pub(crate) const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// File extensions that identify model weights. Callers: the frontend
 /// hf:// sibling harvest below and `local_model::harvest_extra_files`.
+///
+/// Also matches one trailing suffix after a weight extension
+/// (`model-00001-of-00002.safetensors.0dc03bC1`, `x.safetensors.partial`):
+/// download tools write shards under such temp names before renaming.
+/// `model.safetensors.index.json` is not a weight.
 pub(crate) fn is_weight_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("safetensors" | "bin" | "gguf" | "onnx" | "tflite" | "h5" | "pt" | "pth" | "msgpack")
-    )
+    let has_weight_ext = |p: &Path| {
+        matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some(
+                "safetensors"
+                    | "bin"
+                    | "gguf"
+                    | "onnx"
+                    | "tflite"
+                    | "h5"
+                    | "pt"
+                    | "pth"
+                    | "msgpack"
+            )
+        )
+    };
+    has_weight_ext(path)
+        || path
+            .file_stem()
+            .is_some_and(|stem| has_weight_ext(Path::new(stem)))
 }
 
 /// Parent directory of a `file://` URI when it resolves to a real local
