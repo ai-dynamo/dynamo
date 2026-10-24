@@ -170,6 +170,26 @@ pub fn unified_family_names() -> &'static [&'static str] {
     &super::unified_parser::FAMILY_NAMES
 }
 
+/// Selectable families with a registered guided-decoding grammar.
+///
+/// Output parser registration alone does not imply grammar support. This query
+/// covers both parser registries; deployment parser-version validation remains
+/// separate from this capability inventory.
+pub fn structural_tag_family_names() -> Vec<&'static str> {
+    let legacy = dynamo_parsers::tool_calling::parsers::get_tool_parser_map();
+    let mut names = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
+    names.extend_from_slice(unified_family_names());
+    names.retain(|family| {
+        legacy
+            .get(*family)
+            .is_some_and(|config| config.structural_tag_builder.is_some())
+            || dynamo_parsers_v2::structural_tag_builder_for_family(family).is_some()
+    });
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 /// Resolve the configured family through the shared generation and pair policy.
 #[cfg(test)]
 pub(crate) fn unified_family(
@@ -990,6 +1010,24 @@ mod tests {
     const MUSE_REASONING: &str = "<|start|>assistant to=self<|message|>Look it up.<|eom|>";
     const MUSE_TOOL: &str = "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>";
     const MUSE_ANSWER: &str = "<|start|>assistant to=user<|message|>It's 18C.<|eot|>";
+
+    #[test]
+    fn grammar_capability_inventory_is_sorted_and_selectable() {
+        let names = structural_tag_family_names();
+        assert!(names.contains(&"deepseek_v4"));
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut selectable = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
+        selectable.extend_from_slice(unified_family_names());
+        assert!(names.iter().all(|family| selectable.contains(family)));
+        // The pinned dependency determines this capability; selecting the
+        // Unified V4.1 output parser must not invent a grammar builder.
+        assert!(unified_family_names().contains(&"deepseek_v41"));
+        let v41_has_builder = dynamo_parsers::tool_calling::parsers::get_tool_parser_map()
+            .get("deepseek_v41")
+            .is_some_and(|config| config.structural_tag_builder.is_some())
+            || dynamo_parsers_v2::structural_tag_builder_for_family("deepseek_v41").is_some();
+        assert_eq!(names.contains(&"deepseek_v41"), v41_has_builder);
+    }
 
     #[test]
     fn deepseek_v4_engine_aliases_select_the_v2_family() {
