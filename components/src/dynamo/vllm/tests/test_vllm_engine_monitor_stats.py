@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for VllmEngineMonitor._periodic_log_stats."""
+"""Tests for vLLM engine monitoring and explicit shutdown."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,6 +15,7 @@ from dynamo.vllm.engine_monitor import VllmEngineMonitor
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.fault_tolerance,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
 ]
@@ -217,3 +218,97 @@ async def test_health_failure_during_worker_shutdown_stops_monitor(
     monitor._shutdown_engine.assert_not_called()
     monitor.runtime.shutdown.assert_not_called()
     exit_process.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("with_shutdown_event", [False, True])
+async def test_stop_finishes_background_tasks(
+    mock_engine, monkeypatch, with_shutdown_event
+):
+    shutdown_event = asyncio.Event() if with_shutdown_event else None
+    monitor = _make_monitor(mock_engine, shutdown_event)
+    monitor.health_config = EngineHealthMonitorConfig(
+        interval=60, check_timeout=0, shutdown_timeout=0
+    )
+    health_started = asyncio.Event()
+    stats_started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def check_health():
+        health_started.set()
+        await blocked.wait()
+
+    async def log_stats():
+        stats_started.set()
+        await blocked.wait()
+
+    mock_engine.check_health.side_effect = check_health
+    mock_engine.do_log_stats.side_effect = log_stats
+    monkeypatch.setenv("VLLM_LOG_STATS_INTERVAL", "0.001")
+    monitor._monitor_task = asyncio.create_task(monitor._check_engine_health())
+    monitor._stats_task = asyncio.create_task(monitor._periodic_log_stats())
+    tasks = (monitor._monitor_task, monitor._stats_task)
+    try:
+        await asyncio.wait_for(health_started.wait(), timeout=1)
+        await asyncio.wait_for(stats_started.wait(), timeout=1)
+        monitor.stop()
+        monitor.stop()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+        monitor.stop()
+
+        assert all(task.done() for task in tasks)
+        mock_engine.check_health.assert_awaited_once()
+        mock_engine.do_log_stats.assert_awaited_once()
+        mock_engine.shutdown.assert_not_called()
+        monitor.runtime.shutdown.assert_not_called()
+        if shutdown_event is not None:
+            assert not shutdown_event.is_set()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("stats_enabled", [False, True])
+async def test_stop_before_tasks_start(mock_engine, stats_enabled):
+    monitor = _make_monitor(mock_engine)
+    monitor._monitor_task = asyncio.create_task(monitor._check_engine_health())
+    monitor._stats_task = (
+        asyncio.create_task(monitor._periodic_log_stats()) if stats_enabled else None
+    )
+    tasks = [
+        task
+        for task in (monitor._monitor_task, monitor._stats_task)
+        if task is not None
+    ]
+    monitor.stop()
+    monitor.stop()
+    await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
+
+    assert all(task.cancelled() for task in tasks)
+    mock_engine.check_health.assert_not_called()
+    mock_engine.do_log_stats.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_after_stats_task_exits(mock_engine):
+    mock_engine.log_stats = False
+    monitor = _make_monitor(mock_engine)
+    monitor._stats_task = asyncio.create_task(monitor._periodic_log_stats())
+    await monitor._stats_task
+    monitor.stop()
+    monitor.stop()
+
+    assert monitor._monitor_task.cancelled()
+    assert monitor._stats_task.result() is None
+
+
+def test_stop_after_failed_initialization():
+    monitor = object.__new__(VllmEngineMonitor)
+    with pytest.raises(ValueError, match="DistributedRuntime"):
+        monitor.__init__(runtime=None, engine_client=None)
+    monitor.stop()
+    monitor.stop()
