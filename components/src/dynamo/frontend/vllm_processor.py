@@ -20,7 +20,6 @@ from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.renderers.chat_utils import load_chat_template
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
 from vllm.tokenizers import TokenizerLike
@@ -62,6 +61,7 @@ from .utils import (
     random_uuid,
     resolve_chat_template,
 )
+from .vllm_protocol import load_chat_template
 
 logger = logging.getLogger(__name__)
 

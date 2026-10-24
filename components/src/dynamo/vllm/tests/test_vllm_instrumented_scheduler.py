@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for ``InstrumentedScheduler._compute_queued`` classification.
 
-Focus: correct handling of ``self.kv_holding_waiting`` and disaggregated-serving
+Focus: correct handling of ``self.skipped_waiting`` and disaggregated-serving
 request states. The production scheduler is heavy to construct (needs a real
 ``VllmConfig`` + ``KVCacheConfig`` + ``StructuredOutputManager``), so these
 tests invoke ``_compute_queued`` as an unbound method against a minimal stub
@@ -142,7 +142,7 @@ def _make_request(status, num_tokens: int, num_computed_tokens: int = 0):
     )
 
 
-def _run_compute_queued(waiting, kv_holding_waiting):
+def _run_compute_queued(waiting, skipped_waiting):
     """Invoke the real ``InstrumentedScheduler._compute_queued`` on a stub.
 
     Bypasses ``__init__`` (which needs full vLLM config) and populates only
@@ -150,7 +150,7 @@ def _run_compute_queued(waiting, kv_holding_waiting):
     """
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.waiting = waiting
-    stub.kv_holding_waiting = kv_holding_waiting
+    stub.skipped_waiting = skipped_waiting
     return InstrumentedScheduler._compute_queued(stub)
 
 
@@ -469,7 +469,7 @@ def test_waiting_new_requests_count_as_queued_prefill():
             _make_request(RequestStatus.WAITING, num_tokens=100),
             _make_request(RequestStatus.WAITING, num_tokens=200),
         ],
-        kv_holding_waiting=[],
+        skipped_waiting=[],
     )
     assert q.num_prefill_requests == 2
     assert q.sum_prefill_tokens == 300
@@ -487,7 +487,7 @@ def test_waiting_preempted_requests_count_as_queued_decode():
                 RequestStatus.PREEMPTED, num_tokens=256, num_computed_tokens=240
             ),
         ],
-        kv_holding_waiting=[],
+        skipped_waiting=[],
     )
     assert q.num_prefill_requests == 0
     assert q.sum_prefill_tokens == 0
@@ -497,18 +497,18 @@ def test_waiting_preempted_requests_count_as_queued_decode():
 
 
 # ---------------------------------------------------------------------------
-# self.kv_holding_waiting classification (the fix)
+# self.skipped_waiting classification (the fix)
 # ---------------------------------------------------------------------------
 
 
-def test_kv_holding_waiting_for_remote_kvs_counts_as_queued_decode():
+def test_skipped_waiting_for_remote_kvs_counts_as_queued_decode():
     """Disagg decode-engine: request has KV being transferred; should count
     as queued decode, not queued prefill.
     """
 
     q = _run_compute_queued(
         waiting=[],
-        kv_holding_waiting=[
+        skipped_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1000,
@@ -529,12 +529,12 @@ def test_kv_holding_waiting_for_remote_kvs_counts_as_queued_decode():
     assert q.sum_decode_kv_tokens == 1500
 
 
-def test_kv_holding_waiting_for_structured_output_counts_as_queued_prefill():
+def test_skipped_waiting_for_structured_output_counts_as_queued_prefill():
     """Structured-output grammar compile wait has no KV computed yet; prefill."""
 
     q = _run_compute_queued(
         waiting=[],
-        kv_holding_waiting=[
+        skipped_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=128),
         ],
     )
@@ -544,10 +544,10 @@ def test_kv_holding_waiting_for_structured_output_counts_as_queued_prefill():
     assert q.sum_decode_kv_tokens == 0
 
 
-def test_kv_holding_waiting_for_streaming_req_counts_as_queued_prefill():
+def test_skipped_waiting_for_streaming_req_counts_as_queued_prefill():
     q = _run_compute_queued(
         waiting=[],
-        kv_holding_waiting=[
+        skipped_waiting=[
             _make_request(RequestStatus.WAITING_FOR_STREAMING_REQ, num_tokens=64),
         ],
     )
@@ -563,7 +563,7 @@ def test_kv_holding_waiting_for_streaming_req_counts_as_queued_prefill():
 
 def test_mixed_disagg_decode_engine_snapshot():
     """Realistic decode-engine snapshot: some local preempts in ``self.waiting``
-    plus many ``WAITING_FOR_REMOTE_KVS`` in ``self.kv_holding_waiting``.
+    plus many ``WAITING_FOR_REMOTE_KVS`` in ``self.skipped_waiting``.
     """
 
     q = _run_compute_queued(
@@ -572,7 +572,7 @@ def test_mixed_disagg_decode_engine_snapshot():
                 RequestStatus.PREEMPTED, num_tokens=800, num_computed_tokens=780
             ),
         ],
-        kv_holding_waiting=[
+        skipped_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1024,
@@ -606,7 +606,7 @@ def test_mixed_prefill_engine_snapshot():
             _make_request(RequestStatus.WAITING, num_tokens=100),
             _make_request(RequestStatus.WAITING, num_tokens=200),
         ],
-        kv_holding_waiting=[
+        skipped_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
@@ -616,7 +616,7 @@ def test_mixed_prefill_engine_snapshot():
 
 
 def test_empty_queues():
-    q = _run_compute_queued(waiting=[], kv_holding_waiting=[])
+    q = _run_compute_queued(waiting=[], skipped_waiting=[])
     assert q.num_prefill_requests == 0
     assert q.sum_prefill_tokens == 0
     assert q.num_decode_requests == 0
@@ -661,7 +661,7 @@ def test_variance_spans_both_queues():
         waiting=[
             _make_request(RequestStatus.WAITING, num_tokens=100),
         ],
-        kv_holding_waiting=[
+        skipped_waiting=[
             _make_request(STRUCTURED_OUTPUT_WAITING_STATUS, num_tokens=300),
         ],
     )
@@ -1711,7 +1711,7 @@ def test_dp_rank_multi_node_start_offset():
 
 def test_decode_variance_spans_both_queues():
     """Decode variance mixes local-preempted (``self.waiting``) and
-    remote-KV-waiting (``self.kv_holding_waiting``) into one accumulator.
+    remote-KV-waiting (``self.skipped_waiting``) into one accumulator.
     KV lengths 500 and 1500 → mean 1000, population variance 250000.
     """
 
@@ -1721,7 +1721,7 @@ def test_decode_variance_spans_both_queues():
                 RequestStatus.PREEMPTED, num_tokens=520, num_computed_tokens=500
             ),
         ],
-        kv_holding_waiting=[
+        skipped_waiting=[
             _make_request(
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
                 num_tokens=1500,

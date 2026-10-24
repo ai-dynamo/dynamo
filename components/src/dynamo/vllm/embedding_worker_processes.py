@@ -36,7 +36,7 @@ from vllm.v1.executor import Executor
 
 def _client_listeners(
     zmq_listeners: Any, process_index: int
-) -> tuple[socket.socket, socket.socket]:
+) -> tuple[socket.socket, ...]:
     return (
         zmq_listeners.inputs[process_index].socket,
         zmq_listeners.outputs[process_index].socket,
@@ -122,26 +122,25 @@ def _attach_client(
     stat_loggers: list[Any],
     enable_log_requests: bool,
     disable_log_stats: bool,
-    listeners: tuple[socket.socket, socket.socket],
+    listeners: tuple[socket.socket, ...],
 ) -> tuple[AsyncLLM, VllmConfig]:
     client_vllm_config = _client_config(
         vllm_config,
         process_count=process_count,
         process_index=process_index,
     )
-    input_listener, output_listener = listeners
+    client_addresses: dict[str, Any] = {
+        "input_address": input_address,
+        "output_address": output_address,
+    }
+    client_addresses.update(zip(("input_listener", "output_listener"), listeners))
     client = AsyncLLM.from_vllm_config(
         vllm_config=client_vllm_config,
         usage_context=usage_context,
         stat_loggers=stat_loggers,
         enable_log_requests=enable_log_requests,
         disable_log_stats=disable_log_stats,
-        client_addresses={
-            "input_address": input_address,
-            "output_address": output_address,
-            "input_listener": input_listener,
-            "output_listener": output_listener,
-        },
+        client_addresses=client_addresses,
         client_count=process_count,
         client_index=process_index,
     )
@@ -196,21 +195,13 @@ def _decode_child_addresses(process_count: int) -> tuple[int, list[str], list[st
     return process_index, inputs, outputs
 
 
-def _decode_child_listener_fds() -> tuple[int, int]:
-    try:
-        input_fd, output_fd = json.loads(os.environ[_LISTENER_FDS_ENV])
-        return int(input_fd), int(output_fd)
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError("invalid embedding child listener bootstrap data") from exc
-
-
 def _child_environment(
     *,
     process_count: int,
     process_index: int,
     addresses_json: str,
     parent_pid: int,
-    listener_fds: tuple[int, int],
+    listener_fds: tuple[int, ...],
 ) -> dict[str, str]:
     env = os.environ.copy()
     env[_ROLE_ENV] = _CHILD_ROLE
@@ -446,8 +437,11 @@ def create_shared_embedding_engine_client(
 
     if is_embedding_process_child():
         process_index, inputs, outputs = _decode_child_addresses(process_count)
-        input_fd, output_fd = _decode_child_listener_fds()
-        listeners = (socket.socket(fileno=input_fd), socket.socket(fileno=output_fd))
+        input_fd, output_fd = json.loads(os.environ[_LISTENER_FDS_ENV])
+        listeners = (
+            socket.socket(fileno=input_fd),
+            socket.socket(fileno=output_fd),
+        )
         client, client_config = _attach_client(
             vllm_config,
             process_count=process_count,
@@ -525,8 +519,7 @@ def create_shared_embedding_engine_client(
                 command = [sys.executable, "-m", "dynamo.vllm", *sys.argv[1:]]
                 for process_index in range(1, process_count):
                     child_listeners = _client_listeners(zmq_listeners, process_index)
-                    input_listener, output_listener = child_listeners
-                    listener_fds = (input_listener.fileno(), output_listener.fileno())
+                    listener_fds = tuple(s.fileno() for s in child_listeners)
                     child = subprocess.Popen(
                         command,
                         env=_child_environment(

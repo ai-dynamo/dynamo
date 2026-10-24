@@ -5,7 +5,6 @@
 
 import json
 import os
-import socket
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -313,7 +312,9 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
 
 
 def test_child_attaches_without_launching_engine(monkeypatch):
-    input_end, output_end = socket.socketpair()
+    from socket import socketpair
+
+    input_end, output_end = socketpair()
     monkeypatch.setenv(processes._ROLE_ENV, processes._CHILD_ROLE)
     monkeypatch.setenv(
         processes._LISTENER_FDS_ENV,
@@ -392,14 +393,14 @@ def _run_listener_child():
             )
         assert group is None
         try:
-            for sock in sockets:
-                sock.setsockopt(zmq.RCVTIMEO, 30000)
+            for socket in sockets:
+                socket.setsockopt(zmq.RCVTIMEO, 30000)
             assert sockets[1].recv() == b"output"
             identity, payload = sockets[0].recv_multipart()
             sockets[0].send_multipart([identity, payload])
         finally:
-            for sock in sockets:
-                sock.close(linger=0)
+            for socket in sockets:
+                socket.close(linger=0)
 
 
 @pytest.mark.timeout(180)
@@ -447,10 +448,10 @@ def test_embedding_child_adopts_supervisor_bound_listeners(monkeypatch):
         with zmq.Context() as context, context.socket(
             zmq.PUSH
         ) as output, context.socket(zmq.DEALER) as input_socket:
-            for sock in (output, input_socket):
-                sock.setsockopt(zmq.LINGER, 0)
-                sock.setsockopt(zmq.RCVTIMEO, 30000)
-                sock.setsockopt(zmq.SNDTIMEO, 30000)
+            for socket in (output, input_socket):
+                socket.setsockopt(zmq.LINGER, 0)
+                socket.setsockopt(zmq.RCVTIMEO, 30000)
+                socket.setsockopt(zmq.SNDTIMEO, 30000)
             output.connect(addresses.outputs[1])
             input_socket.connect(addresses.inputs[1])
             output.send(b"output")

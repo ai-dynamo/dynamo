@@ -14,11 +14,6 @@ from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
-from vllm.entrypoints.generate.base.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
@@ -26,7 +21,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
-from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -34,6 +28,12 @@ from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.frontend.vllm_protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    make_tool_call_id,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 from .structural_tag_policy import (
