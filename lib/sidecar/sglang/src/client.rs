@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Thin sidecar client for SGLang's native `sglang.runtime.v1.SglangService`.
+//! Thin sidecar client for SGLang's native `sglang.api.v1.SglangService`.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -11,44 +11,38 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
-use dynamo_backend_common::{BackendError, DisaggregationMode, DynamoError, ErrorType};
+use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
-use serde::Deserialize;
-use serde_json::Value;
+use tokio::time::error::Elapsed;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::Channel;
 
+use crate::discovery::{self, Discovery, EngineInfo};
 use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
 
 pub type Client = SglangServiceClient<Channel>;
 
-pub(crate) const WORKER_GROUP_KEY: &str = "sglang_worker_group_id";
-pub(crate) const KV_CONFIG_KEY: &str = "sglang_sidecar_kv_events";
+/// The gRPC service the sidecar speaks, published in runtime data.
+pub(crate) const GRPC_SERVICE: &str = pb::sglang_service_server::SERVICE_NAME;
 
-/// Node-local KV publishers reported by the engine's GetServerInfo RPC.
-/// Other server fields (and unused source fields such as replay_endpoint) are
-/// ignored so the metadata-only and full servers share the same wire contract.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) const WORKER_GROUP_KEY: &str = "sglang_worker_group_id";
+
+/// The engine's place in the deployment and its KV-event publishers, as
+/// GetServerInfo's `deployment_info` reports them. `dp_size` counts
+/// attention-DP ranks, and the source list is authoritative even when empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NodeMetadata {
     pub node_rank: u32,
     pub nnodes: u32,
     pub dp_size: u32,
-    // SGLang reports model DP and attention DP separately. KV publisher ranks
-    // span their product; default to one when attention DP is not reported.
-    #[serde(default = "default_parallel_size")]
-    pub attn_dp_size: u32,
     pub dist_init_addr: Option<String>,
     pub kv_event_sources: Vec<LocalKvEventSource>,
 }
 
-fn default_parallel_size() -> u32 {
-    1
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalKvEventSource {
     pub dp_rank: u32,
     pub endpoint: String,
@@ -57,20 +51,23 @@ pub(crate) struct LocalKvEventSource {
 }
 
 impl NodeMetadata {
-    /// An absent source list permits legacy leader discovery; an explicit empty
-    /// list is authoritative and must never fall back to all global DP ranks.
-    pub(crate) fn from_server_info(server_info: &Value) -> anyhow::Result<Option<Self>> {
-        ensure!(
-            server_info.is_object(),
-            "GetServerInfo must contain a JSON object"
-        );
-        if server_info.get("kv_event_sources").is_none() {
-            return Ok(None);
-        }
-        let metadata: Self = serde_json::from_value(server_info.clone())
-            .context("invalid GetServerInfo node-local KV metadata")?;
+    /// Validate the reported topology and sources.
+    pub(crate) fn new(
+        node_rank: u32,
+        nnodes: u32,
+        dp_size: u32,
+        dist_init_addr: Option<String>,
+        kv_event_sources: Vec<LocalKvEventSource>,
+    ) -> anyhow::Result<Self> {
+        let metadata = Self {
+            node_rank,
+            nnodes,
+            dp_size,
+            dist_init_addr,
+            kv_event_sources,
+        };
         metadata.validate()?;
-        Ok(Some(metadata))
+        Ok(metadata)
     }
 
     fn validate(&self) -> anyhow::Result<()> {
@@ -79,21 +76,14 @@ impl NodeMetadata {
             "invalid GetServerInfo node topology"
         );
         ensure!(self.dp_size > 0, "GetServerInfo dp_size must be positive");
-        ensure!(
-            self.attn_dp_size > 0,
-            "GetServerInfo attn_dp_size must be positive"
-        );
-        let deployment_dp_size = self
-            .dp_size
-            .checked_mul(self.attn_dp_size)
-            .context("GetServerInfo deployment DP size overflow")?;
+        let deployment_dp_size = self.dp_size;
         ensure!(
             self.nnodes == 1
                 || self
                     .dist_init_addr
                     .as_ref()
                     .is_some_and(|addr| !addr.trim().is_empty()),
-            "multinode sidecars require dist_init_addr for leader matching"
+            "multinode deployments require dist_init_addr for their worker group id"
         );
         let mut ranks = HashSet::new();
         let mut endpoints = HashSet::new();
@@ -123,19 +113,12 @@ impl NodeMetadata {
         Ok(())
     }
 
-    pub(crate) fn validate_registration(
-        &self,
-        dp_size: u32,
-        block_size: Option<u32>,
-    ) -> anyhow::Result<()> {
-        ensure!(
-            self.dp_size.checked_mul(self.attn_dp_size) == Some(dp_size),
-            "GetServerInfo deployment DP size does not match leader registration"
-        );
+    /// Every source must publish at the registered block size.
+    pub(crate) fn validate_registration(&self, block_size: Option<u32>) -> anyhow::Result<()> {
         for source in &self.kv_event_sources {
             ensure!(
                 Some(source.block_size) == block_size,
-                "KV source block_size does not match leader registration"
+                "KV source block_size does not match the registration"
             );
         }
         Ok(())
@@ -164,8 +147,8 @@ impl NodeMetadata {
             "dist_init_addr must be a TCP address"
         );
         validate_endpoint(&url)?;
-        // Match the in-process group key using the shared rendezvous address,
-        // not the local source or gRPC address.
+        // Derive the group key from the shared rendezvous address, not from
+        // the local source or gRPC address.
         resolve_rendezvous(move || address.socket_addrs(|| None), deadline)
             .await
             .and_then(worker_group_id_from_addresses)
@@ -240,40 +223,19 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Metadata exposed by SGLang's model/server discovery RPCs.
-#[derive(Clone, Debug)]
-pub struct Discovery {
-    pub model_path: String,
-    pub tokenizer_path: String,
-    pub served_model_name: Option<String>,
-    pub max_model_len: Option<u32>,
-    pub model_info: Value,
-    pub server_info: Value,
-}
-
-#[derive(Debug)]
-pub(crate) enum StartupDiscovery {
-    Leader(Box<Discovery>),
-    Follower,
-}
-
+/// Connect and discover the engine before the worker registers, which fixes
+/// its role and identity.
+///
+/// `bootstrap`: true for synchronous constructors before logging setup;
+/// false for deferred launcher discovery.
 pub(crate) async fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: &GrpcTransportConfig,
     bootstrap: bool,
-) -> Result<StartupDiscovery, DynamoError> {
+) -> Result<EngineInfo, DynamoError> {
     let deadline = Instant::now() + transport.startup_deadline;
     let mut client = connect(endpoint, transport, deadline, bootstrap).await?;
-    let server_info = get_server_info(&mut client, deadline).await?;
-    if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
-        // Followers expose metadata only. Their local KV sources are
-        // validated by the headless startup path before relaying.
-        Ok(StartupDiscovery::Follower)
-    } else {
-        discover_with_server_info(&mut client, server_info, deadline)
-            .await
-            .map(|d| StartupDiscovery::Leader(Box::new(d)))
-    }
+    discovery::engine_info(discover(&mut client, deadline).await?)
 }
 
 /// `bootstrap`: true for synchronous constructors before logging setup;
@@ -313,7 +275,7 @@ async fn connect_pool(
     })?
 }
 
-fn client_from_channel(channel: Channel) -> Client {
+pub(crate) fn client_from_channel(channel: Channel) -> Client {
     SglangServiceClient::new(channel)
         .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
         .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
@@ -327,14 +289,14 @@ pub struct Pool {
 }
 
 impl Pool {
-    // bootstrap=false: Pool::connect's only call site is LLMEngine::start
-    // (lib/sidecar/sglang/src/engine.rs), after the tracing subscriber is
-    // installed. See connect()'s own doc comment.
     pub async fn connect(
         uri: &GrpcEndpoint,
         cfg: &GrpcTransportConfig,
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
+        // bootstrap=false: a pool is connected only from LLMEngine::start,
+        // after the tracing subscriber is installed. See connect()'s own doc
+        // comment.
         let pool = connect_pool(uri, *cfg, deadline, false).await?;
         let clients = (0..pool.len())
             .map(|_| client_from_channel(pool.next_channel()))
@@ -360,56 +322,44 @@ impl Pool {
     }
 }
 
-pub async fn discover(client: &mut Client, deadline: Instant) -> Result<Discovery, DynamoError> {
-    let server_info = get_server_info(client, deadline).await?;
-    discover_with_server_info(client, server_info, deadline).await
-}
-
-async fn discover_with_server_info(
+/// GetServerInfo, GetModelInfo and ListModels, mapped to typed discovery.
+/// An engine that answers any of them UNIMPLEMENTED does not serve the
+/// contract: SGLang's Python server serves none of them, and a Rust server
+/// that predates sgl-project/sglang#42118 lacks ListModels.
+pub(crate) async fn discover(
     client: &mut Client,
-    server_info: Value,
     deadline: Instant,
 ) -> Result<Discovery, DynamoError> {
-    if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
-        return Err(invalid_arg(
-            "inference discovery requires node_rank=0; followers expose only GetServerInfo",
-        ));
-    }
-    let model = rpc_with_deadline(
+    let server_info = contract_rpc_with_deadline(
+        "GetServerInfo",
+        GRPC_SERVICE,
+        deadline,
+        client.get_server_info(pb::GetServerInfoRequest {}),
+    )
+    .await?
+    .into_inner();
+    let model = contract_rpc_with_deadline(
         "GetModelInfo",
+        GRPC_SERVICE,
         deadline,
         client.get_model_info(pb::GetModelInfoRequest {}),
     )
     .await?
     .into_inner();
-    let models = rpc_with_deadline(
+    let models = contract_rpc_with_deadline(
         "ListModels",
+        GRPC_SERVICE,
         deadline,
         client.list_models(pb::ListModelsRequest {}),
     )
     .await?
     .into_inner()
     .models;
-
-    parse_discovery(model, server_info, models)
+    discovery::parse_discovery(model, server_info, models)
 }
 
-/// Follower engines implement only this RPC, not model discovery or health
-/// checks. Use it for both startup discovery and metadata-only liveness checks.
-pub(crate) async fn get_server_info(
-    client: &mut Client,
-    deadline: Instant,
-) -> Result<Value, DynamoError> {
-    let server = rpc_with_deadline(
-        "GetServerInfo",
-        deadline,
-        client.get_server_info(pb::GetServerInfoRequest {}),
-    )
-    .await?
-    .into_inner();
-    parse_json_object("GetServerInfo.json_info", &server.json_info)
-}
-
+/// SGLang's Rust server answers UNAVAILABLE until its scheduler responds, and
+/// the engine's readiness loop retries that error.
 pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool, DynamoError> {
     rpc_with_deadline(
         "HealthCheck",
@@ -420,21 +370,80 @@ pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool
     .map(|response| response.into_inner().healthy)
 }
 
-pub async fn abort(
-    client: &mut Client,
-    request: pb::AbortRequest,
-    timeout: Duration,
-) -> Result<(), DynamoError> {
+/// Returns whether an active generation matched `rid`.
+pub async fn abort(client: &mut Client, rid: &str, timeout: Duration) -> Result<bool, DynamoError> {
+    let request = pb::AbortRequest {
+        rid: rid.to_string(),
+        abort_all: false,
+    };
     rpc_with_deadline("Abort", Instant::now() + timeout, client.abort(request))
         .await
-        .map(|_| ())
+        .map(|response| response.into_inner().success)
 }
 
-async fn rpc_with_deadline<T, F>(rpc: &str, deadline: Instant, future: F) -> Result<T, DynamoError>
+/// The Abort RPC on one connection. SGLang's Rust server has no HTTP
+/// `/abort_request`; this RPC also cancels requests opened through native
+/// HTTP `/generate`.
+#[derive(Clone)]
+pub(crate) struct AbortRpc(Client);
+
+impl AbortRpc {
+    pub(crate) fn new(client: Client) -> Self {
+        Self(client)
+    }
+
+    /// Failures are logged, not returned.
+    pub(crate) async fn abort(&self, request_id: &str, timeout: Duration) {
+        match abort(&mut self.0.clone(), request_id, timeout).await {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(request_id, "SGLang Abort matched no active request"),
+            Err(error) => tracing::debug!(request_id, %error, "SGLang Abort RPC failed"),
+        }
+    }
+
+    /// An Abort RPC whose every call fails to connect.
+    #[cfg(test)]
+    pub(crate) fn unreachable() -> Self {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        Self(client_from_channel(channel))
+    }
+}
+
+pub(crate) async fn rpc_with_deadline<T, F>(
+    rpc: &str,
+    deadline: Instant,
+    future: F,
+) -> Result<T, DynamoError>
+where
+    F: Future<Output = Result<T, tonic::Status>>,
+{
+    deadline_result(rpc, timeout_at(deadline, future).await)
+}
+
+/// A discovery RPC. An engine that does not serve `service`, or serves an
+/// older version of it, answers UNIMPLEMENTED.
+pub(crate) async fn contract_rpc_with_deadline<T, F>(
+    rpc: &str,
+    service: &str,
+    deadline: Instant,
+    future: F,
+) -> Result<T, DynamoError>
 where
     F: Future<Output = Result<T, tonic::Status>>,
 {
     match timeout_at(deadline, future).await {
+        Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
+            Err(contract_mismatch(rpc, service))
+        }
+        result => deadline_result(rpc, result),
+    }
+}
+
+fn deadline_result<T>(
+    rpc: &str,
+    result: Result<Result<T, tonic::Status>, Elapsed>,
+) -> Result<T, DynamoError> {
+    match result {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(status)) => Err(status_to_dynamo(rpc, status)),
         Err(_) => Err(connection_timeout(format!(
@@ -443,112 +452,13 @@ where
     }
 }
 
-fn parse_discovery(
-    model: pb::GetModelInfoResponse,
-    server_info: Value,
-    models: Vec<pb::ModelCard>,
-) -> Result<Discovery, DynamoError> {
-    let model_info = parse_json_object("GetModelInfo.json_info", &model.json_info)?;
-    // Generate responses are forwarded as token deltas. Accepting cumulative
-    // output here would duplicate tokens and inflate completion usage.
-    if server_info
-        .get("incremental_streaming_output")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        return Err(invalid_arg(
-            "SGLang sidecar requires incremental streaming output; restart the SGLang server \
-             with --incremental-streaming-output to prevent duplicated tokens and inflated \
-             completion-token counts",
-        ));
-    }
-    let model_path = if model.model_path.trim().is_empty() {
-        model_info
-            .get("model_path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    } else {
-        model.model_path
-    };
-    if model_path.trim().is_empty() {
-        return Err(protocol_error(
-            "SGLang GetModelInfo returned an empty model_path",
-        ));
-    }
-    let tokenizer_path = model_info
-        .get("tokenizer_path")
-        .and_then(Value::as_str)
-        .filter(|path| !path.trim().is_empty())
-        .unwrap_or(&model_path)
-        .to_string();
-
-    let primary = models
-        .iter()
-        .find(|candidate| candidate.root == model_path || candidate.id == model_path)
-        .or_else(|| models.first());
-    let served_model_name = server_info
-        .get("served_model_name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            primary
-                .map(|card| card.id.as_str())
-                .filter(|name| !name.is_empty() && *name != model_path)
-                .map(str::to_string)
-        });
-    let max_model_len = primary
-        .and_then(|card| card.max_model_len)
-        .and_then(|value| u32::try_from(value).ok())
-        .or_else(|| json_u32(&server_info, "context_length"))
-        .or_else(|| json_u32(&server_info, "max_req_input_len"));
-
-    Ok(Discovery {
-        model_path,
-        tokenizer_path,
-        served_model_name,
-        max_model_len,
-        model_info,
-        server_info,
-    })
-}
-
-pub(crate) fn discovery_mode(server_info: &Value) -> Result<DisaggregationMode, DynamoError> {
-    match server_info
-        .get("disaggregation_mode")
-        .and_then(Value::as_str)
-        .unwrap_or("null")
-    {
-        "null" | "agg" | "aggregated" => Ok(DisaggregationMode::Aggregated),
-        "prefill" => Ok(DisaggregationMode::Prefill),
-        "decode" => Ok(DisaggregationMode::Decode),
-        mode => Err(protocol_error(format!(
-            "unsupported SGLang disaggregation_mode `{mode}`"
-        ))),
-    }
-}
-
-fn parse_json_object(label: &str, raw: &str) -> Result<Value, DynamoError> {
-    let value: Value = serde_json::from_str(raw)
-        .map_err(|err| protocol_error(format!("invalid {label}: {err}")))?;
-    if !value.is_object() {
-        return Err(protocol_error(format!("{label} must be a JSON object")));
-    }
-    Ok(value)
-}
-
-pub(crate) fn json_u64(value: &Value, key: &str) -> Option<u64> {
-    value.get(key).and_then(|entry| {
-        entry
-            .as_u64()
-            .or_else(|| entry.as_i64().and_then(|number| u64::try_from(number).ok()))
-            .or_else(|| entry.as_str().and_then(|number| number.parse().ok()))
-    })
-}
-
-pub(crate) fn json_u32(value: &Value, key: &str) -> Option<u32> {
-    json_u64(value, key).and_then(|number| u32::try_from(number).ok())
+fn contract_mismatch(rpc: &str, service: &str) -> DynamoError {
+    invalid_arg(format!(
+        "the SGLang engine does not serve {service}/{rpc} (UNIMPLEMENTED); \
+         start SGLang with SGLANG_RUST_SERVER=1; the sidecar requires an SGLang build \
+         with sgl-project/sglang#42118 and the api.v1 sidecar changes listed in \
+         lib/sidecar/sglang/README.md"
+    ))
 }
 
 fn backend(kind: BackendError, message: impl Into<String>) -> DynamoError {
@@ -612,161 +522,35 @@ mod tests {
     use std::time::Duration;
 
     use dynamo_backend_common::{BackendError, ErrorType};
-    use serde_json::json;
     use tokio::net::TcpListener;
     use tokio::time::Instant;
     use tonic::transport::Endpoint;
 
     use super::{
-        NodeMetadata, client_from_channel, discover, discovery_mode, json_u32, json_u64,
-        parse_discovery, rpc_with_deadline, status_to_dynamo, worker_group_id_from_addresses,
+        LocalKvEventSource, NodeMetadata, client_from_channel, discover, rpc_with_deadline,
+        status_to_dynamo, worker_group_id_from_addresses,
     };
-    use crate::proto as pb;
 
-    #[test]
-    fn numeric_discovery_fields_accept_numbers_and_strings() {
-        let value = json!({"a": 16, "b": "32", "c": -1});
-        assert_eq!(json_u64(&value, "a"), Some(16));
-        assert_eq!(json_u32(&value, "b"), Some(32));
-        assert_eq!(json_u64(&value, "c"), None);
-        for value in [json!(u64::MAX), json!(u64::MAX.to_string())] {
-            let info = json!({"limit": value});
-            assert_eq!(json_u64(&info, "limit"), Some(u64::MAX));
-            assert_eq!(json_u32(&info, "limit"), None);
+    fn source(dp_rank: u32, endpoint: &str) -> LocalKvEventSource {
+        LocalKvEventSource {
+            dp_rank,
+            endpoint: endpoint.to_string(),
+            topic: String::new(),
+            block_size: 64,
         }
-        for value in [json!(u32::MAX), json!(u32::MAX.to_string())] {
-            assert_eq!(json_u32(&json!({"limit": value}), "limit"), Some(u32::MAX));
-        }
-        for value in [
-            json!(null),
-            json!(true),
-            json!(1.5),
-            json!("-1"),
-            json!("1.5"),
-            json!("18446744073709551616"),
-        ] {
-            assert_eq!(json_u64(&json!({"limit": value}), "limit"), None);
-        }
-        assert_eq!(json_u32(&json!({}), "limit"), None);
     }
 
     #[test]
-    fn discovery_preserves_distinct_tokenizer_path() {
-        let discovery = parse_discovery(
-            pb::GetModelInfoResponse {
-                model_path: "model-repo".to_string(),
-                json_info: json!({"tokenizer_path": "tokenizer-repo"}).to_string(),
-            },
-            json!({"incremental_streaming_output": true}),
-            Vec::new(),
-        )
-        .unwrap();
-        assert_eq!(discovery.model_path, "model-repo");
-        assert_eq!(discovery.tokenizer_path, "tokenizer-repo");
-    }
-
-    fn node_metadata_json() -> serde_json::Value {
-        json!({
-            "node_rank": 1, "nnodes": 2, "dp_size": 8,
-            "dist_init_addr": "127.0.0.1:2345",
-            "kv_event_sources": [{
-                "dp_rank": 4, "endpoint": "tcp://127.0.0.1:5561",
-                "topic": "", "block_size": 64
-            }]
-        })
-    }
-
-    #[tokio::test]
-    async fn parses_node_local_sources_and_ignores_unrelated_server_fields() {
-        let mut raw = node_metadata_json();
-        raw["model_path"] = json!("model-repo");
-        // Live-only relaying does not interpret the engine's optional replay field.
-        raw["kv_event_sources"][0]["replay_endpoint"] = json!("unused");
-        let metadata = NodeMetadata::from_server_info(&raw).unwrap().unwrap();
-        assert_eq!(metadata.kv_event_sources[0].dp_rank, 4);
-        assert_eq!(
-            metadata
-                .worker_group_id(Instant::now() + std::time::Duration::from_secs(1))
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("dist_init:tcp://127.0.0.1:2345")
-        );
-        metadata.validate_registration(8, Some(64)).unwrap();
-        assert!(metadata.validate_registration(4, Some(64)).is_err());
-        assert!(metadata.validate_registration(8, Some(32)).is_err());
-    }
-
-    #[test]
-    fn local_sources_distinguish_absent_empty_and_invalid_metadata() {
-        assert!(
-            NodeMetadata::from_server_info(&json!({}))
-                .unwrap()
-                .is_none()
-        );
-        let mut raw = node_metadata_json();
-        raw["kv_event_sources"] = json!([]);
-        assert!(
-            NodeMetadata::from_server_info(&raw)
-                .unwrap()
-                .unwrap()
-                .kv_event_sources
-                .is_empty()
-        );
-        raw["kv_event_sources"] = serde_json::Value::Null;
-        assert!(NodeMetadata::from_server_info(&raw).is_err());
-    }
-
-    #[test]
-    fn rejects_duplicate_rank_or_endpoint() {
-        let mut raw = node_metadata_json();
-        let mut source = raw["kv_event_sources"][0].clone();
-        source["endpoint"] = json!("tcp://127.0.0.1:5562");
-        raw["kv_event_sources"].as_array_mut().unwrap().push(source);
-        assert!(NodeMetadata::from_server_info(&raw).is_err());
-        raw["kv_event_sources"][1]["dp_rank"] = json!(5);
-        raw["kv_event_sources"][1]["endpoint"] = json!("tcp://127.0.0.1:5561");
-        assert!(NodeMetadata::from_server_info(&raw).is_err());
-    }
-
-    #[test]
-    fn source_rank_and_block_size_must_be_valid() {
-        let mut raw = node_metadata_json();
-        raw["kv_event_sources"][0]["dp_rank"] = json!(8);
-        assert!(NodeMetadata::from_server_info(&raw).is_err());
-        raw["kv_event_sources"][0]["dp_rank"] = json!(4);
-        raw["kv_event_sources"][0]["block_size"] = json!(0);
-        assert!(NodeMetadata::from_server_info(&raw).is_err());
-    }
-
-    #[test]
-    fn attention_dp_expands_the_kv_source_rank_space() {
-        let mut raw = node_metadata_json();
-        raw["dp_size"] = json!(1);
-        raw["attn_dp_size"] = json!(8);
-        raw["kv_event_sources"][0]["dp_rank"] = json!(7);
-        let metadata = NodeMetadata::from_server_info(&raw).unwrap().unwrap();
-        metadata.validate_registration(8, Some(64)).unwrap();
-        assert!(metadata.validate_registration(1, Some(64)).is_err());
-
-        raw["kv_event_sources"][0]["dp_rank"] = json!(8);
-        assert!(NodeMetadata::from_server_info(&raw).is_err());
-    }
-
-    #[tokio::test]
-    async fn normalizes_ipv6_group_id_and_accepts_bound_ipc_sources() {
-        let mut raw = node_metadata_json();
-        raw["dist_init_addr"] = json!("tcp://[::1]:2345");
-        raw["kv_event_sources"][0]["endpoint"] = json!("ipc:///engine/kv-events");
-        let metadata = NodeMetadata::from_server_info(&raw).unwrap().unwrap();
-        assert_eq!(
-            metadata
-                .worker_group_id(Instant::now() + std::time::Duration::from_secs(1))
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("dist_init:tcp://[::1]:2345")
-        );
+    fn rejects_invalid_kv_sources() {
+        let duplicate = vec![
+            source(0, "tcp://127.0.0.1:5557"),
+            source(0, "tcp://127.0.0.1:5558"),
+        ];
+        assert!(NodeMetadata::new(0, 1, 1, None, duplicate).is_err());
+        let unbound = vec![source(0, "tcp://0.0.0.0:5557")];
+        assert!(NodeMetadata::new(0, 1, 1, None, unbound).is_err());
+        // Several nodes need dist_init_addr for their worker group id.
+        assert!(NodeMetadata::new(0, 2, 1, None, Vec::new()).is_err());
     }
 
     #[tokio::test]
@@ -849,199 +633,6 @@ mod tests {
     }
 
     #[test]
-    fn discovery_roles_accept_native_aliases_and_reject_unknown_strings() {
-        use dynamo_backend_common::DisaggregationMode;
-
-        for (value, expected) in [
-            (json!(null), DisaggregationMode::Aggregated),
-            (json!("null"), DisaggregationMode::Aggregated),
-            (json!("agg"), DisaggregationMode::Aggregated),
-            (json!("aggregated"), DisaggregationMode::Aggregated),
-            (json!("prefill"), DisaggregationMode::Prefill),
-            (json!("decode"), DisaggregationMode::Decode),
-        ] {
-            assert_eq!(
-                discovery_mode(&json!({"disaggregation_mode": value})).unwrap(),
-                expected
-            );
-        }
-        assert_eq!(
-            discovery_mode(&json!({})).unwrap(),
-            DisaggregationMode::Aggregated
-        );
-        for mode in ["encode", "unknown", ""] {
-            let error = discovery_mode(&json!({"disaggregation_mode": mode})).unwrap_err();
-            assert_eq!(
-                error.error_type(),
-                ErrorType::Backend(BackendError::Unknown)
-            );
-            assert!(
-                error
-                    .to_string()
-                    .contains("unsupported SGLang disaggregation_mode")
-            );
-        }
-    }
-
-    #[test]
-    fn discovery_requires_incremental_streaming() {
-        for info in [
-            json!({}),
-            json!({"incremental_streaming_output": false}),
-            json!({"incremental_streaming_output": "true"}),
-            json!({"incremental_streaming_output": null}),
-        ] {
-            let error = parse_discovery(
-                pb::GetModelInfoResponse {
-                    model_path: "model-repo".to_string(),
-                    json_info: "{}".to_string(),
-                },
-                info,
-                Vec::new(),
-            )
-            .unwrap_err();
-            assert_eq!(
-                error.error_type(),
-                ErrorType::Backend(BackendError::InvalidArgument)
-            );
-            assert!(
-                error.to_string().contains("--incremental-streaming-output"),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
-    fn discovery_rejects_malformed_json_and_non_object_metadata() {
-        for label in ["GetModelInfo.json_info", "GetServerInfo.json_info"] {
-            for raw in ["{", "null", "[]", "1", "\"metadata\""] {
-                let error = super::parse_json_object(label, raw).unwrap_err();
-                assert_eq!(
-                    error.error_type(),
-                    ErrorType::Backend(BackendError::Unknown)
-                );
-                assert!(error.to_string().contains(label), "{raw}: {error}");
-            }
-        }
-    }
-
-    #[test]
-    fn discovery_resolves_model_path_and_tokenizer_fallbacks() {
-        for (native_path, json_path, expected) in [
-            ("native-model", "json-model", Some("native-model")),
-            (" ", "json-model", Some("json-model")),
-            ("", " ", None),
-        ] {
-            for tokenizer in [json!(null), json!(""), json!(" "), json!(7)] {
-                let result = parse_discovery(
-                    pb::GetModelInfoResponse {
-                        model_path: native_path.into(),
-                        json_info: json!({"model_path": json_path, "tokenizer_path": tokenizer})
-                            .to_string(),
-                    },
-                    json!({"incremental_streaming_output": true}),
-                    vec![],
-                );
-                if let Some(expected) = expected {
-                    let info = result.unwrap();
-                    assert_eq!(info.model_path, expected);
-                    assert_eq!(info.tokenizer_path, expected);
-                    assert_eq!(info.served_model_name, None);
-                    assert_eq!(info.max_model_len, None);
-                } else {
-                    let error = result.unwrap_err();
-                    assert_eq!(
-                        error.error_type(),
-                        ErrorType::Backend(BackendError::Unknown)
-                    );
-                    assert!(error.to_string().contains("empty model_path"));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn discovery_prefers_matching_model_and_server_alias() {
-        for (id, root, fallback_name) in [
-            ("card-alias", "model", Some("card-alias")),
-            ("model", "different-root", None),
-        ] {
-            for server_name in [None, Some("server-alias")] {
-                let model_info = json!({"tokenizer_path": "tokenizer", "custom": [1, 2]});
-                let server_info = json!({
-                    "incremental_streaming_output": true,
-                    "served_model_name": server_name,
-                    "context_length": 1024,
-                });
-                let info = parse_discovery(
-                    pb::GetModelInfoResponse {
-                        model_path: "model".into(),
-                        json_info: model_info.to_string(),
-                    },
-                    server_info.clone(),
-                    vec![
-                        pb::ModelCard {
-                            id: "unrelated".into(),
-                            max_model_len: Some(512),
-                            ..Default::default()
-                        },
-                        pb::ModelCard {
-                            id: id.into(),
-                            root: root.into(),
-                            max_model_len: Some(4096),
-                            ..Default::default()
-                        },
-                    ],
-                )
-                .unwrap();
-                assert_eq!(
-                    info.served_model_name.as_deref(),
-                    server_name.or(fallback_name)
-                );
-                assert_eq!(info.max_model_len, Some(4096));
-                assert_eq!(info.model_info, model_info);
-                assert_eq!(info.server_info, server_info);
-            }
-        }
-    }
-
-    #[test]
-    fn discovery_falls_back_to_first_card_and_valid_server_limits() {
-        for (card_limit, context, input_limit, expected) in [
-            (Some(2048), json!(4096), json!(8192), Some(2048)),
-            (Some(-1), json!("4096"), json!(8192), Some(4096)),
-            (
-                None,
-                json!(u64::from(u32::MAX) + 1),
-                json!("8192"),
-                Some(8192),
-            ),
-            (None, json!(null), json!(-1), None),
-        ] {
-            let info = parse_discovery(
-                pb::GetModelInfoResponse {
-                    model_path: "model".into(),
-                    json_info: "{}".into(),
-                },
-                json!({
-                    "incremental_streaming_output": true,
-                    "served_model_name": "",
-                    "context_length": context,
-                    "max_req_input_len": input_limit,
-                }),
-                vec![pb::ModelCard {
-                    id: "first-alias".into(),
-                    max_model_len: card_limit,
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
-            assert_eq!(info.served_model_name.as_deref(), Some("first-alias"));
-            assert_eq!(info.max_model_len, expected);
-        }
-    }
-
-    #[test]
     fn rpc_status_mapping_preserves_error_kind_and_context() {
         for (code, kind) in [
             (tonic::Code::InvalidArgument, BackendError::InvalidArgument),
@@ -1094,6 +685,22 @@ mod tests {
             error
                 .to_string()
                 .contains("HealthCheck exceeded the configured deadline")
+        );
+    }
+
+    #[tokio::test]
+    async fn unimplemented_rpc_reports_the_contract_mismatch() {
+        let error = super::contract_rpc_with_deadline::<(), _>(
+            "GetServerInfo",
+            "sglang.api.v1.SglangService",
+            Instant::now() + Duration::from_secs(60),
+            async { Err(tonic::Status::unimplemented("")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("SGLANG_RUST_SERVER=1"),
+            "{error}"
         );
     }
 
