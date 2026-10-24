@@ -10,9 +10,9 @@ on:
       - "ci/test-runner-group-balancing"
 
 concurrency:
-  # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
-  group: docker-build-test-${{ github.ref_name }}
-  cancel-in-progress: true
+  # Keep stress-test pushes concurrent; normal PR pushes still supersede older runs.
+  group: docker-build-test-${{ github.ref_name }}-${{ github.ref_name == 'ci/test-runner-group-balancing' && github.run_id || 'latest' }}
+  cancel-in-progress: ${{ github.ref_name != 'ci/test-runner-group-balancing' }}
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
