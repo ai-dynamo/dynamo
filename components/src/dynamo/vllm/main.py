@@ -100,7 +100,7 @@ from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import prepare_snapshot_engine
+from .snapshot import apply_restore_served_model_name, prepare_snapshot_engine
 from .state_agent import (
     StateAgentLifecycle,
     start_attachment_owner,
@@ -254,6 +254,7 @@ async def worker(argv: list[str] | None = None) -> None:
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
         config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        apply_restore_served_model_name(config)
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
