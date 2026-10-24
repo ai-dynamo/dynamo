@@ -11,6 +11,9 @@
 //! large request payloads as Bytes instead of copying them into flattened buffers.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::config::environment_names::request_plane::{
+    DYN_TCP_CHANNEL_BUFFER, DYN_TCP_CONNECT_TIMEOUT, DYN_TCP_POOL_SIZE, DYN_TCP_REQUEST_TIMEOUT,
+};
 use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
@@ -122,28 +125,29 @@ impl TcpRequestConfig {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
+    /// Read TCP settings, retaining defaults for missing or invalid values.
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
         let mut config = Self::default();
 
-        if let Some(val) = lookup("DYN_TCP_REQUEST_TIMEOUT")
+        if let Some(val) = lookup(DYN_TCP_REQUEST_TIMEOUT)
             && let Ok(timeout) = val.parse::<u64>()
         {
             config.request_timeout = Duration::from_secs(timeout);
         }
 
-        if let Some(val) = lookup("DYN_TCP_POOL_SIZE")
+        if let Some(val) = lookup(DYN_TCP_POOL_SIZE)
             && let Ok(size) = val.parse::<usize>()
         {
             config.pool_size = size;
         }
 
-        if let Some(val) = lookup("DYN_TCP_CONNECT_TIMEOUT")
+        if let Some(val) = lookup(DYN_TCP_CONNECT_TIMEOUT)
             && let Ok(timeout) = val.parse::<u64>()
         {
             config.connect_timeout = Duration::from_secs(timeout);
         }
 
-        if let Some(val) = lookup("DYN_TCP_CHANNEL_BUFFER")
+        if let Some(val) = lookup(DYN_TCP_CHANNEL_BUFFER)
             && let Ok(size) = val.parse::<usize>()
         {
             config.channel_buffer = size;
