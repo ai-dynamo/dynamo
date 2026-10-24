@@ -437,6 +437,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         input: WorkerSelectionInput<'_, C>,
         trace: Option<SelectionTraceSpec>,
     ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select_worker_with_decode_progress(input, trace, None)
+    }
+
+    fn select_worker_with_decode_progress(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        trace: Option<SelectionTraceSpec>,
+        progress: Option<&super::super::decode_progress::DecodeProgressProvider<'_>>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         let state = match &self.state {
             #[cfg(any(test, feature = "bench"))]
@@ -454,7 +463,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             request,
             eligibility,
             block_size,
-            trace,
+            super::SelectionCapture { trace, progress },
         )
     }
 }

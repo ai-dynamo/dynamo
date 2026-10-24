@@ -79,6 +79,19 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
     ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
         self.select_worker(input).map(|result| (result, None))
     }
+
+    /// Host extension supplying an optional native, scheduler-scoped progress projection.
+    /// Existing selectors keep their behavior. Opted-in pickers receive only eligible rows;
+    /// this provider never grants permission to mutate ownership or admission state.
+    #[doc(hidden)]
+    fn select_worker_with_decode_progress(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        trace: Option<SelectionTraceSpec>,
+        _progress: Option<&super::decode_progress::DecodeProgressProvider<'_>>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select_worker_traced(input, trace)
+    }
 }
 
 /// Inputs supplied by the selector's host.
@@ -178,6 +191,7 @@ impl<'a> MaterializedSelectionInput<'a> {
                     || !request.overlap.tier_overlap_blocks.disk.is_empty(),
             },
             context: WorkerSelectionContext {
+                decode_progress: None,
                 request,
                 request_blocks: request.request_blocks(block_size),
                 block_size,
@@ -462,9 +476,15 @@ fn log_selection<C: WorkerConfigLike>(
     }
 }
 
-#[inline(always)]
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
+#[derive(Default)]
+struct SelectionCapture<'a> {
+    trace: Option<SelectionTraceSpec>,
+    progress: Option<&'a super::decode_progress::DecodeProgressProvider<'a>>,
+}
+
+#[inline(always)]
 fn select_worker_with_policy<C: WorkerConfigLike>(
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
@@ -472,8 +492,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
     block_size: u32,
-    trace: Option<SelectionTraceSpec>,
+    capture: SelectionCapture<'_>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+    let SelectionCapture { trace, progress } = capture;
     eligibility.validate_pinned_worker_allowed()?;
 
     if let Some(worker) = eligibility.pinned_worker() {
@@ -538,7 +559,20 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
                 };
-                let row = picker.pick(&input.context, picker_input)?;
+                let decode_progress = picker_inputs
+                    .contains(WorkerInputs::DECODE_PROGRESS)
+                    .then(|| {
+                        super::decode_progress::DecodeProgressSnapshot::capture(
+                            candidates.iter().map(|row| row.worker()),
+                            progress,
+                        )
+                    })
+                    .flatten();
+                let picker_context = WorkerSelectionContext {
+                    decode_progress: decode_progress.as_ref(),
+                    ..input.context
+                };
+                let row = picker.pick(&picker_context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,

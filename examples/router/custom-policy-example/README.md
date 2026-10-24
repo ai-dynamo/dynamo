@@ -7,6 +7,26 @@ SPDX-License-Identifier: Apache-2.0
 
 Use this example as the build guide for a custom Rust worker-selection policy. It covers the full path from `WorkerFilter`, `WorkerScorer`, and `WorkerPicker` implementations to a linked Python frontend or standalone Endpoint Picker Provider (EPP).
 
+## Optional Aggregated Decoder Progress
+
+An explicitly enabled aggregated frontend can expose current-attempt token
+observations to a picker declaring `WorkerInputs::DECODE_PROGRESS` through
+`context.decode_progress()`. Collection is controlled by
+`DYN_ROUTER_DECODE_PROGRESS=1` together with native `router_track_output_blocks: true`,
+independently of TRACE logging. Progress stays with existing slot-tracker request
+owners and reaches the picker through its derived read model. Absence and stale
+data require a policy fallback; remaining token budget does not predict GPU finish
+time. Unsupported multi-choice, disaggregated, unknown-limit, or early-stop requests
+are not collected.
+
+The [progress-group YAML](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/progress-group.yaml)
+demonstrates this input in the shipped two-tier picker with an explicitly supplied
+two-worker calibration profile. Its thresholds are experimental and do not claim
+safe behavior for arbitrary loads. Omit `progress_group` and leave collection off
+to retain the original two-tier path. See the
+[custom-policy contract](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx)
+for lifetime, cost, and missing-data semantics.
+
 ## What You Are Building
 
 ```text

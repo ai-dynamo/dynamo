@@ -831,6 +831,8 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Opt-in frontend-local aggregated decoder progress; independent of TRACE logging.
+    pub const DYN_ROUTER_DECODE_PROGRESS: &str = "DYN_ROUTER_DECODE_PROGRESS";
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 
@@ -1253,6 +1255,7 @@ mod tests {
             model::huggingface::HF_ENDPOINT,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
+            router::DYN_ROUTER_DECODE_PROGRESS,
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,

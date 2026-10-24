@@ -877,6 +877,31 @@ where
         )
     }
 
+    /// Extend the native output path with explicitly supported raw progress.
+    /// Metadata-only updates do not allocate output blocks or publish replica/shared load.
+    /// The native booking owns retirement on free, retry, expiry and worker removal.
+    #[doc(hidden)]
+    pub async fn update_output_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
+        decay_fraction: Option<f64>,
+        progress: Option<super::decode_progress::DecodeProgressUpdate>,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue.ensure_running()?;
+        self.slots
+            .update_output_if_booking(
+                &booking.request_id,
+                booking.worker,
+                booking.attempt_id,
+                num_blocks,
+                decay_fraction,
+                progress,
+            )
+            .map(|_| ())
+            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
+    }
+
     pub fn get_potential_loads(
         &self,
         token_seq: Option<Vec<SequenceHash>>,
