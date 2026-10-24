@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
 import logging
 import os
 import time
@@ -42,6 +43,7 @@ from ..multimodal_utils import (
     load_vision_model,
     vLLMMultimodalRequest,
 )
+from ..multimodal_utils.custom_encoder.batcher import ThreadedMicroBatcher
 from ..multimodal_utils.model import ModelFamily, resolve_model_family
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,24 @@ logger = logging.getLogger(__name__)
 # [gluo NOTE] default off to benchmark standalone encoder
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
+# Run all vision forwards on one dedicated thread and coalesce concurrent requests
+# into a single forward. One asyncio.to_thread per request makes the threads fight
+# over the GIL while launching eager kernels, which drops throughput below serial.
+ENCODE_MICRO_BATCH = int(os.getenv("DYN_ENCODE_MICRO_BATCH", 1))
+# Upper bound on pixel_values rows (vision patches) per coalesced forward.
+ENCODE_MAX_BATCH_PATCHES = int(os.getenv("DYN_ENCODE_MAX_BATCH_PATCHES", 65536))
+# Max requests between image loading and the end of their vision forward (0 = no
+# limit). Preprocessing outpaces the vision forward, and each waiting request holds
+# its decoded images and float32 pixel_values (~34 MB per 1600x900 image), so an
+# unbounded backlog grows host memory with the number of in-flight requests.
+ENCODE_MAX_INFLIGHT = int(os.getenv("DYN_ENCODE_MAX_INFLIGHT", 64))
+
+
+def _release_after(slot: asyncio.Semaphore, forward: asyncio.Future) -> None:
+    slot.release()
+    if not forward.cancelled():
+        # Nobody awaits the forward of a cancelled request; mark its error seen.
+        forward.exception()
 
 
 def _load_image_processor(engine_args: AsyncEngineArgs):
@@ -179,6 +199,27 @@ class EncodeWorkerHandler:
         self.vision_encoder, self.projector = get_encoder_components(
             self.model, self.vision_model
         )
+        self._encode_slots = (
+            asyncio.Semaphore(ENCODE_MAX_INFLIGHT) if ENCODE_MAX_INFLIGHT > 0 else None
+        )
+        self._vit_batcher: ThreadedMicroBatcher | None = None
+        # Started on first use: the worker factory calls cleanup() only once the
+        # endpoint is serving, and this non-daemon thread would otherwise keep the
+        # process alive after a failed startup.
+        self._vit_batcher_started = False
+        if (
+            ENCODE_MICRO_BATCH
+            and resolve_model_family(self.model) is ModelFamily.QWEN_VL
+        ):
+            self._vit_batcher = ThreadedMicroBatcher(
+                self._encode_qwen_batch,
+                max_batch_cost=ENCODE_MAX_BATCH_PATCHES,
+                name="encode-vit",
+            )
+            logger.info(
+                "Encode worker vision micro-batching enabled (max %d patches/batch)",
+                ENCODE_MAX_BATCH_PATCHES,
+            )
         self._connector: connect.Connector | None = None
         self._accumulated_time = 0.0
         self._processed_requests = 0
@@ -218,6 +259,94 @@ class EncodeWorkerHandler:
         self.send_complete_queue.put_nowait(
             (None, None)
         )  # Send sentinel value to stop the checker
+        if self._vit_batcher is not None:
+            self._vit_batcher.shutdown()
+
+    async def _encode_releasing_slot(
+        self, image_embeds: dict[str, Any], slot: asyncio.Semaphore | None
+    ) -> torch.Tensor:
+        """Run one request's vision forward, then release the held ``slot``.
+
+        The forward is shielded from the request's cancellation: once handed to
+        the encoder thread it keeps running, and holding the request's images,
+        until it returns. The slot therefore follows the forward, not the request.
+        """
+        forward = asyncio.ensure_future(self._vision_forward(image_embeds))
+        if slot is not None:
+            forward.add_done_callback(functools.partial(_release_after, slot))
+        return await asyncio.shield(forward)
+
+    async def _vision_forward(self, image_embeds: dict[str, Any]) -> torch.Tensor:
+        if self._vit_batcher is None:
+            return await asyncio.to_thread(
+                encode_image_embeddings,
+                model_name=self.model,
+                image_embeds=image_embeds,
+                vision_encoder=self.vision_encoder,
+                projector=self.projector,
+            )
+        if not self._vit_batcher_started:
+            self._vit_batcher.start()
+            self._vit_batcher_started = True
+        # An oversized request still runs, alone in its own batch.
+        cost = min(int(image_embeds["pixel_values"].shape[0]), ENCODE_MAX_BATCH_PATCHES)
+        (embeddings,) = await self._vit_batcher.submit([image_embeds], costs=[cost])
+        if isinstance(embeddings, BaseException):
+            raise embeddings
+        return embeddings
+
+    def _encode_qwen_batch(
+        self, items: list[Any]
+    ) -> list[torch.Tensor | BaseException]:
+        """Encode several requests' processed images in one vision forward.
+
+        Returns, per item, either one ``[1, visual_tokens, hidden]`` tensor
+        (what ``encode_image_embeddings`` returns for that item alone) or the
+        exception encoding it raised. A failed coalesced forward is retried item
+        by item so one bad request does not fail the others in its batch.
+        """
+        if len(items) > 1:
+            try:
+                return self._encode_qwen(items)
+            except Exception:
+                logger.warning(
+                    "Coalesced vision forward of %d requests failed; "
+                    "retrying them one by one",
+                    len(items),
+                    exc_info=True,
+                )
+        results: list[torch.Tensor | BaseException] = []
+        for item in items:
+            try:
+                results.append(self._encode_qwen([item])[0])
+            except Exception as e:
+                results.append(e)
+        return results
+
+    def _encode_qwen(self, items: list[Any]) -> list[torch.Tensor]:
+        if len(items) == 1:
+            image_embeds = items[0]
+        else:
+            image_embeds = {
+                "pixel_values": torch.cat([it["pixel_values"] for it in items]),
+                "image_grid_thw": torch.cat([it["image_grid_thw"] for it in items]),
+            }
+        embeddings = encode_image_embeddings(
+            model_name=self.model,
+            image_embeds=image_embeds,
+            vision_encoder=self.vision_encoder,
+            projector=self.projector,
+        )
+        if len(items) == 1:
+            return [embeddings]
+        merge_size = self.vision_encoder.spatial_merge_size
+        sizes = [
+            int(it["image_grid_thw"].prod(-1).sum()) // merge_size // merge_size
+            for it in items
+        ]
+        # Each request must own its storage: the NIXL sender holds a sent tensor
+        # until the receiver pulls it, so a view would pin the whole batch output.
+        return [e.unsqueeze(0).clone() for e in embeddings.squeeze(0).split(sizes)]
 
     def _image_cache_key(
         self, group_input, cache_scope: str | None = None
@@ -361,6 +490,7 @@ class EncodeWorkerHandler:
         # 7. Await for the write operation to complete.
         # 8. Yield the encode response.
 
+        holding_slot = False
         try:
             time_start = time.perf_counter()
             encoded_embeddings: torch.Tensor | None = None
@@ -383,6 +513,10 @@ class EncodeWorkerHandler:
                     else:
                         # keep track of key to avoid recompute of it
                         need_encode_indexes.append((idx, embedding_key))
+
+            if need_encode_indexes and self._encode_slots is not None:
+                await self._encode_slots.acquire()
+                holding_slot = True
 
             with _nvtx.annotate(
                 "mm:enc:image_load", color="green"
@@ -422,13 +556,9 @@ class EncodeWorkerHandler:
                     f"[ENCODE] request: {request_id} encoding"
                 ):
                     # Encode the image embeddings using model-specific encoder
-                    embeddings = await asyncio.to_thread(
-                        encode_image_embeddings,
-                        model_name=self.model,
-                        image_embeds=image_embeds,
-                        vision_encoder=self.vision_encoder,
-                        projector=self.projector,
-                    )
+                    slot = self._encode_slots if holding_slot else None
+                    holding_slot = False
+                    embeddings = await self._encode_releasing_slot(image_embeds, slot)
                     encoded_embeddings = embeddings
                     # Sync XPU to ensure kernels complete before NIXL transfer.
                     if embeddings.device.type == "xpu":
@@ -558,3 +688,6 @@ class EncodeWorkerHandler:
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
+        finally:
+            if holding_slot:
+                self._encode_slots.release()
