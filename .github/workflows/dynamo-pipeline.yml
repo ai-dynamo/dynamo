@@ -10,11 +10,6 @@ name: Dynamo Pipeline
 on:
   workflow_call:
     inputs:
-      gpu_runner_labels:
-        description: 'JSON runner labels for Python GPU tests; defaults to the existing unpinned runner selector'
-        required: false
-        type: string
-        default: '["prod-tester-amd-gpu-v2"]'
       builder_name:
         description: 'BuildKit builder name'
         required: true
@@ -185,7 +180,6 @@ jobs:
       framework: dynamo  # matches the framework passed to image
       test_type: gpu
       amd_runner: prod-tester-amd-gpu-v2
-      amd_runner_labels: ${{ inputs.gpu_runner_labels }}
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64"]'
