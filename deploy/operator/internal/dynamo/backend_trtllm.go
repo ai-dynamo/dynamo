@@ -42,10 +42,8 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		container.LivenessProbe = nil
 		container.StartupProbe = nil
 		container.ReadinessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{
-					Port: intstr.FromInt(commonconsts.MpiRunSshPort),
-				},
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromInt(commonconsts.MpiRunSshPort),
 			},
 			InitialDelaySeconds: 20,
 			PeriodSeconds:       20,
@@ -92,11 +90,9 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
 			Name: b.MpiRunSecretName,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName:  b.MpiRunSecretName,
-					DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
-				},
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  b.MpiRunSecretName,
+				DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
 			},
 		}
 		podSpec.Volumes = append(podSpec.Volumes, sshVolume)

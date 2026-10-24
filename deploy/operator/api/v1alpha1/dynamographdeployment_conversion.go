@@ -40,7 +40,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -611,7 +610,7 @@ func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferP
 		Enforcement:         v1beta1.KvTransferEnforcement(src.Enforcement),
 	}
 	if src.PreferredWeight != nil {
-		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
+		dst.PreferredWeight = new(*src.PreferredWeight)
 	}
 }
 
@@ -625,7 +624,7 @@ func ConvertToKvTransferPolicy(src *v1beta1.KvTransferPolicy, dst *KvTransferPol
 		Enforcement:         KvTransferEnforcement(src.Enforcement),
 	}
 	if src.PreferredWeight != nil {
-		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
+		dst.PreferredWeight = new(*src.PreferredWeight)
 	}
 }
 
@@ -657,7 +656,7 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 			State: v1beta1.PlacementScoreState(src.Placement.State),
 		}
 		if src.Placement.Score != nil {
-			dst.Placement.Score = ptr.To(*src.Placement.Score)
+			dst.Placement.Score = new(*src.Placement.Score)
 		}
 	} else {
 		dst.Placement = nil
@@ -704,7 +703,7 @@ func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStat
 			State: PlacementScoreState(src.Placement.State),
 		}
 		if src.Placement.Score != nil {
-			dst.Placement.Score = ptr.To(*src.Placement.Score)
+			dst.Placement.Score = new(*src.Placement.Score)
 		}
 	} else {
 		dst.Placement = nil
@@ -816,22 +815,22 @@ func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.Com
 		UpdatedReplicas:      src.UpdatedReplicas,
 	}
 	if src.GPUPowerLimitWatts != nil {
-		dst.GPUPowerLimitWatts = ptr.To(*src.GPUPowerLimitWatts)
+		dst.GPUPowerLimitWatts = new(*src.GPUPowerLimitWatts)
 	}
 	if src.GPUsPerEngine != nil {
-		dst.GPUsPerEngine = ptr.To(*src.GPUsPerEngine)
+		dst.GPUsPerEngine = new(*src.GPUsPerEngine)
 	}
 	if src.GPUsPerReplica != nil {
-		dst.GPUsPerReplica = ptr.To(*src.GPUsPerReplica)
+		dst.GPUsPerReplica = new(*src.GPUsPerReplica)
 	}
 	if src.ReadyReplicas != nil {
-		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
+		dst.ReadyReplicas = new(*src.ReadyReplicas)
 	}
 	if src.AvailableReplicas != nil {
-		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+		dst.AvailableReplicas = new(*src.AvailableReplicas)
 	}
 	if src.ScheduledReplicas != nil {
-		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
+		dst.ScheduledReplicas = new(*src.ScheduledReplicas)
 	}
 }
 
@@ -850,24 +849,24 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 		UpdatedReplicas:      src.UpdatedReplicas,
 	}
 	if src.GPUPowerLimitWatts != nil {
-		dst.GPUPowerLimitWatts = ptr.To(*src.GPUPowerLimitWatts)
+		dst.GPUPowerLimitWatts = new(*src.GPUPowerLimitWatts)
 	}
 	if src.GPUsPerEngine != nil {
-		dst.GPUsPerEngine = ptr.To(*src.GPUsPerEngine)
+		dst.GPUsPerEngine = new(*src.GPUsPerEngine)
 	}
 	if src.GPUsPerReplica != nil {
-		dst.GPUsPerReplica = ptr.To(*src.GPUsPerReplica)
+		dst.GPUsPerReplica = new(*src.GPUsPerReplica)
 	}
 	if len(componentNames) > 0 {
 		dst.ComponentName = componentNames[len(componentNames)-1]
 	}
 	if src.ReadyReplicas != nil {
-		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
+		dst.ReadyReplicas = new(*src.ReadyReplicas)
 	}
 	if src.AvailableReplicas != nil {
-		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+		dst.AvailableReplicas = new(*src.AvailableReplicas)
 	}
 	if src.ScheduledReplicas != nil {
-		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
+		dst.ScheduledReplicas = new(*src.ScheduledReplicas)
 	}
 }

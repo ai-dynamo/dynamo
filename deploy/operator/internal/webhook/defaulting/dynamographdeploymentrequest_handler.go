@@ -26,7 +26,6 @@ import (
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -105,7 +104,7 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		dgdr.Spec.SearchStrategy = nvidiacomv1beta1.SearchStrategyRapid
 	}
 	if dgdr.Spec.AutoApply == nil {
-		dgdr.Spec.AutoApply = ptr.To(true)
+		dgdr.Spec.AutoApply = new(true)
 	}
 
 	// Image derivation remains create-only so updates do not rewrite an
