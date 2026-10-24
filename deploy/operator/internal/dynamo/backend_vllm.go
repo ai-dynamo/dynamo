@@ -34,7 +34,12 @@ type VLLMBackend struct {
 	roleLaunchOwnership       roleLaunchOwnership
 }
 
-func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
+func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount, nativeSidecar bool) error {
+	// Single-node native engines retain their authored container configuration.
+	if nativeSidecar && numberOfNodes <= 1 {
+		return nil
+	}
+
 	// The inter-pod GMS layout (with or without failover) requires the engine
 	// to load weights from the dedicated GMS weight-server pod rather than
 	// from disk.
@@ -300,7 +305,12 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 	}
 }
 
-func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, nativeSidecar bool) {
+	// Native sidecar templates own pod-level engine setup and runtime placement.
+	if nativeSidecar {
+		return
+	}
+
 	if !b.shouldInjectVLLMMpWaitLeaderInit(podSpec, numberOfNodes, role) {
 		return
 	}

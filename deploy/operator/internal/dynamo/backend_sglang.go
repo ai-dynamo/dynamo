@@ -33,9 +33,14 @@ func isPythonCommand(cmd string) bool {
 	return matched
 }
 
-func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
-	// Reserve the exporter ports before any early return: a single-node worker
-	// is exactly the case that co-locates every rank in one container.
+func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount, nativeSidecar bool) error {
+	// Single-node native engines retain their authored container configuration.
+	if nativeSidecar && numberOfNodes <= 1 {
+		return nil
+	}
+
+	// Reserve exporter ports before the multinode and launch-ownership checks:
+	// a single-node combined runtime co-locates every rank in one container.
 	if err := reserveNixlExporterPorts(container, containerGPUCount); err != nil {
 		return err
 	}
@@ -262,7 +267,7 @@ func nixlPrometheusPort(env *corev1.EnvVar) (int32, bool, error) {
 	return int32(port), true, nil
 }
 
-func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, nativeSidecar bool) {
 	// do nothing
 }
 

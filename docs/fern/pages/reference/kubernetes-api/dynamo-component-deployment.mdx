@@ -164,7 +164,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    An init container named `runtime` is rejected in role templates because Dynamo sidecar mode does not yet support multinode or LPX components.
+    For SGLang multinode sidecar mode, declare `runtime` in the leader template. This selects native-engine defaults for the whole component, including workers without a sidecar. Declare `runtime` in the worker template only when each follower has a local KV publisher. LPX and other multinode backends do not yet support sidecar mode.
 
     For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
 
@@ -282,7 +282,7 @@ The operator leaves native sidecar `servedModelName` and `runtimeComponentName` 
 Upgrading the operator can roll existing sidecar workers whose backend was previously undetected. Review the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#native-sidecar-backend-inference) before upgrading.
 </Warning>
 
-This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
+This mode supports `worker`, `prefill`, and `decode` components. SGLang multinode is supported as described below. Other multinode backends, enabled checkpoint, GPU memory service, and failover remain unsupported. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
 
 The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.
 
@@ -297,6 +297,12 @@ podTemplate:
         image: <dynamo-sidecar-image>
         restartPolicy: Always
 ```
+
+SGLang multinode sidecar deployments require explicit `backendFramework: sglang` and complete `leader` and `worker` role templates. The leader declares `runtime`; the worker declares it only when its engine ranks publish KV events. A component-level `podTemplate` is rejected. Engine commands, topology arguments, and sidecar placement are user-owned.
+
+For DGDs created with operator version 1.6.0 or later, `main` and each declared `runtime` receive `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. Runtime discovery, identity, system-port, and probe defaults target `runtime`. Engine images are excluded from Dynamo runtime-version checks. Deployments that run the engine and Dynamo together in `main` retain shared-template support and generated multinode arguments.
+
+Shared memory, compilation cache, provider startup ordering, and group management retain their existing behavior. Multinode native engines receive NIXL exporter ports in `main`. Worker `main` probes are removed; worker `runtime` probes remain independent. See the [SGLang sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md) for topology requirements and examples.
 
 Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
 
