@@ -27,8 +27,8 @@ use crate::plugins::request_classifier::{RequestProgress, RequestProgressUpdater
 
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::{
-    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestClassifierContext, RequestClassifierWorker,
+    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, RequestClassificationContext,
+    RequestClassifier, RequestClassifierContext,
 };
 
 /// One live lifecycle's bookkeeping. `generation` fences `classify_with`
@@ -172,9 +172,9 @@ impl RequestClassifierRuntime {
     /// `classify` and freed when it returns, before the classification future is awaited.
     pub(crate) async fn classify_with(
         &self,
-        mut request: ClassifyRequest,
+        mut request: RequestClassificationContext,
         workers: WorkerInputRows,
-    ) -> Result<ClassifyRequest, KvSchedulerError> {
+    ) -> Result<RequestClassificationContext, KvSchedulerError> {
         if self.shutdown.is_cancelled() {
             return Err(KvSchedulerError::SubscriberShutdown);
         }
@@ -187,7 +187,7 @@ impl RequestClassifierRuntime {
                 KvSchedulerError::ClassificationLifecycleEnded(request_id.to_owned())
             })?;
             live.progress_updater
-                .update_context_tokens(request.input_tokens());
+                .update_context_tokens(request.isl_tokens());
             request.progress = live.progress.clone();
             if let Some(overrides) = live.overrides.clone() {
                 request.overrides = overrides;
@@ -560,7 +560,7 @@ mod tests {
     impl RequestClassifier for SynchronousPanicOnce {
         fn classify(
             &mut self,
-            request: ClassifyRequest,
+            request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
@@ -581,7 +581,10 @@ mod tests {
         );
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
+            .classify_with(
+                RequestClassificationContext::new(1, 0),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -590,7 +593,10 @@ mod tests {
                 if message == "synchronous classifier panic"
         ));
         runtime
-            .classify_with(ClassifyRequest::new(2, 0), WorkerInputRows::empty())
+            .classify_with(
+                RequestClassificationContext::new(2, 0),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -603,7 +609,7 @@ mod tests {
     impl RequestClassifier for FuturePanicOnce {
         fn classify(
             &mut self,
-            request: ClassifyRequest,
+            request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             let should_panic = self.calls.fetch_add(1, Ordering::Relaxed) == 0;
@@ -625,7 +631,10 @@ mod tests {
         );
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
+            .classify_with(
+                RequestClassificationContext::new(1, 0),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -634,7 +643,10 @@ mod tests {
                 if message == "classifier future panic"
         ));
         runtime
-            .classify_with(ClassifyRequest::new(2, 0), WorkerInputRows::empty())
+            .classify_with(
+                RequestClassificationContext::new(2, 0),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -649,7 +661,7 @@ mod tests {
     impl RequestClassifier for FailingClassifier {
         fn classify(
             &mut self,
-            _request: ClassifyRequest,
+            _request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             Box::pin(async { Err(Box::new(TestClassifierError) as Box<ClassifierError>) })
@@ -662,7 +674,10 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(FailingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
+            .classify_with(
+                RequestClassificationContext::new(1, 0),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -677,10 +692,10 @@ mod tests {
     impl RequestClassifier for ReplacingClassifier {
         fn classify(
             &mut self,
-            _request: ClassifyRequest,
+            _request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
-            Box::pin(async { Ok(ClassifyRequest::new(2, 0)) })
+            Box::pin(async { Ok(RequestClassificationContext::new(2, 0)) })
         }
     }
 
@@ -690,7 +705,10 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(ReplacingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
+            .classify_with(
+                RequestClassificationContext::new(1, 0),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -719,7 +737,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_classifier_returns_the_same_request_without_overrides() {
-        let request = ClassifyRequest::new(128, 32)
+        let request = RequestClassificationContext::new(128, 32)
             .with_request_id("request-1")
             .with_initial_policy_class("latency");
 
@@ -747,7 +765,7 @@ mod tests {
     impl RequestClassifier for EventReleasedClassifier {
         fn classify(
             &mut self,
-            request: ClassifyRequest,
+            request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             let entered = Arc::clone(&self.entered);
@@ -781,7 +799,10 @@ mod tests {
         let pending_runtime = Arc::clone(&runtime);
         let pending = tokio::spawn(async move {
             pending_runtime
-                .classify_with(ClassifyRequest::new(1, 1), WorkerInputRows::empty())
+                .classify_with(
+                    RequestClassificationContext::new(1, 1),
+                    WorkerInputRows::empty(),
+                )
                 .await
         });
         entered.notified().await;
@@ -800,7 +821,7 @@ mod tests {
     impl RequestClassifier for PendingClassifier {
         fn classify(
             &mut self,
-            _request: ClassifyRequest,
+            _request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             self.entered.fetch_add(1, Ordering::Relaxed);
@@ -831,7 +852,7 @@ mod tests {
             let _lifecycle = cancelled_runtime.begin_request("cancelled").unwrap();
             cancelled_runtime
                 .classify_with(
-                    ClassifyRequest::new(1, 0).with_request_id("cancelled"),
+                    RequestClassificationContext::new(1, 0).with_request_id("cancelled"),
                     WorkerInputRows::empty(),
                 )
                 .await
@@ -871,7 +892,7 @@ mod tests {
         let lifecycle = runtime.begin_request("off-runtime-drop").unwrap();
         runtime
             .classify_with(
-                ClassifyRequest::new(1, 0).with_request_id("off-runtime-drop"),
+                RequestClassificationContext::new(1, 0).with_request_id("off-runtime-drop"),
                 WorkerInputRows::empty(),
             )
             .await
@@ -888,7 +909,7 @@ mod tests {
     impl RequestClassifier for CountingClassifier {
         fn classify(
             &mut self,
-            mut request: ClassifyRequest,
+            mut request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             self.calls.fetch_add(1, Ordering::Relaxed);
@@ -913,7 +934,7 @@ mod tests {
 
         runtime
             .classify_with(
-                ClassifyRequest::new(10, 10).with_request_id("request-1"),
+                RequestClassificationContext::new(10, 10).with_request_id("request-1"),
                 WorkerInputRows::empty(),
             )
             .await
@@ -946,7 +967,7 @@ mod tests {
 
         let first = runtime
             .classify_with(
-                ClassifyRequest::new(10, 10).with_request_id("request-1"),
+                RequestClassificationContext::new(10, 10).with_request_id("request-1"),
                 WorkerInputRows::empty(),
             )
             .await
@@ -958,15 +979,15 @@ mod tests {
         lifecycle.prepare_retry();
         let retry = runtime
             .classify_with(
-                ClassifyRequest::new(20, 20).with_request_id("request-1"),
+                RequestClassificationContext::new(20, 20).with_request_id("request-1"),
                 WorkerInputRows::empty(),
             )
             .await
             .unwrap();
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(first.input_tokens(), 10);
-        assert_eq!(retry.input_tokens(), 20);
+        assert_eq!(first.isl_tokens(), 10);
+        assert_eq!(retry.isl_tokens(), 20);
         assert_eq!(retry.scheduling_cost_tokens(), 7);
         assert_eq!(retry.progress().context_tokens(), 25);
         assert_eq!(
@@ -982,7 +1003,7 @@ mod tests {
         let mut next_lifecycle = runtime.begin_request("request-1").unwrap();
         let next = runtime
             .classify_with(
-                ClassifyRequest::new(3, 0).with_request_id("request-1"),
+                RequestClassificationContext::new(3, 0).with_request_id("request-1"),
                 WorkerInputRows::empty(),
             )
             .await
@@ -1012,7 +1033,7 @@ mod tests {
 
         let result = runtime
             .classify_with(
-                ClassifyRequest::new(4, 0).with_request_id("ghost"),
+                RequestClassificationContext::new(4, 0).with_request_id("ghost"),
                 WorkerInputRows::empty(),
             )
             .await;
@@ -1033,7 +1054,7 @@ mod tests {
     impl RequestClassifier for GatedClassifier {
         fn classify(
             &mut self,
-            mut request: ClassifyRequest,
+            mut request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1067,7 +1088,7 @@ mod tests {
         let stale = tokio::spawn(async move {
             stale_runtime
                 .classify_with(
-                    ClassifyRequest::new(1, 0).with_request_id("reused"),
+                    RequestClassificationContext::new(1, 0).with_request_id("reused"),
                     WorkerInputRows::empty(),
                 )
                 .await
@@ -1090,7 +1111,7 @@ mod tests {
         release.notify_one();
         let second = runtime
             .classify_with(
-                ClassifyRequest::new(1, 0).with_request_id("reused"),
+                RequestClassificationContext::new(1, 0).with_request_id("reused"),
                 WorkerInputRows::empty(),
             )
             .await
@@ -1111,7 +1132,7 @@ mod tests {
         let lifecycle = runtime.begin_request("reused").unwrap();
         let guard = runtime.classifier.lock().await;
         let mut stale = Box::pin(runtime.classify_with(
-            ClassifyRequest::new(1, 0).with_request_id("reused"),
+            RequestClassificationContext::new(1, 0).with_request_id("reused"),
             WorkerInputRows::empty(),
         ));
 
@@ -1131,12 +1152,12 @@ mod tests {
         // The replacement must reach the plugin, without stale overrides.
         let replacement = runtime
             .classify_with(
-                ClassifyRequest::new(100, 0).with_request_id("reused"),
+                RequestClassificationContext::new(100, 0).with_request_id("reused"),
                 WorkerInputRows::empty(),
             )
             .await
             .unwrap();
-        assert_eq!(replacement.input_tokens(), 100);
+        assert_eq!(replacement.isl_tokens(), 100);
         assert_eq!(replacement.scheduling_cost_tokens(), 7);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
@@ -1159,7 +1180,7 @@ mod tests {
         let ended = tokio::spawn(async move {
             ended_runtime
                 .classify_with(
-                    ClassifyRequest::new(1, 0).with_request_id("ended"),
+                    RequestClassificationContext::new(1, 0).with_request_id("ended"),
                     WorkerInputRows::empty(),
                 )
                 .await
@@ -1192,7 +1213,7 @@ mod tests {
         let ended = tokio::spawn(async move {
             ended_runtime
                 .classify_with(
-                    ClassifyRequest::new(1, 0).with_request_id("ended"),
+                    RequestClassificationContext::new(1, 0).with_request_id("ended"),
                     WorkerInputRows::empty(),
                 )
                 .await
@@ -1256,7 +1277,7 @@ mod tests {
         let mut lifecycle = runtime.begin_request("request-1").unwrap();
         runtime
             .classify_with(
-                ClassifyRequest::new(40, 0).with_request_id("request-1"),
+                RequestClassificationContext::new(40, 0).with_request_id("request-1"),
                 WorkerInputRows::empty(),
             )
             .await
@@ -1351,7 +1372,7 @@ mod tests {
     impl RequestClassifier for OrderingClassifier {
         fn classify(
             &mut self,
-            request: ClassifyRequest,
+            request: RequestClassificationContext,
             _workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             let _ = self
@@ -1409,7 +1430,7 @@ mod tests {
         let classify = tokio::spawn(async move {
             classify_runtime
                 .classify_with(
-                    ClassifyRequest::new(1, 0).with_request_id("reused"),
+                    RequestClassificationContext::new(1, 0).with_request_id("reused"),
                     WorkerInputRows::empty(),
                 )
                 .await

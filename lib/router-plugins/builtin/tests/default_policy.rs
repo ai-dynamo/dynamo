@@ -533,7 +533,7 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
             context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            assert_eq!(context.prompt_tokens(), 17);
+            assert_eq!(context.isl_tokens(), 17);
             assert_eq!(context.request_blocks(), 2);
             assert!(input.load().unwrap().iter().all(|load| load.is_available()));
             for cache in input.cache().unwrap().iter() {

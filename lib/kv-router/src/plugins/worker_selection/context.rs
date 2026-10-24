@@ -25,15 +25,15 @@ impl WorkerSelectionContext<'_> {
         self.pinned_worker
     }
 
-    /// Exact incoming prompt length in tokens. Borrowed from this request; no rounding,
-    /// cache weighting, or additional storage is involved. Zero when the request carries
-    /// no prompt token IDs, such as embeddings-only input.
-    pub fn prompt_tokens(&self) -> usize {
+    /// Input sequence length in tokens, the same value classifiers read as
+    /// `RequestClassificationContext::isl_tokens`. No rounding or cache weighting is applied.
+    /// Zero when the request carries no prompt token IDs, such as embeddings-only input.
+    pub fn isl_tokens(&self) -> usize {
         self.request.isl_tokens
     }
 
-    /// Return the incoming prompt size in KV blocks. Zero when
-    /// [`prompt_tokens`](Self::prompt_tokens) is zero.
+    /// Return the input size in KV blocks. Zero when
+    /// [`isl_tokens`](Self::isl_tokens) is zero.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
     }

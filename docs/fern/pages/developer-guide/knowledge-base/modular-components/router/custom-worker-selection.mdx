@@ -376,7 +376,7 @@ Routing cache resources start only if a component requests `CACHE`. `serve_index
 
 | Accessor | Meaning |
 |---|---|
-| `prompt_tokens()` | Exact incoming prompt token count; zero when the request has no token IDs, such as embeddings-only input |
+| `isl_tokens()` | Input sequence length in tokens, the same value a request classifier reads; zero when the request has no token IDs, such as embeddings-only input |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
@@ -556,7 +556,7 @@ Standalone EPP supplies `WorkerType::Aggregated` because it selects from one ful
 
 ## Request Classifier Sequence Hashes
 
-`ClassifyRequest::sequence_hashes()` returns a read-only snapshot of the existing ordered active-tracking sequence hashes before admission. Each entry covers a complete tracking block; use the factory context's `block_size()` for token units. Partial trailing blocks are excluded. `None` means tracking data is absent; `Some(&[])` means the host supplied an empty sequence. The snapshot remains valid while the classification future is pending and does not grow with generated output.
+`RequestClassificationContext::sequence_hashes()` returns a read-only snapshot of the existing ordered active-tracking sequence hashes before admission. Each entry covers a complete tracking block; use the factory context's `block_size()` for token units. Partial trailing blocks are excluded. `None` means tracking data is absent; `Some(&[])` means the host supplied an empty sequence. The snapshot remains valid while the classification future is pending and does not grow with generated output.
 
 Sequence hashes retain the host's tracking configuration. When KV reuse is disabled, they are randomized identities rather than reusable content hashes. Public and keyed hashes must stay within their respective tracking domains and configurations; matching values do not establish physical KV residency or a safe shared-budget discount. This accessor adds no hashing or scheduling overrides.
 
@@ -568,14 +568,14 @@ For example, a classifier can inspect the sequence while retaining the request i
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, ClassifyRequest, RequestClassifier,
+    ClassifyFuture, RequestClassificationContext, RequestClassifier,
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 
 struct InspectPrefixes;
 
 impl RequestClassifier for InspectPrefixes {
-    fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
+    fn classify(&mut self, request: RequestClassificationContext, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
         Box::pin(async move {
             let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
             Ok(request)
