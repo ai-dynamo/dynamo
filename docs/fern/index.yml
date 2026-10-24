@@ -1133,6 +1133,10 @@ navigation:
         path: pages/reference/general/nightly-releases.md
         slug: nightly-releases
 
+      - page: Generation Artifact Delivery (Proposed)
+        path: pages/reference/general/generation-artifact-delivery.md
+        slug: generation-artifact-delivery
+
       - page: Model Early Access Builds
         icon: microchip
         path: pages/reference/general/model-early-access-builds.mdx
