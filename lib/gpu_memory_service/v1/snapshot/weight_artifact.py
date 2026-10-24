@@ -220,10 +220,13 @@ def load_weights(
     sharded_ssd_roots: Sequence[str] | None = None,
     sharded_ssd_queues_per_root: int = 2,
     posix_backend_params: Mapping[str, str] | None = None,
+    backend_params: Mapping[str, object] | None = None,
 ) -> None:
     """Load exact V1 weight IDs into a fresh server and publish them.
 
     Returns without loading if the server already has committed weights.
+    ``backend_params`` passes backend-specific settings through, such as the
+    peer identity and rank the ``mx`` backend fills from.
     """
     started_at = monotonic()
     if max_workers <= 0:
@@ -245,6 +248,7 @@ def load_weights(
                 "sharded_ssd_roots": list(roots),
                 "sharded_ssd_queues_per_root": sharded_ssd_queues_per_root,
                 "posix_backend_params": posix_backend_params,
+                **(backend_params or {}),
             },
         ),
     )
