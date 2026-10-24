@@ -166,7 +166,9 @@ and compare `achieved_block_ops_per_sec` against an untracked run. Add
 `--resident-blocks-reader-cpu <CPU>` to also read every counter in a loop from a
 thread pinned to that CPU, as selections do, so the result includes the cache-line
 traffic between event threads and readers. Keep that CPU outside the backend and
-issuer masks.
+issuer masks. The 128-core binding above uses every CPU, so take one out of the
+backend mask first, for example `--backend-cpus 4-62,69-127
+--resident-blocks-reader-cpu 63`.
 
 ### Sweep
 

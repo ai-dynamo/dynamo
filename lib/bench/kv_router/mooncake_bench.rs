@@ -310,20 +310,33 @@ async fn run_open_loop_for_config(
                 .zip(args.resident_blocks_reader_cpu)
                 .map(|(counts, cpu)| {
                     let stop = stop.clone();
-                    std::thread::spawn(move || {
-                        pin_current_thread_to_cpus(&[cpu])?;
+                    let (pinned_tx, pinned_rx) = std::sync::mpsc::sync_channel(1);
+                    let handle = std::thread::spawn(move || {
+                        let pinned = pin_current_thread_to_cpus(&[cpu]);
+                        let failed = pinned.is_err();
+                        let _ = pinned_tx.send(pinned);
+                        if failed {
+                            return;
+                        }
                         while !stop.load(Ordering::Relaxed) {
                             std::hint::black_box(counts.bench_sum());
                         }
-                        std::io::Result::Ok(())
-                    })
+                    });
+                    (handle, pinned_rx)
                 });
+            // Don't start the trial until the reader is pinned, so a failed pin
+            // aborts here instead of producing a run with no reader.
+            if let Some((_, pinned_rx)) = &reader {
+                pinned_rx.recv().map_err(|_| {
+                    anyhow::anyhow!("resident block reader exited before pinning")
+                })??;
+            }
             let result = run_backend(config.short_name(), indexer, trial, open_config).await;
             stop.store(true, Ordering::Relaxed);
-            if let Some(reader) = reader {
-                reader
+            if let Some((handle, _)) = reader {
+                handle
                     .join()
-                    .map_err(|_| anyhow::anyhow!("resident block reader panicked"))??;
+                    .map_err(|_| anyhow::anyhow!("resident block reader panicked"))?;
             }
             result
         }
