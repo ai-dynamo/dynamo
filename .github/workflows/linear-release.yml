@@ -52,6 +52,7 @@ jobs:
         env:
           INPUT_COMMAND: ${{ inputs.command }}
           INPUT_VERSION: ${{ inputs.version }}
+          BRANCH_CREATED: ${{ github.event.created }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
@@ -71,18 +72,57 @@ jobs:
             echo "::error::Unsupported trigger ref: $GITHUB_REF"
             exit 1
           fi
+          # Stage moves run only when the release branch is created, so later
+          # cherry-pick pushes never move a release backwards. A minor cut puts
+          # that release in QA and main's next release In Development; a patch
+          # cut puts the patch In Development. Both releases must already exist.
+          QA_VERSION=""
+          DEV_VERSION=""
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$BRANCH_CREATED" == "true" && "$COMMAND" == "sync" ]]; then
+            IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"
+            if [[ "$PATCH" == "0" ]]; then
+              QA_VERSION="$VERSION"
+              if (( MINOR >= 9 )); then
+                DEV_VERSION="$((MAJOR + 1)).0.0"
+              else
+                DEV_VERSION="${MAJOR}.$((MINOR + 1)).0"
+              fi
+            else
+              DEV_VERSION="$VERSION"
+            fi
+          fi
           {
             echo "command=${COMMAND}"
             echo "version=${VERSION}"
             echo "name=Dynamo v${VERSION}"
+            echo "qa_version=${QA_VERSION}"
+            echo "dev_version=${DEV_VERSION}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run Linear Release
         # Pinned to an audited commit SHA (not a mutable @v0 tag) since this step
         # receives LINEAR_ACCESS_KEY. Bump deliberately after reviewing upstream.
-        uses: linear/linear-release-action@c0cb8354a362c24c6d3e0948f37fd66d07588e3f  # v0.14.5
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
         with:
           access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
           command: ${{ steps.params.outputs.command }}
           version: ${{ steps.params.outputs.version }}
           name: ${{ steps.params.outputs.name }}
+
+      - name: Move the cut release to QA
+        if: steps.params.outputs.qa_version != ''
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: update
+          stage: QA
+          version: ${{ steps.params.outputs.qa_version }}
+
+      - name: Move the next release to In Development
+        if: steps.params.outputs.dev_version != ''
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: update
+          stage: In Development
+          version: ${{ steps.params.outputs.dev_version }}
