@@ -1932,7 +1932,7 @@ impl ChoiceState {
                 }]);
             }
             // v0.8.0: Message boundary markers - no action needed for streaming
-            UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd => {}
+            _ => {}
         }
         choice
     }
@@ -2402,7 +2402,7 @@ fn parse_complete_in_mode(
                 });
             }
             // v0.8.0: Message boundary markers - no action needed for batch processing
-            UnifiedEvent::MessageStart { .. } | UnifiedEvent::MessageEnd { .. } => {}
+            _ => {}
         }
     }
 
