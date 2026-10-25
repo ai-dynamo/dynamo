@@ -17,3 +17,8 @@ cdk.out/
 cdk.context.json
 dist/
 node_modules/
+
+# Operator-specific settings and credentials.
+config/*.local.json
+*.pem
+*.key

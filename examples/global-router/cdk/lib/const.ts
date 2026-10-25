@@ -41,15 +41,15 @@ const US_WEST_2B = "us-west-2b";
 const M5_XLARGE = "m5.xlarge";
 const T3_SMALL = "t3.small";
 
-// Local POC images built from Dynamo a47ad40894 and published to both Regions.
+// Example registry references; configure your own versioned images locally.
 const POC_ECR_OHIO =
-  "197002356433.dkr.ecr.us-east-2.amazonaws.com/global-router-poc";
+  "111111111111.dkr.ecr.us-east-2.amazonaws.com/global-router-poc";
 const POC_ECR_WEST =
-  "197002356433.dkr.ecr.us-west-2.amazonaws.com/global-router-poc";
+  "111111111111.dkr.ecr.us-west-2.amazonaws.com/global-router-poc";
 const POC_PLANNER_DIGEST =
-  "sha256:23b02f9e4b0b981e6f9118fceb6afcfb08e05261cde2701b7a7967f2ff27925c";
+  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const POC_RELAY_DIGEST =
-  "sha256:f4199e6f5c2fcd8d058216eb0cb37837eee0e51629aff8553a0d0aad178ec0b2";
+  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 export const MOCKER_VPC_US_EAST_2 = {
   name: "mocker-vpc-us-east-2",
@@ -60,7 +60,6 @@ export const MOCKER_VPC_US_EAST_2 = {
 
 export const BASTION_CONFIG_OHIO = {
   name: "mocker-experiment-bastion",
-  amiId: "ami-070db52ff58e36a5a",
   iamRoleName: "mocker-bastion-role",
   instanceType: T3_SMALL,
   availabilityZone: US_EAST_2A,
@@ -71,7 +70,7 @@ export const BASTION_CONFIG_OHIO = {
 
 export const MOCKER_US_EAST_2_CONFIG = {
   region: US_EAST_2,
-  clusterName: "sachal-mocker-cluster",
+  clusterName: "mocker-ohio-cluster",
   vpcConfig: MOCKER_VPC_US_EAST_2,
   bastionConfig: BASTION_CONFIG_OHIO,
 } satisfies ClusterConfig;
@@ -85,7 +84,6 @@ export const MOCKER_VPC_US_WEST_2 = {
 
 export const BASTION_CONFIG_WEST = {
   name: "mocker-west-experiment-bastion",
-  amiId: "ami-07a288b554ded85f8",
   iamRoleName: "mocker-west-bastion-role",
   instanceType: T3_SMALL,
   availabilityZone: US_WEST_2A,
@@ -96,7 +94,7 @@ export const BASTION_CONFIG_WEST = {
 
 export const MOCKER_US_WEST_2_CONFIG = {
   region: US_WEST_2,
-  clusterName: "sachal-mocker-west-cluster",
+  clusterName: "mocker-west-cluster",
   vpcConfig: MOCKER_VPC_US_WEST_2,
   bastionConfig: BASTION_CONFIG_WEST,
 } satisfies ClusterConfig;
@@ -117,7 +115,7 @@ export const DYNAMO_PLATFORM_1_4_0 = {
 
 export const MOCKER_OHIO_1_DGD = {
   dgdName: "mocker-ohio-1",
-  workerRuntimeNamespace: "dynamo-mocker-ohio-1-27f7037e",
+  workerRuntimeNamespace: "dynamo-mocker-ohio-1-example",
   frontendRouterMode: "kv",
   poolNames: ["mocker-cpu-ohio-1"],
   mockerReplicas: 2,
@@ -152,7 +150,7 @@ export const US_EAST2_DEPLOYMENT = {
 
 export const MOCKER_WEST_1_DGD = {
   dgdName: "mocker-west-1",
-  workerRuntimeNamespace: "dynamo-mocker-west-1-eb50ba2c",
+  workerRuntimeNamespace: "dynamo-mocker-west-1-example",
   frontendRouterMode: "kv",
   poolNames: ["mocker-cpu-west-1"],
   mockerReplicas: 2,
@@ -190,40 +188,43 @@ export const DEPLOYMENTS = {
   west: US_WEST2_DEPLOYMENT,
 } satisfies Record<string, DeploymentConfig>;
 
-// From the regional CloudFormation stacks in account 197002356433 on 2026-09-29.
-// Refresh these IDs if either regional VPC is rebuilt; public route tables are excluded.
+// Example network IDs; use local settings populated from your deployed stacks.
+// Include only private route tables in the peering configuration.
 export const POC_PEERING_OHIO = {
   region: US_EAST_2,
   cidrBlock: MOCKER_VPC_US_EAST_2.cidrBlock,
-  vpcId: "vpc-06c34093b7a5acb5f",
+  vpcId: "vpc-00000000000000001",
   privateRouteTableIds: [
-    "rtb-0b1892e84e10b25d4", // clusterSubnet1
-    "rtb-065e446706956ba1e", // clusterSubnet2
-    "rtb-0e8ad0043f450774a", // dgd-pool-slot-1Subnet1
-    "rtb-0aaeffd32412af270", // dgd-pool-slot-1Subnet2
+    "rtb-00000000000000002", // clusterSubnet1
+    "rtb-00000000000000003", // clusterSubnet2
+    "rtb-00000000000000004", // dgd-pool-slot-1Subnet1
+    "rtb-00000000000000005", // dgd-pool-slot-1Subnet2
   ],
 } satisfies PeeringRegionConfig;
 
 export const POC_PEERING_WEST = {
   region: US_WEST_2,
   cidrBlock: MOCKER_VPC_US_WEST_2.cidrBlock,
-  vpcId: "vpc-0b22a247e4f8e8d7c",
+  vpcId: "vpc-00000000000000006",
   privateRouteTableIds: [
-    "rtb-08af3bdd3bd2080b6", // clusterSubnet1
-    "rtb-0d4ebeb19aa31a74c", // clusterSubnet2
-    "rtb-0755738960722e63b", // dgd-pool-slot-1Subnet1
-    "rtb-0c00d24e9c4e92bef", // dgd-pool-slot-1Subnet2
+    "rtb-00000000000000007", // clusterSubnet1
+    "rtb-00000000000000008", // clusterSubnet2
+    "rtb-00000000000000009", // dgd-pool-slot-1Subnet1
+    "rtb-0000000000000000a", // dgd-pool-slot-1Subnet2
   ],
 } satisfies PeeringRegionConfig;
 
 export type DeploymentName = keyof typeof DEPLOYMENTS;
 
-export function selectDeployment(name: unknown): DeploymentConfig {
-  if (typeof name !== "string" || !Object.hasOwn(DEPLOYMENTS, name)) {
+export function selectDeployment(
+  name: unknown,
+  deployments: Record<string, DeploymentConfig> = DEPLOYMENTS,
+): DeploymentConfig {
+  if (typeof name !== "string" || !Object.hasOwn(deployments, name)) {
     throw new Error(
-      `Unknown deployment ${String(name)}. Choose one of: ${Object.keys(DEPLOYMENTS).join(", ")}.`,
+      `Unknown deployment ${String(name)}. Choose one of: ${Object.keys(deployments).join(", ")}.`,
     );
   }
 
-  return DEPLOYMENTS[name as DeploymentName];
+  return deployments[name];
 }

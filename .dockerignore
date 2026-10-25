@@ -100,3 +100,8 @@ docs/_build/
 examples/global-router/cdk/node_modules/
 examples/global-router/cdk/dist/
 examples/global-router/cdk/cdk.out/
+
+# Operator-specific Global Router CDK settings and credentials.
+examples/global-router/cdk/config/*.local.json
+examples/global-router/cdk/**/*.pem
+examples/global-router/cdk/**/*.key

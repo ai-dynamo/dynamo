@@ -15,19 +15,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # CPU Mocker on Amazon EKS with AWS CDK
 
 Run the commands below from Dynamo’s `examples/global-router/cdk` directory.
 
 This TypeScript AWS CDK v2 template creates an Amazon EKS cluster and deploys one or more
 aggregated NVIDIA Dynamo `DynamoGraphDeployment` (DGD) resources backed by CPU-only Mocker
-workers. Deployment settings are ordinary typed objects in `lib/const.ts`; there is no JSON
-configuration loader.
+workers. Generic deployment examples live in `lib/const.ts`. Use an explicit local JSON file for
+your account's settings, as described in [Configure](#configure). The checked-in image references,
+resource IDs, key-pair names, runtime namespaces, and `.invalid` endpoints are placeholders;
+replace them before deploying.
 
 Each entry in `dgdPools` creates one infrastructure capacity pool: a managed node group in one
 selected private subnet and Availability Zone (AZ). Each entry in `dgds` creates one Mocker Helm
@@ -78,12 +75,13 @@ bootstrap commands. The instance role is granted cluster-admin access through an
 The stack adds TCP 443 ingress from the bastion security group to the private EKS API security
 groups. The bastion and cluster must share a Region and VPC in this template.
 
-The deployed bastion configurations pin their current regional AMI IDs. Leave these pins unchanged
-for application rollouts: a deploy-time lookup of the latest Amazon Linux image can replace the
-bastion during an otherwise unrelated stack update. Upgrade a bastion AMI deliberately, accounting
-for its new SSH host key and the loss of local tools/files on its root volume. Use a CloudFormation
-change set to check replacements before executing a deployment; a template-only CDK diff does not
-show changes in values resolved from SSM at deployment time.
+The generic bastion examples omit `amiId`. For an existing deployment, set
+`clusterConfig.bastionConfig.amiId` in your local configuration to its current regional AMI ID and
+retain that pin during application rollouts. A deploy-time lookup of the latest Amazon Linux image
+can replace the bastion during an otherwise unrelated stack update. Upgrade a bastion AMI
+deliberately, accounting for its new SSH host key and the loss of local tools/files on its root
+volume. Use a CloudFormation change set to check replacements before executing a deployment;
+a template-only CDK diff does not show values resolved from SSM at deployment time.
 
 The two private EKS cluster subnets are tagged `kubernetes.io/role/internal-elb=1` so an internal
 Network Load Balancer can discover placement subnets. The stack installs AWS Load Balancer Controller
@@ -96,7 +94,7 @@ Global Router.
 
 ## Global Router private Frontend path
 
-The agreed first POC places the Global Router in Ohio. Ohio and West use non-overlapping VPC ranges
+The example places the Global Router in Ohio. Ohio and West use non-overlapping VPC ranges
 `10.42.0.0/16` and `10.43.0.0/16`. Deploy the regional stacks separately with
 `deployment=ohio` and `deployment=west`. The `-c deployment=both` mode then creates only a single
 inter-Region VPC peering connection and private routes in both directions. The peering connection
@@ -118,14 +116,13 @@ service account and role, and the managed node groups. Each DGD Helm release exp
 the controller. Its chart creates a second, private Service named `<dgd-name>-private`; this Service
 uses the DGD's Frontend-only chart label plus a unique DGD label, TCP port 8000, and an internal NLB
 with IP targets. It restricts load balancer source ranges to the configured
-`privateFrontendSourceCidrs`. Both regional deployment configurations currently allow the Ohio VPC
-CIDR (`10.42.0.0/16`), where the first Global Router will run. If a West regional Router is
-added later, Ohio Frontend source ranges must also allow the West VPC CIDR (`10.43.0.0/16`).
+`privateFrontendSourceCidrs`. The regional examples allow both VPC CIDRs (`10.42.0.0/16` and
+`10.43.0.0/16`). Set these ranges to the actual private client and Router networks in your deployment.
 
 After deployment, set `DYNAMO_NAMESPACE` to the stack's `DynamoNamespace` output (currently
 `dynamo`), then get each NLB's private DNS name with:
 
-```sh
+```bash
 DYNAMO_NAMESPACE=dynamo
 kubectl get service -n "$DYNAMO_NAMESPACE" <dgd-name>-private \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
@@ -141,14 +138,14 @@ documents these Service settings.
 
 ## Optional private KV DC Relay workload
 
-Each named deployment may set `kvDcRelayImage` in `lib/const.ts` to an explicit image tag or
+Each named deployment may set `kvDcRelayImage` in its local configuration to an explicit image tag or
 sha256 digest. When set, CDK installs one Relay Deployment and internal NLB Service per DGD in the
 same Kubernetes namespace (`dynamo`). The Relay uses the operator-created DGD discovery service
 account `<dgd-name>-k8s-service-discovery` and is scheduled only on the pools assigned to that
 DGD. Its own runtime namespace stays at `dynamo-<dgd-name>` for Frontend stats. It watches the
 worker runtime namespace for KV catalog, readiness, and events. The Relay image is not built or
-published by this CDK project. The current POC configuration pins the published Relay image digest
-in each Region.
+published by this CDK project. Replace the example image references with validated images available
+to your clusters, or omit `kvDcRelayImage` to leave Relay deployment disabled.
 
 The Service listens on TCP 50051 for the WAN gRPC endpoint and TCP 50052 for stats gRPC. Both use
 internal NLBs and `loadBalancerSourceRanges` from `privateRelaySourceCidrs`; the Ohio and West
@@ -169,33 +166,46 @@ Relay data. No AWS resources are created for Relay while `kvDcRelayImage` is uns
 
 The Ohio stack can install the packaged Rust Global Router alongside the CPU Mocker DGDs. It is
 opt-in and needs an explicit image URI/tag plus a local JSON config file; the CDK has no implicit
-image or `latest` default. For example, after publishing an image and preparing the config:
+image or `latest` default.
+
+For two-region routing, deploy the regional stacks and `deployment=both` peering first. Copy the
+checked-in `config/router-ohio-poc.json` to `config/router-ohio.local.json` without overwriting an
+existing local file, then replace its `.invalid` hostnames, cluster names, and example worker runtime
+namespaces with values from your deployment. For a new local file:
 
 ```bash
-pnpm exec cdk deploy -c deployment=ohio \
-  -c routerImage="197002356433.dkr.ecr.us-east-2.amazonaws.com/global-router-poc:<tag>" \
-  -c routerConfigPath=/path/to/router-ohio.json
+node <<'JS'
+const fs = require("node:fs");
+fs.writeFileSync(
+  "config/router-ohio.local.json",
+  fs.readFileSync("config/router-ohio-poc.json"),
+  { flag: "wx", mode: 0o600 },
+);
+JS
 ```
 
-For two-region routing, deploy `deployment=both` first to add peering, then install the Router
-in Ohio using the checked-in `config/router-ohio-poc.json`:
+After editing that file and selecting a validated Router image, deploy with both local paths:
 
 ```bash
+AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+ROUTER_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/global-router-poc:<validated-tag>"
+
 pnpm exec cdk deploy -c deployment=ohio \
-  -c routerImage="197002356433.dkr.ecr.us-east-2.amazonaws.com/global-router-poc@sha256:2d7e76ba22051bbfb7d4f3cb17626f878d8fdcb9186a2214b880df04de4d7dc2" \
-  -c routerConfigPath=config/router-ohio-poc.json
+  -c deploymentConfigPath=config/deployments.local.json \
+  -c "routerImage=${ROUTER_IMAGE}" \
+  -c routerConfigPath=config/router-ohio.local.json
 ```
 
-That config records the private NLB names assigned on 2026-09-29. Refresh an endpoint if its
-Service is replaced. Global View derives each stable pool ID from the configured site ID,
-Kubernetes namespace, and DGD name. The Mocker pools now set `stats_only_aggregated: false` so
-the Router consumes the Relay KV catalog, serving readiness, and CKF stream. Verify those streams
+Refresh an endpoint if its Service is replaced. Global View derives each stable pool ID from the
+configured site ID, Kubernetes namespace, and DGD name. The example pools set
+`stats_only_aggregated: false` so the Router consumes the Relay KV catalog, serving readiness, and
+CKF stream. Verify those streams
 before deploying the Router configuration; an empty catalog does not make a pool routable.
 
-The worker runtime namespaces in `lib/const.ts` and `config/router-ohio-poc.json` are temporary
-pins to the active operator worker generations. The Frontend stays in the unsuffixed namespace,
-while each decode worker advertises KV events in a namespace with a worker hash suffix. Read the
-current values from each cluster before deployment:
+The checked-in worker runtime namespaces `dynamo-mocker-ohio-1-example` and
+`dynamo-mocker-west-1-example` are placeholders. The Frontend stays in the unsuffixed namespace,
+while each decode worker advertises KV events in a namespace with an operator-generated suffix.
+Read the current values from each cluster before configuring Relay and Router:
 
 ```bash
 kubectl -n dynamo get dgd mocker-ohio-1 -o jsonpath='{.status.components.decode.runtimeNamespace}'
@@ -203,14 +213,15 @@ kubectl -n dynamo get dgd mocker-west-1 -o jsonpath='{.status.components.decode.
 ```
 
 Run each command against its corresponding cluster. When a worker rollout changes a suffix,
-update the matching DGD `workerRuntimeNamespace` in `lib/const.ts` and the Router pool's
-`runtime_namespace`, then redeploy the affected Relay and Router. Their pod templates include
-ConfigMap checksums so changed configuration restarts the processes. Discovery from DGD status
+update the matching DGD `workerRuntimeNamespace` in `config/deployments.local.json` and the Router
+pool's `runtime_namespace` in `config/router-ohio.local.json`, then redeploy the affected Relay and
+Router. Their pod templates include ConfigMap checksums so changed configuration restarts the
+processes. Discovery from DGD status
 should replace these static pins after the POC. Keep the Router's optional
 `kv_aware_token_id_completions` flag disabled while validating the catalog and CKF stream. After
 both pools report fresh overlap, enable it with a Router image that supports the flag. The first
 serving experiment uses `/v1/completions` with `prompt` as an array of token IDs; chat and text
-prompts continue using load-based selection. Each deployed DGD explicitly sets its local Frontend
+prompts continue using load-based selection. Each example DGD explicitly sets its local Frontend
 `frontendRouterMode` to `kv`, so the selected pool can route to the worker holding the prefix.
 The Global Router logs pool decisions at info level with `RUST_LOG=warn,dynamo_llm::global_view=info`;
 these records include the selected pool and matched-prefix token count.
@@ -272,8 +283,9 @@ configured public model. It does not require GPUs or a Hugging Face token.
 
 ## Configure
 
-Edit `lib/const.ts` and the bastion key-pair name in `lib/keypairs.ts`. Regional configurations are
-collected in `DEPLOYMENTS` and selected by name with CDK context. Ohio remains the default:
+The typed objects in `lib/const.ts` are generic examples. Ohio remains the default selection;
+`deployment=west` selects West, and `deployment=both` selects the peering stacks. To inspect the
+examples locally:
 
 ```bash
 pnpm exec cdk synth
@@ -282,31 +294,69 @@ pnpm exec cdk synth -c deployment=west
 pnpm exec cdk synth -c deployment=both
 ```
 
-An unknown deployment name fails with the available names. Use `-c deployment=west` for
-us-west-2. After deploying both regional VPC/EKS stacks separately, `deployment=both` synthesizes
-only two network stacks: one owns the peering connection and Ohio private routes, and the other owns
-West private routes. `POC_PEERING_OHIO` and `POC_PEERING_WEST` in `lib/const.ts` pin the VPC and
-private route table IDs from the deployed stacks; refresh them if a regional VPC is rebuilt.
-Deploy these two stacks with `pnpm exec cdk deploy --all -c deployment=both` after bootstrapping
-both Regions. Each private subnet route table gets a native CloudFormation route to the opposite VPC CIDR. Public
-subnet route tables are not changed. The regional load balancer controller applies security group
-ingress from the NLB Service source ranges: West allows the Ohio VPC CIDR, so no broad worker
-ingress rule is added. The private NLB DNS hostname resolves to its private node addresses; VPC
-peering DNS-resolution options for EC2 public hostnames are not needed for that NLB name. Verify DNS
-resolution and connectivity from Ohio after peering becomes active.
+For your own deployment, supply `-c deploymentConfigPath=config/deployments.local.json` on every
+synth, diff, deploy, and destroy command. This path is resolved relative to the working directory.
+For this two-region setup, use a complete JSON document with `deployments.ohio`,
+`deployments.west`, `peering.ohio`, and `peering.west`. The loader does not merge a partial override
+into the examples.
+Each deployment follows `DeploymentConfig` and each peering entry follows `PeeringRegionConfig`
+in `lib/config.ts`.
 
-The West VPC uses `10.43.0.0/16` to keep its network range distinct from Ohio. West is configured to
-use the EC2 key pair `mocker-west-admin`, imported on 2026-09-29 from the public half of the supplied
-Ohio bastion key. The same private key can access both bastions. CDK bootstrap completed in West on
-2026-09-29; a new account still needs its own regional bootstrap.
+After installing the dependencies, create the full local document from the example objects:
 
-The regional `global-router-poc` ECR repositories contain the POC images built from Dynamo
-`a47ad40894`. CDK does not build or push images. Each entry in `DEPLOYMENTS` pins its
-region-local `mockerImage` and `kvDcRelayImage` by digest. The planner digest requires
-`mockerRuntimeVersionOverride: "1.6.0"` on both DGD components because the operator cannot infer
-a runtime version from a digest-only image reference. If omitted, the chart keeps using
-`nvcr.io/nvidia/ai-dynamo/dynamo-planner` at the configured Dynamo version. The objects separate
-settings by responsibility:
+```bash
+node --require ts-node/register <<'JS'
+const fs = require("node:fs");
+const { DEPLOYMENTS, POC_PEERING_OHIO, POC_PEERING_WEST } = require("./lib/const");
+const settings = {
+  deployments: DEPLOYMENTS,
+  peering: { ohio: POC_PEERING_OHIO, west: POC_PEERING_WEST },
+};
+fs.writeFileSync(
+  "config/deployments.local.json",
+  JSON.stringify(settings, null, 2) + "\n",
+  { flag: "wx", mode: 0o600 },
+);
+JS
+```
+
+The exclusive-create flag refuses to overwrite an existing file. Edit your existing local file if
+you already have one. Both `config/deployments.local.json` and `config/router-ohio.local.json` are
+excluded from Git and the Docker build context. Keep deployment-specific metadata and keys local;
+the application loads these files only when their context paths are supplied explicitly.
+
+Before deployment, set the actual cluster and key-pair names, available AZs, VPC CIDRs, private
+source ranges, and image references. The example clusters are `mocker-ohio-cluster` and
+`mocker-west-cluster`; the example launch keys are `example-ohio-admin` and `example-west-admin`.
+Each launch key must already exist in its Region, and you must have its corresponding private key.
+For an existing stack, preserve its current names, resource identities, and bastion AMI pin in the
+local file. Omitting `deploymentConfigPath` selects the generic examples.
+
+The example ECR account `111111111111` and repeated-character image digests are placeholders.
+CDK does not build or publish images. Set each deployment's `mockerImage` and `kvDcRelayImage`
+to images you have validated and made available to that cluster. A digest-only planner image needs
+`mockerRuntimeVersionOverride` set to its actual Dynamo runtime version because the operator cannot
+infer the version from the digest. If `mockerImage` is omitted, the chart uses
+`nvcr.io/nvidia/ai-dynamo/dynamo-planner` at the configured platform version.
+
+After deploying both regional VPC/EKS stacks separately, populate `peering.ohio` and
+`peering.west` with their actual VPC IDs and private route-table IDs. These entries also require
+`region` and `cidrBlock`; the two VPC CIDRs must not overlap. Refresh the IDs if a VPC is rebuilt.
+Then deploy the two network stacks using the same local file:
+
+```bash
+pnpm exec cdk deploy --all -c deployment=both \
+  -c deploymentConfigPath=config/deployments.local.json
+```
+
+One stack owns the peering connection and Ohio private routes; the other owns West private routes.
+Each listed private route table receives a native CloudFormation route to the opposite VPC CIDR.
+Public route tables are not changed. The regional load balancer controller applies ingress from
+NLB Service source ranges. The private NLB DNS name resolves to its private node addresses;
+peering DNS-resolution options for EC2 public hostnames are not needed for that name. Verify DNS
+resolution and connectivity from the Router's private network after peering becomes active.
+
+The generic typed objects separate settings by responsibility:
 
 - `MOCKER_VPC_US_EAST_2` defines the Region, two standard AZs, and VPC CIDR.
 - `US_EAST_2_BASTION_KEY_PAIR` in `lib/keypairs.ts` defines the SSH key pair attached at launch.
@@ -323,10 +373,9 @@ settings by responsibility:
 For a Dynamo source revision that should supply the planner image in this POC, build from that
 checked-out revision and publish the same commit-derived tag to both regional repositories. This uses
 Dynamo's developer-convenience target; Dynamo documents its official build and release pipeline as
-the supported path for production images. The two `global-router-poc` ECR repositories are
-`197002356433.dkr.ecr.us-east-2.amazonaws.com/global-router-poc` and
-`197002356433.dkr.ecr.us-west-2.amazonaws.com/global-router-poc`. Confirm you are authorized for
-account `197002356433` before running the push steps.
+the supported path for production images. Create a `global-router-poc` ECR repository in each
+Region of your target account before publishing; this CDK application does not create them. Confirm
+the active AWS account and your authorization to publish there before running the push steps.
 
 From a shell with Docker, AWS CLI v2, and GNU Make installed, set `DYNAMO_DIR` to the local Dynamo
 checkout at the desired revision. These commands build once for the current Linux/amd64 platform,
@@ -336,15 +385,16 @@ then tag and push the identical image to each region:
 export DYNAMO_DIR=/path/to/dynamo
 test -z "$(git -C "$DYNAMO_DIR" status --porcelain)"  # Build a clean source revision
 export IMAGE_TAG="gv-$(git -C "$DYNAMO_DIR" rev-parse HEAD)"
-export EAST_REGISTRY=197002356433.dkr.ecr.us-east-2.amazonaws.com
-export WEST_REGISTRY=197002356433.dkr.ecr.us-west-2.amazonaws.com
+export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+export EAST_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com"
+export WEST_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
 export EAST_REPO="$EAST_REGISTRY/global-router-poc"
 export WEST_REPO="$WEST_REGISTRY/global-router-poc"
 
 aws ecr get-login-password --region us-east-2 \
-  | docker login --username AWS --password-stdin 197002356433.dkr.ecr.us-east-2.amazonaws.com
+  | docker login --username AWS --password-stdin "$EAST_REGISTRY"
 aws ecr get-login-password --region us-west-2 \
-  | docker login --username AWS --password-stdin 197002356433.dkr.ecr.us-west-2.amazonaws.com
+  | docker login --username AWS --password-stdin "$WEST_REGISTRY"
 
 make -C "$DYNAMO_DIR/deploy/operator" docker-build-planner \
   REGISTRY="$EAST_REGISTRY" TAG="$IMAGE_TAG"
@@ -355,16 +405,18 @@ docker push "$WEST_REPO:$IMAGE_TAG"
 ```
 
 The tag contains the full checked-out Dynamo commit SHA; retain the image digest with the
-deployment record. ECR tag immutability is not configured by this CDK project, so avoid reusing tags. After publishing, set `mockerImage` in each regional configuration in
-`lib/const.ts` to its matching URI and tag, for example
-`197002356433.dkr.ecr.us-east-2.amazonaws.com/global-router-poc:<tag>` for Ohio and
-`197002356433.dkr.ecr.us-west-2.amazonaws.com/global-router-poc:<tag>` for West. The CDK chart
+deployment record. ECR tag immutability is not configured by this CDK project, so avoid reusing tags.
+After publishing, set `mockerImage` in each deployment in `config/deployments.local.json` to its
+matching URI and tag. Example URI shapes are
+`111111111111.dkr.ecr.us-east-2.amazonaws.com/global-router-poc:<tag>` for Ohio and
+`111111111111.dkr.ecr.us-west-2.amazonaws.com/global-router-poc:<tag>` for West. The CDK chart
 uses this image for the Mocker DGD's frontend and worker.
 This planner build does not create the standalone Rust KV DC Relay or Global Router images.
 Build those from their dedicated Dockerfiles in the Dynamo source checkout and publish them with
 explicit revision tags. Do not use the planner image for either component.
 
-To add infrastructure capacity, append a typed object to `dgdPools`:
+To add infrastructure capacity, append an object to a deployment's `dgdPools` array. The equivalent
+typed example is:
 
 ```typescript
 {
@@ -375,8 +427,8 @@ To add infrastructure capacity, append a typed object to `dgdPools`:
 }
 ```
 
-To add a DGD, append a separate typed object to `dgds` and reference one or more configured pool
-names:
+To add a DGD, append an object to the deployment's `dgds` array and reference one or more configured
+pool names. The equivalent typed example is:
 
 ```typescript
 {
@@ -446,9 +498,9 @@ deployment order.
 
 ## Deploy
 
-Bootstrap CDK once per account and Region. East is already bootstrapped; bootstrap West before its
-first deployment. The West key pair must also exist before deployment. These commands select the
-West configuration and Region consistently:
+Bootstrap CDK once per account and Region. The configured launch key must also exist in that Region
+before deployment. After replacing the example settings in your local file, these commands select
+the West configuration and Region consistently:
 
 ```bash
 DEPLOYMENT=west
@@ -456,9 +508,12 @@ AWS_REGION=us-west-2
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 
 pnpm exec cdk bootstrap "aws://${AWS_ACCOUNT_ID}/${AWS_REGION}"
-pnpm exec cdk synth -c "deployment=${DEPLOYMENT}"
-pnpm exec cdk diff -c "deployment=${DEPLOYMENT}"
-pnpm exec cdk deploy -c "deployment=${DEPLOYMENT}"
+pnpm exec cdk synth -c "deployment=${DEPLOYMENT}" \
+  -c deploymentConfigPath=config/deployments.local.json
+pnpm exec cdk diff -c "deployment=${DEPLOYMENT}" \
+  -c deploymentConfigPath=config/deployments.local.json
+pnpm exec cdk deploy -c "deployment=${DEPLOYMENT}" \
+  -c deploymentConfigPath=config/deployments.local.json
 ```
 
 Creation usually takes several minutes. The bastion sends no guest bootstrap signal; configure its
@@ -489,7 +544,7 @@ connect with an SSH tunnel for the frontend port:
 
 ```bash
 AWS_REGION=us-west-2
-CLUSTER_NAME=sachal-mocker-west-cluster
+CLUSTER_NAME=mocker-west-cluster
 STACK_NAME="${CLUSTER_NAME}-cdk"
 BASTION_IP="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
@@ -547,13 +602,13 @@ ssh -i "$KEY_FILE" -L 8000:127.0.0.1:8000 "ec2-user@$BASTION_IP"
 
 `DgdPoolNames`, `DgdPoolPlacements`, and `DgdPoolSubnetIds` describe the infrastructure pools in the
 same order. `DgdNames` and `DgdPoolMappings` describe which pools each DGD can use. On the bastion,
-set the cluster values from `lib/const.ts`, install `kubectl`, wait for all DGDs, and inspect the node
+set the cluster values from your local configuration, install `kubectl`, wait for all DGDs, and inspect the node
 labels and pod constraints. The commands below use the West configuration:
 
 ```bash
 export AWS_REGION=us-west-2
 export AWS_DEFAULT_REGION="$AWS_REGION"
-export CLUSTER_NAME=sachal-mocker-west-cluster
+export CLUSTER_NAME=mocker-west-cluster
 export DYNAMO_NAMESPACE=dynamo
 
 KUBECTL_VERSION=1.35.6
@@ -610,7 +665,7 @@ OpenAI-compatible request:
 
 ```bash
 AWS_REGION=us-west-2
-CLUSTER_NAME=sachal-mocker-west-cluster
+CLUSTER_NAME=mocker-west-cluster
 STACK_NAME="${CLUSTER_NAME}-cdk"
 MODEL_NAMES="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
@@ -663,12 +718,12 @@ See:
 
 ## Main Configuration
 
-| Object and key | Current value | Purpose |
+| Object and key | Example value | Purpose |
 |---|---|---|
 | `MOCKER_VPC_US_EAST_2.region` | `us-east-2` | AWS Region for this stack |
 | `MOCKER_VPC_US_EAST_2.availabilityZones` | `us-east-2a`, `us-east-2b` | AZs used for cluster and pool subnet groups |
 | `MOCKER_VPC_US_EAST_2.cidrBlock` | `10.42.0.0/16` | VPC CIDR; derived subnets are `/20` |
-| `US_EAST_2_BASTION_KEY_PAIR` | `sachalm-mac` | EC2 key pair attached to the bastion at launch |
+| `US_EAST_2_BASTION_KEY_PAIR` | `example-ohio-admin` | EC2 key pair attached to the bastion at launch |
 | `BASTION_CONFIG_OHIO.instanceType` | `t3.small` | Low-cost SSH and `kubectl` admin host |
 | `MOCKER_CPU_NODE_GROUP.instanceTypes` | `m5.xlarge` | Default x86-64 managed node-group capacity choice |
 | `MOCKER_CPU_NODE_GROUP.scaling.desiredSize` | `2` | Initial number of CPU nodes in the default pool |
@@ -691,7 +746,8 @@ See:
 Stop the port-forward and SSH session, then remove the deployment and its AWS infrastructure:
 
 ```bash
-pnpm exec cdk destroy -c deployment=west
+pnpm exec cdk destroy -c deployment=west \
+  -c deploymentConfigPath=config/deployments.local.json
 ```
 
 The shared CDK bootstrap stack is not removed. Keep it for other CDK deployments, or remove it
