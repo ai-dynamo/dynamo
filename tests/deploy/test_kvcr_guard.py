@@ -51,7 +51,7 @@ TRANSFER_BLOCKS = "vllm:kvcr_transfer_blocks_total"
 TIER_READ_BYTES = "vllm:kv_offload_tiering_read_bytes_total"
 TIER_WRITE_BYTES = "vllm:kv_offload_tiering_write_bytes_total"
 PROMPT_TOKENS = "vllm:prompt_tokens_by_source_total"
-GUARD_INITIALIZED = "Initialized NIXL agent: KVCR-Guard-"
+GUARD_PROMOTED = "KVCR_EVENT guard_promoted "
 # Large enough to make the transfer visible, while remaining comfortably below
 # the small model's context limit and the example's 2 GiB host-memory pool.
 LONG_PREFIX = (
@@ -150,6 +150,36 @@ def _rdma_counter(
     assert state == "4: ACTIVE", f"{device_port} is not active: {state}"
     result = _exec(namespace, pod_name, container, "cat", counter_path)
     return int(result.stdout.strip()) * 4
+
+
+def _rdma_device(namespace: str, pod: str, container: str, configured: str) -> str:
+    # Device-plugin allocations can differ between containers in the same Pod.
+    snippet = """
+import json
+from pathlib import Path
+ports = []
+for verbs in Path('/sys/class/infiniband_verbs').glob('uverbs*'):
+    if not (Path('/dev/infiniband') / verbs.name).is_char_device():
+        continue
+    device = (verbs / 'ibdev').read_text().strip()
+    for port in (Path('/sys/class/infiniband') / device / 'ports').iterdir():
+        if (port / 'state').read_text().strip() == '4: ACTIVE':
+            ports.append(f'{device}:{port.name}')
+print(json.dumps(ports))
+"""
+    ports = json.loads(
+        _exec(namespace, pod, container, "python3", "-c", snippet).stdout
+    )
+    if configured == "all":
+        assert len(ports) == 1, (
+            f"Counter validation needs one allocated active RDMA port in "
+            f"{pod}/{container}, found {ports}"
+        )
+        return ports[0]
+    assert (
+        configured in ports
+    ), f"{configured} is not exposed in {pod}/{container}: {ports}"
+    return configured
 
 
 def _wait_until(predicate, description: str, timeout: int) -> None:
@@ -283,6 +313,27 @@ def test_rdma_counter_uses_configured_active_port(monkeypatch) -> None:
 @pytest.mark.pre_merge
 @pytest.mark.unit
 @pytest.mark.gpu_0
+def test_rdma_device_respects_each_container_allocation(monkeypatch) -> None:
+    allocations = {"main": ["mlx5_0:1"], "kvcr-services": ["mlx5_10:1"]}
+
+    def fake_exec(namespace, pod, container, *command):
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(allocations[container])
+        )
+
+    monkeypatch.setattr(f"{__name__}._exec", fake_exec)
+    assert _rdma_device("test", "worker-0", "main", "all") == "mlx5_0:1"
+    assert _rdma_device("test", "worker-0", "kvcr-services", "all") == "mlx5_10:1"
+    with pytest.raises(AssertionError, match="is not exposed"):
+        _rdma_device("test", "worker-0", "kvcr-services", "mlx5_0:1")
+    allocations["main"].append("mlx5_1:1")
+    with pytest.raises(AssertionError, match="needs one allocated"):
+        _rdma_device("test", "worker-0", "main", "all")
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
 @pytest.mark.timeout(90)
 @pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
 def test_render_manifest_injects_test_only_fault_gate(monkeypatch, tmp_path) -> None:
@@ -341,9 +392,9 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
         "DYNAMO_KVCR_COMPATIBILITY_DIGEST"
     ), "DYNAMO_KVCR_COMPATIBILITY_DIGEST is required"
     ucx_device = os.environ.get("DYNAMO_UCX_NET_DEVICES", "")
-    assert re.fullmatch(
+    assert ucx_device == "all" or re.fullmatch(
         r"mlx5_\d+:\d+", ucx_device
-    ), "DYNAMO_UCX_NET_DEVICES must name one device and port, e.g. mlx5_0:1"
+    ), "DYNAMO_UCX_NET_DEVICES must be all or one device and port, e.g. mlx5_0:1"
 
     deployment_spec = DeploymentSpec(_render_manifest(tmp_path, image))
     deployment_spec.namespace = namespace
@@ -469,9 +520,9 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
 
         main_before = _container_status(namespace, source.name, MAIN)
         sidecar_before = _container_status(namespace, source.name, KVCR_SERVICES)
-        guard_initializations_before = _logs(
-            namespace, source.name, KVCR_SERVICES
-        ).count(GUARD_INITIALIZED)
+        guard_promotions_before = _logs(namespace, source.name, KVCR_SERVICES).count(
+            GUARD_PROMOTED
+        )
         _exec(
             namespace,
             source.name,
@@ -504,11 +555,9 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
             engine_restarted, "the source vLLM container restart", FAILURE_TIMEOUT
         )
         _wait_until(
-            lambda: _logs(namespace, source.name, KVCR_SERVICES).count(
-                GUARD_INITIALIZED
-            )
-            > guard_initializations_before,
-            "KVCR Guard NIXL agent initialization",
+            lambda: _logs(namespace, source.name, KVCR_SERVICES).count(GUARD_PROMOTED)
+            > guard_promotions_before,
+            "KVCR Guard promotion after engine failure",
             FAILURE_TIMEOUT,
         )
         sidecar_failed = _container_status(namespace, source.name, KVCR_SERVICES)
@@ -529,18 +578,21 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
         _capture_workers(deployment, pods, ".source-failed")
 
         target_before = _metrics(namespace, target.name, deployment_spec.system_port)
+        source_device = _rdma_device(namespace, source.name, KVCR_SERVICES, ucx_device)
+        target_device = _rdma_device(namespace, target.name, MAIN, ucx_device)
+        logger.info("KVCR_TEST RDMA source=%s target=%s", source_device, target_device)
         xmit_before = _rdma_counter(
             namespace,
             source.name,
             KVCR_SERVICES,
-            ucx_device,
+            source_device,
             "port_xmit_data",
         )
         recv_before = _rdma_counter(
             namespace,
             target.name,
             MAIN,
-            ucx_device,
+            target_device,
             "port_rcv_data",
         )
         recovered_content = _request(request_url)
@@ -581,7 +633,7 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
                 namespace,
                 source.name,
                 KVCR_SERVICES,
-                ucx_device,
+                source_device,
                 "port_xmit_data",
             )
             - xmit_before
@@ -591,7 +643,7 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
                 namespace,
                 target.name,
                 MAIN,
-                ucx_device,
+                target_device,
                 "port_rcv_data",
             )
             - recv_before
@@ -629,6 +681,20 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
             lambda: _container_status(namespace, source.name, MAIN)["ready"],
             "the source vLLM container to become ready",
             READINESS_TIMEOUT,
+        )
+        _wait_until(
+            lambda: sum_metric_samples(
+                _metrics(namespace, source.name, deployment_spec.system_port),
+                "vllm:kvcr_state",
+                {"resource": "block_records"},
+            )
+            >= blocks,
+            "preserved KVCR records after handback to the replacement engine",
+            60,
+        )
+        assert (
+            _container_status(namespace, source.name, KVCR_SERVICES)["restartCount"]
+            == sidecar_before["restartCount"]
         )
         logger.info(
             "KVCR_TEST result=PASS source_main_restarts=%d "

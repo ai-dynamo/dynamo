@@ -63,6 +63,7 @@ signal.pause()
         "DYN_NAMESPACE_WORKER_SUFFIX": "",
         "DYNAMO_KVCR_COMPATIBILITY_DIGEST": "test",
         "TEST_EXIT_CODE": str(exit_code),
+        "KVCR_POOL_SIZE_GIB": "1024",
     }
     process = subprocess.Popen(
         ["bash", str(tmp_path / "services.sh")],
@@ -79,6 +80,7 @@ signal.pause()
             info = json.loads(process.stdout.readline())
             children[info["module"]] = info
         guard_args = children["kvcr.kvcr_service"]["args"]
+        assert guard_args[guard_args.index("--pool-sizes-gb") + 1] == "1024"
         assert ("--health-dependency-url" in guard_args) == (worker == "0")
         if exit_module is None:
             process.terminate()
@@ -232,7 +234,7 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
     assert "python3 -m kvcr.kvcr_service" in sidecar_command
     assert "python3 -m dynamo.kv_state_agent" in sidecar_command
     assert "--guard-count 1" in sidecar_command
-    assert "--pool-sizes-gb 2" in sidecar_command
+    assert '--pool-sizes-gb "${KVCR_POOL_SIZE_GIB:-2}"' in sidecar_command
     assert 'if [ "$POD_INDEX" = "0" ]' in sidecar_command
     assert "DYN_HEALTH_CHECK_ENABLED=false" in sidecar_command
     assert "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" not in sidecar_command
@@ -242,7 +244,10 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
     )
     assert '--max-slots "$KVCR_CACHE_SLOT_COUNT"' in sidecar_command
     assert "wait_any_exit" in sidecar_command
-    assert "wait_for_ready http://127.0.0.1:9092/ready 120" in main_command
+    assert (
+        'wait_for_ready http://127.0.0.1:9092/ready "${KVCR_STARTUP_TIMEOUT_SECONDS}"'
+        in main_command
+    )
     assert '"kvcr_service_socket_path": "/run/kvcr/memory.sock"' in main_command
     assert "/run/kvcr/hold-engine-start" not in main_command
     assert 'case "$POD_INDEX" in' not in main_command
@@ -272,7 +277,10 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
 
 @pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
 @pytest.mark.parametrize("memory_service", ("false", "true"))
-def test_deploy_script_renders_selected_variant(memory_service: str) -> None:
+@pytest.mark.parametrize("pool_gib,memory_request_gib", ((2, 3), (1024, 1035)))
+def test_deploy_script_renders_selected_variant(
+    memory_service: str, pool_gib: int, memory_request_gib: int
+) -> None:
     env = os.environ.copy()
     env.update(
         {
@@ -281,6 +289,11 @@ def test_deploy_script_renders_selected_variant(memory_service: str) -> None:
             "DYNAMO_KVCR_COMPATIBILITY_DIGEST": "qwen3-0.6b-example-v1",
             "DYNAMO_VLLM_IMAGE": "runtime:1.4.0@sha256:test",
             "KVCR_MEMORY_SERVICE_ENABLED": memory_service,
+            "KVCR_POOL_SIZE_GIB": str(pool_gib),
+            "KVCR_STARTUP_TIMEOUT_SECONDS": "900",
+            "KVCR_TERMINATION_GRACE_PERIOD_SECONDS": "180"
+            if pool_gib == 1024
+            else "30",
         }
     )
 
@@ -295,6 +308,22 @@ def test_deploy_script_renders_selected_variant(memory_service: str) -> None:
 
     rendered = yaml.safe_load(result.stdout)
     assert rendered["kind"] == "DynamoGraphDeployment"
+    if memory_service == "true":
+        worker = next(
+            c for c in rendered["spec"]["components"] if c["name"] == "worker"
+        )
+        pod_spec = worker["podTemplate"]["spec"]
+        main, sidecar = pod_spec["containers"]
+        assert 'wait_for_ready http://127.0.0.1:9092/ready "900"' in main["args"][0]
+        assert pod_spec["terminationGracePeriodSeconds"] == (
+            180 if pool_gib == 1024 else 30
+        )
+        env_values = {e["name"]: e.get("value") for e in sidecar["env"]}
+        assert env_values["KVCR_POOL_SIZE_GIB"] == str(pool_gib)
+        assert sidecar["resources"]["requests"]["memory"] == f"{memory_request_gib}Gi"
+        assert sidecar["resources"]["limits"]["memory"] == f"{memory_request_gib + 1}Gi"
+        memory = next(v for v in pod_spec["volumes"] if v["name"] == "kvcr-memory")
+        assert memory["emptyDir"]["sizeLimit"] == f"{pool_gib + 1}Gi"
     containers = [
         container
         for component in rendered["spec"]["components"]
@@ -324,6 +353,7 @@ def test_deploy_script_renders_selected_variant(memory_service: str) -> None:
         )
         configmap = json.loads(bundle.stdout)
         assert configmap["immutable"] is True
+        assert "binaryData" not in configmap
         assert (
             configmap["data"]["services.sh"]
             == (_MANIFEST_DIR / "services.sh").read_text()

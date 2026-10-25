@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1beta1
@@ -46,7 +46,7 @@ spec:
             if [ -f /opt/kvcr-startup/kvcr.whl ]; then
               export PYTHONPATH="/opt/kvcr-startup/kvcr.whl${PYTHONPATH:+:$PYTHONPATH}"
             fi
-            wait_for_ready http://127.0.0.1:9092/ready 120
+            wait_for_ready http://127.0.0.1:9092/ready "${KVCR_STARTUP_TIMEOUT_SECONDS}"
 
             kv_transfer_config=$(
               python3 - <<'PY'
@@ -162,6 +162,8 @@ spec:
           env:
           - name: DYNAMO_KVCR_COMPATIBILITY_DIGEST
             value: ${DYNAMO_KVCR_COMPATIBILITY_DIGEST}
+          - name: KVCR_POOL_SIZE_GIB
+            value: "${KVCR_POOL_SIZE_GIB}"
           - name: CONTAINER_NAME
             value: kvcr-services
           - name: DYN_COMPONENT
@@ -216,11 +218,11 @@ spec:
           resources:
             limits:
               ${DYNAMO_RDMA_RESOURCE}: "1"
-              memory: 4Gi
+              memory: ${KVCR_MEMORY_LIMIT_GIB}Gi
             requests:
               ${DYNAMO_RDMA_RESOURCE}: "1"
               cpu: "1"
-              memory: 3Gi
+              memory: ${KVCR_MEMORY_REQUEST_GIB}Gi
           securityContext:
             capabilities:
               add:
@@ -233,7 +235,7 @@ spec:
             name: kvcr-socket
           - mountPath: /dev/shm/kvcr
             name: kvcr-memory
-        terminationGracePeriodSeconds: 30
+        terminationGracePeriodSeconds: ${KVCR_TERMINATION_GRACE_PERIOD_SECONDS}
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -246,7 +248,7 @@ spec:
           name: kvcr-socket
         - emptyDir:
             medium: Memory
-            sizeLimit: 3Gi
+            sizeLimit: ${KVCR_SHM_SIZE_GIB}Gi
           name: kvcr-memory
     replicas: 2
     type: worker

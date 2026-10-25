@@ -1,9 +1,9 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# KVCR deployment examples
+## KVCR deployment examples
 
 These examples deploy two aggregated vLLM workers on separate GPU nodes and
 use KVCR as a secondary KV-cache tier over RDMA. Both variants use one
@@ -30,23 +30,26 @@ process-local variant requests one share per GPU node; the memory-service
 variant requests two shares per node because both `main` and `kvcr-services`
 use RDMA. Set
 `DYNAMO_RDMA_RESOURCE=rdma/ib` or another cluster-specific resource name when
-required. `UCX_TLS=rc_x,cuda` prevents TCP fallback. Set
-`DYNAMO_UCX_NET_DEVICES` to the GPU-local HCA and port exposed by the selected
-RDMA resource, such as `mlx5_0:1`; do not copy that example device name without
-checking the target nodes.
+required. Both containers use `UCX_TLS=rc_x,cuda` to prevent TCP payload
+fallback and satisfy NIXL's transport checks on GPU hosts. Set
+`DYNAMO_UCX_NET_DEVICES=all` when the device plugin assigns a single HCA to each
+container. UCX then uses that container's assigned device, which can differ
+between `main` and `kvcr-services`. For a shared RDMA resource that exposes the
+same HCA everywhere, pin the GPU-local HCA and port, such as `mlx5_0:1`, after
+checking its availability in every engine and sidecar.
 
 The image tag must contain a Dynamo semantic release version. Pin the same
 image by digest for every component, for example
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:REPLACE_ME`. Until KVCR is
 available in a Dynamo release image, build that image from matching Dynamo,
 KVCR, and vLLM revisions. Use [KVCR tag
-`v0.1.0`](https://github.com/ai-dynamo/kvcr/tree/v0.1.0). Until
-[vLLM PR 53624](https://github.com/vllm-project/vllm/pull/53624) is merged, pin
-vLLM to the PR's immutable head SHA; at the time of this update it is
-[`7015687c`](https://github.com/vllm-project/vllm/commit/7015687c390442fae384b78fc62e6621b3bf6e56).
-After the PR merges, pin the commit that lands on vLLM `main`. Record the exact
-Dynamo, KVCR, and vLLM commit IDs with the image digest used for every qualified
-deployment.
+`v0.1.1`](https://github.com/ai-dynamo/kvcr/tree/v0.1.1) as the base, or the
+upcoming `v0.2` release when available. The memory-service variant requires KVCR's
+`--health-port`, `--health-host`, and `--health-dependency-url` flags, plus
+vLLM's KVCR secondary tier with `kvcr_service_socket_path` support. With a
+`v0.1.1` base, use the health-enabled wheel overlay below; the released tag does
+not contain those health flags. Record the exact Dynamo, KVCR, and vLLM commit
+IDs with the image digest used for every qualified deployment.
 
 `DYNAMO_KVCR_COMPATIBILITY_DIGEST` is an opaque layout version shared by the
 engine and memory service. Change it whenever model, dtype, block layout, or
@@ -72,9 +75,9 @@ containers. To test it without rebuilding the existing compatible runtime image,
 build a pure-Python wheel from the KVCR feature tree and export
 `KVCR_WHEEL=/absolute/path/to/kvcr-0.1.1-py3-none-any.whl` before deployment.
 The script mounts it through `PYTHONPATH` in both containers; it does not install
-packages or supply native dependencies. Stop if the selected image needs new
-NIXL, CUDA, UCX, or other dependencies. Without `KVCR_WHEEL`, the installed KVCR
-must already support the health flags; the older tag referenced above does not.
+packages or supply native dependencies. Rebuild the runtime image when NIXL,
+CUDA, UCX, or other dependencies must change. Without `KVCR_WHEEL`, the installed
+KVCR must already support the health flags.
 
 `deploy.sh` applies an immutable, content-addressed ConfigMap containing
 `services.sh`, Dynamo's shared `launch_utils.sh`, and the optional wheel before
@@ -116,13 +119,38 @@ vLLM container restart leaves the service, Guard, and pool running.
 `services.sh` starts KVCR and, on worker 0, the state agent. It uses Dynamo's
 `wait_any_exit` and process-group cleanup helpers: any child exit ends the
 wrapper and terminates/reaps its companion; SIGTERM does the same. Kubernetes'
-30-second Pod termination grace period is the final bound for stuck children,
-not a timeout implemented by the shell helper. For a planned shutdown, drain and
-stop engines before their service; the wrapper does not impose cross-container
-shutdown ordering.
+Pod termination grace period (default: 30 seconds) is the final bound for stuck
+children, not a timeout implemented by the shell helper. For a planned shutdown,
+drain and stop engines before their service; the wrapper does not impose
+cross-container shutdown ordering.
 
-The main container waits up to 120 seconds for KVCR `/ready` on port 9092 before
-launching vLLM. The sidecar's HTTP readiness probe checks that the Unix accept
+The main container waits up to `KVCR_STARTUP_TIMEOUT_SECONDS` (default: 120)
+for KVCR `/ready` on port 9092 before launching vLLM.
+Set `KVCR_POOL_SIZE_GIB` (default: 2) to change each worker's Guard pool.
+The shared-memory volume is pool size plus 1 GiB. The sidecar memory request
+adds 1% of pool size, rounded up to a whole GiB; its limit adds another 1 GiB.
+This covers the 100 MiB recovery journal, process overhead, and kernel metadata
+charged for the tmpfs allocation. For example, a 1 TiB pool requests 1035 GiB
+with a 1036 GiB limit; a fixed 2 GiB allowance was insufficient at that size.
+The engine's separate CPU offload buffer remains
+2 GiB. Larger pools need enough unallocated node memory and a startup timeout
+covering eager page allocation; for a 1 TiB pool, set `KVCR_POOL_SIZE_GIB=1024`
+and measure readiness before choosing the timeout. Large pools also take longer
+to unmap and free during shutdown. Set `KVCR_TERMINATION_GRACE_PERIOD_SECONDS`
+(default: 30) to cover engine drain and pool cleanup. All three settings accept
+positive decimal integers without leading zeros. Health readiness precedes
+engine-side NIXL registration, model loading, and inference readiness.
+
+For the 1 TiB case, validation on two B200 nodes used the following settings with
+more than 1035 GiB of schedulable memory available on each worker node:
+
+```bash
+KVCR_MEMORY_SERVICE_ENABLED=true KVCR_POOL_SIZE_GIB=1024 \
+  KVCR_STARTUP_TIMEOUT_SECONDS=600 KVCR_TERMINATION_GRACE_PERIOD_SECONDS=180 \
+  ./deploy.sh
+```
+
+The sidecar's HTTP readiness probe checks that the Unix accept
 loop and Guard actor loops progress, plus worker 0's state-agent `/live` endpoint.
 It does not require an attached engine or mutate a pool. No liveness/startup
 restart probe is set on the sidecar: a failed probe must not restart it beneath
@@ -168,4 +196,6 @@ the standard `test_output` directory). It verifies that the workers are on
 separate hosts, one source engine restarts while its KVCR sidecar remains up,
 the Guard serves the preserved cache to the other engine, the response matches,
 the KVCR transfer metrics increase, and the selected active HCA carries the
-transfer.
+transfer. With `DYNAMO_UCX_NET_DEVICES=all`, the test requires exactly one
+allocated active RDMA port per measured container and reads the source and
+target counters from their respective devices.

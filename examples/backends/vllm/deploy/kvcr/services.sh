@@ -25,7 +25,7 @@ python3 -m kvcr.kvcr_service \
     --socket-path /run/kvcr/memory.sock \
     --pool-dir /dev/shm/kvcr \
     --guard-count 1 \
-    --pool-sizes-gb 2 \
+    --pool-sizes-gb "${KVCR_POOL_SIZE_GIB:-2}" \
     --compatibility-digest "$DYNAMO_KVCR_COMPATIBILITY_DIGEST" \
     --health-host 0.0.0.0 --health-port "${KVCR_HEALTH_PORT:-9092}" \
     "${health_args[@]}" &

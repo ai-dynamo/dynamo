@@ -1,11 +1,11 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 set -eu
 
 : "${DYNAMO_VLLM_IMAGE:?set DYNAMO_VLLM_IMAGE to a KVCR-capable image}"
-: "${DYNAMO_UCX_NET_DEVICES:?set DYNAMO_UCX_NET_DEVICES to the GPU-local UCX device}"
+: "${DYNAMO_UCX_NET_DEVICES:?set DYNAMO_UCX_NET_DEVICES to all or an exposed GPU-local UCX device}"
 
 DYNAMO_RDMA_RESOURCE=${DYNAMO_RDMA_RESOURCE:-rdma/shared_ib}
 KVCR_MEMORY_SERVICE_ENABLED=${KVCR_MEMORY_SERVICE_ENABLED:-false}
@@ -23,6 +23,25 @@ case "$KVCR_MEMORY_SERVICE_ENABLED" in
     manifest=$script_dir/agg-memory-service.yaml
     deployment_name=vllm-agg-kvcr-memory-service
     : "${DYNAMO_KVCR_COMPATIBILITY_DIGEST:?set a versioned KVCR compatibility value}"
+    KVCR_POOL_SIZE_GIB=${KVCR_POOL_SIZE_GIB:-2}
+    KVCR_STARTUP_TIMEOUT_SECONDS=${KVCR_STARTUP_TIMEOUT_SECONDS:-120}
+    KVCR_TERMINATION_GRACE_PERIOD_SECONDS=${KVCR_TERMINATION_GRACE_PERIOD_SECONDS:-30}
+    for value in "$KVCR_POOL_SIZE_GIB" "$KVCR_STARTUP_TIMEOUT_SECONDS" \
+      "$KVCR_TERMINATION_GRACE_PERIOD_SECONDS"; do
+      case "$value" in
+        ''|0*|*[!0-9]*)
+          echo "KVCR pool size and timeouts must be positive decimal integers without leading zeros" >&2
+          exit 2
+          ;;
+      esac
+    done
+    # Large tmpfs pools also charge kernel metadata to the allocating container.
+    KVCR_SHM_SIZE_GIB=$((KVCR_POOL_SIZE_GIB + 1))
+    KVCR_MEMORY_REQUEST_GIB=$((KVCR_POOL_SIZE_GIB + (KVCR_POOL_SIZE_GIB + 99) / 100))
+    KVCR_MEMORY_LIMIT_GIB=$((KVCR_MEMORY_REQUEST_GIB + 1))
+    export KVCR_POOL_SIZE_GIB KVCR_STARTUP_TIMEOUT_SECONDS
+    export KVCR_TERMINATION_GRACE_PERIOD_SECONDS
+    export KVCR_SHM_SIZE_GIB KVCR_MEMORY_REQUEST_GIB KVCR_MEMORY_LIMIT_GIB
     case "$DYNAMO_KVCR_COMPATIBILITY_DIGEST" in
       *[!A-Za-z0-9._:/-]*)
         echo "DYNAMO_KVCR_COMPATIBILITY_DIGEST contains an unsupported character" >&2
@@ -58,10 +77,13 @@ payload = json.dumps({"data": data, "binaryData": binary}, sort_keys=True)
 if len(payload.encode()) > 1024 * 1024:
     sys.exit("KVCR startup bundle exceeds 1 MiB; use a smaller pure-Python wheel")
 name = "kvcr-startup-" + hashlib.sha256(payload.encode()).hexdigest()[:16]
-print(name if sys.argv[3] == "name" else json.dumps({
+bundle = {
     "apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": name},
-    "immutable": True, "data": data, "binaryData": binary,
-}))
+    "immutable": True, "data": data,
+}
+if binary:
+    bundle["binaryData"] = binary
+print(name if sys.argv[3] == "name" else json.dumps(bundle))
 PY
 }
 
@@ -75,6 +97,9 @@ render() {
   substitution_vars="$substitution_vars "'${DYNAMO_UCX_NET_DEVICES}'
   substitution_vars="$substitution_vars "'${DYNAMO_KVCR_COMPATIBILITY_DIGEST}'
   substitution_vars="$substitution_vars "'${KVCR_STARTUP_CONFIG_MAP}'
+  substitution_vars="$substitution_vars "'${KVCR_POOL_SIZE_GIB} ${KVCR_STARTUP_TIMEOUT_SECONDS}'
+  substitution_vars="$substitution_vars "'${KVCR_TERMINATION_GRACE_PERIOD_SECONDS}'
+  substitution_vars="$substitution_vars "'${KVCR_SHM_SIZE_GIB} ${KVCR_MEMORY_REQUEST_GIB} ${KVCR_MEMORY_LIMIT_GIB}'
   envsubst "$substitution_vars" < "$manifest"
 }
 
