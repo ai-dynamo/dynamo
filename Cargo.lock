@@ -2763,11 +2763,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.24"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a62c4aea442890712dcdb64e493fac636edad8c9b25f793948800507c41bedc"
+checksum = "705005ac5414c4dc7327f8f868c56ae85bc247c71dfd250ab95fc1aa9622e72d"
 dependencies = [
  "anyhow",
+ "dynamo-structural-tag",
  "openai-harmony",
  "percent-encoding",
  "regex",
@@ -3027,6 +3028,18 @@ dependencies = [
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tonic-health 0.14.6",
+]
+
+[[package]]
+name = "dynamo-structural-tag"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8d57353db2c855b6d8154bb67b752d95547ee33eda3ee55342c0625211bdaae"
+dependencies = [
+ "anyhow",
+ "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -9705,9 +9718,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.54.0"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0c168a474b95bfecfe908a65d4bdffc523144b649a74c09c286afb35d53e0bc"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",

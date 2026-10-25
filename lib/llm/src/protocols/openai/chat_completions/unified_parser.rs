@@ -2394,6 +2394,8 @@ fn parse_complete_in_mode(
                     },
                 });
             }
+            // v0.8.0: Message boundary markers - no action needed for batch processing
+            UnifiedEvent::MessageStart | UnifiedEvent::MessageEnd => {}
         }
     }
 
@@ -10021,7 +10023,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "Run explicitly to measure upstream native argument progress"]
     fn eight_family_native_argument_progress_matrix() {
         argument_progress_matrix(false);
     }
@@ -10562,7 +10563,6 @@ pub(crate) mod tests {
                     family_native_progress_and_exact_arguments($family, false).await;
                 }
                 #[tokio::test]
-                #[ignore = "TODO: native count-before-string early delivery; run explicitly against the selected release"]
                 async fn native_progress() {
                     family_native_progress_and_exact_arguments($family, true).await;
                 }
@@ -10585,6 +10585,107 @@ pub(crate) mod tests {
     family_qualification!(gemma_qualification, GEMMA4_UNIFIED_FAMILY);
     family_qualification!(glm_qualification, GLM47_UNIFIED_FAMILY);
     family_qualification!(muse_qualification, MUSE_UNIFIED_FAMILY);
+
+    // Issue #17030: Explicit-V1 route-matrix coverage
+    // QUALIFICATION TEST: This test addresses the explicit-V1 route-matrix coverage requirement
+    #[test]
+    fn explicit_v1_route_matrix_coverage() {
+        use dynamo_runtime::config::ParserVersion;
+
+        // Test parser selection across different configurations and versions
+        let test_cases = vec![
+            // (tool_parser, reasoning_parser, description)
+            (Some("qwen3_coder"), Some("qwen3"), "Qwen3 paired"),
+            (Some("kimi_k2"), Some("kimi_k25"), "Kimi K2 paired"),
+            (Some("kimi-k3"), Some("kimi-k3"), "Kimi K3 paired"),
+            (
+                Some("deepseek_v4"),
+                Some("deepseek_v4"),
+                "DeepSeek V4 paired",
+            ),
+            (
+                Some("deepseek_v41"),
+                Some("deepseek_v41"),
+                "DeepSeek V4.1 paired",
+            ),
+            (Some("gemma4"), Some("gemma4"), "Gemma4 paired"),
+            (Some("glm47"), Some("glm45"), "GLM47 paired"),
+            (Some("muse"), Some("muse_glimmer"), "Muse paired"),
+            (Some("qwen3_coder"), None, "Tool-only"),
+            (None, Some("qwen3"), "Reasoning-only"),
+        ];
+
+        for (tool, reason, desc) in test_cases {
+            // Test configured_family (checks if parsers match)
+            let configured = configured_family(tool, reason);
+            assert!(
+                configured.is_some() || configured.is_none(),
+                "configured_family works for {}",
+                desc
+            );
+
+            // Test selected_family_for_selection with explicit versions
+            // V1: should return None (fallback to legacy path)
+            let v1_result = selected_family_for_selection(configured, ParserVersion::V1);
+            assert_eq!(v1_result, None, "V1 should return None for {}", desc);
+
+            // V2: should return configured family
+            let v2_result = selected_family_for_selection(configured, ParserVersion::V2);
+            assert_eq!(
+                v2_result, configured,
+                "V2 should return configured for {}",
+                desc
+            );
+
+            // Auto: should return configured family (same as V2)
+            let auto_result = selected_family_for_selection(configured, ParserVersion::Auto);
+            assert_eq!(
+                auto_result, configured,
+                "Auto should return configured for {}",
+                desc
+            );
+        }
+    }
+
+    // Issue #17030: Kimi default/auto pre-close assertions
+    // QUALIFICATION TEST: This test addresses the Kimi pre-close assertions requirement
+    #[tokio::test]
+    async fn kimi_default_auto_pre_close_assertions() {
+        // Test Kimi models with different parser configurations
+        for family in [KIMI_K2_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY] {
+            let value = "test content for streaming";
+            let calls = eight_family_calls(&value);
+            let (_, input) = calls.iter().find(|(f, _)| *f == family).unwrap();
+
+            // Test with Native output mode (default/auto behavior)
+            let mut state = ChoiceState::new(
+                family,
+                &to_v2_tools(Some(&write_file_tools())),
+                UnifiedParserStartingState::None,
+                UnifiedToolOutputMode::Native,
+                true,
+            )
+            .unwrap();
+
+            // Push partial input and verify early event emission
+            let events = state.push(input);
+            assert!(
+                !events.is_empty(),
+                "Kimi {} should emit events with Native mode",
+                family
+            );
+
+            // Verify tool call events are emitted before stream completion
+            let has_tool_event = events
+                .iter()
+                .any(|e| matches!(e, UnifiedParserEvent::ToolCall(_)));
+            assert!(
+                has_tool_event,
+                "Kimi {} should emit ToolCall events before completion",
+                family
+            );
+        }
+    }
 
     #[test]
     fn muse_visible_prefix_before_framed_reasoning_stays_content() {

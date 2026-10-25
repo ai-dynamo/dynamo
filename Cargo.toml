@@ -73,8 +73,8 @@ dynamo-parsers = { version = "=10.0.7" }
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-# Native count-before-string early streaming still needs a frontend-crates fix.
-dynamo-parsers-v2 = { version = "=0.7.24" }
+# Native count-before-string early streaming support added in 0.8.0.
+dynamo-parsers-v2 = { version = "=0.8.0" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.7.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.7.0" }
 
@@ -142,7 +142,7 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
-tokio = { version = "=1.54.0", features = ["full"] }
+tokio = { version = "=1.54.1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.19", features = ["codec", "net", "rt", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
