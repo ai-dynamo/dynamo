@@ -15,6 +15,7 @@ pub mod envoy_helpers;
 pub mod epp;
 pub mod epp_router;
 pub mod epp_standalone_config;
+mod gateway_routing;
 pub mod inference_pool;
 pub mod metrics;
 pub mod peer_discovery;

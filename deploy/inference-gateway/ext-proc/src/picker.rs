@@ -149,6 +149,19 @@ pub trait EndpointPicker: Send + Sync + 'static {
     /// the picker booked nothing.
     async fn on_prefill_complete(&self, _booking_id: &str) {}
 
+    /// Called with each response body chunk Envoy relays for a routed request
+    /// (`streaming`: an SSE response), and once with the whole body for a
+    /// buffered response. Lets a picker follow output progress. Must not block:
+    /// it runs on the response path ahead of forwarding the chunk.
+    fn on_response_body(
+        &self,
+        _booking_id: &str,
+        _chunk: &[u8],
+        _streaming: bool,
+        _end_of_stream: bool,
+    ) {
+    }
+
     /// Called when a request's response is fully complete (end-of-stream on the
     /// response body or trailers). Lets the picker free bookkeeping state.
     /// `booking_id` is as in [`Self::on_prefill_complete`]. Prefer
@@ -207,6 +220,11 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
+    /// The routing pipeline rejected the request with the status the frontend
+    /// returns for the same failure (for example 529 when every worker is over
+    /// its load threshold).
+    #[error("{message}")]
+    Rejected { status: u16, message: String },
 }
 
 #[cfg(test)]

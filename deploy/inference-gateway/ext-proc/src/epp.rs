@@ -18,6 +18,8 @@ use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::entrypoint::build_preprocessed_routing_with_dispatch;
+use dynamo_llm::kv_router::gateway_dispatch::GatewayDispatch;
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -34,6 +36,7 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
+use crate::gateway_routing::{GatewayRouting, ROUTING_HOST_ENV, SESSION_AFFINITY_TTL_ENV};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
@@ -82,6 +85,27 @@ fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
     }
 }
 
+/// Whether `DYN_EPP_ROUTING_HOST` enables the frontend routing-host path.
+fn routing_host_enabled() -> Result<bool> {
+    match std::env::var(ROUTING_HOST_ENV) {
+        Ok(value) => match value.trim() {
+            "" | "0" | "false" => Ok(false),
+            "1" | "true" => Ok(true),
+            other => anyhow::bail!("{ROUTING_HOST_ENV} must be true or false, got {other:?}"),
+        },
+        Err(_) => Ok(false),
+    }
+}
+
+fn session_affinity_ttl_secs() -> Result<Option<u64>> {
+    match std::env::var(SESSION_AFFINITY_TTL_ENV) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().parse().map_err(|e| {
+            anyhow::anyhow!("{SESSION_AFFINITY_TTL_ENV} must be a number of seconds: {e}")
+        })?)),
+        _ => Ok(None),
+    }
+}
+
 fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
     is_disaggregated.then_some(RouterConfigOverride {
         overlap_score_credit: Some(0.0),
@@ -120,6 +144,11 @@ pub struct Router {
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
     served_model: String,
+    /// Set once a prefill worker registers; the routing-host path then yields
+    /// to the disaggregated path below.
+    prefill_discovered: Arc<AtomicBool>,
+    /// The frontend's routing pipeline, when `DYN_EPP_ROUTING_HOST` is set.
+    gateway: Option<GatewayRouting>,
 }
 
 /// Remove and release a booking once. Both response lifecycle callbacks use
@@ -208,6 +237,33 @@ impl Router {
             );
         }
 
+        let gateway = if routing_host_enabled()? {
+            // The gateway relays output text, not token IDs, so output-hashing
+            // approximate indexing cannot run on this path.
+            anyhow::ensure!(
+                kv_router_config.use_kv_events,
+                "{ROUTING_HOST_ENV} requires KV events (approximate KV indexing needs output token IDs)"
+            );
+            let dispatch = Arc::new(GatewayDispatch::new());
+            let routing = build_preprocessed_routing_with_dispatch(
+                &endpoint.client().await?,
+                model_manager.clone(),
+                RouterMode::KV,
+                decode_router.load_context().clone(),
+                Some(decode_router.router().clone()),
+                session_affinity_ttl_secs()?,
+                dispatch.clone(),
+            )
+            .await?;
+            tracing::info!("Routing aggregated requests through the frontend routing host");
+            Some(GatewayRouting::new(
+                routing.backend_engine().clone(),
+                dispatch,
+            ))
+        } else {
+            None
+        };
+
         let mut prefill_config = kv_router_config;
         prefill_config.router_track_active_blocks = false;
 
@@ -227,7 +283,13 @@ impl Router {
             drt.child_token(),
         );
 
-        spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
+        let prefill_discovered = Arc::new(AtomicBool::new(false));
+        spawn_prefill_discovery_watcher(
+            drt.clone(),
+            actual_namespace.to_string(),
+            prefill_tx,
+            prefill_discovered.clone(),
+        );
 
         // Namespace-scoped pod selectors use the BASE namespace for the pod
         // selector. Workers register in discovery under the suffixed namespace
@@ -252,6 +314,8 @@ impl Router {
             worker_index,
             pod_store_ready,
             served_model: model_name,
+            prefill_discovered,
+            gateway,
         })
     }
 
@@ -1255,6 +1319,7 @@ fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
     tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
+    discovered: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         let discovery = drt.discovery();
@@ -1299,6 +1364,7 @@ fn spawn_prefill_discovery_watcher(
                             && let Ok(comp) = ns.component(component)
                         {
                             let ep = comp.endpoint(endpoint);
+                            discovered.store(true, Ordering::Release);
                             if tx.send(ep).is_err() {
                                 tracing::debug!("PrefillRouter activation channel already closed");
                             }
@@ -1449,6 +1515,25 @@ impl EndpointPicker for Router {
 
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
+
+        // TODO(epp-routing-host-disagg): Route disaggregated requests through
+        // the frontend's PrefillRouter as well; until then they keep this path.
+        if let Some(gateway) = &self.gateway
+            && worker_map.is_empty()
+            && !self.prefill_discovered.load(Ordering::Acquire)
+            && let Some(request) = GatewayRouting::prepare(
+                &self.preprocessor,
+                body_str,
+                &req.headers,
+                &Uuid::new_v4().to_string(),
+                allowed_worker_ids.clone(),
+            )
+            .await?
+        {
+            return gateway
+                .pick(request, |worker_id| self.resolve_worker_endpoint(worker_id))
+                .await;
+        }
 
         let TokenizeResult {
             tokens,
@@ -1634,7 +1719,8 @@ impl EndpointPicker for Router {
     }
 
     async fn on_prefill_complete(&self, booking_id: &str) {
-        if booking_id.is_empty() {
+        // The routing host marks prefill complete from the response stream.
+        if booking_id.is_empty() || self.gateway.as_ref().is_some_and(|g| g.owns(booking_id)) {
             return;
         }
         release_prefill_booking(&self.prefill_bookings, booking_id).await;
@@ -1647,8 +1733,26 @@ impl EndpointPicker for Router {
         }
     }
 
+    fn on_response_body(
+        &self,
+        booking_id: &str,
+        chunk: &[u8],
+        streaming: bool,
+        end_of_stream: bool,
+    ) {
+        if let Some(gateway) = &self.gateway {
+            gateway.on_response_body(booking_id, chunk, streaming, end_of_stream);
+        }
+    }
+
     async fn on_request_complete_with_usage(&self, booking_id: &str, usage: Option<ResponseUsage>) {
         if booking_id.is_empty() {
+            return;
+        }
+        if let Some(gateway) = &self.gateway
+            && gateway.owns(booking_id)
+        {
+            gateway.on_request_complete(booking_id);
             return;
         }
         if let Some(usage) = usage {
