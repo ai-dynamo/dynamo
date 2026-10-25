@@ -2659,6 +2659,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-global-ingress"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-global-router",
+ "dynamo-global-router-shared",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-router"
+version = "1.6.0"
+dependencies = [
+ "dynamo-global-router-shared",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "dynamo-global-router-shared"
 version = "1.6.0"
 dependencies = [

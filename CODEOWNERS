@@ -88,9 +88,13 @@
 /components/src/dynamo/thunderagent_router/                                                             @ai-dynamo/dynamo-router-codeowners
 
 # === global-router  (@ai-dynamo/dynamo-global-router-codeowners) ===
-/examples/global-router/cdk/                                                                            @ai-dynamo/dynamo-global-router-codeowners
+/lib/global-router/                                                                                     @ai-dynamo/dynamo-global-router-codeowners
+/lib/global-ingress/                                                                                    @ai-dynamo/dynamo-global-router-codeowners
+/lib/global-router-shared/                                                                              @ai-dynamo/dynamo-global-router-codeowners
 /lib/global-view-receiver/                                                                              @ai-dynamo/dynamo-global-router-codeowners
+/examples/global-router/cdk/                                                                            @ai-dynamo/dynamo-global-router-codeowners
 /lib/global-discovery-client/                                                                           @ai-dynamo/dynamo-global-router-codeowners
+/lib/global-discovery-service/                                                                          @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/pool_relay/                                                                      @ai-dynamo/dynamo-global-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===

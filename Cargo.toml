@@ -15,6 +15,8 @@ members = [
     "lib/kv-router",
     "lib/global-discovery-client",
     "lib/global-discovery-service",
+    "lib/global-ingress",
+    "lib/global-router",
     "lib/global-router-shared",
     "lib/router-plugins/catalog",
     "lib/router-plugins/builtin",
