@@ -465,6 +465,45 @@ struct InvalidArgumentEngine {
 /// Engine that rejects during request admission, before a response stream exists.
 struct AdmissionInvalidArgumentEngine {}
 
+/// Scheduler admission rejects before an HTTP streaming response is committed.
+struct AdmissionDoNotQueueEngine;
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for AdmissionDoNotQueueEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        assert_eq!(
+            request.nvext.as_ref().and_then(|nvext| nvext.do_not_queue),
+            Some(true),
+            "the HTTP handler must preserve the admission preference"
+        );
+        Err(Error::new(
+            DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::RateLimited)
+                .reason(
+                    dynamo_runtime::error::ErrorReason::new("router.do_not_queue")
+                        .expect("registered do-not-queue reason"),
+                )
+                .public_details(dynamo_runtime::error::PublicDetails::RouterQueue {
+                    policy_class: "latency".to_string(),
+                    pending_count: 2,
+                    pending_isl_tokens: 128,
+                    pending_cached_tokens: 64,
+                })
+                .build(),
+        )
+        .context("scheduler admission failed"))
+    }
+}
+
 fn invalid_argument_error_frame<T>() -> Annotated<T> {
     use dynamo_runtime::error::{BackendError, ErrorType as DynErrorType};
     Annotated {
@@ -2160,6 +2199,41 @@ fn anthropic_stream_body() -> serde_json::Value {
         "max_tokens": 16,
         "messages": [{"role": "user", "content": "hi"}],
     })
+}
+
+#[tokio::test]
+async fn test_do_not_queue_returns_http_429_for_unary_and_streaming_chat() {
+    let (port, _metrics, cancel_token, task) =
+        start_anthropic_first_event_service(Arc::new(AdmissionDoNotQueueEngine)).await;
+    let client = reqwest::Client::new();
+
+    for streaming in [false, true] {
+        let response = client
+            .post(format!("http://localhost:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": DELAYED_ERROR_MODEL,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": streaming,
+                "max_tokens": 1,
+                "nvext": {"do_not_queue": true}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            response.headers()[reqwest::header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("application/json")
+        );
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], 429);
+    }
+
+    cancel_token.cancel();
+    task.await.unwrap();
 }
 
 /// Chat engine whose first event is a capacity rejection after `delay`.
