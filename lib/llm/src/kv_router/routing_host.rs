@@ -12,6 +12,7 @@ use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
     scheduling::{AbortCause, KvSchedulerError},
     selector::{WorkerInputs, WorkerSelector},
+    services::selection::affinity::AffinityLease,
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
@@ -62,7 +63,7 @@ use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cle
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
-use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
+use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard, TerminalOutcome};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -193,7 +194,9 @@ fn monitor_response_stream(
                                 .is_some_and(|error| crate::migration::is_migratable(error));
                             if !migratable || !guard.release_for_retry().await {
                                 guard
-                                    .abort_with_error(item.error.as_ref().map(|e| e as &AbortCause))
+                                    .on_terminal(TerminalOutcome::Aborted(
+                                        item.error.as_ref().map(|e| e as &AbortCause),
+                                    ))
                                     .await;
                             }
                             yield item;
@@ -241,11 +244,13 @@ fn monitor_response_stream(
             }
         };
 
-        if completed {
-            guard.finish().await;
-        } else {
-            guard.abort().await;
-        }
+        guard
+            .on_terminal(if completed {
+                TerminalOutcome::Completed
+            } else {
+                TerminalOutcome::Aborted(None)
+            })
+            .await;
         // Released only now: the drain proved it was last, and the booking is already gone.
         if let Some(pending) = pending_terminal.take() {
             yield pending;
@@ -528,18 +533,18 @@ impl RoutingHost {
         Some(Arc::new(SessionAffinityId::new(binding_id)))
     }
 
-    /// Commit a held session to the dispatched worker; a request without a
-    /// session passes its stream through.
-    fn bind_affinity(
+    /// Commit a held session to the worker the request was sent to. The lease
+    /// goes into the request guard, so the binding is held exactly as long as
+    /// the request it belongs to. `None` when this host has no affinity.
+    fn commit_affinity(
         &self,
-        hold: Option<Hold>,
+        hold: Hold,
         dispatched_target: AffinityTarget,
-        stream: ManyOut<Annotated<LLMEngineOutput>>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let (Some(hold), Some(affinity)) = (hold, self.affinity.as_ref()) else {
-            return Ok(stream);
-        };
-        affinity.commit_to_stream(hold, dispatched_target, stream)
+    ) -> Result<Option<AffinityLease>, Error> {
+        match self.affinity.as_ref() {
+            Some(affinity) => affinity.commit(hold, dispatched_target).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Check request-supplied targets only at initial selection, not after a route preview

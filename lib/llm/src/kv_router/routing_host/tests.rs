@@ -1966,7 +1966,13 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
     .await;
 
     let error = router
-        .dispatch_selection(request, selection, guard, &CleanupBudget::default())
+        .dispatch_selection(
+            request,
+            selection,
+            guard,
+            &CleanupBudget::default(),
+            &mut None,
+        )
         .await
         .expect_err("aggregated dispatch must still be cancelled before it is issued");
     assert!(match_error_chain(
@@ -2510,7 +2516,7 @@ async fn classifier_uses_scheduler_token_basis() {
         )
         .await
         .unwrap();
-    guard.mark_dispatched();
+    guard.on_dispatched();
     let output = LLMEngineOutput {
         completion_usage: Some(dynamo_protocols::types::CompletionUsage {
             prompt_tokens: 5,
@@ -2852,7 +2858,8 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
                 failed_request,
                 failed_selection,
                 failed_dispatch_guard,
-                &CleanupBudget::default()
+                &CleanupBudget::default(),
+                &mut None,
             )
             .await
             .is_err()
@@ -2863,7 +2870,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
 
     let (_, _, mut completed_guard) = track_request(&router).await;
     completed_guard.start_dispatch("aggregated");
-    completed_guard.mark_dispatched();
+    completed_guard.on_dispatched();
     completed_guard.finish().await;
     drop(completed_guard);
     assert_eq!(metrics.requests_started_total.get(), 3);
@@ -2879,7 +2886,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let (other_router, other_runtime) = router_with_workers(None, &[8]).await;
     let (_, _, mut other_guard) = track_request(&other_router).await;
     other_guard.start_dispatch("aggregated");
-    other_guard.mark_dispatched();
+    other_guard.on_dispatched();
     other_guard.finish().await;
     drop(other_guard);
     assert_eq!(metrics.requests_started_total.get(), 4);
@@ -3693,7 +3700,7 @@ async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
         )
         .await
         .unwrap();
-    guard.mark_dispatched();
+    guard.on_dispatched();
     assert!(guard.release_for_retry().await);
     assert!(
         potential_loads(&decode)
@@ -3724,7 +3731,7 @@ async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
         )
         .await
         .unwrap();
-    guard.mark_dispatched();
+    guard.on_dispatched();
     guard.finish().await;
 
     let (mut selected, _) = decode
@@ -3745,7 +3752,7 @@ async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
         )
         .await
         .unwrap();
-    guard.mark_dispatched();
+    guard.on_dispatched();
     guard.finish().await;
     let observation = tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
         .await
@@ -4649,19 +4656,16 @@ async fn parent_group_binding_offers_siblings_the_committed_worker() {
     let first = subagent_request("child-1", Some("parent-1"));
     let (offered_first, hold) = offered(&first).await;
     assert_eq!(offered_first, None, "a new group starts unbound");
-    let mut stream = router
-        .bind_affinity(
-            hold,
-            AffinityTarget::new(7, Some(0)),
-            ResponseStream::new(
-                Box::pin(stream::iter([Annotated::from_data(
-                    LLMEngineOutput::default(),
-                )])),
-                first.context(),
-            ),
-        )
-        .unwrap();
-    while stream.next().await.is_some() {}
+    // Commit the group binding and let the request's lease go, as a finished
+    // response stream would.
+    drop(
+        router
+            .commit_affinity(
+                hold.expect("a new session holds"),
+                AffinityTarget::new(7, Some(0)),
+            )
+            .unwrap(),
+    );
 
     let sibling = subagent_request("child-2", Some("parent-1"));
     let (offered_sibling, _) = offered(&sibling).await;
@@ -4698,19 +4702,14 @@ async fn child_prefill_uses_parent_worker_while_decode_keeps_group_binding() {
         )
         .await
         .unwrap();
-    let mut stream = router
-        .bind_affinity(
-            hold,
-            AffinityTarget::new(7, Some(0)),
-            ResponseStream::new(
-                Box::pin(stream::iter([Annotated::from_data(
-                    LLMEngineOutput::default(),
-                )])),
-                parent.context(),
-            ),
-        )
-        .unwrap();
-    while stream.next().await.is_some() {}
+    drop(
+        router
+            .commit_affinity(
+                hold.expect("a new session holds"),
+                AffinityTarget::new(7, Some(0)),
+            )
+            .unwrap(),
+    );
 
     let child = subagent_request("child-1", Some("parent-1"));
     let (selected, hold) = router
