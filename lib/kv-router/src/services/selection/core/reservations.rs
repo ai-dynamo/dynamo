@@ -387,7 +387,7 @@ impl SelectionCore {
         // initializer that may itself be waiting for this worker's capacity.
         let session = match (session_id.as_deref(), entry.affinity.get()) {
             (Some(session_id), Some(table)) => self
-                .hold_session(table, session_id, &key, None)
+                .hold_session(table, session_id, &key)
                 .await?
                 .map(|hold| (table, session_id, hold)),
             _ => None,

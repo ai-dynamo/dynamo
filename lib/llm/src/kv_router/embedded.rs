@@ -285,7 +285,6 @@ impl EmbeddedSelection {
                 channels: replica_sync,
                 request_leases,
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-                ..HostReplication::default()
             },
         })
         .build()

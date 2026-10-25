@@ -228,13 +228,9 @@ pub struct HostTelemetry {
 }
 
 /// Replica-sync transport the host carries for partitions this core does not
-/// mesh itself. Load channels are ignored when the service runs its own ZMQ
-/// replica sync; session bindings cannot be combined with it.
+/// mesh itself (ignored when the service runs its own ZMQ replica sync).
 #[derive(Clone)]
 pub struct HostReplication {
-    /// Identity and publisher for host-carried session bindings.
-    pub writer_id: u64,
-    pub affinity_tx: Option<mpsc::Sender<AffinityBindingEvent>>,
     pub channels: Option<HostReplicaSyncFactory>,
     /// Owns request expiry when supplied; the partition then expires only through lifecycle events.
     pub request_leases: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
@@ -246,42 +242,10 @@ pub struct HostReplication {
 impl Default for HostReplication {
     fn default() -> Self {
         Self {
-            writer_id: 0,
-            affinity_tx: None,
             channels: None,
             request_leases: None,
             replica_worker_policy: ReplicaWorkerPolicy::RequireRegistered,
         }
-    }
-}
-
-impl HostReplication {
-    pub fn affinity_channel(writer_id: u64) -> (Self, mpsc::Receiver<AffinityBindingEvent>) {
-        let (tx, rx) = mpsc::channel(AFFINITY_EVENT_CHANNEL_CAPACITY);
-        (
-            Self {
-                writer_id,
-                affinity_tx: Some(tx),
-                ..Self::default()
-            },
-            rx,
-        )
-    }
-
-    fn affinity_sink(
-        &self,
-        partition: &RoutingPartitionId,
-    ) -> Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)> {
-        self.affinity_tx.clone().map(|tx| {
-            let sink = AffinityMeshSink {
-                partition: partition.clone(),
-                tx,
-            };
-            (
-                self.writer_id,
-                Arc::new(sink) as Arc<dyn super::affinity::AffinityReplicaSink>,
-            )
-        })
     }
 }
 
@@ -326,6 +290,8 @@ pub struct SelectionCore {
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
     session_affinity: Option<SessionAffinityConfig>,
+    /// Writer id and publisher for session bindings the host carries to its peers.
+    session_binding_tx: Option<(u64, mpsc::Sender<AffinityBindingEvent>)>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
     /// mutation, so membership tests can exercise per-worker error paths.
     #[cfg(test)]
@@ -439,6 +405,7 @@ impl SelectionCore {
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
             session_affinity,
+            session_binding_tx: None,
             #[cfg(test)]
             fail_upsert_for: parking_lot::Mutex::default(),
             #[cfg(test)]
@@ -446,6 +413,32 @@ impl SelectionCore {
             #[cfg(test)]
             after_affinity_invalidation: None,
         }
+    }
+
+    /// Export session bindings through a bounded channel for the host to carry.
+    pub(super) fn with_session_binding_publisher(
+        mut self,
+        writer_id: u64,
+    ) -> (Self, mpsc::Receiver<AffinityBindingEvent>) {
+        let (tx, rx) = mpsc::channel(AFFINITY_EVENT_CHANNEL_CAPACITY);
+        self.session_binding_tx = Some((writer_id, tx));
+        (self, rx)
+    }
+
+    fn session_binding_sink(
+        &self,
+        partition: &RoutingPartitionId,
+    ) -> Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)> {
+        self.session_binding_tx.as_ref().map(|(writer_id, tx)| {
+            let sink = AffinityMeshSink {
+                partition: partition.clone(),
+                tx: tx.clone(),
+            };
+            (
+                *writer_id,
+                Arc::new(sink) as Arc<dyn super::affinity::AffinityReplicaSink>,
+            )
+        })
     }
 
     /// Cancel core-scoped tasks (KV-event listeners, scheduling, replica sync,

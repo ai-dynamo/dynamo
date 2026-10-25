@@ -2880,7 +2880,7 @@ async fn joined_failover_preserves_the_successful_bookings_binding(#[case] commi
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
 
     let mut r2_request = session_reservation("r2", "s");
-    r2_request.allowed_worker_ids = Some(HashSet::from([first.worker_id, replacement]));
+    r2_request.allowed_worker_ids = Some(HashSet::from([replacement]));
     let mut r2 = Box::pin(core.select_and_reserve(r2_request));
     assert!(r2.as_mut().poll(&mut context).is_pending());
     core.catalog
@@ -2925,19 +2925,11 @@ async fn late_failover_mismatch_preserves_the_committed_replacement() {
     let key = default_key();
     let entry = core.entry(&key).expect("entry");
     let table = entry.affinity.get().expect("affinity table");
-    let old_hold = core
-        .hold_session(table, "s", &key, None)
-        .await
-        .unwrap()
-        .unwrap();
+    let old_hold = core.hold_session(table, "s", &key).await.unwrap().unwrap();
     core.catalog
         .set_lifecycle(first.worker_id, WorkerLifecycle::Draining, Vec::new());
     let replacement = if first.worker_id == 1 { 2 } else { 1 };
-    let new_hold = core
-        .hold_session(table, "s", &key, None)
-        .await
-        .unwrap()
-        .unwrap();
+    let new_hold = core.hold_session(table, "s", &key).await.unwrap().unwrap();
     let lease = core
         .commit_session(
             table,
@@ -3134,7 +3126,7 @@ async fn soft_mode_follows_the_dispatch() {
 }
 
 #[tokio::test]
-async fn soft_binding_follows_policy_override() {
+async fn soft_mode_follows_custom_policy() {
     // Bind to an eligible worker different from the custom policy's choice.
     let (policy, _) = capturing_policy_factory();
     let core = core_with(
@@ -3964,21 +3956,17 @@ async fn overflowing_worker_dp_range_patch_preserves_live_worker() {
 fn core_with_binding_stream(
     writer_id: u64,
 ) -> (SelectionCore, mpsc::Receiver<AffinityBindingEvent>) {
-    let (replication, rx) = HostReplication::affinity_channel(writer_id);
-    let core = core_with(
+    core_with(
         test_config(false),
-        SelectionHost {
-            replication,
-            ..SelectionHost::default()
-        },
+        SelectionHost::default(),
         None,
         WorkerType::Aggregated,
         Some(
             SessionAffinityConfig::new(Duration::from_secs(10))
                 .with_mode(SessionAffinityMode::Soft),
         ),
-    );
-    (core, rx)
+    )
+    .with_session_binding_publisher(writer_id)
 }
 
 #[tokio::test(start_paused = true)]

@@ -19,9 +19,7 @@ use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
 use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
-use super::core::{
-    HostReplication, KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig,
-};
+use super::core::{KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -168,26 +166,16 @@ impl SelectionServiceBuilder {
     }
 
     pub async fn build(mut self) -> anyhow::Result<SelectionService> {
-        let session_binding_rx = if let Some(writer_id) = self.session_replication_writer_id {
+        if self.session_replication_writer_id.is_some() {
             anyhow::ensure!(
                 self.session_affinity_ttl.is_some(),
                 "session binding replication requires session affinity"
             );
             anyhow::ensure!(
-                self.host.replication.affinity_tx.is_none(),
-                "session binding publisher already configured"
+                self.replica_sync_port.is_none(),
+                "host session binding replication cannot be combined with replica_sync"
             );
-            let (replication, rx) = HostReplication::affinity_channel(writer_id);
-            self.host.replication.writer_id = replication.writer_id;
-            self.host.replication.affinity_tx = replication.affinity_tx;
-            Some(Mutex::new(Some(rx)))
-        } else {
-            None
-        };
-        anyhow::ensure!(
-            self.replica_sync_port.is_none() || self.host.replication.affinity_tx.is_none(),
-            "host session binding replication cannot be combined with replica_sync"
-        );
+        }
         self.kv_router_config
             .apply_policy_config()
             .map_err(anyhow::Error::msg)?;
@@ -227,7 +215,7 @@ impl SelectionServiceBuilder {
             );
         }
         let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
-        let core = Arc::new(SelectionCore::new_inner(
+        let core = SelectionCore::new_inner(
             self.kv_router_config,
             self.indexer_threads,
             cancel_token.clone(),
@@ -241,7 +229,15 @@ impl SelectionServiceBuilder {
             indexer_policy,
             self.session_affinity_ttl
                 .map(|ttl| SessionAffinityConfig::new(ttl).with_mode(self.session_affinity_mode)),
-        ));
+        );
+        let (core, session_binding_rx) = match self.session_replication_writer_id {
+            Some(writer_id) => {
+                let (core, rx) = core.with_session_binding_publisher(writer_id);
+                (core, Some(Mutex::new(Some(rx))))
+            }
+            None => (core, None),
+        };
+        let core = Arc::new(core);
 
         if recover_from_peers {
             match core.recover_indexer_from_peers(&self.indexer_peers).await {
