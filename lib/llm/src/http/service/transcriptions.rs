@@ -244,9 +244,7 @@ async fn dispatch_audio_transcription(
             inflight.mark_error(extract_error_type_from_response(&response));
             response
         })?;
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = inflight.response_collector();
 
     let stream = engine.generate(request).await.map_err(|error| {
         let is_validation = error_is_invalid_argument(error.as_ref());
