@@ -30,6 +30,7 @@ import {
   US_EAST_2_BASTION_KEY_PAIR,
   US_WEST_2_BASTION_KEY_PAIR,
 } from "./keypairs";
+import { KARMADA_VERSION } from "./multi-cluster";
 
 const US_EAST_2 = "us-east-2";
 const US_EAST_2A = "us-east-2a";
@@ -146,6 +147,18 @@ export const US_EAST2_DEPLOYMENT = {
   dynamoPlatformConfig: DYNAMO_PLATFORM_1_4_0,
   dgdPools: [MOCKER_OHIO_1_POOL],
   dgds: [MOCKER_OHIO_1_DGD],
+  // Ohio is the Karmada hub. Member names match the Router's site IDs.
+  multiCluster: {
+    memberName: "aws-ohio",
+    peerCidrs: [MOCKER_VPC_US_WEST_2.cidrBlock],
+    karmadaControlPlane: {
+      version: KARMADA_VERSION,
+      apiSourceCidrs: [
+        MOCKER_VPC_US_EAST_2.cidrBlock,
+        MOCKER_VPC_US_WEST_2.cidrBlock,
+      ],
+    },
+  },
 } satisfies DeploymentConfig;
 
 export const MOCKER_WEST_1_DGD = {
@@ -181,6 +194,10 @@ export const US_WEST2_DEPLOYMENT = {
   dynamoPlatformConfig: DYNAMO_PLATFORM_1_4_0,
   dgdPools: [MOCKER_WEST_1_POOL],
   dgds: [MOCKER_WEST_1_DGD],
+  multiCluster: {
+    memberName: "aws-west",
+    peerCidrs: [MOCKER_VPC_US_EAST_2.cidrBlock],
+  },
 } satisfies DeploymentConfig;
 
 export const DEPLOYMENTS = {
@@ -189,7 +206,7 @@ export const DEPLOYMENTS = {
 } satisfies Record<string, DeploymentConfig>;
 
 // Example network IDs; use local settings populated from your deployed stacks.
-// Include only private route tables in the peering configuration.
+// Public routes enable bastion access to peers without adding internet ingress.
 export const POC_PEERING_OHIO = {
   region: US_EAST_2,
   cidrBlock: MOCKER_VPC_US_EAST_2.cidrBlock,
@@ -200,6 +217,8 @@ export const POC_PEERING_OHIO = {
     "rtb-00000000000000004", // dgd-pool-slot-1Subnet1
     "rtb-00000000000000005", // dgd-pool-slot-1Subnet2
   ],
+  // publicSubnet1 and publicSubnet2: the only route tables with an internet gateway route.
+  publicRouteTableIds: ["rtb-0000000000000000b", "rtb-0000000000000000c"],
 } satisfies PeeringRegionConfig;
 
 export const POC_PEERING_WEST = {
@@ -212,6 +231,8 @@ export const POC_PEERING_WEST = {
     "rtb-00000000000000009", // dgd-pool-slot-1Subnet1
     "rtb-0000000000000000a", // dgd-pool-slot-1Subnet2
   ],
+  // publicSubnet1 and publicSubnet2: the only route tables with an internet gateway route.
+  publicRouteTableIds: ["rtb-0000000000000000d", "rtb-0000000000000000e"],
 } satisfies PeeringRegionConfig;
 
 export type DeploymentName = keyof typeof DEPLOYMENTS;

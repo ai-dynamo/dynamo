@@ -84,6 +84,35 @@ export interface PeeringRegionConfig {
   readonly cidrBlock: string;
   readonly vpcId: string;
   readonly privateRouteTableIds: readonly [string, ...string[]];
+  /**
+   * Public subnet route tables. Routing them over the peering lets each
+   * bastion reach the other VPC, for example to join Karmada.
+   */
+  readonly publicRouteTableIds?: readonly string[];
+}
+
+/** Karmada control plane, installed in the hub cluster only. */
+export interface KarmadaControlPlaneConfig {
+  /**
+   * Karmada release, which pins the chart and its images. It must be
+   * `KARMADA_VERSION`, the release that `crds/` comes from.
+   */
+  readonly version: string;
+  /** VPC ranges allowed to reach the internal Karmada API load balancer. */
+  readonly apiSourceCidrs: readonly [string, ...string[]];
+}
+
+/** Karmada and SIG Multicluster (MCS) support for one cluster. */
+export interface MultiClusterConfig {
+  /** Karmada member name. The Global Router uses it as the pool site ID. */
+  readonly memberName: string;
+  /**
+   * VPC ranges of the other member clusters. Their pods may reach pods in
+   * this cluster, and traffic from pods here to them keeps its pod address.
+   */
+  readonly peerCidrs: readonly [string, ...string[]];
+  /** Set in the hub cluster only. */
+  readonly karmadaControlPlane?: KarmadaControlPlaneConfig;
 }
 
 export interface DeploymentConfig {
@@ -99,4 +128,6 @@ export interface DeploymentConfig {
   readonly dynamoPlatformConfig: DynamoPlatformConfig;
   readonly dgdPools: readonly [DgdPoolConfig, ...DgdPoolConfig[]];
   readonly dgds: readonly [DgdConfig, ...DgdConfig[]];
+  /** Karmada and MCS support; omit for a single-cluster deployment. */
+  readonly multiCluster?: MultiClusterConfig;
 }

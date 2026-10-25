@@ -24,7 +24,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { POC_PEERING_OHIO, POC_PEERING_WEST } from "../lib/const";
 import { addInterRegionPeering } from "../lib/inter-region-peering";
 
-test("both mode creates one Ohio peering connection and private routes both ways", () => {
+test("both mode creates one Ohio peering connection and routes both ways", () => {
   const app = new App();
   addInterRegionPeering(
     app,
@@ -50,11 +50,74 @@ test("both mode creates one Ohio peering connection and private routes both ways
       { Key: "Project", Value: "dynamo-mocker-cpu" },
     ],
   });
-  assertPrivateRoutes(peeringTemplate, "10.43.0.0/16", POC_PEERING_OHIO.privateRouteTableIds);
-  assertPrivateRoutes(westRoutesTemplate, "10.42.0.0/16", POC_PEERING_WEST.privateRouteTableIds);
+  assertPeeringRoutes(peeringTemplate, "10.43.0.0/16", [
+    ...POC_PEERING_OHIO.privateRouteTableIds,
+    ...POC_PEERING_OHIO.publicRouteTableIds,
+  ]);
+  assertPeeringRoutes(westRoutesTemplate, "10.42.0.0/16", [
+    ...POC_PEERING_WEST.privateRouteTableIds,
+    ...POC_PEERING_WEST.publicRouteTableIds,
+  ]);
+  // Every route, public ones included, uses this peering connection; West
+  // reads its ID across Regions.
+  for (const route of Object.values(peeringTemplate.findResources("AWS::EC2::Route"))) {
+    assert.deepEqual(route.Properties.VpcPeeringConnectionId, {
+      "Fn::GetAtt": ["OhioWestVpcPeering", "Id"],
+    });
+  }
+  for (const route of Object.values(westRoutesTemplate.findResources("AWS::EC2::Route"))) {
+    assert.match(JSON.stringify(route.Properties.VpcPeeringConnectionId), /OhioWestVpcPeeringId/);
+  }
 });
 
-function assertPrivateRoutes(
+test("keeps private route IDs and adds public routes only when configured", () => {
+  const app = new App();
+  addInterRegionPeering(
+    app,
+    { ...POC_PEERING_OHIO, publicRouteTableIds: ["rtb-0hiopublic1", "rtb-0hiopublic2"] },
+    { ...POC_PEERING_WEST, publicRouteTableIds: [] },
+    "111111111111",
+  );
+  const peeringStack = app.node.tryFindChild("OhioWestPeeringRoutes") as Stack;
+  const westRoutesStack = app.node.tryFindChild("WestPrivateRoutes") as Stack;
+  const ohioRoutes = Template.fromStack(peeringStack).findResources("AWS::EC2::Route");
+  const westRoutes = Template.fromStack(westRoutesStack).findResources("AWS::EC2::Route");
+
+  // Logical IDs of deployed routes must not change, or CloudFormation replaces them.
+  assert.ok("OhioToWestPrivateRoute1" in ohioRoutes);
+  assert.ok("WestToOhioPrivateRoute1" in westRoutes);
+  assert.equal(
+    (ohioRoutes.OhioToWestPublicRoute2 as { Properties: Record<string, unknown> })
+      .Properties.RouteTableId,
+    "rtb-0hiopublic2",
+  );
+  assert.equal(
+    Object.keys(ohioRoutes).length,
+    POC_PEERING_OHIO.privateRouteTableIds.length + 2,
+  );
+  assert.equal(
+    Object.keys(westRoutes).length,
+    POC_PEERING_WEST.privateRouteTableIds.length,
+  );
+});
+
+test("rejects a route table listed as both private and public", () => {
+  assert.throws(
+    () =>
+      addInterRegionPeering(
+        new App(),
+        POC_PEERING_OHIO,
+        {
+          ...POC_PEERING_WEST,
+          publicRouteTableIds: [POC_PEERING_WEST.privateRouteTableIds[0]],
+        },
+        "111111111111",
+      ),
+    /both private and public/,
+  );
+});
+
+function assertPeeringRoutes(
   template: Template,
   destinationCidr: string,
   expectedRouteTableIds: readonly string[],
