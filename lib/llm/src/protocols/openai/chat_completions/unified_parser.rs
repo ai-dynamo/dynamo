@@ -2249,6 +2249,11 @@ pub(crate) fn parse_complete(
     )
 }
 
+/// Parse complete output with a specific policy.
+///
+/// This function handles batch parsing of model output with full policy control,
+/// including tool output mode, reasoning policy, and guided tool constraints.
+/// It processes all message boundary markers (MessageStart/MessageEnd) from v0.8.0.
 pub(crate) fn parse_complete_with_policy(
     family: &str,
     content: &str,
