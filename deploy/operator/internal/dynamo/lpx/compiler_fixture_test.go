@@ -19,7 +19,6 @@ import (
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -54,9 +53,7 @@ func newSelectedTestDGD(t *testing.T, name string, components ...v1beta1.DynamoC
 
 	t.Log("Construct one fresh selected-LPX projection fixture around the caller-owned configuration")
 	return &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: "test", UID: "uid", Generation: 1,
-		},
+		Name: name, Namespace: "test", UID: "uid", Generation: 1,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: components,
 		},

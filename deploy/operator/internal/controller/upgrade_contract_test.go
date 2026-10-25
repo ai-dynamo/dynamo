@@ -18,7 +18,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -237,10 +236,9 @@ func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables
 		if object.GetKind() != upgradeDynamoGraphDeploymentKind {
 			continue
 		}
-		dgd := api.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		dgd := api.DynamoGraphDeployment{
 			Name: object.GetName(), Namespace: object.GetNamespace(),
-			Labels: object.GetLabels(), Annotations: object.GetAnnotations(),
-		}}
+			Labels: object.GetLabels(), Annotations: object.GetAnnotations()}
 		spec, _, err := unstructured.NestedMap(object.Object, "spec")
 		require.NoError(t, err)
 		require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &dgd.Spec))
