@@ -881,9 +881,7 @@ def test_small_ssd_hits_are_not_read(tmp_path, io, monkeypatch):
     d.close()
 
 
-def test_promotion_while_the_write_is_in_flight_keeps_the_original_bytes(
-    tmp_path, io
-):
+def test_promotion_while_the_write_is_in_flight_keeps_the_original_bytes(tmp_path, io):
     d = Driver(ssd_runner(tmp_path, rows=3))
     a, c = prompt(600, salt=1), prompt(600, salt=3)
     d.run("a", a)
@@ -1044,9 +1042,7 @@ def test_gpu_leaf_with_a_complete_copy_goes_to_ssd_when_host_is_full(tmp_path, i
     d.close()
 
 
-def test_read_error_is_a_miss_with_removed_events_and_the_engine_goes_on(
-    tmp_path, io
-):
+def test_read_error_is_a_miss_with_removed_events_and_the_engine_goes_on(tmp_path, io):
     d = Driver(ssd_runner(tmp_path, rows=3))
     cold = Driver(make_runner("none"))
     a, b = prompt(600, salt=1), prompt(600, salt=2)

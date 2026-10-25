@@ -373,9 +373,12 @@ def test_parse_args_defaults(fake_env):
         assert spec.cache_options["ssd_dir"] == "/ssd" and spec.rank == rank
         assert spec.cache_options["ssd_bytes"] == 2 << 40
         assert spec.cache_options["ssd_rank"] == rank
-    assert make_args("--kv-cache-manager", "prefix").rank_specs("e")[0].cache_options[
-        "ssd_bytes"
-    ] == 0
+    assert (
+        make_args("--kv-cache-manager", "prefix")
+        .rank_specs("e")[0]
+        .cache_options["ssd_bytes"]
+        == 0
+    )
     with pytest.raises(ValueError, match="ssd-bytes needs --kv-cache-manager prefix"):
         make_args("--prefix-ssd-bytes", "1G", "--prefix-ssd-dir", "/ssd")
     with pytest.raises(ValueError, match="needs --prefix-host-bytes"):

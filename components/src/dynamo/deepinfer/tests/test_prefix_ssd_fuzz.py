@@ -24,7 +24,12 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 SEEDS = range(40)
 
 
-def quiesce(d: Driver, io, live: set[str], fail: dict[str, bool]) -> None:
+def quiesce(
+    d: Driver,
+    io,  # noqa: F811
+    live: set[str],
+    fail: dict[str, bool],
+) -> None:
     """Finish or abort everything, let all I/O land and let the cache settle."""
     d.apply(aborts=sorted(live))
     live.clear()
@@ -46,7 +51,12 @@ def quiesce(d: Driver, io, live: set[str], fail: dict[str, bool]) -> None:
 
 
 @pytest.mark.parametrize("seed", SEEDS)
-def test_random_traffic_keeps_the_tiers_consistent(seed, tmp_path, io, monkeypatch):
+def test_random_traffic_keeps_the_tiers_consistent(
+    seed,
+    tmp_path,
+    io,  # noqa: F811
+    monkeypatch,
+):
     from dynamo.deepinfer.kv_cache import prefix
 
     rnd = random.Random(seed)
