@@ -342,11 +342,11 @@ impl RoutingHost {
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
-        let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
+        match self
+            .dispatch_selection(request, selection, guard, &budget, &mut affinity)
             .await
         {
-            Ok(stream) => stream,
+            Ok(stream) => Ok(stream),
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard
                     && !self.affinity_target_is_valid(selected_target)
@@ -354,10 +354,9 @@ impl RoutingHost {
                 {
                     operation.invalidate();
                 }
-                return Err(error);
+                Err(error)
             }
-        };
-        self.bind_affinity(affinity, selected_target, stream)
+        }
     }
 
     pub(crate) async fn prefill_worker_busy(
@@ -541,12 +540,17 @@ impl RoutingHost {
         Ok(guard)
     }
 
+    /// Send a tracked selection and hand the response stream to its guard. On
+    /// success the session-affinity hold, if any, is committed to the worker
+    /// and its lease moves into the guard; on failure the hold is left with the
+    /// caller, which decides whether to invalidate it.
     pub(super) async fn dispatch_selection(
         &self,
         request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
         mut guard: RequestGuard,
         budget: &CleanupBudget,
+        affinity: &mut Option<Hold>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -554,14 +558,14 @@ impl RoutingHost {
         let phase = request.phase();
         let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
-        guard.start_dispatch(&phase_label);
+        let worker = selection.worker;
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
         backend_input.kv_hint = selection.kv_hint;
         let updated_request = context.map(|_| backend_input);
-        guard.record_prefill_start(updated_request.content());
+        guard.begin_dispatch(&phase_label, updated_request.content());
 
         let dispatch = self
             .inner
@@ -618,7 +622,17 @@ impl RoutingHost {
             }
         };
 
-        guard.mark_dispatched();
+        guard.on_dispatched();
+        if let Some(hold) = affinity.take() {
+            match self.commit_affinity(hold, route_target(worker)) {
+                Ok(Some(lease)) => guard.hold_affinity_lease(lease),
+                Ok(None) => {}
+                Err(error) => {
+                    guard.abort().await;
+                    return Err(error);
+                }
+            }
+        }
         Ok(wrap_route_span(
             into_monitored_response(response_stream, guard),
             route_span,

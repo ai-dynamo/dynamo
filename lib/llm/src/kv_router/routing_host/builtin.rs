@@ -374,8 +374,7 @@ impl RoutingHost {
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
-        guard.start_dispatch(&phase_label);
-        guard.record_prefill_start(request.content());
+        guard.begin_dispatch(&phase_label, request.content());
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
             await_with_cleanup_policy(
@@ -520,9 +519,18 @@ impl RoutingHost {
             };
             tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
         }
-        guard.mark_dispatched();
-        let stream = into_monitored_response(response_stream, guard);
-        Ok((metadata, self.bind_affinity(operation, target, stream)?))
+        guard.on_dispatched();
+        if let Some(hold) = operation.take() {
+            match self.commit_affinity(hold, target) {
+                Ok(Some(lease)) => guard.hold_affinity_lease(lease),
+                Ok(None) => {}
+                Err(error) => {
+                    guard.abort().await;
+                    return Err(error);
+                }
+            }
+        }
+        Ok((metadata, into_monitored_response(response_stream, guard)))
     }
 }
 
