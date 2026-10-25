@@ -94,6 +94,7 @@ jobs:
               else
                 PLAN_VERSION="${DEV_MAJOR}.$((DEV_MINOR + 1)).0"
               fi
+              PLAN_VERSION="${PLAN_VERSION} ${MAJOR}.${MINOR}.1"
             else
               DEV_VERSION="$VERSION"
             fi
@@ -119,9 +120,10 @@ jobs:
 
       - name: Create missing releases in Planned
         # The stage moves below target a release by version, so the release
-        # must exist first. This also creates the release after next, so PMs
-        # can plan against it for a whole cycle. The IDs are the Dynamo
-        # pipeline and its Planned stage in Linear.
+        # must exist first, and a missing patch release is created here too. A
+        # minor cut also creates the release after next, so PMs can plan a
+        # whole cycle ahead, and the cut release's first patch. The IDs are the
+        # Dynamo pipeline and its Planned stage in Linear.
         if: steps.params.outputs.dev_version != ''
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
