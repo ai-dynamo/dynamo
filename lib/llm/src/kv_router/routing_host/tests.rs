@@ -129,10 +129,11 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+        .load_context(load_context.clone())
+        .build()
         .await
         .unwrap();
-    let host = RoutingHost::new_builtin(inner, load_context.clone()).unwrap();
 
     assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
     assert!(host.hosted_occupancy.is_none());
@@ -141,10 +142,11 @@ async fn builtin_host_constructs_only_declared_capabilities() {
 
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
+    let host = RoutingHost::builder(client, RouterMode::PowerOfTwoChoices)
+        .load_context(load_context)
+        .build()
         .await
         .unwrap();
-    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
@@ -188,12 +190,13 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client.clone(), RouterMode::LeastLoaded)
-        .await
-        .unwrap();
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
+        .load_context(load_context)
+        .build()
+        .await
+        .unwrap();
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
@@ -435,13 +438,11 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     );
     let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
     let estimator = Arc::new(LoadEstimator::new());
-    let host = RoutingHost::new_builtin_with_capabilities(
-        inner,
-        load_context,
-        None,
-        Some((filter, Arc::clone(&estimator))),
-    )
-    .unwrap();
+    let host = RoutingHostBuilder::from_transport(inner)
+        .load_context(load_context)
+        .lora((filter, Arc::clone(&estimator)))
+        .build_sync()
+        .unwrap();
 
     let mut base_stream = host.generate(Context::new(request())).await.unwrap();
     while base_stream.next().await.is_some() {}
@@ -778,10 +779,11 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
     client.override_instance_avail(vec![worker_id, fallback_worker_id]);
     client.set_overloaded_instances(&[worker_id]);
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .build()
         .await
         .unwrap();
-    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     let request = Context::new(request());
 
     let hard = host
@@ -3025,9 +3027,11 @@ fn builtin_host_with_affinity(
     mode: crate::session_affinity::SessionAffinityMode,
 ) -> (RoutingHost, AffinityCoordinator) {
     let affinity = AffinityCoordinator::new(Duration::from_secs(10), mode).unwrap();
-    let host =
-        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(affinity.clone()))
-            .unwrap();
+    let host = RoutingHostBuilder::from_transport(inner)
+        .load_context(load_context)
+        .affinity_coordinator(affinity.clone())
+        .build_sync()
+        .unwrap();
     (host, affinity)
 }
 
@@ -4077,14 +4081,12 @@ async fn builtin_host_with_recorded_dispatch(
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let load_context = test_load_context(&client).await;
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
-        client,
-        mode,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::builder(client, mode)
+        .load_context(load_context)
+        .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
+        .build()
+        .await
+        .unwrap();
     (host, dispatch, worker_id, runtime)
 }
 
@@ -4383,14 +4385,12 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
     endpoint.register_endpoint_instance().await.unwrap();
     let live_worker = client.wait_for_instances().await.unwrap()[0].id();
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
-        client,
-        RouterMode::RoundRobin,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
+        .build()
+        .await
+        .unwrap();
     let worker_id = live_worker.wrapping_add(1);
     for (field, phase) in [
         ("backend_instance_id", RequestPhase::Aggregated),
@@ -4603,16 +4603,17 @@ async fn affinity_mode_host(namespace: &str) -> (Runtime, RoutingHost) {
     endpoint.register_endpoint_instance().await.unwrap();
     client.wait_for_instances().await.unwrap();
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
-        .await
-        .unwrap();
     let coordinator = AffinityCoordinator::new(
         Duration::from_secs(60),
         crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
-    let host =
-        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(coordinator)).unwrap();
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .affinity_coordinator(coordinator)
+        .build()
+        .await
+        .unwrap();
     (runtime, host)
 }
 

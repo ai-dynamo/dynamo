@@ -338,11 +338,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
-            .await
-            .unwrap();
         let shared = Arc::new(
-            RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
+            RoutingHost::builder(client, mode)
+                .load_context(load_context)
+                .dispatch(dispatch as crate::kv_router::LlmDispatch)
+                .build()
+                .await
+                .unwrap(),
         );
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(

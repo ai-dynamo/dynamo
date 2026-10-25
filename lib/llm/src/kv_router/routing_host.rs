@@ -18,7 +18,7 @@ use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, RouterMode, SingleIn, async_trait,
+        ResponseStream, SingleIn, async_trait,
         network::egress::route_span::{
             get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
         },
@@ -48,6 +48,7 @@ use crate::{
     },
 };
 
+mod builder;
 mod builtin;
 mod cancellation;
 mod kv;
@@ -55,6 +56,7 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
+pub use builder::{LlmDispatch, LlmPushRouter, RoutingHostBuilder};
 use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
@@ -313,7 +315,7 @@ pub struct RoutingHost {
     lora: Option<LoraRouting>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
-    /// Compatibility construction paths that predate routing load ownership leave this unset.
+    /// Every host except a KV host built with [`RoutingHost::new`] has one.
     #[allow(dead_code)]
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
@@ -382,6 +384,8 @@ impl RoutePlan {
 pub type KvPushRouter = RoutingHost;
 
 impl RoutingHost {
+    /// A KV host over a transport the caller built, with hard session affinity
+    /// when `session_affinity_ttl` is set. Prefer [`RoutingHost::builder`].
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter>,
@@ -390,10 +394,15 @@ impl RoutingHost {
         let affinity = session_affinity_ttl
             .map(|ttl| kv_router.affinity_coordinator(ttl, SessionAffinityMode::Hard))
             .transpose()?;
-
-        Ok(Self::new_with_coordinator(inner, kv_router, affinity))
+        RoutingHostBuilder::from_transport(inner)
+            .kv_router(kv_router)
+            .affinity_coordinator(affinity)
+            .build_sync()
     }
 
+    /// A KV host over a transport the caller built, owning `load_context`, with
+    /// session affinity in `session_affinity_mode` when `session_affinity_ttl` is
+    /// set. Prefer [`RoutingHost::builder`].
     pub fn new_with_load_context(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter>,
@@ -404,145 +413,11 @@ impl RoutingHost {
         let affinity = session_affinity_ttl
             .map(|ttl| kv_router.affinity_coordinator(ttl, session_affinity_mode))
             .transpose()?;
-
-        Ok(Self::new_with_load_context_and_coordinator(
-            inner,
-            kv_router,
-            load_context,
-            affinity,
-        ))
-    }
-
-    pub(crate) fn new_with_coordinator(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        affinity: Option<AffinityCoordinator>,
-    ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity)
-    }
-
-    pub(crate) fn new_with_load_context_and_coordinator(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-        affinity: Option<AffinityCoordinator>,
-    ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(
-            inner,
-            kv_router,
-            Some(load_context),
-            affinity,
-        )
-    }
-
-    fn new_with_optional_load_context_and_coordinator(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
-        affinity: Option<AffinityCoordinator>,
-    ) -> Self {
-        // Eagerly register router request metrics (as zeros) so they are
-        // scrapeable before any requests arrive. Both the frontend pipeline
-        // and the standalone router create RoutingHost, so this covers both.
-        let request_metrics =
-            RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
-
-        RoutingHost {
-            inner,
-            policy: RoutingPolicy::Kv(kv_router),
-            request_metrics,
-            session_affinity_mode: affinity
-                .as_ref()
-                .map(AffinityCoordinator::mode)
-                .unwrap_or_default(),
-            affinity,
-            hosted_occupancy: None,
-            lora: None,
-            routing_context: load_context,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_builtin(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-    ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, load_context, None, None)
-    }
-
-    pub(crate) fn new_builtin_with_coordinator(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-        affinity: Option<AffinityCoordinator>,
-    ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, load_context, affinity, None)
-    }
-
-    pub(crate) fn new_builtin_with_capabilities(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-        affinity: Option<AffinityCoordinator>,
-        lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
-    ) -> Result<Self, Error> {
-        if affinity.is_some() && lora.is_some() {
-            anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
-        }
-        let policy = match inner.router_mode() {
-            RouterMode::Direct => RoutingPolicy::Direct,
-            RouterMode::DeviceAwareWeighted => RoutingPolicy::DeviceAwareWeighted,
-            mode => {
-                RoutingPolicy::Builtin(BuiltinWorkerSelector::new(mode).ok_or_else(|| {
-                    anyhow::anyhow!("{mode:?} routing is not a first-party policy")
-                })?)
-            }
-        };
-        let required_worker_inputs = match &policy {
-            RoutingPolicy::Builtin(selector) => selector.required_worker_inputs(),
-            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::OCCUPANCY,
-            RoutingPolicy::Direct => WorkerInputs::NONE,
-            RoutingPolicy::Kv(_) => unreachable!(),
-        };
-        let hosted_occupancy = matches!(&policy, RoutingPolicy::Builtin(_))
-            .then_some(required_worker_inputs.contains(WorkerInputs::OCCUPANCY))
-            .unwrap_or(false)
-            .then(|| HostedOccupancy::new(&inner))
-            .transpose()?;
-        if lora.is_some()
-            && !matches!(
-                inner.router_mode(),
-                RouterMode::RoundRobin | RouterMode::Random
-            )
-        {
-            anyhow::bail!(
-                "LoRA filtering is unsupported with {:?} routing",
-                inner.router_mode()
-            );
-        }
-        let lora_selector = lora.as_ref().map(|_| {
-            BuiltinWorkerSelector::new(inner.router_mode())
-                .expect("LoRA routing mode was validated above")
-        });
-        let request_metrics =
-            RouterRequestMetrics::from_component(inner.client.endpoint.component());
-        Ok(Self {
-            inner,
-            policy,
-            request_metrics,
-            session_affinity_mode: affinity
-                .as_ref()
-                .map(AffinityCoordinator::mode)
-                .unwrap_or_default(),
-            affinity,
-            hosted_occupancy,
-            lora: lora
-                .zip(lora_selector)
-                .map(|((filter, load_estimator), selector)| LoraRouting {
-                    filter,
-                    load_estimator,
-                    selector,
-                }),
-            routing_context: Some(load_context),
-        })
+        RoutingHostBuilder::from_transport(inner)
+            .kv_router(kv_router)
+            .load_context(load_context)
+            .affinity_coordinator(affinity)
+            .build_sync()
     }
 
     pub fn required_worker_inputs(&self) -> WorkerInputs {
