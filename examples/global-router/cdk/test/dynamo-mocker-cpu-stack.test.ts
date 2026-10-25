@@ -170,11 +170,19 @@ function expectedPoolAffinity(poolNames: readonly string[]): unknown {
   };
 }
 
-test("deployed regional bastions pin their active AMIs instead of resolving latest at deploy time", () => {
-  for (const config of [US_EAST2_DEPLOYMENT, US_WEST2_DEPLOYMENT]) {
+test("explicit bastion AMI pins avoid resolving latest at deploy time", () => {
+  for (const defaults of [US_EAST2_DEPLOYMENT, US_WEST2_DEPLOYMENT]) {
+    const amiId = "ami-0123456789abcdef0";
+    const config: DeploymentConfig = {
+      ...defaults,
+      clusterConfig: {
+        ...defaults.clusterConfig,
+        bastionConfig: { ...defaults.clusterConfig.bastionConfig, amiId },
+      },
+    };
     const template = synthesizeTemplate(config);
     template.hasResourceProperties("AWS::EC2::Instance", {
-      ImageId: config.clusterConfig.bastionConfig.amiId,
+      ImageId: amiId,
     });
     const parameters = template.toJSON().Parameters ?? {};
     assert.equal(
@@ -998,7 +1006,7 @@ test("uses an encrypted gp3 root volume and IMDSv2", () => {
 
 test("optionally deploys a private Global Router from explicit image and JSON values", () => {
   const globalRouter = {
-    image: "197002356433.dkr.ecr.us-east-2.amazonaws.com/global-router-poc:abc123",
+    image: "111111111111.dkr.ecr.us-east-2.amazonaws.com/global-router-poc:abc123",
     config: {
       listen: "0.0.0.0:8080",
       freshness: {

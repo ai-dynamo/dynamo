@@ -17,7 +17,8 @@
 
 import { App } from "aws-cdk-lib";
 
-import { POC_PEERING_OHIO, POC_PEERING_WEST, selectDeployment } from "../lib/const";
+import { selectDeployment } from "../lib/const";
+import { loadDeploymentSettings } from "../lib/deployment-settings";
 import type { DeploymentConfig } from "../lib/config";
 import { loadGlobalRouterDeployment } from "../lib/global-router-deployment";
 import { DynamoMockerCpuStack } from "../lib/dynamo-mocker-cpu-stack";
@@ -25,6 +26,7 @@ import { addInterRegionPeering } from "../lib/inter-region-peering";
 
 const app = new App();
 const deploymentName = app.node.tryGetContext("deployment") ?? "ohio";
+const settings = loadDeploymentSettings(app.node.tryGetContext("deploymentConfigPath"));
 const globalRouter = loadGlobalRouterDeployment(
   app.node.tryGetContext("routerImage"),
   app.node.tryGetContext("routerConfigPath"),
@@ -37,15 +39,15 @@ if (deploymentName === "both") {
   // the connection and private routes between their VPCs.
   addInterRegionPeering(
     app,
-    POC_PEERING_OHIO,
-    POC_PEERING_WEST,
+    settings.peering.ohio,
+    settings.peering.west,
     process.env.CDK_DEFAULT_ACCOUNT,
   );
 } else {
   if (globalRouter !== undefined && deploymentName !== "ohio") {
     throw new Error("The Global Router POC workload is only supported in Ohio.");
   }
-  createStack("DynamoMockerCpu", selectDeployment(deploymentName), globalRouter);
+  createStack("DynamoMockerCpu", selectDeployment(deploymentName, settings.deployments), globalRouter);
 }
 
 function createStack(

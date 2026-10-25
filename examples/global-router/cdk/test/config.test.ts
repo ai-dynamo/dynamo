@@ -110,8 +110,8 @@ test("requires an explicitly versioned optional Relay image", () => {
 
 test("synthesizes each named deployment with its own regional cluster", () => {
   for (const [name, region, clusterName] of [
-    ["ohio", "us-east-2", "sachal-mocker-cluster"],
-    ["west", "us-west-2", "sachal-mocker-west-cluster"],
+    ["ohio", "us-east-2", "mocker-ohio-cluster"],
+    ["west", "us-west-2", "mocker-west-cluster"],
   ] as const) {
     const config = selectDeployment(name);
     assert.equal(config.clusterConfig.region, region);

@@ -15,6 +15,6 @@
  * limitations under the License.
  */
 
-export const US_EAST_2_BASTION_KEY_PAIR = "sachalm-mac";
+export const US_EAST_2_BASTION_KEY_PAIR = "example-ohio-admin";
 
-export const US_WEST_2_BASTION_KEY_PAIR = "mocker-west-admin";
+export const US_WEST_2_BASTION_KEY_PAIR = "example-west-admin";
