@@ -1,0 +1,4 @@
+global-ingress
+global-discovery-service
+*.local.json
+__pycache__/

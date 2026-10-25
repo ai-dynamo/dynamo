@@ -1,0 +1,4 @@
+*
+!Dockerfile
+!global-ingress
+!global-discovery-service
