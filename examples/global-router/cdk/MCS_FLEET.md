@@ -117,7 +117,16 @@ YAML
 Create a short-lived registration token on the hub, then run the printed register
 command with the new member's kubeconfig, `--cluster-name=<siteId>`, region/provider
 metadata and `--namespace=karmada-agent`. Use CA-hash verification and certificate
-rotation. Delete the bootstrap token after registration. If temporary operator
+rotation. For a custom agent namespace, certificate rotation also needs the matching Secret
+namespace flag. Karmadactl 1.19 does not set it automatically. After registration,
+append it once to the generated agent command:
+
+```bash
+kubectl -n karmada-agent patch deployment karmada-agent --type=json -p \
+  '[{"op":"add","path":"/spec/template/spec/containers/0/command/-","value":"--karmada-kubeconfig-namespace=karmada-agent"}]'
+```
+
+Delete the bootstrap token after registration. If temporary operator
 access is needed, bound registration with a timeout and revoke that access in a
 finally path immediately afterward, including on failure. Worker roles do not need
 cluster-admin access.
