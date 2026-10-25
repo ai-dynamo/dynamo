@@ -50,6 +50,92 @@ func newFakeClient(objs ...client.Object) client.Reader {
 		Build()
 }
 
+func TestGPUDiscovery_TotalGPUs(t *testing.T) {
+	for _, source := range []string{"node labels", "DCGM"} {
+		t.Run(source, func(t *testing.T) {
+			tests := []struct {
+				name        string
+				h100Counts  []int
+				a100Counts  []int
+				filterSKU   nvidiacomv1beta1.GPUSKUType
+				wantSKU     nvidiacomv1beta1.GPUSKUType
+				wantPerNode int
+				wantNodes   int
+				wantTotal   int
+			}{
+				{name: "single node", h100Counts: []int{8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 1, wantTotal: 8},
+				{name: "uniform nodes", h100Counts: []int{8, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 16},
+				{name: "heterogeneous nodes", h100Counts: []int{8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
+				{name: "maximum selected after smaller node", h100Counts: []int{4, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
+				{name: "unfiltered excludes other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
+				{name: "filter selects other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, filterSKU: "a100_sxm", wantSKU: "a100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 10},
+				{name: "discovery does not cap the total", h100Counts: []int{8, 8, 8, 8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 5, wantTotal: 36},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Log("creating GPU nodes and DCGM exporters for each SKU")
+					var objects []client.Object
+					metrics := make(map[string]GPUInfo)
+					for _, group := range []struct {
+						model  string
+						vram   int
+						counts []int
+					}{
+						{model: "H100-SXM5-80GB", vram: 81920, counts: tt.h100Counts},
+						{model: "A100-SXM4-40GB", vram: 40960, counts: tt.a100Counts},
+					} {
+						for _, count := range group.counts {
+							name := fmt.Sprintf("gpu-node-%d", len(metrics))
+							ip := fmt.Sprintf("10.0.0.%d", len(metrics)+1)
+							objects = append(objects, &corev1.Node{
+								Name: name,
+								Labels: map[string]string{
+									LabelGPUCount: fmt.Sprint(count), LabelGPUProduct: group.model, LabelGPUMemory: fmt.Sprint(group.vram),
+								},
+							}, &corev1.Pod{
+								Name: name, Namespace: "gpu-operator",
+								Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+								Spec:   corev1.PodSpec{NodeName: name},
+								Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
+							})
+							metrics[buildDCGMEndpoint(ip)] = GPUInfo{NodeName: name, GPUsPerNode: count, Model: group.model, VRAMPerGPU: group.vram}
+						}
+					}
+					k8sClient := newFakeClient(objects...)
+
+					t.Log("discovering the selected SKU's actual GPU total")
+					var info *GPUInfo
+					var err error
+					if source == "DCGM" {
+						discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+							info, ok := metrics[endpoint]
+							if !ok {
+								return nil, fmt.Errorf("unexpected DCGM endpoint %q", endpoint)
+							}
+							return &info, nil
+						})
+						cache := NewGPUDiscoveryCache()
+						info, err = discovery.DiscoverGPUsFromDCGMFiltered(t.Context(), k8sClient, cache, tt.filterSKU)
+						require.NoError(t, err)
+
+						t.Log("checking that the cached result retains the aggregate")
+						cached, err := discovery.DiscoverGPUsFromDCGMFiltered(t.Context(), k8sClient, cache, tt.filterSKU)
+						require.NoError(t, err)
+						assert.Equal(t, tt.wantTotal, cached.TotalGPUs)
+					} else {
+						info, err = DiscoverGPUsFiltered(t.Context(), k8sClient, tt.filterSKU)
+					}
+					require.NoError(t, err)
+					assert.Equal(t, tt.wantSKU, info.System)
+					assert.Equal(t, tt.wantPerNode, info.GPUsPerNode)
+					assert.Equal(t, tt.wantNodes, info.NodesWithGPUs)
+					assert.Equal(t, tt.wantTotal, info.TotalGPUs)
+				})
+			}
+		})
+	}
+}
+
 func TestDiscoverGPUs_SingleNode(t *testing.T) {
 	ctx := context.Background()
 

@@ -1900,7 +1900,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	logger.Info("GPU discovery completed successfully",
 		"gpusPerNode", gpuInfo.GPUsPerNode,
 		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
-		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.TotalGPUs,
 		"model", gpuInfo.Model,
 		"vramMiB", gpuInfo.VRAMPerGPU,
 		"system", gpuInfo.System,
@@ -1935,14 +1935,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	if hw.TotalGPUs == nil && gpuInfo != nil {
 		// TODO: This is a temporary limit to prevent the profiler from using too many GPUs.
 		// Will be removed once a fix is in the Profiler/AIC.
-		const defaultMaxAutoGPUs = int32(32)
-		total := int32(gpuInfo.GPUsPerNode * gpuInfo.NodesWithGPUs)
+		const defaultMaxAutoGPUs = 32
+		total := gpuInfo.TotalGPUs
 		if total > defaultMaxAutoGPUs {
 			logger.Info("Capping auto-discovered TotalGPUs at default limit; set hardware.totalGpus to override",
 				"discovered", total, "cap", defaultMaxAutoGPUs)
 			total = defaultMaxAutoGPUs
 		}
-		hw.TotalGPUs = &total
+		hw.TotalGPUs = new(int32(total))
 		changed = true
 	}
 	if hw.Interconnect == "" && gpuInfo != nil && gpuInfo.Interconnect != "" {

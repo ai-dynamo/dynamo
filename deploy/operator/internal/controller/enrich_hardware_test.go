@@ -273,6 +273,54 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestEnrichHardwareFromDiscovery_TotalGPUs(t *testing.T) {
+	tests := []struct {
+		name          string
+		counts        []int
+		explicitTotal *int32
+		wantTotal     int32
+	}{
+		{name: "heterogeneous nodes", counts: []int{8, 4}, wantTotal: 12},
+		{name: "uniform nodes", counts: []int{8, 8}, wantTotal: 16},
+		{name: "aggregate below cap despite larger maximum times nodes", counts: []int{8, 8, 8, 4, 2}, wantTotal: 30},
+		{name: "aggregate at cap", counts: []int{8, 8, 8, 4, 4}, wantTotal: 32},
+		{name: "aggregate above cap", counts: []int{8, 8, 8, 8, 4}, wantTotal: 32},
+		{name: "explicit total below discovery", counts: []int{8, 4}, explicitTotal: new(int32(4)), wantTotal: 4},
+		{name: "explicit total above cap", counts: []int{8, 4}, explicitTotal: new(int32(64)), wantTotal: 64},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("creating H100 nodes and an unrelated A100 node")
+			objects := []client.Object{gpuNode("a100-node", "A100-SXM4-40GB", 8, 40960)}
+			for i, count := range tt.counts {
+				objects = append(objects, gpuNode(fmt.Sprintf("h100-node-%d", i), "H100-SXM5-80GB", count, 81920))
+			}
+			r := newFakeReconciler(objects...)
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						GPUSKU:    nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						TotalGPUs: tt.explicitTotal,
+					},
+				},
+			}
+
+			t.Log("enriching missing hardware fields while preserving an explicit budget")
+			changed, err := r.enrichHardwareFromDiscovery(t.Context(), dgdr)
+			require.NoError(t, err)
+			require.True(t, changed)
+			require.NotNil(t, dgdr.Spec.Hardware.TotalGPUs)
+			assert.Equal(t, tt.wantTotal, *dgdr.Spec.Hardware.TotalGPUs)
+			assert.Equal(t, int32(8), *dgdr.Spec.Hardware.NumGPUsPerNode)
+
+			t.Log("checking that enrichment preserves the resolved budget on another pass")
+			_, err = r.enrichHardwareFromDiscovery(t.Context(), dgdr)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantTotal, *dgdr.Spec.Hardware.TotalGPUs)
+		})
+	}
+}
+
 func TestEnrichHardwareFromDiscovery_WritesOptionalHardwareMetadata(t *testing.T) {
 	r := newFakeReconciler()
 	r.GPUDiscovery = gpupkg.NewGPUDiscovery(nil)
@@ -281,6 +329,7 @@ func TestEnrichHardwareFromDiscovery_WritesOptionalHardwareMetadata(t *testing.T
 		NodeName:      "n1",
 		GPUsPerNode:   8,
 		NodesWithGPUs: 2,
+		TotalGPUs:     16,
 		Model:         "NVIDIA H100 80GB HBM3",
 		VRAMPerGPU:    81079,
 		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
@@ -313,6 +362,7 @@ func TestEnrichHardwareFromDiscovery_FillsOptionalMetadataWhenRequiredFieldsSet(
 		NodeName:      "n1",
 		GPUsPerNode:   8,
 		NodesWithGPUs: 4,
+		TotalGPUs:     32,
 		Model:         "NVIDIA H100 80GB HBM3",
 		VRAMPerGPU:    81079,
 		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
@@ -367,6 +417,7 @@ func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
 		NodeName:      "n1",
 		GPUsPerNode:   8,
 		NodesWithGPUs: 2,
+		TotalGPUs:     16,
 		Model:         "NVIDIA H100 80GB HBM3",
 		VRAMPerGPU:    81079,
 		System:        nvidiacomv1beta1.GPUSKUTypeH100PCIe,
