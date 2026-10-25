@@ -65,6 +65,8 @@ impl PeerSync {
         // Logged when they become unreachable and when they recover, not on
         // every round.
         let mut unreachable: HashSet<ReplicaId> = HashSet::new();
+        // Logged when it changes. Zero means registrations stay local.
+        let mut others_reached = None;
         let mut ticks = tokio::time::interval(self.every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -81,6 +83,7 @@ impl PeerSync {
                 }
             };
             let replies = join_all(peers.iter().map(|peer| fetch(&client, peer))).await;
+            let mut reached = 0;
             for (peer, reply) in peers.iter().zip(replies) {
                 match reply {
                     Ok((reply, received)) => {
@@ -89,6 +92,9 @@ impl PeerSync {
                                 peer = %peer.replica.0,
                                 "discovery instance is reachable again"
                             );
+                        }
+                        if reply.instance != self.instance {
+                            reached += 1;
                         }
                         self.absorb(peer, reply, received);
                     }
@@ -105,6 +111,10 @@ impl PeerSync {
             }
             // Forget instances that left, so one that comes back is logged.
             unreachable.retain(|id| peers.iter().any(|peer| &peer.replica == id));
+            if others_reached != Some(reached) {
+                tracing::info!(reached, "other discovery instances reached");
+                others_reached = Some(reached);
+            }
             self.synced.store(true, Ordering::Release);
         }
     }
@@ -158,9 +168,7 @@ mod tests {
     use super::*;
     use crate::backends::kubernetes::TrustedNetworkAuthenticator;
     use crate::backends::memory::StaticReplicaDirectory;
-    use crate::pool_discovery::{
-        Directory, LeasePolicy, PeerCredentials, PoolDirectory, PoolRegistrar, verify,
-    };
+    use crate::pool_discovery::{Directory, LeasePolicy, PoolDirectory, PoolRegistrar};
     use crate::service::{self, DiscoveryStore, Sharing};
 
     const LEASE: LeasePolicy = LeasePolicy {
@@ -168,9 +176,13 @@ mod tests {
         lease_duration: Duration::from_millis(1000),
     };
 
-    /// Serves one instance that shares its registrations. Returns its store
-    /// and URL.
-    async fn instance(name: &str, stop: &CancellationToken) -> (Arc<MemoryPoolStore>, Url) {
+    /// Serves one instance that shares its registrations, ready once `synced`
+    /// is set. Returns its store and URL.
+    async fn instance(
+        name: &str,
+        stop: &CancellationToken,
+        synced: Arc<AtomicBool>,
+    ) -> (Arc<MemoryPoolStore>, Url) {
         let store = Arc::new(MemoryPoolStore::new(LEASE).unwrap());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
@@ -186,7 +198,7 @@ mod tests {
                 sharing: Some(Sharing {
                     instance: name.to_owned(),
                     registrations: store.clone(),
-                    synced: Arc::new(AtomicBool::new(true)),
+                    synced,
                 }),
             },
             stop.clone(),
@@ -223,6 +235,20 @@ mod tests {
         assert!(response.status().is_success());
     }
 
+    /// Waits up to five seconds for `url` to report ready.
+    async fn wait_for_ready(url: &Url) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while reqwest::get(url.join("healthz").unwrap())
+            .await
+            .unwrap()
+            .status()
+            != reqwest::StatusCode::OK
+        {
+            assert!(tokio::time::Instant::now() < deadline, "{url} is not ready");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Waits up to five seconds for `store` to list exactly `expected` models.
     async fn wait_for_models(store: &MemoryPoolStore, expected: &[&str]) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -250,22 +276,33 @@ mod tests {
     #[tokio::test]
     async fn registrations_reach_the_other_instances_and_lapse_there() {
         let stop = CancellationToken::new();
-        let (a, a_url) = instance("a", &stop).await;
-        let (b, b_url) = instance("b", &stop).await;
-        // B asks every instance, itself included.
+        let (a, a_url) = instance("a", &stop, Arc::new(AtomicBool::new(true))).await;
+        let synced = Arc::new(AtomicBool::new(false));
+        let (b, b_url) = instance("b", &stop, synced.clone()).await;
+        // B is not ready until it has asked the other instances once.
+        let healthz = reqwest::get(b_url.join("healthz").unwrap()).await.unwrap();
+        assert_eq!(healthz.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        // B asks every instance: A, itself, and one that is gone.
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gone = Url::parse(&format!("http://{}/", closed.local_addr().unwrap())).unwrap();
+        drop(closed);
         tokio::spawn(
             PeerSync {
                 peers: Arc::new(StaticReplicaDirectory::new(vec![
                     peer("a", &a_url),
                     peer("b", &b_url),
+                    peer("gone", &gone),
                 ])),
                 store: b.clone(),
                 instance: "b".to_owned(),
                 every: LEASE.heartbeat_interval / 2,
-                synced: Arc::default(),
+                synced,
             }
             .run(stop.clone()),
         );
+        // A round counts though one instance was unreachable.
+        wait_for_ready(&b_url).await;
 
         register(&a_url, &registration("m1")).await;
         wait_for_models(&b, &["m1"]).await;
@@ -283,36 +320,6 @@ mod tests {
         stop.cancel();
     }
 
-    #[tokio::test]
-    async fn an_unreachable_instance_is_skipped() {
-        let stop = CancellationToken::new();
-        let (a, a_url) = instance("a", &stop).await;
-        let (b, _) = instance("b", &stop).await;
-        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let gone = Url::parse(&format!("http://{}/", closed.local_addr().unwrap())).unwrap();
-        drop(closed);
-        let synced = Arc::new(AtomicBool::new(false));
-        tokio::spawn(
-            PeerSync {
-                peers: Arc::new(StaticReplicaDirectory::new(vec![
-                    peer("gone", &gone),
-                    peer("a", &a_url),
-                ])),
-                store: b.clone(),
-                instance: "b".to_owned(),
-                every: LEASE.heartbeat_interval / 2,
-                synced: synced.clone(),
-            }
-            .run(stop.clone()),
-        );
-        register(&a_url, &registration("m1")).await;
-        wait_for_models(&b, &["m1"]).await;
-        assert_eq!(a.local_registrations().len(), 1);
-        // A round that could not reach every instance still counts.
-        assert!(synced.load(Ordering::Acquire));
-        stop.cancel();
-    }
-
     /// A `GET /registrations` reply from `instance`.
     fn reply(instance: &str, model: &str, expires_in_ms: u64) -> SharedRegistrations {
         serde_json::from_value(json!({
@@ -322,53 +329,25 @@ mod tests {
         .unwrap()
     }
 
-    /// Instance "a" copying into `store`.
-    fn sync_into(store: &Arc<MemoryPoolStore>) -> PeerSync {
-        PeerSync {
+    #[tokio::test(start_paused = true)]
+    async fn absorb_skips_its_own_reply_and_counts_the_wait() {
+        let store = Arc::new(MemoryPoolStore::new(LEASE).unwrap());
+        let sync = PeerSync {
             peers: Arc::new(StaticReplicaDirectory::new(Vec::new())),
             store: store.clone(),
             instance: "a".to_owned(),
             every: LEASE.heartbeat_interval / 2,
             synced: Arc::default(),
-        }
-    }
+        };
+        let somewhere = |name: &str| peer(name, &Url::parse("http://127.0.0.1:1/").unwrap());
 
-    fn somewhere(name: &str) -> ReplicaEndpoint {
-        peer(name, &Url::parse("http://127.0.0.1:1/").unwrap())
-    }
+        // Its own reply is skipped.
+        sync.absorb(&somewhere("a"), reply("a", "m1", 500), Instant::now());
+        assert!(store.list().await.unwrap().items.is_empty());
 
-    #[tokio::test(start_paused = true)]
-    async fn an_instance_skips_its_own_reply() {
-        let store = Arc::new(MemoryPoolStore::new(LEASE).unwrap());
-        let sync = sync_into(&store);
-        let (record, _) = reply("a", "m1", 0)
-            .registrations
-            .remove(0)
-            .into_record()
-            .unwrap();
-        let caller = verify(
-            &TrustedNetworkAuthenticator,
-            &PeerCredentials::PeerAddress("10.0.0.1".parse().unwrap()),
-        )
-        .await
-        .unwrap();
-        store.register(record, &caller).await.unwrap();
-        tokio::time::advance(Duration::from_millis(10)).await;
-
-        // Its own reply, though it seems to last longer, changes nothing.
-        sync.absorb(&somewhere("a"), reply("a", "m1", 60_000), Instant::now());
-        assert_eq!(store.local_registrations().len(), 1);
-        // The same reply from another instance makes it a copy here.
-        sync.absorb(&somewhere("b"), reply("b", "m1", 60_000), Instant::now());
-        assert!(store.local_registrations().is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn waiting_for_a_slower_instance_does_not_lengthen_copies() {
-        let store = Arc::new(MemoryPoolStore::new(LEASE).unwrap());
-        let sync = sync_into(&store);
+        // Another instance's reply waited 300 ms for a slower one's, so its
+        // copy has 200 ms left, not 500.
         let received = Instant::now();
-        // The reply waited 300 ms for a slower instance's.
         tokio::time::advance(Duration::from_millis(300)).await;
         sync.absorb(&somewhere("b"), reply("b", "m1", 500), received);
         assert_eq!(store.list().await.unwrap().items.len(), 1);

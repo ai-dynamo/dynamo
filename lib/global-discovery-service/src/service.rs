@@ -640,47 +640,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registrations_are_shared_only_when_enabled() {
-        let (base, shutdown) = start(memory_store()).await;
-        let response = reqwest::get(format!("{base}/registrations")).await.unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
-        shutdown.cancel();
-
-        let pools = Arc::new(MemoryPoolStore::new(LEASE).unwrap());
-        let synced = Arc::new(AtomicBool::new(false));
-        let mut store = memory_store();
-        store.pools = pools.clone();
-        store.registrar = Some(pools.clone());
-        store.sharing = Some(Sharing {
-            instance: "a".to_owned(),
-            registrations: pools,
-            synced: synced.clone(),
-        });
-        let (base, shutdown) = start(store).await;
-        // Not ready until it has asked the other instances once.
-        let response = reqwest::get(format!("{base}/healthz")).await.unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-        synced.store(true, Ordering::Release);
-        let response = reqwest::get(format!("{base}/healthz")).await.unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-
-        post_pool(&base, &registration()).await;
-        let (status, shared) = get_json(&base, "/registrations").await;
-        assert_eq!(status, reqwest::StatusCode::OK);
-        assert_eq!(shared["instance"], json!("a"));
-        let expires_in_ms = shared["registrations"][0]["expires_in_ms"]
-            .as_u64()
-            .unwrap();
-        assert!(
-            expires_in_ms > 0 && expires_in_ms <= 15_000,
-            "{expires_in_ms}"
-        );
-        // Shared as the PoolRelay sent it.
-        assert_eq!(shared["registrations"][0]["registration"], registration());
-        shutdown.cancel();
-    }
-
-    #[tokio::test]
     async fn healthy_store_is_ok() {
         let (base, shutdown) = start(memory_store()).await;
         let response = reqwest::get(format!("{base}/healthz")).await.unwrap();

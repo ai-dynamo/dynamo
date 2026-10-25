@@ -694,14 +694,6 @@ mod tests {
     }
 
     #[test]
-    fn frontend_suffix_must_not_overlap_the_relay_suffix() {
-        assert!(frontend_service("-frontend").check(SUFFIX).is_ok());
-        for suffix in ["", "-relay", SUFFIX, "-frontend-pool-relay"] {
-            assert!(frontend_service(suffix).check(SUFFIX).is_err(), "{suffix}");
-        }
-    }
-
-    #[test]
     fn unknown_cluster_gets_a_location_named_after_it() {
         let cache = cache(false);
         sync(

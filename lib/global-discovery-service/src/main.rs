@@ -152,6 +152,9 @@ fn registrations(args: &Args) -> Result<Arc<MemoryPoolStore>> {
 }
 
 fn memory_store(args: &Args) -> Result<DiscoveryStore> {
+    if args.peer_service.is_some() {
+        bail!("--peer-service requires --store karmada or --store mcs");
+    }
     let store = registrations(args)?;
     let mut ids = HashSet::new();
     if let Some(repeated) = args

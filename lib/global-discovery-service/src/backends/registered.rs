@@ -288,8 +288,9 @@ impl Join {
                 tracing::warn!(
                     ?key,
                     "MCS lists a Ready PoolRelay for this pool, but the pool has no live \
-                     registration, so it is not listed. Check that its PoolRelay calls \
-                     POST /pools with this key."
+                     registration here, so it is not listed. Check that its PoolRelay calls \
+                     POST /pools with this key, and that this instance shares registrations \
+                     with the discovery instance in the pool's cluster."
                 );
             } else {
                 tracing::warn!(
@@ -527,9 +528,9 @@ mod tests {
         caller: VerifiedRelayIdentity,
     }
 
-    async fn fixture(registration_lease: LeasePolicy) -> Fixture {
+    async fn fixture() -> Fixture {
         let mcs = Arc::new(MemoryPoolStore::new(NO_EXPIRY).unwrap());
-        let registrations = Arc::new(MemoryPoolStore::new(registration_lease).unwrap());
+        let registrations = Arc::new(MemoryPoolStore::new(LEASE).unwrap());
         Fixture {
             directory: RegisteredPoolDirectory::new(mcs.clone(), registrations.clone(), LEASE),
             mcs,
@@ -574,43 +575,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn lists_only_pools_both_sources_have() {
-        let fx = fixture(LEASE).await;
+    async fn joins_only_pools_both_sources_list() {
+        let fx = fixture().await;
         fx.in_mcs("relay-only").await;
         fx.register("registered-only", "m").await;
         fx.in_mcs("both").await;
-        fx.register("both", "m").await;
+        fx.register("both", "qwen").await;
 
         // Before the join has synced, each read joins the sources itself.
         assert_eq!(fx.keys().await, [key("both")]);
         settle().await;
         assert!(fx.directory.join.snapshot().is_some());
         assert_eq!(fx.keys().await, [key("both")]);
-    }
 
-    #[tokio::test(start_paused = true)]
-    async fn the_registration_says_what_mcs_says_where() {
-        let fx = fixture(LEASE).await;
-        fx.in_mcs("mocker").await;
-        fx.register("mocker", "qwen").await;
-        let record = fx.directory.get(&key("mocker")).await.unwrap().unwrap();
+        // What the pool serves comes from its registration, and where to reach
+        // it from MCS.
+        let record = fx.directory.get(&key("both")).await.unwrap().unwrap();
+        let registration = registered("both", "qwen");
         assert_eq!(record.model.as_deref(), Some("qwen"));
-        assert_eq!(record.location, registered("mocker", "qwen").location);
-        assert_eq!(
-            record.capacity,
-            [Capacity {
-                sku: "H100".to_owned(),
-                count: 8
-            }]
-        );
-        // The frontends and the Relay come from MCS, not the registration.
-        assert_eq!(record.frontends, from_mcs("mocker").frontends);
-        assert_eq!(record.relay_identity, from_mcs("mocker").relay_identity);
+        assert_eq!(record.location, registration.location);
+        assert_eq!(record.capacity, registration.capacity);
+        assert_eq!(record.frontends, from_mcs("both").frontends);
+        assert_eq!(record.relay_identity, from_mcs("both").relay_identity);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn watch_follows_changes_from_both_sources() {
-        let fx = fixture(LEASE).await;
+    async fn watch_follows_both_sources() {
+        let fx = fixture().await;
         fx.in_mcs("mocker").await;
         fx.register("mocker", "m1").await;
         let mut watch = fx.directory.list_and_watch(None).await.unwrap();
@@ -621,7 +612,9 @@ mod tests {
             matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.items.len() == 1)
         );
 
-        // A heartbeat with a new model is a new revision.
+        // A heartbeat with a new model is a new revision; an unchanged one
+        // publishes nothing.
+        fx.register("mocker", "m2").await;
         fx.register("mocker", "m2").await;
         let Some(Ok(WatchEvent::Added(second))) = watch.next().await else {
             panic!("expected Added");
@@ -629,105 +622,89 @@ mod tests {
         assert_eq!(second.model.as_deref(), Some("m2"));
         assert!(second.revision > first.revision);
 
-        // An unchanged heartbeat publishes nothing; MCS dropping the Relay
-        // removes the pool at once, though it is still registered.
-        fx.register("mocker", "m2").await;
+        // MCS dropping the Relay removes the pool at once, though it is still
+        // registered.
         fx.mcs.unregister(&key("mocker"), &fx.caller).await.unwrap();
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker"))
         );
-        assert!(fx.keys().await.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_lapsed_registration_drops_a_pool_mcs_still_lists() {
-        let fx = fixture(LEASE).await;
         fx.in_mcs("mocker").await;
-        fx.register("mocker", "m1").await;
-        let mut watch = fx.directory.list_and_watch(None).await.unwrap();
         assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
-        assert!(matches!(
-            watch.next().await,
-            Some(Ok(WatchEvent::Resync(_)))
-        ));
 
         // No heartbeat for longer than the lease, as when the pool's cluster
-        // is cut off but its imported slices still say Ready. The pool goes
+        // is cut off but its imported slices still say Ready: the pool goes
         // within one sweep.
         tokio::time::advance(LEASE.lease_duration + SWEEP_EVERY).await;
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker"))
         );
         assert!(fx.mcs.get(&key("mocker")).await.unwrap().is_some());
-        assert!(fx.keys().await.is_empty());
-
-        // Registering again brings it back.
-        fx.register("mocker", "m1").await;
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
     }
 
-    #[tokio::test]
-    async fn a_relist_forgets_pools_neither_source_lists() {
-        let snapshot = |items| {
+    #[tokio::test(start_paused = true)]
+    async fn tracks_pools_only_one_source_lists() {
+        let join = Join {
+            state: Mutex::default(),
+            events: broadcast::channel(16).0,
+        };
+        let resync = |items: Vec<PoolRecord>| {
             WatchEvent::Resync(Snapshot {
                 items,
                 completeness: Completeness::Exact,
             })
         };
-        let now = Instant::now();
-        let mut state = JoinState::default();
-        state.apply(Source::Mcs, snapshot(Vec::new()), now);
-        state.apply(
-            Source::Registrations,
-            snapshot(vec![registered("gone", "m")]),
-            now,
-        );
-        assert!(state.one_sided.contains_key(&key("gone")));
-        state.apply(Source::Registrations, snapshot(Vec::new()), now);
-        assert!(state.one_sided.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn warns_once_about_pools_only_one_source_lists() {
-        let fx = fixture(NO_EXPIRY).await;
-        fx.in_mcs("relay-only").await;
-        fx.register("registered-only", "m").await;
-        fx.in_mcs("both").await;
-        fx.register("both", "m").await;
-        fx.directory.list().await.unwrap();
-        settle().await;
-        let warned = |fx: &Fixture| {
-            let mut warned: Vec<(String, bool)> = fx
-                .directory
-                .join
+        let one_sided = |join: &Join| {
+            let mut one_sided: Vec<(String, bool)> = join
                 .lock()
                 .one_sided
                 .iter()
                 .map(|(key, one_sided)| (key.dgd_name().to_owned(), one_sided.warned))
                 .collect();
-            warned.sort();
-            warned
+            one_sided.sort();
+            one_sided
         };
+        join.apply(
+            Source::Mcs,
+            resync(vec![from_mcs("relay-only"), from_mcs("both")]),
+        );
+        join.apply(
+            Source::Registrations,
+            resync(vec![
+                registered("registered-only", "m"),
+                registered("both", "m"),
+            ]),
+        );
+        let after = LEASE.lease_duration * 2;
+        join.warn_one_sided(after);
         assert_eq!(
-            warned(&fx),
+            one_sided(&join),
             [
                 ("registered-only".to_owned(), false),
                 ("relay-only".to_owned(), false)
             ]
         );
-        tokio::time::advance(LEASE.lease_duration * 2 + LEASE.heartbeat_interval).await;
-        settle().await;
+
+        // Each is logged once, after `after`.
+        tokio::time::advance(after).await;
+        join.warn_one_sided(after);
         assert_eq!(
-            warned(&fx),
+            one_sided(&join),
             [
                 ("registered-only".to_owned(), true),
                 ("relay-only".to_owned(), true)
             ]
         );
 
-        // Once both sources list it, the pool is no longer one-sided.
-        fx.register("relay-only", "m").await;
-        settle().await;
-        assert_eq!(warned(&fx), [("registered-only".to_owned(), true)]);
+        // A pool both sources list, or neither, is no longer one-sided, also
+        // after a relist.
+        join.apply(
+            Source::Registrations,
+            WatchEvent::Added(registered("relay-only", "m")),
+        );
+        join.apply(
+            Source::Registrations,
+            resync(vec![registered("both", "m"), registered("relay-only", "m")]),
+        );
+        assert!(one_sided(&join).is_empty());
     }
 }

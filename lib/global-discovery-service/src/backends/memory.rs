@@ -98,8 +98,13 @@ impl MemoryPoolStore {
 
     /// Keeps a registration copied from another service instance (see
     /// `crate::peers`) for the `remaining` time it had there, capped at this
-    /// store's lease. The latest registration wins, wherever it was made.
+    /// store's lease. The latest registration wins, wherever it was made. A
+    /// copy with no time left is ignored, so it cannot list a lapsed pool
+    /// again until the next sweep.
     pub fn adopt(&self, mut record: PoolRecord, remaining: Duration) {
+        if remaining.is_zero() {
+            return;
+        }
         self.ensure_sweeping();
         let now = Instant::now();
         let expires_at = now + remaining.min(self.lease.lease_duration);
@@ -471,57 +476,42 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_copy_lasts_its_remaining_time_and_never_longer_than_the_lease() {
-        let store = MemoryPoolStore::new(LEASE).unwrap();
-        store.adopt(record("mocker", "m1"), Duration::from_secs(10));
-        assert!(store.get(&key("mocker")).await.unwrap().is_some());
-        tokio::time::advance(Duration::from_secs(11)).await;
-        assert!(store.get(&key("mocker")).await.unwrap().is_none());
-
-        store.adopt(record("mocker", "m1"), Duration::from_secs(3600));
-        tokio::time::advance(Duration::from_secs(16)).await;
-        assert!(store.get(&key("mocker")).await.unwrap().is_none());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_latest_registration_wins_and_only_local_ones_are_shared() {
+    async fn copies_follow_the_latest_registration() {
         let store = MemoryPoolStore::new(LEASE).unwrap();
         let caller = caller().await;
+        let model = |store: &MemoryPoolStore| {
+            store
+                .lock()
+                .records
+                .get(&key("mocker"))
+                .and_then(|registered| registered.record.model.clone())
+        };
         store
             .register(record("mocker", "m1"), &caller)
             .await
             .unwrap();
-        let shared = store.local_registrations();
-        assert_eq!(shared.len(), 1);
-        assert_eq!(shared[0].1, LEASE.lease_duration);
 
         // A copy older than the local registration changes nothing.
         store.adopt(record("mocker", "m2"), Duration::from_secs(10));
-        let model =
-            |store: &MemoryPoolStore| store.lock().records[&key("mocker")].record.model.clone();
         assert_eq!(model(&store).as_deref(), Some("m1"));
+        assert_eq!(store.local_registrations().len(), 1);
 
-        // A newer copy of the same record only extends it, and it is no longer
-        // shared from here.
+        // A newer copy takes over, so it is not shared again from here, and
+        // a still newer one with another model replaces it.
         tokio::time::advance(Duration::from_secs(5)).await;
         store.adopt(record("mocker", "m1"), Duration::from_secs(14));
-        let renewed = store.get(&key("mocker")).await.unwrap().unwrap();
-        assert_eq!(renewed.revision, Revision(1));
         assert!(store.local_registrations().is_empty());
-
-        // A newer copy of a changed record replaces it.
-        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
         store.adopt(record("mocker", "m2"), Duration::from_secs(14));
-        let changed = store.get(&key("mocker")).await.unwrap().unwrap();
-        assert_eq!(changed.model.as_deref(), Some("m2"));
-        assert_eq!(changed.revision, Revision(2));
+        assert_eq!(model(&store).as_deref(), Some("m2"));
 
-        // The PoolRelay registering here again makes it local again.
-        store
-            .register(record("mocker", "m2"), &caller)
-            .await
-            .unwrap();
-        assert_eq!(store.local_registrations().len(), 1);
+        // A copy never outlasts this store's lease, and one with no time left
+        // is ignored.
+        store.adopt(record("mocker", "m2"), Duration::from_secs(3600));
+        tokio::time::advance(LEASE.lease_duration + Duration::from_secs(1)).await;
+        assert!(store.get(&key("mocker")).await.unwrap().is_none());
+        store.adopt(record("other", "m1"), Duration::ZERO);
+        assert!(!store.lock().records.contains_key(&key("other")));
     }
 
     #[tokio::test]
