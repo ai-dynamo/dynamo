@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import json
 import os
+import select
 import shutil
+import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +24,75 @@ pytestmark = [
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST_DIR = _REPO_ROOT / "examples/backends/vllm/deploy/kvcr"
 _MANIFESTS = ("agg.yaml", "agg-memory-service.yaml")
+
+
+@pytest.mark.parametrize(
+    "worker,exit_module,exit_code",
+    [
+        ("0", "kvcr.kvcr_service", 7),
+        ("0", "dynamo.kv_state_agent", 0),
+        ("0", None, 0),
+        ("1", "kvcr.kvcr_service", 7),
+    ],
+)
+def test_services_supervises_children(tmp_path, worker, exit_module, exit_code):
+    """Exercise the actual wrapper with controllable children, without engines."""
+    for source in (
+        _MANIFEST_DIR / "services.sh",
+        _REPO_ROOT / "examples/common/launch_utils.sh",
+    ):
+        shutil.copy(source, tmp_path / source.name)
+    child = tmp_path / "python3"
+    child.write_text(
+        f"#!{sys.executable}\n"
+        + """
+import json, os, signal, sys
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+signal.signal(signal.SIGUSR1, lambda *_: sys.exit(int(os.environ["TEST_EXIT_CODE"])))
+print(json.dumps({"module": sys.argv[2], "pid": os.getpid(), "args": sys.argv[3:]}), flush=True)
+signal.pause()
+"""
+    )
+    child.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "POD_INDEX": worker,
+        "DYN_NAMESPACE": "test",
+        "KVCR_CACHE_SLOT_COUNT": "2",
+        "DYN_NAMESPACE_WORKER_SUFFIX": "",
+        "DYNAMO_KVCR_COMPATIBILITY_DIGEST": "test",
+        "TEST_EXIT_CODE": str(exit_code),
+    }
+    process = subprocess.Popen(
+        ["bash", str(tmp_path / "services.sh")],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        bufsize=0,
+    )
+    children = {}
+    try:
+        for _ in range(2 if worker == "0" else 1):
+            assert select.select([process.stdout], [], [], 5)[0], "child did not start"
+            info = json.loads(process.stdout.readline())
+            children[info["module"]] = info
+        guard_args = children["kvcr.kvcr_service"]["args"]
+        assert ("--health-dependency-url" in guard_args) == (worker == "0")
+        if exit_module is None:
+            process.terminate()
+        else:
+            os.kill(children[exit_module]["pid"], signal.SIGUSR1)
+        output, _ = process.communicate(timeout=5)
+        assert process.returncode == exit_code, output.decode()
+        for info in children.values():
+            with pytest.raises(ProcessLookupError):
+                os.kill(info["pid"], 0)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
 
 
 def _worker(manifest_name: str) -> dict:
@@ -152,7 +225,8 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
     pod_spec = _worker("agg-memory-service.yaml")["podTemplate"]["spec"]
     main, sidecar = pod_spec["containers"]
     main_command = main["args"][0]
-    sidecar_command = sidecar["args"][0]
+    assert sidecar["args"] == ["/opt/kvcr-startup/services.sh"]
+    sidecar_command = (_MANIFEST_DIR / "services.sh").read_text()
 
     assert sidecar["name"] == "kvcr-services"
     assert "python3 -m kvcr.kvcr_service" in sidecar_command
@@ -167,7 +241,8 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
         for item in sidecar["env"]
     )
     assert '--max-slots "$KVCR_CACHE_SLOT_COUNT"' in sidecar_command
-    assert 'wait -n "$kvcr_pid" "$state_agent_pid"' in sidecar_command
+    assert "wait_any_exit" in sidecar_command
+    assert "wait_for_ready http://127.0.0.1:9092/ready 120" in main_command
     assert '"kvcr_service_socket_path": "/run/kvcr/memory.sock"' in main_command
     assert "/run/kvcr/hold-engine-start" not in main_command
     assert 'case "$POD_INDEX" in' not in main_command
@@ -182,17 +257,17 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
 
     for container in (main, sidecar):
         mounts = {mount["name"] for mount in container["volumeMounts"]}
-        assert mounts == {"kvcr-memory", "kvcr-socket"}
+        assert mounts == {"kvcr-memory", "kvcr-socket", "kvcr-startup"}
     memory = next(
         volume for volume in pod_spec["volumes"] if volume["name"] == "kvcr-memory"
     )
     assert memory["emptyDir"]["medium"] == "Memory"
 
-    for probe_name in ("startupProbe", "livenessProbe", "readinessProbe"):
-        probe = sidecar[probe_name]["exec"]["command"][-1]
-        assert "/run/kvcr/memory.sock" in probe
-        assert "9091/live" in probe
-        assert "os.environ['POD_INDEX'] != '0' or" in probe
+    assert sidecar["readinessProbe"]["httpGet"] == {"path": "/ready", "port": 9092}
+    assert "startupProbe" not in sidecar
+    assert "livenessProbe" not in sidecar
+    assert "--health-dependency-url" in sidecar_command
+    assert "--health-port" in sidecar_command
 
 
 @pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
@@ -239,6 +314,30 @@ def test_deploy_script_renders_selected_variant(memory_service: str) -> None:
         assert container["resources"]["limits"]["rdma/test"] == "1"
     if memory_service == "true":
         assert result.stdout.count("qwen3-0.6b-example-v1") == 2
+        bundle = subprocess.run(
+            [str(_MANIFEST_DIR / "deploy.sh"), "--render-configmap"],
+            check=True,
+            capture_output=True,
+            env=env,
+            text=True,
+            timeout=30,
+        )
+        configmap = json.loads(bundle.stdout)
+        assert configmap["immutable"] is True
+        assert (
+            configmap["data"]["services.sh"]
+            == (_MANIFEST_DIR / "services.sh").read_text()
+        )
+        assert (
+            configmap["data"]["launch_utils.sh"]
+            == (_REPO_ROOT / "examples/common/launch_utils.sh").read_text()
+        )
+        volume = next(
+            v
+            for v in worker["podTemplate"]["spec"]["volumes"]
+            if v["name"] == "kvcr-startup"
+        )
+        assert volume["configMap"]["name"] == configmap["metadata"]["name"]
     expected_name = (
         "vllm-agg-kvcr-memory-service" if memory_service == "true" else "vllm-agg-kvcr"
     )
@@ -266,6 +365,47 @@ def test_deploy_script_rejects_unknown_argument() -> None:
 
     assert result.returncode == 2
     assert "usage:" in result.stderr
+
+
+@pytest.mark.parametrize("size", [32, 1024 * 1024])
+def test_startup_bundle_wheel_overlay_and_size_limit(tmp_path, size):
+    wheel = tmp_path / "fixture.whl"
+    wheel.write_bytes(b"x" * size)
+    env = {
+        **os.environ,
+        "DYNAMO_UCX_NET_DEVICES": "test:1",
+        "DYNAMO_VLLM_IMAGE": "runtime:test",
+        "KVCR_MEMORY_SERVICE_ENABLED": "true",
+        "DYNAMO_KVCR_COMPATIBILITY_DIGEST": "test",
+        "KVCR_WHEEL": str(wheel),
+    }
+    result = subprocess.run(
+        [str(_MANIFEST_DIR / "deploy.sh"), "--render-configmap"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+    if size == 1024 * 1024:
+        assert result.returncode != 0
+        assert "exceeds 1 MiB" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        bundle = json.loads(result.stdout)
+        assert base64.b64decode(bundle["binaryData"]["kvcr.whl"]) == wheel.read_bytes()
+        without_wheel = subprocess.run(
+            [str(_MANIFEST_DIR / "deploy.sh"), "--render-configmap"],
+            check=True,
+            capture_output=True,
+            env={**env, "KVCR_WHEEL": ""},
+            text=True,
+            timeout=30,
+        )
+        assert (
+            bundle["metadata"]["name"]
+            != json.loads(without_wheel.stdout)["metadata"]["name"]
+        )
 
 
 def test_deploy_script_rejects_unsafe_compatibility_digest() -> None:

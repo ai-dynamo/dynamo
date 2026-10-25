@@ -42,16 +42,11 @@ spec:
         - args:
           - |
             set -euo pipefail
-            for _ in $(seq 1 60); do
-              if python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/kvcr/memory.sock'); s.close()" >/dev/null 2>&1; then
-                break
-              fi
-              sleep 1
-            done
-            if ! python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/kvcr/memory.sock'); s.close()"; then
-              echo "KVCR memory service did not become ready" >&2
-              exit 1
+            source /opt/kvcr-startup/launch_utils.sh
+            if [ -f /opt/kvcr-startup/kvcr.whl ]; then
+              export PYTHONPATH="/opt/kvcr-startup/kvcr.whl${PYTHONPATH:+:$PYTHONPATH}"
             fi
+            wait_for_ready http://127.0.0.1:9092/ready 120
 
             kv_transfer_config=$(
               python3 - <<'PY'
@@ -152,50 +147,21 @@ spec:
               add:
               - IPC_LOCK
           volumeMounts:
+          - mountPath: /opt/kvcr-startup
+            name: kvcr-startup
+            readOnly: true
           - mountPath: /run/kvcr
             name: kvcr-socket
           - mountPath: /dev/shm/kvcr
             name: kvcr-memory
           workingDir: /workspace/examples/backends/vllm
         - args:
-          - |
-            set -euo pipefail
-            state_namespace=$DYN_NAMESPACE
-            if [ -n "${DYN_NAMESPACE_WORKER_SUFFIX:-}" ]; then
-              state_namespace="${state_namespace}-${DYN_NAMESPACE_WORKER_SUFFIX}"
-            fi
-
-            kvcr_pid=
-            state_agent_pid=
-            cleanup() {
-              [ -z "$kvcr_pid" ] || kill -TERM "$kvcr_pid" 2>/dev/null || true
-              [ -z "$state_agent_pid" ] || kill -TERM "$state_agent_pid" 2>/dev/null || true
-              [ -z "$kvcr_pid" ] || wait "$kvcr_pid" 2>/dev/null || true
-              [ -z "$state_agent_pid" ] || wait "$state_agent_pid" 2>/dev/null || true
-            }
-            trap cleanup EXIT INT TERM
-
-            python3 -m kvcr.kvcr_service \
-              --socket-path /run/kvcr/memory.sock \
-              --pool-dir /dev/shm/kvcr \
-              --guard-count 1 \
-              --pool-sizes-gb 2 \
-              --compatibility-digest "${DYNAMO_KVCR_COMPATIBILITY_DIGEST}" &
-            kvcr_pid=$!
-            if [ "$POD_INDEX" = "0" ]; then
-              env DYN_NAMESPACE="$state_namespace" \
-                DYN_HEALTH_CHECK_ENABLED=false \
-                python3 -m dynamo.kv_state_agent \
-                  --max-slots "$KVCR_CACHE_SLOT_COUNT" &
-              state_agent_pid=$!
-              wait -n "$kvcr_pid" "$state_agent_pid"
-            else
-              wait "$kvcr_pid"
-            fi
+          - /opt/kvcr-startup/services.sh
           command:
           - /bin/bash
-          - -c
           env:
+          - name: DYNAMO_KVCR_COMPATIBILITY_DIGEST
+            value: ${DYNAMO_KVCR_COMPATIBILITY_DIGEST}
           - name: CONTAINER_NAME
             value: kvcr-services
           - name: DYN_COMPONENT
@@ -237,22 +203,13 @@ spec:
           - name: UCX_NET_DEVICES
             value: ${DYNAMO_UCX_NET_DEVICES}
           image: ${DYNAMO_VLLM_IMAGE}
-          livenessProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import os,socket,urllib.request; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/kvcr/memory.sock'); s.close(); os.environ['POD_INDEX'] != '0' or urllib.request.urlopen('http://127.0.0.1:9091/live', timeout=1).read()
-            failureThreshold: 3
-            periodSeconds: 5
-            timeoutSeconds: 4
           name: kvcr-services
+          # Readiness observes failures without triggering an unsafe sidecar-only
+          # restart. A deployment controller must coordinate Pod/group replacement.
           readinessProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import os,socket,urllib.request; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/kvcr/memory.sock'); s.close(); os.environ['POD_INDEX'] != '0' or urllib.request.urlopen('http://127.0.0.1:9091/live', timeout=1).read()
+            httpGet:
+              path: /ready
+              port: 9092
             failureThreshold: 3
             periodSeconds: 5
             timeoutSeconds: 4
@@ -268,25 +225,23 @@ spec:
             capabilities:
               add:
               - IPC_LOCK
-          startupProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import os,socket,urllib.request; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/kvcr/memory.sock'); s.close(); os.environ['POD_INDEX'] != '0' or urllib.request.urlopen('http://127.0.0.1:9091/live', timeout=1).read()
-            failureThreshold: 60
-            periodSeconds: 2
-            timeoutSeconds: 4
           volumeMounts:
+          - mountPath: /opt/kvcr-startup
+            name: kvcr-startup
+            readOnly: true
           - mountPath: /run/kvcr
             name: kvcr-socket
           - mountPath: /dev/shm/kvcr
             name: kvcr-memory
+        terminationGracePeriodSeconds: 30
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
           operator: Exists
         volumes:
+        - configMap:
+            name: ${KVCR_STARTUP_CONFIG_MAP}
+          name: kvcr-startup
         - emptyDir: {}
           name: kvcr-socket
         - emptyDir:

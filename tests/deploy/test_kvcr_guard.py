@@ -192,6 +192,15 @@ def _render_manifest(tmp_path: Path, image: str) -> Path:
         timeout=RENDER_TIMEOUT,
     )
     manifest = yaml.safe_load(result.stdout)
+    bundle = subprocess.run(
+        [str(deploy_script), "--render-configmap"],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=RENDER_TIMEOUT,
+    )
+    (tmp_path / "kvcr-startup.json").write_text(bundle.stdout)
     worker = next(
         component
         for component in manifest["spec"]["components"]
@@ -338,6 +347,9 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
 
     deployment_spec = DeploymentSpec(_render_manifest(tmp_path, image))
     deployment_spec.namespace = namespace
+    # The deployment helper normally applies this immutable bundle before the DGD.
+    # Keep it, like deploy.sh does: other deployments can share its content hash.
+    _kubectl(namespace, "apply", "-f", str(tmp_path / "kvcr-startup.json"))
     logger.info(
         "KVCR_TEST start image=%s namespace=%s ucx_device=%s",
         image,

@@ -23,7 +23,7 @@ KVCR-capable Dynamo vLLM runtime image for every process.
   and UCX builds.
 - Linux 6.5 or a kernel with equivalent `SO_PEERPIDFD` support for the
   memory-service variant.
-- `envsubst` and `kubectl` on the deployment host.
+- `envsubst`, `kubectl`, and Python 3 on the deployment host.
 
 The manifests default to the `rdma/shared_ib` extended resource. The
 process-local variant requests one share per GPU node; the memory-service
@@ -67,7 +67,25 @@ KVCR_MEMORY_SERVICE_ENABLED=false ./deploy.sh
 KVCR_MEMORY_SERVICE_ENABLED=true ./deploy.sh
 ```
 
-Run `./deploy.sh --render-only` to inspect the selected DGD. Both manifests
+The memory-service variant requires the KVCR HTTP-health implementation in both
+containers. To test it without rebuilding the existing compatible runtime image,
+build a pure-Python wheel from the KVCR feature tree and export
+`KVCR_WHEEL=/absolute/path/to/kvcr-0.1.1-py3-none-any.whl` before deployment.
+The script mounts it through `PYTHONPATH` in both containers; it does not install
+packages or supply native dependencies. Stop if the selected image needs new
+NIXL, CUDA, UCX, or other dependencies. Without `KVCR_WHEEL`, the installed KVCR
+must already support the health flags; the older tag referenced above does not.
+
+`deploy.sh` applies an immutable, content-addressed ConfigMap containing
+`services.sh`, Dynamo's shared `launch_utils.sh`, and the optional wheel before
+applying the DGD. The bundle is limited to 1 MiB. It is retained after deployment
+deletion because other deployments may share it; delete an old bundle only after
+no Pods or deployment templates reference it. Do not replace a live bundle or
+roll an incompatible KVCR wheel under engines that still map the old pools.
+
+Run `./deploy.sh --render-only` to inspect the selected DGD. For the memory-service
+variant, `./deploy.sh --render-configmap` separately renders its prerequisite
+ConfigMap; apply that first when deploying rendered files manually. Both manifests
 use required Pod anti-affinity, so the second worker remains Pending unless a
 second eligible node is available. After apply, the script also verifies that
 the operator materialized Grove as the DGD's workload provider. Each engine's
@@ -94,9 +112,22 @@ restarts.
 In `agg-memory-service.yaml`, `dynamo.vllm` runs in `main`. A regular
 `kvcr-services` sidecar runs the KVCR memory service and state agent. Both
 containers mount `/run/kvcr` and the memory-backed `/dev/shm/kvcr` volume. A
-vLLM container restart leaves the service, Guard, and pool running. The
-sidecar's probes check the KVCR Unix socket. The state agent runs in worker 0's
-sidecar, and that sidecar's probe also checks state-agent health. Kubernetes
+vLLM container restart leaves the service, Guard, and pool running.
+`services.sh` starts KVCR and, on worker 0, the state agent. It uses Dynamo's
+`wait_any_exit` and process-group cleanup helpers: any child exit ends the
+wrapper and terminates/reaps its companion; SIGTERM does the same. Kubernetes'
+30-second Pod termination grace period is the final bound for stuck children,
+not a timeout implemented by the shell helper. For a planned shutdown, drain and
+stop engines before their service; the wrapper does not impose cross-container
+shutdown ordering.
+
+The main container waits up to 120 seconds for KVCR `/ready` on port 9092 before
+launching vLLM. The sidecar's HTTP readiness probe checks that the Unix accept
+loop and Guard actor loops progress, plus worker 0's state-agent `/live` endpoint.
+It does not require an attached engine or mutate a pool. No liveness/startup
+restart probe is set on the sidecar: a failed probe must not restart it beneath
+a live engine. Readiness does not itself fence engines or remove Dynamo routing
+state. Kubernetes
 container discovery gives `main` and the real `kvcr-services` sidecar separate
 metadata writers. The explicit sidecar supplies its own downward-API Pod UID;
 the operator injects that identity only into its generated `main` container.
@@ -106,7 +137,10 @@ deployment-fatal: a replacement service cannot adopt the original Guard and
 pool while vLLM remains alive. An external deployment controller must replace
 the entire affected worker Pod instead of restarting only the sidecar. If
 worker 0's sidecar restarts, recreate the worker group or DGD because its state
-agent's routing state was also lost.
+agent's routing state was also lost. State-agent loss alone does not destroy KV
+payloads, but current engines bind a discovered agent instance and do not
+automatically reselect its replacement. Group recreation is the conservative
+way to restore those bindings; this change does not add a recovery controller.
 
 The state agent carries routing and residency information; it does not move
 KV payloads. KVCR uses NIXL and UCX for the remote payload transfer.
