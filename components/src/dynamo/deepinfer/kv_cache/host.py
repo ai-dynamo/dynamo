@@ -230,24 +230,31 @@ class HostBlockPool:
     def release(self, slot: int) -> None:
         self._free.append(slot)
 
-    def store(self, gpu_ids: list[int], slots: list[int]) -> None:
-        """GPU block rows -> host rows (before the blocks are freed)."""
-        self._copy(slots, gpu_ids, to_host=True)
+    def store(self, gpu_ids: list[int], slots: list[int]) -> Optional[Any]:
+        """GPU block rows -> host rows (before the blocks are freed).
+
+        Returns a ``torch.cuda.Event`` that completes when the copy has: the
+        host rows may be read (by an SSD write) once it is synchronized. None
+        on the numpy path, where the copy is done on return.
+        """
+        return self._copy(slots, gpu_ids, to_host=True)
 
     def load(self, slots: list[int], gpu_ids: list[int]) -> None:
         """Host rows -> GPU block rows (before the prefill that reads them)."""
         self._copy(slots, gpu_ids, to_host=False)
 
-    def _copy(self, slots: list[int], gpu_ids: list[int], *, to_host: bool) -> None:
+    def _copy(
+        self, slots: list[int], gpu_ids: list[int], *, to_host: bool
+    ) -> Optional[Any]:
         if not slots:
-            return
+            return None
         if self._rows.numpy:
             for slot, gid in zip(slots, gpu_ids):
                 if to_host:
                     self._rows.row(slot)[...] = self._gpu[gid]
                 else:
                     self._gpu[gid] = self._rows.row(slot)
-            return
+            return None
         torch = _torch()
         current = torch.cuda.current_stream(self._gpu.device)
         if self._batch is None:
@@ -256,7 +263,7 @@ class HostBlockPool:
                     host, gpu = self._rows.row(slot), self._gpu[gid]
                     dst, src = (host, gpu) if to_host else (gpu, host)
                     dst.copy_(src, non_blocking=True)
-            return
+            return self._record(current) if to_host else None
         host = np.fromiter((self._rows.ptr(s) for s in slots), np.uint64, len(slots))
         gpu = np.asarray(gpu_ids, dtype=np.uint64) * np.uint64(self._gpu_pitch)
         gpu += np.uint64(self._gpu_base)
@@ -279,8 +286,16 @@ class HostBlockPool:
             ctypes.byref(fail),
             ctypes.c_void_p(stream.cuda_stream),
         )
+        event = self._record(stream) if to_host else None
         current.wait_stream(stream)
         if err:
             raise RuntimeError(
                 f"cuMemcpyBatchAsync failed with CUresult {err} at copy {fail.value}"
             )
+        return event
+
+    @staticmethod
+    def _record(stream: Any) -> Any:
+        event = _torch().cuda.Event()
+        event.record(stream)
+        return event

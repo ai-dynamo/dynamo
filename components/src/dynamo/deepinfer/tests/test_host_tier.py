@@ -37,6 +37,22 @@ def test_blocks_round_trip_through_host_rows(batched):
     assert not gpu[:10].any()
 
 
+@pytest.mark.parametrize("batched", [True, False], ids=["batch", "per-block"])
+def test_store_returns_event_after_which_host_rows_hold_the_bytes(batched):
+    gpu = torch.randint(0, 256, (64, 114048), dtype=torch.uint8, device="cuda")
+    pool = HostBlockPool(gpu, 16)
+    if not batched:
+        pool._batch = None
+    elif pool._batch is None:
+        pytest.skip("cuMemcpyBatchAsync unavailable")
+    event = pool.store([3, 7, 9], [4, 0, 8])
+    assert isinstance(event, torch.cuda.Event)
+    event.synchronize()
+    for gid, slot in zip([3, 7, 9], [4, 0, 8]):
+        assert torch.equal(pool._rows.row(slot), gpu[gid].cpu())
+    assert pool.load([4], [20]) is None
+
+
 def test_pinned_rows_hold_snapshots_across_chunks(monkeypatch):
     from dynamo.deepinfer.kv_cache import host
 
