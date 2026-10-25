@@ -206,3 +206,27 @@ zeroed. Logs and metrics contain no prompt text, token lists or session IDs.
 
 For flags and defaults, see
 [Frontend configuration](../../../../reference/components/frontend-configuration.mdx#experimental-delta-tokenizer).
+
+### Validate additional tokenizer families
+
+The optional family matrix accepts explicitly staged tokenizer directories and
+an expected admission decision. It never downloads artifacts or model weights:
+
+```bash
+export DYNAMO_DELTA_TOKENIZER_MATRIX='[
+  {"name":"certified-family","directory":"/absolute/path/to/tokenizer","admitted":true},
+  {"name":"uncertified-family","directory":"/absolute/path/to/other-tokenizer","admitted":false}
+]'
+python3 -m pytest components/src/dynamo/frontend/tests/test_delta_toktier_matrix.py
+```
+
+Admitted cases exercise ordinary appends, combining characters, multilingual
+text, whitespace and tool-result text, with full reference verification.
+Uncertified cases must decline admission. A family being certified does not imply
+that every transition can use incremental repair; unsupported transitions still
+use the reference tokenizer.
+
+The frontend benchmark scripts include session contention/retention and rebuilt
+HTTP token-mock harnesses. Their README describes setup, outputs and measurement
+limits. HTTP parity compares the digest of backend-received token IDs with full
+reference IDs, in addition to the direct preprocessing parity tests.

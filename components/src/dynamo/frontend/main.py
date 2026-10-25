@@ -490,11 +490,7 @@ async def async_main():
     if config.experimental_delta_tokenizer:
         # An unserved endpoint contributes its registry to the frontend's combined
         # /metrics scrape. This does not register a worker or start a service.
-        endpoint = (
-            runtime.namespace("dynamo")
-            .component("frontend")
-            .endpoint("delta-tokenizer")
-        )
+        endpoint = runtime.endpoint("dynamo.frontend.delta-tokenizer")
         endpoint.metrics.register_prometheus_expfmt_callback(
             lambda: generate_latest(DEFAULT_METRICS.registry).decode()
         )

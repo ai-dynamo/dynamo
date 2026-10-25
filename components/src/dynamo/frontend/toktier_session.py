@@ -60,7 +60,9 @@ def _process_budget(config: DeltaConfig) -> DeltaBudget:
         return _PROCESS_BUDGET
 
 
-def _certified(report: dict[str, Any]) -> bool:
+def _certified(report: object) -> bool:
+    if not isinstance(report, dict):
+        return False
     certification = report.get("certification")
     probe = report.get("probe")
     if not isinstance(certification, dict) or not isinstance(probe, dict):
@@ -92,9 +94,11 @@ class _Session:
             cache_budget_bytes=cache_bytes,
         )
         try:
+            identity = check_core_identity(reference, tokenizer)
             if (
                 not _certified(tokenizer.explain())
-                or check_core_identity(reference, tokenizer)["status"] != "equivalent"
+                or not isinstance(identity, dict)
+                or identity.get("status") != "equivalent"
             ):
                 raise UnsupportedTransition
             context = tokenizer.session()
@@ -126,8 +130,18 @@ class _Session:
                     or report["backend"] != "fast_cpu"
                 ):
                     raise UnsupportedTransition
+            replacement = list(patch.replacement_ids)
+            if (
+                type(patch.replace_from) is not int
+                or patch.replace_from < 0
+                or any(
+                    type(token) is not int or not 0 <= token <= 0xFFFFFFFF
+                    for token in replacement
+                )
+            ):
+                raise UnsupportedTransition
             self._seeded = True
-            return patch.replace_from, list(patch.replacement_ids)
+            return patch.replace_from, replacement
         except (ToktierError, KeyError, TypeError) as exc:
             raise UnsupportedTransition from exc
 
@@ -214,7 +228,10 @@ def _create_delta_tokenizer(
         )
         # Account for loaded model tables as well as Python/native prompt state.
         # This is conservative approximate accounting, not an RSS limit.
-        base_bytes = 16 * len(serialized.encode())
+        # Native tables and allocator overhead exceed serialized JSON size.
+        # The CPU multi-session harness calibrates this admission estimate;
+        # allocator retention still makes process RSS a separate measurement.
+        base_bytes = 32 * len(serialized.encode())
         if 2 * base_bytes + 2048 >= config.max_bytes:
             return None
 
