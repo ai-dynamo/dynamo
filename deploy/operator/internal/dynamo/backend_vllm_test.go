@@ -165,7 +165,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			},
 			containerGPUs: 4,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8 --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_producer\"}" --distributed-executor-backend ray`,
+				`ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8 --kv-transfer-config '{"kv_connector": "NixlConnector", "kv_role": "kv_producer"}' --distributed-executor-backend ray`,
 				VLLMPort, tensorParallelSizeFlag,
 			)},
 			expectProbesRemoved: true,
