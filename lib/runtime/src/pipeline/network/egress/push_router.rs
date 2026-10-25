@@ -710,7 +710,33 @@ where
         multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
         multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
+        Self::from_client_with_state_and_dispatch(
+            client,
+            router_mode,
+            worker_monitor,
+            multimodal_cache_indexer,
+            multimodal_cache_key_extractor,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::from_client_with_state`] with an optional caller-supplied
+    /// [`StreamingDispatch`] in place of the request plane. Everything above
+    /// the seam (monitoring, occupancy, fault detection) is wired the same.
+    pub async fn from_client_with_state_and_dispatch(
+        client: Client,
+        router_mode: RouterMode,
+        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+        multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
+        multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+        dispatch: Option<Arc<dyn StreamingDispatch<T, U>>>,
+    ) -> anyhow::Result<Self> {
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = match dispatch {
+            Some(dispatch) => dispatch,
+            None => addressed_router(&client.endpoint).await?,
+        };
 
         // Start worker monitor if provided and in dynamic mode
         if let Some(monitor) = worker_monitor.as_ref() {
@@ -723,8 +749,6 @@ where
             None
         };
 
-        // Type-erase to the seam so discovery-removal cleanup runs through it.
-        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),

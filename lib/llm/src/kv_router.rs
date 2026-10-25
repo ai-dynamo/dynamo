@@ -58,6 +58,7 @@ pub use dynamo_kv_router::scheduling;
 
 pub(crate) mod embedded;
 pub mod encoder_router;
+pub mod gateway_dispatch;
 pub mod indexer;
 pub mod metrics;
 pub(crate) mod metrics_subscriber;

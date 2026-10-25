@@ -117,6 +117,13 @@ impl RequestContext {
     }
 
     /// Advance the state machine and collect responses that are ready to send.
+    /// The booking id handed back to the picker: its own, else the request id.
+    fn picker_booking_id(&self) -> String {
+        self.booking_id
+            .clone()
+            .unwrap_or_else(|| self.request_id.clone())
+    }
+
     fn drain_pending_responses(&mut self) -> Vec<ProcessingResponse> {
         let mut out = Vec::new();
 
@@ -694,14 +701,28 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 });
                             }
 
-                            // TODO(epp-output-tracking): Parse generated-token progress and
-                            // update router output blocks instead of tracking only phase changes.
                             if ctx.model_server_streaming {
+                                if ctx.body_routed {
+                                    picker.on_response_body(
+                                        &ctx.picker_booking_id(),
+                                        &body.body,
+                                        true,
+                                        body.end_of_stream,
+                                    );
+                                }
                                 ExtProcServer::<P>::handle_response_body(&mut ctx, body);
                             } else {
                                 resp_body_buf.extend_from_slice(&body.body);
                                 if body.end_of_stream {
                                     let full_body = std::mem::take(&mut resp_body_buf);
+                                    if ctx.body_routed {
+                                        picker.on_response_body(
+                                            &ctx.picker_booking_id(),
+                                            &full_body,
+                                            false,
+                                            true,
+                                        );
+                                    }
                                     let synthetic = ext_proc::HttpBody {
                                         body: full_body,
                                         end_of_stream: true,
@@ -713,8 +734,24 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         Some(processing_request::Request::ResponseTrailers(_)) => {
                             if !ctx.response_complete {
                                 ctx.response_complete = true;
+                                if ctx.body_routed && ctx.model_server_streaming {
+                                    picker.on_response_body(
+                                        &ctx.picker_booking_id(),
+                                        &[],
+                                        true,
+                                        true,
+                                    );
+                                }
                                 if !resp_body_buf.is_empty() {
                                     let full_body = std::mem::take(&mut resp_body_buf);
+                                    if ctx.body_routed {
+                                        picker.on_response_body(
+                                            &ctx.picker_booking_id(),
+                                            &full_body,
+                                            false,
+                                            true,
+                                        );
+                                    }
                                     let synthetic = ext_proc::HttpBody {
                                         body: full_body,
                                         end_of_stream: true,
@@ -987,7 +1024,9 @@ fn extract_candidate_subset(
 // ---------------------------------------------------------------------------
 
 struct ExtProcError {
-    status_code: StatusCode,
+    /// HTTP status. An `i32` rather than [`StatusCode`] so statuses outside
+    /// Envoy's enum (the frontend's default overload status 529) pass through.
+    status_code: i32,
     message: String,
 }
 
@@ -995,47 +1034,51 @@ impl ExtProcError {
     fn from_pick_error(e: PickError) -> Self {
         match e {
             PickError::NoEndpoints => Self {
-                status_code: StatusCode::ServiceUnavailable,
+                status_code: StatusCode::ServiceUnavailable as i32,
                 message: e.to_string(),
             },
             PickError::RoutingFailed(msg) => Self {
-                status_code: StatusCode::ServiceUnavailable,
+                status_code: StatusCode::ServiceUnavailable as i32,
                 message: msg,
             },
             PickError::InvalidRequest(msg) => Self {
-                status_code: StatusCode::BadRequest,
+                status_code: StatusCode::BadRequest as i32,
                 message: msg,
             },
             PickError::MetadataHeadersTooLarge(err) => Self {
-                status_code: StatusCode::RequestHeaderFieldsTooLarge,
+                status_code: StatusCode::RequestHeaderFieldsTooLarge as i32,
                 message: err.to_string(),
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
             // client-safe variant message; the detailed cause is logged upstream.
             PickError::TokenizerUnavailable => Self {
-                status_code: StatusCode::ServiceUnavailable,
+                status_code: StatusCode::ServiceUnavailable as i32,
                 message: e.to_string(),
             },
             PickError::TokenizerTimeout => Self {
-                status_code: StatusCode::GatewayTimeout,
+                status_code: StatusCode::GatewayTimeout as i32,
                 message: e.to_string(),
             },
             PickError::TokenizerUpstreamError => Self {
-                status_code: StatusCode::BadGateway,
+                status_code: StatusCode::BadGateway as i32,
                 message: e.to_string(),
             },
             // In-flight limit saturated: shed as retryable backpressure. The
             // variant message ("endpoint picker overloaded") is client-safe.
             PickError::Overloaded => Self {
-                status_code: StatusCode::ServiceUnavailable,
+                status_code: StatusCode::ServiceUnavailable as i32,
                 message: e.to_string(),
+            },
+            PickError::Rejected { status, message } => Self {
+                status_code: i32::from(status),
+                message,
             },
         }
     }
 
     fn into_processing_response(self) -> ProcessingResponse {
-        envoy_helpers::build_error_response(self.status_code, Some(&self.message))
+        envoy_helpers::build_error_response_code(self.status_code, Some(&self.message))
     }
 }
 
@@ -1651,7 +1694,25 @@ mod tests {
     #[test]
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
-        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+        assert_eq!(err.status_code, StatusCode::ServiceUnavailable as i32);
+    }
+
+    /// #14638: a routing-pipeline rejection reaches Envoy with the frontend's
+    /// status, including 529, which Envoy's `StatusCode` enum does not name.
+    #[test]
+    fn rejected_pick_error_keeps_the_frontend_status() {
+        let err = ExtProcError::from_pick_error(PickError::Rejected {
+            status: 529,
+            message: "Service temporarily overloaded".to_string(),
+        });
+        let response = err.into_processing_response();
+        let Some(crate::proto::envoy::service::ext_proc::v3::processing_response::Response::ImmediateResponse(immediate)) =
+            response.response
+        else {
+            panic!("a rejection is an immediate response");
+        };
+        assert_eq!(immediate.status.unwrap().code, 529);
+        assert_eq!(immediate.body, b"Service temporarily overloaded");
     }
 
     #[test]
@@ -1659,7 +1720,10 @@ mod tests {
         let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(
             dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
         ));
-        assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
+        assert_eq!(
+            err.status_code,
+            StatusCode::RequestHeaderFieldsTooLarge as i32
+        );
     }
 
     /// Cache salt is injected as a top-level field and tagged with the Dynamo

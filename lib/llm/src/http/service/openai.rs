@@ -1149,6 +1149,29 @@ pub(super) fn preprocessed_context_from_headers(
     context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| None)
 }
 
+/// The HTTP status and client message the frontend returns for a request
+/// that failed before streaming (rejection, overload, no routable worker).
+/// Lets a host outside the HTTP service (the Gateway EPP) answer with the
+/// frontend's statuses instead of mapping errors itself.
+pub fn client_error_response(err: anyhow::Error) -> (u16, String) {
+    let (status, Json(message)) = ErrorMessage::from_anyhow(err, "Request routing failed");
+    (status.as_u16(), message.message)
+}
+
+/// [`preprocessed_context_from_headers`] for hosts outside the HTTP service
+/// (the Gateway EPP) that build a [`PreprocessedRequest`] from a request they
+/// did not receive through axum. The only failure is oversized metadata headers.
+///
+/// [`PreprocessedRequest`]: crate::preprocessor::PreprocessedRequest
+pub fn preprocessed_request_context(
+    request: crate::preprocessor::PreprocessedRequest,
+    request_id: String,
+    headers: &HeaderMap,
+) -> anyhow::Result<Context<crate::preprocessor::PreprocessedRequest>> {
+    preprocessed_context_from_headers(request, request_id, headers)
+        .map_err(|(status, Json(message))| anyhow::anyhow!("{status}: {}", message.message))
+}
+
 fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,
