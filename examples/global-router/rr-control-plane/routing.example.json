@@ -1,0 +1,8 @@
+{
+  "frontend_service_suffix": "-frontend",
+  "frontend_port_name": "http",
+  "pools": [
+    {"site_id": "cluster-a", "namespace": "global-router-rr", "dgd_name": "mocker", "model": "Qwen/Qwen3-32B", "location": {"region": "region-a"}},
+    {"site_id": "cluster-b", "namespace": "global-router-rr", "dgd_name": "mocker", "model": "Qwen/Qwen3-32B", "location": {"region": "region-b"}}
+  ]
+}
