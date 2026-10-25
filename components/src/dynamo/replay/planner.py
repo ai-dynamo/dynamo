@@ -254,7 +254,8 @@ def prepare_planner_replay(
         if retune_inputs_factory is None:
             raise ValueError(
                 "planner.retune is only supported by run_trace_replay with "
-                "trace_format='dynamo' (open-loop) in this release"
+                "trace_format='dynamo' (in aisimulate predict, traffic.source "
+                "type: trace with format: dynamo), not by synthetic replay"
             )
         retune_inputs = retune_inputs_factory(planner_config)
 

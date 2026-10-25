@@ -193,7 +193,7 @@ def test_read_task_writes_the_window_and_buckets_the_history(tmp_path):
         assert (unread.observations, unread.warmup_path) == (None, None)
         assert "history_requests" not in unread.row_counts
     # A read error propagates: the worker reports it as the task's failure.
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ValueError, match="No warmup trace files matched"):
         read("missing", trace_paths=(str(tmp_path / "missing"),))
 
 
@@ -481,15 +481,13 @@ def test_presweep_task_forecasts_only_the_window(monkeypatch, tmp_path):
         tmp_path / "observations.json", _wavy(history + window)
     )
 
-    loss = sweep_module._presweep_task(path, "constant_last", 180, window)
+    mapping = complete_predictor_preset("constant_last")
+    loss = sweep_module._presweep_task(path, mapping, 180, window)
 
     # Three series x window buckets forecasts, none for history: the first
     # forecast already sees every history bucket.
     assert loss is not None
     assert len(seen) == 3 * window and seen[:3] == [history] * 3
-    # A complete mapping scores exactly as the preset it spells out.
-    mapping = complete_predictor_preset("constant_last")
-    assert sweep_module._presweep_task(path, mapping, 180, window) == loss
     # A window shorter than one predictor interval has nothing to score.
     assert sweep_module._presweep_task(path, mapping, 180, 0) is None
 
@@ -506,7 +504,7 @@ def test_presweep_summary_picks_the_earliest_lowest_loss():
     summary = sweep_module._presweep_summary(
         {"constant_last": 0.5, "custom_1": 0.25, "custom_2": None, "custom_3": 0.25},
         {
-            "constant_last": "constant_last",
+            "constant_last": complete_predictor_preset("constant_last"),
             "custom_1": tuned,
             "custom_2": same,
             "custom_3": same,
@@ -525,7 +523,7 @@ def test_presweep_summary_picks_the_earliest_lowest_loss():
             ["t"],
             [retune_params(1.0)],
             retune_params(1.0),
-            predictor_candidates=(("a", "constant_last"), ("a", same)),
+            predictor_candidates=(("a", tuned), ("a", same)),
         )
 
 

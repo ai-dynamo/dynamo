@@ -5,7 +5,7 @@
 
 The controller itself is replaced by a recording stub, so these tests cover
 only the engine contract: construction, ``start``/step 6/``close`` wiring,
-and the quiet ticks of a retune-only planner (R11).
+and the quiet ticks of a retune-only planner.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ async def test_retune_only_planner_never_reconciles_replicas(
 ):
     # 16 one-GPU workers exceed the default max_gpu_budget (8) and one worker
     # is below min_endpoint 2. A scaling planner repairs both; a retune-only
-    # planner keeps the deployment's replicas. Its ticks are also quiet (R11):
+    # planner keeps the deployment's replicas. Its ticks are also quiet:
     # no load loop, no FPM pull (which the SLA target would otherwise make),
     # and nothing that forces the hosts to emit tick diagnostics.
     engine = _engine(optimization_target="sla", **overrides)

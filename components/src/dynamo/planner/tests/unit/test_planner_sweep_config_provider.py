@@ -667,8 +667,8 @@ def test_fpm_bucket_range_keeps_only_perfect_square_choices() -> None:
 
 
 def test_independent_float_range_includes_exact_endpoint() -> None:
-    # Accumulating ``current += step`` in float reached 0.30000000000000004
-    # and dropped the 0.3 endpoint.
+    # Float accumulation would reach 0.30000000000000004 and drop the 0.3
+    # endpoint.
     plan = create_provider().compile_recommendation(
         {
             "policy": "enabled",

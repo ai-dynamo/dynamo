@@ -12,8 +12,14 @@ from typing import Annotated, Any, Literal, TypeAlias
 from aisimulate.config.common import Choices, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# Also importable from here, where the router expansion used to define it.
-from dynamo.aisimulate.domains import stepped_numeric_values
+from dynamo.aisimulate.domains import (
+    CHOICE_FORM,
+    CHOICES,
+    KNOB_FORM,
+    RANGE,
+    SCALAR,
+    stepped_numeric_values,
+)
 
 MODES = frozenset({"kv_router", "round_robin"})
 OVERLAP_SCORE_CREDIT_DEFAULTS = (0.0, 0.5, 1.0)
@@ -27,9 +33,19 @@ StrictFiniteFloat = Annotated[float, Field(strict=True, ge=0.0, allow_inf_nan=Fa
 Policy = Literal["round_robin", "kv_router"]
 LoadModelType = Literal["none", "ais"]
 
-RouterKnobDomain: TypeAlias = (
-    StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange
-)
+RouterKnobDomain: TypeAlias = Annotated[
+    Annotated[StrictFiniteFloat, SCALAR]
+    | Annotated[Choices[StrictFiniteFloat], CHOICES]
+    | Annotated[NumericRange, RANGE],
+    KNOB_FORM,
+]
+PolicyDomain: TypeAlias = Annotated[
+    Annotated[Policy, SCALAR] | Annotated[Choices[Policy], CHOICES], CHOICE_FORM
+]
+LoadModelTypeDomain: TypeAlias = Annotated[
+    Annotated[LoadModelType, SCALAR] | Annotated[Choices[LoadModelType], CHOICES],
+    CHOICE_FORM,
+]
 # Public numeric knob -> AISimulate default domain, in plan dimension order.
 ROUTER_KNOB_DEFAULTS: dict[str, tuple[float, ...]] = {
     "overlap_score_credit": OVERLAP_SCORE_CREDIT_DEFAULTS,
@@ -44,16 +60,21 @@ ROUTER_PUBLIC_TO_LIVE: dict[str, str] = {
     "temperature": "router_temperature",
 }
 # ``PolicyParameters`` without an AISimulate public name. Retune accepts them
-# under their live names; recommend and predict do not search them. A
-# candidate's host_cache_hit_weight and disk_cache_hit_weight also weight the
-# replay router's own cache accounting, which an applied update leaves at its
-# startup value. shared_cache_multiplier is not retunable: replay reports no
-# shared cache hits, so every value would score the same.
+# under their live names; recommend and predict do not search them.
 ROUTER_RETUNE_EXTENSIONS: tuple[str, ...] = (
     "overlap_score_credit_decay",
     "decode_active_request_weight",
+)
+# ``PolicyParameters`` retune rejects. The startup ``KvRouterConfig`` also
+# feeds host_cache_hit_weight and disk_cache_hit_weight to the router's
+# overlap accounting (effective cached tokens), which a runtime update does
+# not change, so a candidate replay would score a router no update can
+# produce. Replay reports no shared cache hits, so every
+# shared_cache_multiplier would score the same.
+ROUTER_NOT_RETUNABLE: tuple[str, ...] = (
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
+    "shared_cache_multiplier",
 )
 
 
@@ -66,7 +87,7 @@ class PrefillLoadModel(BaseModel):
 class PrefillLoadRecommendationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: LoadModelType | Choices[LoadModelType] = Field(
+    type: LoadModelTypeDomain = Field(
         default_factory=lambda: Choices[LoadModelType](choices=["none", "ais"])
     )
 
@@ -118,7 +139,7 @@ class RouterPredictionConfig(BaseModel):
 class RouterRecommendationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    policy: Policy | Choices[Policy] = Field(
+    policy: PolicyDomain = Field(
         default_factory=lambda: Choices[Policy](choices=["round_robin", "kv_router"])
     )
     prefill_load_model: PrefillLoadRecommendationModel = Field(
@@ -231,11 +252,9 @@ class RouterRetuneConfig(RouterRecommendationConfig):
       domain: omitted, they keep their current value.
     """
 
-    policy: Policy | Choices[Policy] = "kv_router"
+    policy: PolicyDomain = "kv_router"
     overlap_score_credit_decay: RouterKnobDomain | None = None
     decode_active_request_weight: RouterKnobDomain | None = None
-    host_cache_hit_weight: RouterKnobDomain | None = None
-    disk_cache_hit_weight: RouterKnobDomain | None = None
 
     @model_validator(mode="before")
     @classmethod

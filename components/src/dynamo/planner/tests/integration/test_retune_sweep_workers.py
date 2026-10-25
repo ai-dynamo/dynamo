@@ -257,7 +257,7 @@ def test_empty_window_and_read_errors_end_the_sweep(tmp_path, caplog):
         evaluator=fake_evaluator,
     )
     assert missing.status == "failed"
-    assert "FileNotFoundError" in missing.error
+    assert "No warmup trace files matched" in missing.error
     assert multiprocessing.active_children() == []
 
 

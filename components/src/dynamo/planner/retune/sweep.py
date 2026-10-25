@@ -57,6 +57,7 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
 )
 from dynamo.planner.reconfiguration import prepare_predictor
+from dynamo.planner.retune.domains import PredictorCandidate
 from dynamo.planner.retune.window import (
     ObservationBuckets,
     read_trace_history,
@@ -74,8 +75,6 @@ logger = logging.getLogger(__name__)
 
 SweepStatus = Literal["ok", "empty", "timeout", "failed"]
 Evaluator = Callable[..., tuple[float, dict[str, Any]]]
-# (label, predictor preset name or mapping of public predictor knobs)
-PredictorCandidate = tuple[str, str | Mapping[str, Any]]
 
 GOODPUT_KEY = "goodput_output_throughput_tok_s"
 WORKER_NICENESS = 10
@@ -102,11 +101,10 @@ class SweepRequest:
     ``replicas`` maps worker type (``aggregated`` or ``prefill``/``decode``)
     to the ready count at window start. ``base_planner`` is the current
     planner config dump for an inner planner (``None``: fixed replicas, no
-    planner). ``predictor_candidates`` are the ``(label, entry)`` load
-    predictors the forecast-loss pre-sweep chooses from (an entry is a
-    preset name or a mapping of public predictor knobs, as
-    ``retune.planner.load_predictor`` lists them); its winner's predictor
-    fields are fixed into every non-baseline candidate.
+    planner). ``predictor_candidates`` are the ``(label, mapping)`` load
+    predictors the forecast-loss pre-sweep chooses from, as
+    ``retune.domains`` expands ``retune.planner.load_predictor``; its
+    winner's predictor fields are fixed into every non-baseline candidate.
     """
 
     window_index: int
@@ -310,15 +308,9 @@ def evaluate_candidate(
     return score_summary(report.summary, window_s)
 
 
-def _plain(entry: str | Mapping[str, Any]) -> str | dict[str, Any]:
-    """A candidate entry in the form the ``load_predictor`` helpers take."""
-
-    return entry if isinstance(entry, str) else dict(entry)
-
-
 def _presweep_summary(
     losses: Mapping[str, float | None],
-    entries: Mapping[str, str | Mapping[str, Any]],
+    entries: Mapping[str, dict[str, Any]],
     eval_steps: int,
     warmup_steps: int,
     wall_s: float,
@@ -331,7 +323,7 @@ def _presweep_summary(
             winner, best = label, loss
     return {
         "winner": winner,
-        "fields": {} if winner is None else predictor_fields(_plain(entries[winner])),
+        "fields": {} if winner is None else predictor_fields(entries[winner]),
         "losses": dict(losses),
         "eval_steps": eval_steps,
         "warmup_steps": warmup_steps,
@@ -364,7 +356,7 @@ def _read_observations(path: str | os.PathLike[str]) -> list[TrafficObservation]
 
 def _presweep_task(
     observations_path: str,
-    entry: str | Mapping[str, Any],
+    entry: dict[str, Any],
     interval_s: int,
     eval_steps: int,
 ) -> float | None:
@@ -386,7 +378,7 @@ def _presweep_task(
     ]
     loss = evaluate_preset(
         windows,
-        internal_preset(_plain(entry)),
+        internal_preset(entry),
         interval_s,
         len(windows) - eval_steps,
         forecast_warmup=False,

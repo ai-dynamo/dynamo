@@ -10,8 +10,9 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
 from aisimulate.config.common import Choices, IntegerRange, NumericRange
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from dynamo.aisimulate.domains import CHOICE_FORM, CHOICES, KNOB_FORM, RANGE, SCALAR
 from dynamo.planner.config.planner_config import PlannerConfig
 
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
@@ -19,6 +20,16 @@ NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveFloat = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
 Policy = Literal["disabled", "enabled"]
 Predictor = Literal["constant", "arima", "prophet", "kalman"]
+PolicyDomain: TypeAlias = Annotated[
+    Annotated[Policy, SCALAR] | Annotated[Choices[Policy], CHOICES], CHOICE_FORM
+]
+PredictorDomain: TypeAlias = Annotated[
+    Annotated[Predictor, SCALAR] | Annotated[Choices[Predictor], CHOICES],
+    CHOICE_FORM,
+]
+BoolDomain: TypeAlias = Annotated[
+    Annotated[bool, SCALAR] | Annotated[Choices[bool], CHOICES], CHOICE_FORM
+]
 
 # Public planner knobs whose name is also the ``PlannerConfig`` field name.
 PLANNER_PASSTHROUGH: tuple[str, ...] = (
@@ -140,7 +151,7 @@ class PresetControl(BaseModel):
     preset: Literal["default", False] | list[str | dict[str, Any]] | dict[
         str, Any
     ] = "default"
-    type: Predictor | Choices[Predictor] | None = None
+    type: PredictorDomain | None = None
 
     @model_validator(mode="after")
     def _validate_off_mapping(self) -> PresetControl:
@@ -151,12 +162,49 @@ class PresetControl(BaseModel):
         return self
 
 
-IntDomain: TypeAlias = PositiveInt | Choices[PositiveInt] | IntegerRange
-NonNegativeIntDomain: TypeAlias = (
-    NonNegativeInt | Choices[NonNegativeInt] | IntegerRange
-)
-FloatDomain: TypeAlias = PositiveFloat | Choices[PositiveFloat] | NumericRange
-OptionalIntDomain: TypeAlias = PositiveInt | Choices[PositiveInt | None] | IntegerRange
+def _validate_preset_mapping(
+    model: type[BaseModel], group: str, entry: dict[str, Any]
+) -> None:
+    """Validate one preset mapping, reporting its errors against the entry.
+
+    Raised from a model validator, the nested ``ValidationError`` would place
+    them at the top level of the config.
+    """
+
+    try:
+        model.model_validate(entry)
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
+            for item in error.errors(include_url=False)
+        )
+        raise ValueError(f"planner.{group}.preset entry {entry}: {problems}") from None
+
+
+IntDomain: TypeAlias = Annotated[
+    Annotated[PositiveInt, SCALAR]
+    | Annotated[Choices[PositiveInt], CHOICES]
+    | Annotated[IntegerRange, RANGE],
+    KNOB_FORM,
+]
+NonNegativeIntDomain: TypeAlias = Annotated[
+    Annotated[NonNegativeInt, SCALAR]
+    | Annotated[Choices[NonNegativeInt], CHOICES]
+    | Annotated[IntegerRange, RANGE],
+    KNOB_FORM,
+]
+FloatDomain: TypeAlias = Annotated[
+    Annotated[PositiveFloat, SCALAR]
+    | Annotated[Choices[PositiveFloat], CHOICES]
+    | Annotated[NumericRange, RANGE],
+    KNOB_FORM,
+]
+OptionalIntDomain: TypeAlias = Annotated[
+    Annotated[PositiveInt, SCALAR]
+    | Annotated[Choices[PositiveInt | None], CHOICES]
+    | Annotated[IntegerRange, RANGE],
+    KNOB_FORM,
+]
 
 
 class PlannerRecommendationConfig(BaseModel):
@@ -166,11 +214,11 @@ class PlannerRecommendationConfig(BaseModel):
     fpm_sampling: PresetControl | None = None
     load_sensitivity: PresetControl | None = None
     load_predictor: PresetControl | None = None
-    policy: Policy | Choices[Policy] = Field(
+    policy: PolicyDomain = Field(
         default_factory=lambda: Choices[Policy](choices=["disabled", "enabled"])
     )
-    enable_throughput_scaling: bool | Choices[bool] | None = None
-    enable_load_scaling: bool | Choices[bool] | None = None
+    enable_throughput_scaling: BoolDomain | None = None
+    enable_load_scaling: BoolDomain | None = None
     throughput_adjustment_interval_seconds: IntDomain | None = None
     load_adjustment_interval_seconds: IntDomain | None = None
     max_throughput_scaling_replicas: PositiveInt = PlannerConfig.model_fields[
@@ -180,7 +228,7 @@ class PlannerRecommendationConfig(BaseModel):
     fpm_sample_bucket_size: IntDomain | None = None
     load_scaling_down_sensitivity: NonNegativeIntDomain | None = None
     load_min_observations: IntDomain | None = None
-    load_predictor_log1p: bool | Choices[bool] | None = None
+    load_predictor_log1p: BoolDomain | None = None
     prophet_window_size: IntDomain | None = None
     kalman_q_level: FloatDomain | None = None
     kalman_q_trend: FloatDomain | None = None
@@ -227,7 +275,7 @@ class PlannerRecommendationConfig(BaseModel):
                 mapping_model = mapping_models[group]
                 for entry in control.preset:
                     if isinstance(entry, dict):
-                        mapping_model.model_validate(entry)
+                        _validate_preset_mapping(mapping_model, group, entry)
         sensitivity = self.load_scaling_down_sensitivity
         sensitivity_values = (
             sensitivity.choices if isinstance(sensitivity, Choices) else [sensitivity]
@@ -263,10 +311,18 @@ class PlannerRecommendationConfig(BaseModel):
 # to the ``PlannerConfig`` validation of each expanded value.
 StrictInt = Annotated[int, Field(strict=True)]
 StrictFiniteFloat = Annotated[float, Field(strict=True, allow_inf_nan=False)]
-StrictIntDomain: TypeAlias = StrictInt | Choices[StrictInt] | IntegerRange
-StrictFloatDomain: TypeAlias = (
-    StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange
-)
+StrictIntDomain: TypeAlias = Annotated[
+    Annotated[StrictInt, SCALAR]
+    | Annotated[Choices[StrictInt], CHOICES]
+    | Annotated[IntegerRange, RANGE],
+    KNOB_FORM,
+]
+StrictFloatDomain: TypeAlias = Annotated[
+    Annotated[StrictFiniteFloat, SCALAR]
+    | Annotated[Choices[StrictFiniteFloat], CHOICES]
+    | Annotated[NumericRange, RANGE],
+    KNOB_FORM,
+]
 
 # Public knobs and groups fixed when the planner starts. A retune domain that
 # names one is rejected; retune keeps the running value.
@@ -331,7 +387,7 @@ class PlannerRetuneConfig(PlannerRecommendationConfig):
     list ``null`` (inherit ``min_workers``) yet.
     """
 
-    policy: Policy | Choices[Policy] | None = None
+    policy: PolicyDomain | None = None
     # Recommend pins these two to one value; retune searches them, so the
     # override widens the field type on purpose.
     max_num_gpus: StrictIntDomain | None = None  # type: ignore[assignment]

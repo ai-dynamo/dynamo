@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
 Section = Literal["router", "planner"]
 # (label, mapping of every public predictor knob), as the pre-sweep ranks them.
+# The sweep request carries the same pairs.
 PredictorCandidate = tuple[str, dict[str, Any]]
 
 OVERLAP_SCORE_CREDIT = "overlap_score_credit"
@@ -99,7 +100,8 @@ def parse_retune_section(
     """Validate one retune section against its adapter schema.
 
     ``"default"`` parses as ``{}`` (every knob omitted). Raises ``ValueError``
-    with the schema's messages, and a hint for a bare value list.
+    with pydantic's errors, one ``<location>: <message>`` each, and a hint for
+    a preset group written as a bare list.
     """
 
     schema: type[BaseModel]
@@ -108,53 +110,26 @@ def parse_retune_section(
 
         schema = RouterRetuneConfig
     else:
-        from dynamo.planner.simulation.config import PlannerRetuneConfig
+        from dynamo.planner.simulation.config import (
+            PLANNER_RETUNE_GROUPS,
+            PlannerRetuneConfig,
+        )
 
         schema = PlannerRetuneConfig
     name = f"retune.{section}"
     raw: Any = {} if spec == "default" else spec
     if not isinstance(raw, Mapping):
         raise ValueError(f"{name} must be 'default' or a mapping, got {raw!r}")
-    for key, value in raw.items():
-        if isinstance(value, list) and (hint := _bare_list_hint(section, key, value)):
-            raise ValueError(f"{name}.{key} is a bare list; {hint}")
+    if section == "planner":
+        for group in PLANNER_RETUNE_GROUPS:
+            if isinstance(raw.get(group), list):
+                raise ValueError(
+                    f"{name}.{group} is a bare list; {_preset_group_hint(group)}"
+                )
     try:
         return schema.model_validate(raw)
     except ValidationError as error:
-        raise ValueError(_schema_error(name, raw, error)) from None
-
-
-def _bare_list_hint(section: Section, key: str, value: list[Any]) -> str | None:
-    """How to write ``key`` instead of the bare list ``value``.
-
-    ``None`` for a key whose own schema error says what to write: unknown, a
-    live name, the SLA, or a knob fixed at startup (the router ``policy``
-    included).
-    """
-
-    if section == "router":
-        from dynamo.router.simulation.config import RouterRetuneConfig
-
-        if key not in RouterRetuneConfig.model_fields or key == "policy":
-            return None
-        if key == "prefill_load_model":
-            # Fixed at startup: retune accepts only the running load model.
-            return "write {type: ...} with the running load model, or omit it"
-    else:
-        from dynamo.planner.simulation.config import (
-            PLANNER_RETUNE_GROUPS,
-            PLANNER_RETUNE_STARTUP_ONLY,
-            PlannerRetuneConfig,
-        )
-
-        if (
-            key not in PlannerRetuneConfig.model_fields
-            or key in PLANNER_RETUNE_STARTUP_ONLY
-        ):
-            return None
-        if key in PLANNER_RETUNE_GROUPS:
-            return _preset_group_hint(key)
-    return f"write a scalar, {{choices: {value}}} or {{range: {{min, max, step}}}}"
+        raise ValueError(_schema_error(name, error)) from None
 
 
 def _preset_group_hint(group: str) -> str:
@@ -177,101 +152,28 @@ def _preset_group_hint(group: str) -> str:
     )
 
 
-def _union_arm(part: object) -> str | None:
-    """The union member a ``loc`` part names; ``None`` for a field or index."""
+def _schema_error(name: str, error: ValidationError) -> str:
+    """Pydantic's errors as ``<section>.<location>: <message>``.
 
-    if not isinstance(part, str):
-        return None
-    if part.startswith("Choices["):
-        return "choices"
-    if part in ("NumericRange", "IntegerRange"):
-        return "range"
-    if part.startswith("list["):
-        return "list"
-    if part.startswith("dict["):
-        return "dict"
-    if part.startswith(("constrained-", "literal[", "function-")) or part in (
-        "int",
-        "float",
-        "bool",
-        "str",
-        "none",
-    ):
-        return "scalar"
-    return None
-
-
-def _value_shape(value: object) -> str:
-    if isinstance(value, Mapping):
-        if "choices" in value:
-            return "choices"
-        if "range" in value:
-            return "range"
-        return "mapping"
-    if isinstance(value, list):
-        return "list"
-    return "scalar"
-
-
-def _arm_matches(arm: str, shape: str) -> bool:
-    if arm == shape:
-        return True
-    if arm == "dict":
-        return shape in ("choices", "range", "mapping")
-    return shape == "mapping" and arm in ("choices", "range")
-
-
-def _schema_error(name: str, raw: Mapping[str, Any], error: ValidationError) -> str:
-    """One line per schema error, keeping the union member the value is shaped as.
-
-    A knob is a union of scalar, ``Choices`` and range; pydantic reports every
-    member's error. Only those of the member the written value looks like
-    (``{choices}``, ``{range}`` or a scalar) are kept.
+    A knob's domain union is tagged by the form the value is written in, so
+    pydantic reports only that form's errors. A validator's message that
+    already names the section is used as is.
     """
 
     messages: list[str] = []
     for item in error.errors(include_url=False):
-        path = name
-        value: Any = raw
-        relevant = True
-        written = True
-        fields = [part for part in item["loc"] if _union_arm(part) is None]
-        for part in item["loc"]:
-            arm = _union_arm(part)
-            if arm is not None:
-                if not _arm_matches(arm, _value_shape(value)):
-                    relevant = False
-                    break
-                continue
-            if isinstance(part, int):
-                path += f"[{part}]"
-                written = written and isinstance(value, list) and part < len(value)
-                value = value[part] if written else None
-            elif item["type"] == "missing" and len(fields) > 1 and part is fields[-1]:
-                # A required key the written mapping lacks. (Every section
-                # field is optional: a missing one comes from a nested model.)
-                path += f".{part}"
-            else:
-                path += f".{part}"
-                written = written and isinstance(value, Mapping) and part in value
-                value = value[part] if written else None
-        if not relevant:
-            continue
-        message = str(item["msg"]).removeprefix("Value error, ")
-        if path != name and not written:
-            # Raised by a nested model a validator checks (a preset mapping):
-            # the location is inside that model, not the section.
-            message = (
-                f"{name}: {path.removeprefix(name + '.')}: {message} "
-                f"(in {item['input']!r})"
-            )
-        elif path != name:
-            message = f"{path}: {message}"
+        context = item.get("ctx") or {}
+        message = (
+            str(context["error"])
+            if item["type"] == "value_error" and "error" in context
+            else item["msg"]
+        )
+        if item["loc"]:
+            message = f"{'.'.join([name, *map(str, item['loc'])])}: {message}"
         elif not message.startswith(name):
             message = f"{name}: {message}"
-        if message not in messages:
-            messages.append(message)
-    return "; ".join(messages) or f"{name} is invalid: {error}"
+        messages.append(message)
+    return "; ".join(messages)
 
 
 def expand_router_domain(
@@ -289,11 +191,12 @@ def expand_router_domain(
     at most ``retune.max_candidates`` values.
 
     ``startup_load_model`` and ``zero_startup_credit`` need the startup
-    ``KvRouterConfig``, so the retune controller passes them (stage 2):
+    ``KvRouterConfig``, so the retune controller passes them:
     a written ``prefill_load_model.type`` must equal the startup model (the
-    serde form ``"aic"`` reads as ``"ais"``), and a zero startup credit (E3)
-    collapses an omitted ``overlap_score_credit`` to ``[0.0]``. A written
-    positive credit is left for the caller to reject per candidate.
+    serde form ``"aic"`` reads as ``"ais"``), and a zero startup credit
+    collapses an omitted ``overlap_score_credit`` to ``[0.0]``, since a live
+    router rejects a positive credit then. A written positive credit is left
+    for the caller to reject per candidate.
     """
 
     spec = retune.router
@@ -365,7 +268,8 @@ def expand_planner_domain(config: PlannerConfig) -> PlannerDomain:
 
     An omitted group that does not apply is skipped; a written one raises, as
     does any written knob without load or throughput scaling. Grid values
-    pass R7 (``PlannerConfig._validate_retune_planner_grid``).
+    must affect this configuration and pass strict field validation
+    (``PlannerConfig._validate_retune_planner_grid``).
     """
 
     retune = config.retune
@@ -532,18 +436,14 @@ def _preset_off_entries(
     number of combinations are bounded before anything is built.
     """
 
-    from dynamo.aisimulate.domains import domain_size
+    from dynamo.aisimulate.domains import check_domain_size
     from dynamo.planner.simulation.config import PLANNER_PRESET_GROUPS
     from dynamo.planner.simulation.provider import independent_preset_dimensions
 
     for knob in sorted(PLANNER_PRESET_GROUPS[group] & public.model_fields_set):
         value = getattr(public, knob)
-        size = None if value is None else domain_size(value, None)
-        if size is not None and size > limit:
-            raise ValueError(
-                f"retune.planner.{knob} expands to {size} values, more than the "
-                f"limit of {limit}"
-            )
+        if value is not None:
+            check_domain_size(f"retune.planner.{knob}", value, None, limit=limit)
     control = getattr(public, group).model_dump(mode="python", exclude_none=True)
     names, dimensions = independent_preset_dimensions(
         group, control, public.model_dump(mode="python", exclude_none=True)
@@ -564,7 +464,8 @@ def _preset_off_entries(
 def describe_grid(
     router: Mapping[str, Sequence[Any]], planner: Mapping[str, Sequence[Any]]
 ) -> str:
-    """Each grid dimension's size under its public name, for R8 errors."""
+    """Each grid dimension's size under its public name, for the error of a
+    grid larger than ``retune.max_candidates``."""
 
     from dynamo.planner.simulation.config import PLANNER_RETUNE_KNOBS
     from dynamo.router.simulation.config import ROUTER_PUBLIC_TO_LIVE

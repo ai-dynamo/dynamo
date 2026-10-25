@@ -12,17 +12,62 @@ linear range without ``step``, or a log range). A recommendation sweep hands
 continuous domains to the AISimulate sampler; an exhaustive grid such as the
 planner retune sweep uses ``finite_values`` and ``require_enumerable``, which
 reject them.
+
+``SCALAR``, ``CHOICES`` and ``RANGE`` tag the members of a knob's domain
+union, and ``KNOB_FORM`` (or ``CHOICE_FORM`` for a knob without ranges)
+selects the member from the form the value is written in, so pydantic reports
+only that member's errors.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from aisimulate.config.common import Choices, IntegerRange, NumericRange
-from pydantic import BaseModel
+from pydantic import BaseModel, Discriminator, Tag
+
+SCALAR = Tag("scalar")
+CHOICES = Tag("choices")
+RANGE = Tag("range")
+
+
+def _knob_form(value: Any) -> str | None:
+    """The tag of the domain form ``value`` is written in; ``None`` for none."""
+
+    if isinstance(value, Choices) or (
+        isinstance(value, Mapping) and "choices" in value
+    ):
+        return "choices"
+    if isinstance(value, (NumericRange, IntegerRange)) or (
+        isinstance(value, Mapping) and "range" in value
+    ):
+        return "range"
+    if isinstance(value, (Mapping, list)):
+        return None
+    return "scalar"
+
+
+def _choice_form(value: Any) -> str | None:
+    form = _knob_form(value)
+    return None if form == "range" else form
+
+
+KNOB_FORM = Discriminator(
+    _knob_form,
+    custom_error_type="domain_form",
+    custom_error_message=(
+        "write a scalar, {choices: [...]} or {range: {min, max, step}}"
+    ),
+)
+CHOICE_FORM = Discriminator(
+    _choice_form,
+    custom_error_type="domain_form",
+    custom_error_message="write a scalar or {choices: [...]}",
+)
 
 
 @dataclass(frozen=True)
@@ -34,34 +79,19 @@ class ContinuousDomain:
     log: bool
 
 
-# Digits that hold the step count of any range with finite float bounds
-# (at most about 1.8e308 / 5e-324 < 10**632 steps).
-_EXACT_COUNT_PRECISION = 700
-
-
 def _stepped_count(
     minimum: int | float, maximum: int | float, step: int | float
 ) -> int:
-    """Values of a stepped range, in the current ``Decimal`` context.
+    """Values of a stepped range.
 
-    The default context (28 digits) raises ``decimal.InvalidOperation`` for
-    a count of more than 28 digits, as the router expansion always did.
+    Raises ``decimal.InvalidOperation`` for a count of more than 28 digits,
+    the precision of the default ``Decimal`` context.
     """
 
     start = Decimal(str(minimum))
     stop = Decimal(str(maximum))
     increment = Decimal(str(step))
     return int((stop - start) // increment) + 1
-
-
-def _exact_stepped_count(
-    minimum: int | float, maximum: int | float, step: int | float
-) -> int:
-    """``_stepped_count`` for any finite bounds, however many values."""
-
-    with localcontext() as context:
-        context.prec = _EXACT_COUNT_PRECISION
-        return _stepped_count(minimum, maximum, step)
 
 
 def stepped_numeric_values(
@@ -84,10 +114,11 @@ def stepped_numeric_values(
     ]
 
 
-def domain_size(value: Any, defaults: Sequence[Any] | None) -> int | None:
+def domain_size(value: Any, defaults: Sequence[Any] | None) -> int | float | None:
     """Number of values ``expand_domain`` returns, without building them.
 
-    ``None`` for a continuous range.
+    ``None`` for a continuous range; ``math.inf`` for a stepped float range
+    with too many values to count, which is over any limit.
     """
 
     if value is None:
@@ -104,9 +135,10 @@ def domain_size(value: Any, defaults: Sequence[Any] | None) -> int | None:
             return None
         if isinstance(value, IntegerRange):
             return (spec.max - spec.min) // spec.step + 1
-        # Exact, so a size check reports a range such as 0..1000 step 1e-30
-        # instead of overflowing the default 28-digit context.
-        return _exact_stepped_count(spec.min, spec.max, spec.step)
+        try:
+            return _stepped_count(spec.min, spec.max, spec.step)
+        except InvalidOperation:
+            return math.inf
     return 1
 
 
@@ -152,23 +184,33 @@ def _continuous_error(name: str, minimum: Any, maximum: Any, log: bool) -> Value
     )
 
 
+def check_domain_size(
+    name: str, value: Any, defaults: Sequence[Any] | None, *, limit: int
+) -> None:
+    """Raise ``ValueError`` naming ``name`` for a domain of more than ``limit``
+    values, without building them; a continuous range passes."""
+
+    size = domain_size(value, defaults)
+    if size is not None and size > limit:
+        count = "over 10^28" if size == math.inf else size
+        raise ValueError(
+            f"{name} expands to {count} values, more than the limit of {limit}"
+        )
+
+
 def finite_values(
     name: str, value: Any, defaults: Sequence[Any] | None, *, limit: int
 ) -> list[Any]:
     """``expand_domain`` for an exhaustive grid.
 
     Raises ``ValueError`` naming ``name`` for a continuous range, and for a
-    domain of more than ``limit`` values; the size is computed before any
+    domain of more than ``limit`` values; the size is checked before any
     value is built, so a range such as ``0..1000 step 1e-6`` fails fast.
     """
 
     if value is None and defaults is None:
         raise ValueError(f"{name} has no value and no default domain")
-    size = domain_size(value, defaults)
-    if size is not None and size > limit:
-        raise ValueError(
-            f"{name} expands to {size} values, more than the limit of {limit}"
-        )
+    check_domain_size(name, value, defaults, limit=limit)
     values = expand_domain(value, defaults)
     if isinstance(values, ContinuousDomain):
         raise _continuous_error(name, values.minimum, values.maximum, values.log)

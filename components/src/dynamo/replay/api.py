@@ -149,17 +149,22 @@ def _retune_inputs(
     options and a trace whose requests carry ``agent_context`` (an agentic
     Dynamo trace). ``execution_model`` is not an input: it only names the
     target model of agentic rows, and ``DynamoReplayRunner`` sets it for every
-    performance-model engine, agentic or not.
+    performance-model engine, agentic or not. ``aisimulate predict --stack
+    dynamo`` replays through this function too, so each error also names the
+    AISimulate setting.
     """
 
     if trace_format != "dynamo":
         raise ValueError(
-            f"planner.retune requires trace_format='dynamo'; got {trace_format!r}"
+            "planner.retune replays a Dynamo request trace: it requires "
+            "trace_format='dynamo' (in aisimulate predict, traffic.source.format: "
+            f"dynamo); got {trace_format!r}"
         )
     if replay_concurrency is not None:
         raise ValueError(
-            "planner.retune replays open-loop traffic; "
-            "replay_concurrency is not supported"
+            "planner.retune replays open-loop traffic at the trace timestamps; "
+            "replay_concurrency (in aisimulate predict, traffic.load.type: "
+            "concurrency) is not supported"
         )
     agentic_options = {
         "agentic_lanes": agentic_lanes is not None,
@@ -170,12 +175,14 @@ def _retune_inputs(
     if rejected := sorted(name for name, used in agentic_options.items() if used):
         raise ValueError(
             "planner.retune replays open-loop traffic; agentic replay options "
-            f"are not supported: {rejected}"
+            "(in aisimulate predict, traffic.load.agentic_*) are not supported: "
+            f"{rejected}"
         )
     if max_sim_time_ms is not None:
         raise ValueError(
-            "planner.retune replays complete windows; "
-            "max_sim_time_ms is not supported"
+            "planner.retune replays complete windows; max_sim_time_ms (in "
+            "aisimulate predict, traffic.stop.max_virtual_time_seconds) is not "
+            "supported"
         )
 
     # Lazy imports: the planner and replay-config modules import
@@ -189,7 +196,7 @@ def _retune_inputs(
 
     # Pin the engine shape the outer replay runs (prefill and decode args make
     # it disaggregated whatever the planner mode); the controller rejects a
-    # shape that does not match the planner mode (E5).
+    # shape that does not match the planner mode.
     engine = RetuneEngineSpec(
         extra_engine_args=load_engine_args(extra_engine_args),
         prefill_engine_args=load_engine_args(prefill_engine_args),

@@ -317,8 +317,8 @@ class OrchestratorEngineAdapter:
     ) -> Optional[RetuneController]:
         """Build the retune controller iff ``config.retune`` is set.
 
-        The controller runs its stage-2 validation in its constructor, so an
-        invalid retune setup fails here, at engine construction.
+        The controller validates the retune setup in its constructor, so an
+        invalid one fails here, at engine construction.
         """
         if self._config.retune is None:
             return None

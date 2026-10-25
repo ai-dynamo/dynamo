@@ -109,12 +109,12 @@ class _PendingSweep:
 class RetuneController:
     """Cadence, sweeps and decisions for ``PlannerConfig.retune``.
 
-    Construction runs the stage-2 checks (E1-E7) that need the router
-    bindings, the worker capabilities or the full candidate set, and raises
-    ``ValueError`` on any failure, except that E4 drops the planner grid
-    points that do not validate or fit the deployment. ``config`` is the live
-    config object the host mutates; the controller reads the searched planner
-    fields from it. Under ``config.advisory`` a decision that would apply is
+    Construction runs the checks that need the router bindings, the worker
+    capabilities or the full candidate set, and raises ``ValueError`` on any
+    failure, except that ``_feasible_grid`` drops the planner grid points
+    that do not validate or fit the deployment. ``config`` is the live config
+    object the host mutates; the controller reads the searched planner fields
+    from it. Under ``config.advisory`` a decision that would apply is
     recorded as ``advisory`` and leaves the desired state at the deployed
     point.
     """
@@ -142,9 +142,9 @@ class RetuneController:
             ("prefill", "decode") if config.mode == "disagg" else ("aggregated",)
         )
 
-        _check_engine_shape(config, inputs)  # E5
-        _check_inner_planner_isolation(config)  # E7
-        # E6: the scoring SLA is frozen here; ttft_ms/itl_ms are never searched.
+        _check_engine_shape(config, inputs)
+        _check_inner_planner_isolation(config)
+        # The scoring SLA is frozen here; ttft_ms/itl_ms are never searched.
         self._sla_ttft_ms, self._sla_itl_ms = retune.scoring_sla(
             config.ttft_ms, config.itl_ms
         )
@@ -153,7 +153,7 @@ class RetuneController:
             inputs.engine.router_config or {}
         )
         self._router_maps: dict[str, dict[str, dict[str, float]]] = {}
-        router_domain = self._router_domain(retune)  # E1-E3
+        router_domain = self._router_domain(retune)
         self._router_keys = tuple(sorted(router_domain))
         self._router_searched = bool(router_domain)
 
@@ -184,7 +184,7 @@ class RetuneController:
                     "set it explicitly in the planner config"
                 )
 
-        self._grid = self._feasible_grid(router_domain, planner_domain.grid)  # E4
+        self._grid = self._feasible_grid(router_domain, planner_domain.grid)
 
         self._desired_router: dict[str, float] = self._startup_router_values()
         self._pending_planner: dict[str, Any] = {}
@@ -300,14 +300,14 @@ class RetuneController:
             },
         )
 
-    # ------------------------------------------------------ stage-2 checks
+    # ------------------------------------------------- construction checks
 
     def _router_domain(self, retune: RetuneConfig) -> dict[str, list[float]]:
         if retune.router is None:
             return {}
         engine = self._inputs.engine
         startup = self._startup_router_json
-        # E1: only the builtin default policy is modelled identically.
+        # Only the builtin default policy is modelled identically.
         if engine.router_mode != "kv_router":
             raise ValueError("retune.router requires engine router_mode='kv_router'")
         if startup.get("router_policy_config") is not None:
@@ -327,7 +327,7 @@ class RetuneController:
             )
 
         startup_maps = self._router_map({})
-        # E3: a worker type that starts with no overlap credit can never get it.
+        # A worker type that starts with no overlap credit can never get it.
         zero_credit = {
             worker_type
             for worker_type, parameters in startup_maps.items()
@@ -343,9 +343,9 @@ class RetuneController:
             startup_load_model=startup_load_model,
             zero_startup_credit=bool(zero_credit),
         )
-        # E2: the schema admits only PolicyParameters names; every candidate
-        # must also be a valid router configuration (for example
-        # host_cache_hit_weight <= 1).
+        # The schema admits only PolicyParameters names, with the bounds
+        # KvRouterConfig checks; resolving every candidate also guards
+        # against the two drifting apart.
         for point in grid_points(domain, {}):
             try:
                 maps = self._router_map(point.router)
@@ -368,7 +368,7 @@ class RetuneController:
         router_domain: Mapping[str, Sequence[float]],
         planner_grid: Mapping[str, Sequence[Any]],
     ) -> list[RetuneParams]:
-        """E4: the grid without the planner points that cannot run here.
+        """The grid without the planner points that cannot run here.
 
         Grid points and predictor candidates are checked apart, each on the
         startup config: no ``PlannerConfig`` validator relates a predictor
@@ -685,7 +685,7 @@ class RetuneController:
 
         predictor_warmup = None
         if planner_changes:
-            # E4 checked grid points and predictors apart; check the
+            # _feasible_grid checked grid points and predictors apart; check the
             # combination the host will apply, so it never raises.
             updates = {**self._pending_planner, **planner_changes}
             error = _candidate_error(self._config, updates, self._capabilities)
@@ -806,7 +806,7 @@ class RetuneController:
 
 
 def _check_engine_shape(config: PlannerConfig, inputs: RetuneInputs) -> None:
-    """E5: the pinned engine matches the planner mode."""
+    """The pinned engine matches the planner mode."""
 
     if inputs.engine.is_disagg != (config.mode == "disagg"):
         raise ValueError(
@@ -816,7 +816,7 @@ def _check_engine_shape(config: PlannerConfig, inputs: RetuneInputs) -> None:
 
 
 def _check_inner_planner_isolation(config: PlannerConfig) -> None:
-    """E7: inner sweep planners must never call out to external plugins."""
+    """Inner sweep planners must never call out to external plugins."""
 
     if not config.scaling_enabled():
         return

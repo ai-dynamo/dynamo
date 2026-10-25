@@ -658,11 +658,13 @@ Router knobs:
 | `prefill_load_scale` | `prefill_load_scale` | `{0, 0.25, 0.5, 1, 2, 4, 8, 16, 32}` | Domain |
 | `temperature` | `router_temperature` | `{0, 0.2, 0.5, 1}` | Domain |
 | `overlap_score_credit_decay`, `decode_active_request_weight` (retune only) | Same | Startup value | Domain, non-negative |
-| `host_cache_hit_weight`, `disk_cache_hit_weight` (retune only) | Same | Startup value | Domain, from 0 to 1; see the note below |
 
 `router: default` is 3 × 9 × 4 = 108 points.
 
-`shared_cache_multiplier` is not retunable and is rejected: replay reports no shared cache hits, so every value would score the same. `host_cache_hit_weight` and `disk_cache_hit_weight` are searched with a fidelity gap. A candidate replay starts its router with the candidate's weights, which change both the policy's scores and the replay router's own accounting of host and disk cache hits. An applied change updates only the policy's scores and leaves that accounting at its startup value, so the replay after the decision can differ from the candidate's replay.
+The other router policy parameters are not retunable and are rejected:
+
+- `host_cache_hit_weight` and `disk_cache_hit_weight`: the startup router configuration also uses them to count a request's cached tokens, which a runtime update does not change. A candidate replay would start its router with the candidate's weights and score a router that no applied update can produce.
+- `shared_cache_multiplier`: replay reports no shared cache hits, so every value would score the same.
 
 Planner knobs:
 

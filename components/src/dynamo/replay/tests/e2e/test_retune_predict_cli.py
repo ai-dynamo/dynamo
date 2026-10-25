@@ -8,7 +8,8 @@ The workload is the one in ``test_retune_replay.py``: a dense 20 s head and a
 sparse tail on 4 workers, where greedy routing (``router_temperature: 0``)
 beats near-random routing (``100``) under a tight TTFT SLA. The CLI runs the
 replay in AISimulate's supervised execution process, so this also covers the
-spawned sweep workers under that supervisor.
+spawned sweep workers under that supervisor. Traffic that retune cannot
+replay is rejected by the replay, in AISimulate's terms.
 """
 
 from __future__ import annotations
@@ -130,25 +131,9 @@ def _config() -> dict:
     }
 
 
-@pytest.mark.timeout(180)  # ~20 s measured; spawned sweep workers vary with load
-def test_predict_cli_reports_retune_decisions(tmp_path: Path) -> None:
-    _write_trace(
-        tmp_path / "head.jsonl",
-        count=_HEAD_REQUESTS,
-        gap_ms=40,
-        start_ms=_BASE_MS,
-        prefix="request",
-    )
-    _write_trace(
-        tmp_path / "tail.jsonl",
-        count=_TAIL_REQUESTS,
-        gap_ms=1_000,
-        start_ms=_BASE_MS + _HEAD_REQUESTS * 40,
-        prefix="tail",
-    )
-    (tmp_path / "retune.yaml").write_text(yaml.safe_dump(_config()))
-
-    result = subprocess.run(
+def _predict(tmp_path: Path, config: dict) -> subprocess.CompletedProcess[str]:
+    (tmp_path / "retune.yaml").write_text(yaml.safe_dump(config))
+    return subprocess.run(
         [
             sys.executable,
             "-m",
@@ -169,6 +154,26 @@ def test_predict_cli_reports_retune_decisions(tmp_path: Path) -> None:
         timeout=170,
         check=False,
     )
+
+
+@pytest.mark.timeout(180)  # ~20 s measured; spawned sweep workers vary with load
+def test_predict_cli_reports_retune_decisions(tmp_path: Path) -> None:
+    _write_trace(
+        tmp_path / "head.jsonl",
+        count=_HEAD_REQUESTS,
+        gap_ms=40,
+        start_ms=_BASE_MS,
+        prefix="request",
+    )
+    _write_trace(
+        tmp_path / "tail.jsonl",
+        count=_TAIL_REQUESTS,
+        gap_ms=1_000,
+        start_ms=_BASE_MS + _HEAD_REQUESTS * 40,
+        prefix="tail",
+    )
+
+    result = _predict(tmp_path, _config())
     assert result.returncode == 0, result.stderr[-4000:]
 
     runtime = json.loads((tmp_path / "out/resource-runtime.json").read_text())
@@ -193,3 +198,54 @@ def test_predict_cli_reports_retune_decisions(tmp_path: Path) -> None:
         desired = tick["runtime_decision"]["router_parameters"]["aggregated"]
         expected = 0.0 if tick["at_ms"] >= 130_000.0 else 100.0
         assert desired["router_temperature"] == expected
+
+
+@pytest.mark.timeout(180)  # ~4 s measured per case: the replay rejects at startup
+@pytest.mark.parametrize(
+    ("traffic", "message"),
+    [
+        (
+            {"source": {"type": "trace", "format": "mooncake", "paths": ["m.jsonl"]}},
+            "traffic.source.format: dynamo",
+        ),
+        (
+            {"load": {"type": "concurrency", "concurrency": 4}},
+            "traffic.load.type: concurrency",
+        ),
+        (
+            {"stop": {"max_virtual_time_seconds": 60.0}},
+            "traffic.stop.max_virtual_time_seconds",
+        ),
+        (
+            {
+                "source": {"type": "synthetic", "input_tokens": 64},
+                "load": {"type": "constant_rate", "requests_per_second": 5.0},
+                "stop": {"requests": 20},
+            },
+            "traffic.source type: trace with format: dynamo",
+        ),
+    ],
+    ids=["mooncake", "closed-loop", "virtual-time-stop", "synthetic"],
+)
+def test_predict_cli_rejects_traffic_retune_cannot_replay(
+    tmp_path: Path, traffic: dict, message: str
+) -> None:
+    _write_trace(
+        tmp_path / "head.jsonl", count=20, gap_ms=40, start_ms=_BASE_MS, prefix="r"
+    )
+    (tmp_path / "m.jsonl").write_text(
+        json.dumps({"timestamp": 0, "input_length": 64, "output_length": 4}) + "\n"
+    )
+    config = _config()
+    config["traffic"] = {
+        **config["traffic"],
+        "source": {**config["traffic"]["source"], "paths": ["head.jsonl"]},
+        **traffic,
+    }
+
+    result = _predict(tmp_path, config)
+
+    assert result.returncode != 0
+    assert (
+        "planner.retune" in result.stderr and message in result.stderr
+    ), result.stderr[-4000:]

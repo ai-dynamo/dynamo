@@ -265,7 +265,7 @@ async def test_windows_launch_at_l_k_and_decide_one_tick_later(sweeps):
     sweeps.default = _scored(lambda _c, _r: 1.0)
     config = _s1(sla_ttft_ms=200.0)
     controller = _controller(config, ratio=2.0, start=10.0)
-    # E6: the scoring SLA is frozen at construction.
+    # The scoring SLA is frozen at construction.
     config.ttft_ms = 1.0
     config.itl_ms = 2.0
 
@@ -822,7 +822,7 @@ KALMAN_MIN_POINTS_60 = {
         ),
         (
             # A mapping candidate; its kalman_min_points also sets the history
-            # every sweep reads (R7b).
+            # every sweep reads.
             [KALMAN_MIN_POINTS_60],
             {"load_predictor": "kalman", "kalman_min_points": 2},
             ("custom_0", KALMAN_MIN_POINTS_60),
@@ -911,7 +911,7 @@ async def test_a_baseline_duplicate_is_listed_once_and_kept(sweeps):
 
 
 # ---------------------------------------------------------------------------
-# Stage-2 validation
+# Controller construction checks
 # ---------------------------------------------------------------------------
 
 
@@ -928,11 +928,6 @@ async def test_a_baseline_duplicate_is_listed_once_and_kept(sweeps):
             {},
             "prefill_load_model.type is fixed at startup",
         ),
-        (
-            {"router": {**ROUTER, "host_cache_hit_weight": {"choices": [0.5, 1.5]}}},
-            {},
-            "not a valid router configuration",
-        ),
         ({}, {"overlap_score_credit": 0.0}, "startup credit is 0"),
     ],
     ids=[
@@ -940,7 +935,6 @@ async def test_a_baseline_duplicate_is_listed_once_and_kept(sweeps):
         "custom-policy",
         "cond-disagg",
         "load-model-pin",
-        "out-of-range",
         "zero-credit-forbids",
     ],
 )

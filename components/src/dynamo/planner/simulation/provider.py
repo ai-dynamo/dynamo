@@ -165,10 +165,8 @@ def _public_values(value: Any, defaults: list[Any]) -> list[Any]:
             raise ValueError("Planner independent numeric ranges require step")
         if all(isinstance(bound, int) for bound in (minimum, maximum, step)):
             return list(range(minimum, maximum + 1, step))
-        # Decimal steps: accumulating ``current += step`` in float drifted past
-        # the endpoint and dropped it (0.0..0.3 step 0.1 lost 0.3). Every
-        # value is a float, the first one included: the old loop kept an int
-        # ``min`` (raw legacy input such as min 1, step 0.5) as an int.
+        # In Decimal, so float drift cannot drop the endpoint (0.0..0.3 step
+        # 0.1 ends at 0.3); every value is a float.
         return stepped_numeric_values(minimum, maximum, step)
     if isinstance(value, Mapping):
         raise ValueError("Planner domains must contain exactly choices or range")
@@ -700,7 +698,6 @@ class DynamoPlannerSweepConfigProvider:
         if config.get(_WARMUP_TRACE) is not None:
             candidate_config[_WARMUP_TRACE] = _warmup_trace_path(config[_WARMUP_TRACE])
         if config.get(_RETUNE) is not None:
-            _require_retune_traffic(context.traffic)
             candidate_config[_RETUNE] = _retune_with_evaluation_sla(
                 config[_RETUNE], sla
             )
@@ -1084,56 +1081,14 @@ def _public_planner_config(
 
 
 def _warmup_trace_path(value: JSONValue) -> JSONValue:
-    """Resolve the warmup trace like ``traffic.source.paths``: against the
-    working directory. Absolute, so every process of the run reads one file."""
+    """Make the warmup trace absolute against the working directory, like
+    ``traffic.source.paths``, so every process of the run reads the same
+    files. A file, a directory of shards or a glob; the replay reports one
+    that matches nothing."""
 
     if not isinstance(value, str):
         return value  # PlannerConfig reports the type error.
-    path = os.path.abspath(os.path.expanduser(value))
-    if not os.path.isfile(path):
-        raise ValueError(
-            f"planner.load_predictor_warmup_trace {value!r} is not a file "
-            f"(resolved to {path}; relative paths resolve against the working "
-            "directory, like traffic.source.paths)"
-        )
-    return path
-
-
-def _require_retune_traffic(traffic: Mapping[str, JSONValue]) -> None:
-    """Reject traffic that retune cannot replay, in AISimulate terms.
-
-    ``dynamo.replay`` enforces the same open-loop rules with replay-API names.
-    """
-
-    def section(name: str) -> Mapping[str, JSONValue]:
-        value = traffic.get(name)
-        return value if isinstance(value, Mapping) else {}
-
-    source, load, stop = section("source"), section("load"), section("stop")
-    if source.get("type") != "trace" or source.get("format") != "dynamo":
-        raise ValueError(
-            "planner.retune requires traffic.source type: trace with format: dynamo"
-        )
-    if load.get("type") != "trace_timestamps":
-        raise ValueError(
-            "planner.retune replays open-loop traffic and requires "
-            f"traffic.load.type: trace_timestamps; got {load.get('type')!r}"
-        )
-    agentic = sorted(
-        name
-        for name in ("agentic_lanes", "agentic_snapshot", "agentic_profile")
-        if load.get(name) is not None
-    ) + (["agentic_warmup"] if load.get("agentic_warmup") else [])
-    if agentic:
-        raise ValueError(
-            "planner.retune replays open-loop traffic; traffic.load does not "
-            f"accept {agentic}"
-        )
-    if stop.get("max_virtual_time_seconds") is not None:
-        raise ValueError(
-            "planner.retune replays complete windows; remove "
-            "traffic.stop.max_virtual_time_seconds"
-        )
+    return os.path.abspath(os.path.expanduser(value))
 
 
 def _retune_with_evaluation_sla(

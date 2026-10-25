@@ -490,10 +490,9 @@ trace that ends at or before the first replayed request; without throughput scal
 
 - It passes `router_parameters` to the Rust replay in each tick's decision. The replay patches the
   difference into each replay router's policy at that tick's virtual time. A patch changes the
-  policy's scores only. A candidate replay instead starts its router with the candidate's
-  parameters, so `host_cache_hit_weight` and `disk_cache_hit_weight` also set that router's own
-  accounting of host and disk cache hits, which a patch leaves at the startup value: a decision on
-  those two weights is scored on a router the outer replay does not run after the patch.
+  policy's scores only, while a candidate replay starts its router with the candidate's parameters.
+  Retune therefore does not search `host_cache_hit_weight` and `disk_cache_hit_weight`: the startup
+  router configuration also uses them to count cached tokens, which a patch leaves unchanged.
 - It applies the `planner_changes` of `applied` decisions through `apply_runtime_configuration`,
   warming a new load predictor from the decision's observations.
 - With `advisory: true`, it hands the Rust replay no scaling targets and no router parameters, so
@@ -512,8 +511,9 @@ trace that ends at or before the first replayed request; without throughput scal
   `runtime_decision.router_parameters`.
 
 The AISimulate Planner adapter (`planner/simulation/provider.py`) passes `planner.retune` through to
-`PlannerConfig`, rejects traffic that is not an open-loop Dynamo request trace, and fills the scoring
-SLA from `evaluation.sla`.
+`PlannerConfig` and fills the scoring SLA from `evaluation.sla`. `dynamo.replay` (`run_trace_replay`,
+and `prepare_planner_replay` for synthetic traffic) rejects traffic that is not an open-loop Dynamo
+request trace, and its error names the AISimulate setting.
 
 ## Known Limitations
 

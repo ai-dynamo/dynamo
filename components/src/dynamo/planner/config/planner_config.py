@@ -1919,7 +1919,7 @@ class PlannerConfig(BaseModel):
         grid: Mapping[str, Sequence[Any]],
         public_names: Mapping[str, str],
     ) -> dict[str, list[Any]]:
-        """R7: reject planner grid fields that are inert in this configuration.
+        """Reject planner grid fields that are inert in this configuration.
 
         ``grid`` is keyed by ``PlannerConfig`` field; ``public_names`` gives
         the ``retune.planner`` name to report. Each value must pass the

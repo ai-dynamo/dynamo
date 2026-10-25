@@ -66,8 +66,9 @@ The other accepted keys keep their `PlannerConfig` names: `enable_throughput_sca
 `load_predictor`, `load_predictor_log1p`, `prophet_window_size`, `kalman_q_level`,
 `kalman_q_trend`, `kalman_r`, `kalman_min_points`, `load_predictor_warmup_trace`,
 [`advisory`](#replay-in-advisory-mode), and [`retune`](#simulate-retune-experimental). Any other
-key fails with `Extra inputs are not permitted`. `load_predictor_warmup_trace` resolves a relative
-path against the working directory and must name a file.
+key fails with `Extra inputs are not permitted`. `load_predictor_warmup_trace` names a file, a
+directory of JSONL or JSONL.GZ shards, or a glob; a relative path resolves against the working
+directory.
 
 The adapter sets the remaining fields from the rest of the config:
 
@@ -912,8 +913,6 @@ Scenario 2 at about 4.5 GB with `max_parallel: 8`.
   launched, judged by the latency recorded in the trace rather than the simulated one.
 - **One replay per candidate.** Candidate replays share one random seed, but a score is still one
   sample path of one window; see [Measure the Gain](#measure-the-gain).
-- **Router tier weights.** A candidate replay starts its router with the candidate's
-  `host_cache_hit_weight` and `disk_cache_hit_weight`, which also set the router's own accounting of
-  host and disk cache hits. An applied change updates only the policy's scores, so the replay after
-  the decision can differ from the candidate's replay. `shared_cache_multiplier` is not retunable:
-  replay reports no shared cache hits.
+- **Router cache weights are not retunable.** `host_cache_hit_weight` and `disk_cache_hit_weight`
+  also set how the startup router counts cached tokens, which a runtime update does not change, and
+  replay reports no shared cache hits for `shared_cache_multiplier`. Retune rejects all three.
