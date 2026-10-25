@@ -10,13 +10,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_discovery_service::backends::kubernetes::{
-    EndpointSliceReplicaDirectory, McsPoolDirectory, RouterService, TrustedNetworkAuthenticator,
+    EndpointSliceReplicaDirectory, McsPoolDirectory, McsRoutingConfig, RouterService,
+    TrustedNetworkAuthenticator,
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::pool_discovery::{
@@ -60,6 +62,9 @@ struct Args {
     /// Kubernetes stores: the router Service's named port for state streams.
     #[arg(long)]
     router_port_name: Option<String>,
+    /// Kubernetes stores: configured pool models, joined with live frontend EndpointSlices.
+    #[arg(long)]
+    routing_config: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -115,6 +120,9 @@ async fn main() -> Result<()> {
 }
 
 fn memory_store(args: &Args) -> Result<DiscoveryStore> {
+    if args.routing_config.is_some() {
+        bail!("--routing-config requires --store karmada or --store mcs");
+    }
     let lease = LeasePolicy {
         heartbeat_interval: Duration::from_secs(args.heartbeat_interval_secs),
         lease_duration: Duration::from_secs(args.lease_duration_secs),
@@ -159,16 +167,30 @@ async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<Discove
         name: name.clone(),
         port_name: port_name.clone(),
     };
-    Ok(DiscoveryStore {
-        // Each pool record names its Ready PoolRelay's address, which routers
-        // on a trusted network use to admit the Relay.
-        pools: Arc::new(McsPoolDirectory::new(
+    let pools = if let Some(path) = &args.routing_config {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read routing config {}", path.display()))?;
+        let routing = McsRoutingConfig::from_json(&bytes).context("parse MCS routing config")?;
+        McsPoolDirectory::with_routing(
             client.clone(),
             mcs,
             args.pool_service_suffix.clone(),
             true,
             HashMap::new(),
-        )),
+            routing,
+        )?
+    } else {
+        McsPoolDirectory::new(
+            client.clone(),
+            mcs,
+            args.pool_service_suffix.clone(),
+            true,
+            HashMap::new(),
+        )
+    };
+    Ok(DiscoveryStore {
+        // Relay identity and frontend addresses follow their independent MCS readiness.
+        pools: Arc::new(pools),
         routers: Arc::new(EndpointSliceReplicaDirectory::imported(
             client, &router, mcs,
         )),
