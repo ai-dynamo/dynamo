@@ -631,6 +631,36 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
     AddressedPushRouter::from_runtime_provider(endpoint).await
 }
 
+/// Optional capabilities of a [`PushRouter`], for [`PushRouter::from_client_with_options`].
+///
+/// Every named constructor on [`PushRouter`] is a shorthand for one of these.
+pub struct PushRouterOptions<T, U> {
+    /// Durable overload detection, driven through `client.set_overloaded_instances(...)`.
+    pub worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+    /// Multimodal embedding-cache state for `RouterMode::DeviceAwareWeighted`.
+    pub multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
+    pub multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+    /// A caller-supplied final hop in place of the request plane. Its `ErrorType`
+    /// mapping drives report-down, overload and migration as usual.
+    pub dispatch: Option<Arc<dyn StreamingDispatch<T, U>>>,
+    /// Report transient worker errors to discovery (`report_instance_down`) and
+    /// route `direct()` through the filtered available list. Off for recovery and
+    /// query paths that must reach a worker regardless of its health.
+    pub fault_detection: bool,
+}
+
+impl<T, U> Default for PushRouterOptions<T, U> {
+    fn default() -> Self {
+        Self {
+            worker_monitor: None,
+            multimodal_cache_indexer: None,
+            multimodal_cache_key_extractor: None,
+            dispatch: None,
+            fault_detection: true,
+        }
+    }
+}
+
 impl<T, U> PushRouter<T, U>
 where
     T: Data + Serialize,
@@ -642,7 +672,7 @@ where
 
     /// Create a new PushRouter without a worker load monitor (no overload detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
-        Self::from_client_with_monitor(client, router_mode, None).await
+        Self::from_client_with_options(client, router_mode, PushRouterOptions::default()).await
     }
 
     /// Create a new PushRouter with fault detection disabled.
@@ -654,38 +684,15 @@ where
         client: Client,
         router_mode: RouterMode,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
-
-        let occupancy_state = if router_mode.requires_occupancy() {
-            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
-        } else {
-            None
-        };
-
-        // Type-erase to the seam so discovery-removal cleanup runs through it.
-        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
-        spawn_instance_removal_watcher(
-            client.endpoint.clone(),
-            addressed.clone(),
-            client.endpoint.drt().primary_token(),
-        );
-        let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
-
-        Ok(PushRouter {
+        Self::from_client_with_options(
             client,
-            addressed,
             router_mode,
-            picker,
-            round_robin_picker,
-            random_picker,
-            fault_detection_enabled: false,
-            response_timeout: response_inactivity_timeout(),
-            establish_timeout: response_stream_establish_timeout(),
-            occupancy_state,
-            multimodal_cache_indexer: None,
-            multimodal_cache_key_extractor: None,
-            _phantom: PhantomData,
-        })
+            PushRouterOptions {
+                fault_detection: false,
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
     }
 
     /// Create a new PushRouter with an optional worker load monitor.
@@ -699,7 +706,15 @@ where
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
-        Self::from_client_with_state(client, router_mode, worker_monitor, None, None).await
+        Self::from_client_with_options(
+            client,
+            router_mode,
+            PushRouterOptions {
+                worker_monitor,
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
     }
 
     /// Create a new PushRouter with optional load monitoring and multimodal cache indexing.
@@ -710,7 +725,61 @@ where
         multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
         multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
+        Self::from_client_with_options(
+            client,
+            router_mode,
+            PushRouterOptions {
+                worker_monitor,
+                multimodal_cache_indexer,
+                multimodal_cache_key_extractor,
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Like the other constructors but with a caller-supplied [`StreamingDispatch`]
+    /// as the final hop. Fault detection is on, so the dispatch's `ErrorType`
+    /// mapping drives report-down / overload / migration as usual.
+    ///
+    /// Wires frontend-local occupancy only; pass [`PushRouterOptions`] to
+    /// [`Self::from_client_with_options`] for a monitor or multimodal cache state
+    /// alongside the dispatch.
+    pub async fn from_client_with_dispatch(
+        client: Client,
+        router_mode: RouterMode,
+        dispatch: Arc<dyn StreamingDispatch<T, U>>,
+    ) -> anyhow::Result<Self> {
+        Self::from_client_with_options(
+            client,
+            router_mode,
+            PushRouterOptions {
+                dispatch: Some(dispatch),
+                ..PushRouterOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Create a new PushRouter from `client` with the given optional capabilities.
+    pub async fn from_client_with_options(
+        client: Client,
+        router_mode: RouterMode,
+        options: PushRouterOptions<T, U>,
+    ) -> anyhow::Result<Self> {
+        let PushRouterOptions {
+            worker_monitor,
+            multimodal_cache_indexer,
+            multimodal_cache_key_extractor,
+            dispatch,
+            fault_detection,
+        } = options;
+
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = match dispatch {
+            Some(dispatch) => dispatch,
+            None => addressed_router(&client.endpoint).await?,
+        };
 
         // Start worker monitor if provided and in dynamic mode
         if let Some(monitor) = worker_monitor.as_ref() {
@@ -723,8 +792,6 @@ where
             None
         };
 
-        // Type-erase to the seam so discovery-removal cleanup runs through it.
-        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -741,63 +808,19 @@ where
         }
         let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
-        let router = PushRouter {
+        Ok(PushRouter {
             client,
             addressed,
             router_mode,
             picker,
             round_robin_picker,
             random_picker,
-            fault_detection_enabled: true,
+            fault_detection_enabled: fault_detection,
             response_timeout: response_inactivity_timeout(),
             establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
-            _phantom: PhantomData,
-        };
-
-        Ok(router)
-    }
-
-    /// Like the other constructors but with a caller-supplied [`StreamingDispatch`]
-    /// as the final hop. Fault detection is on, so the dispatch's `ErrorType`
-    /// mapping drives report-down / overload / migration as usual.
-    ///
-    /// Wires frontend-local occupancy only — no `WorkerLoadMonitor` and no
-    /// multimodal cache indexer, so `RouterMode::DeviceAwareWeighted` is
-    /// non-functional; a caller needing those must extend it.
-    pub async fn from_client_with_dispatch(
-        client: Client,
-        router_mode: RouterMode,
-        dispatch: Arc<dyn StreamingDispatch<T, U>>,
-    ) -> anyhow::Result<Self> {
-        let occupancy_state = if router_mode.requires_occupancy() {
-            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
-        } else {
-            None
-        };
-
-        spawn_instance_removal_watcher(
-            client.endpoint.clone(),
-            dispatch.clone(),
-            client.endpoint.drt().primary_token(),
-        );
-        let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
-
-        Ok(PushRouter {
-            client,
-            addressed: dispatch,
-            router_mode,
-            picker,
-            round_robin_picker,
-            random_picker,
-            fault_detection_enabled: true,
-            response_timeout: response_inactivity_timeout(),
-            establish_timeout: response_stream_establish_timeout(),
-            occupancy_state,
-            multimodal_cache_indexer: None,
-            multimodal_cache_key_extractor: None,
             _phantom: PhantomData,
         })
     }

@@ -79,7 +79,7 @@ pub use plugins::{
     router_plugin_registry as worker_selection_policy_registry,
 };
 pub use prefill_router::PrefillRouter;
-pub use routing_host::{KvPushRouter, RoutingHost};
+pub use routing_host::{KvPushRouter, LlmDispatch, LlmPushRouter, RoutingHost, RoutingHostBuilder};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
 };
