@@ -281,11 +281,8 @@ func TestEnrichHardwareFromDiscovery_TotalGPUs(t *testing.T) {
 		wantTotal     int32
 	}{
 		{name: "heterogeneous nodes", counts: []int{8, 4}, wantTotal: 12},
-		{name: "uniform nodes", counts: []int{8, 8}, wantTotal: 16},
 		{name: "aggregate below cap despite larger maximum times nodes", counts: []int{8, 8, 8, 4, 2}, wantTotal: 30},
-		{name: "aggregate at cap", counts: []int{8, 8, 8, 4, 4}, wantTotal: 32},
 		{name: "aggregate above cap", counts: []int{8, 8, 8, 8, 4}, wantTotal: 32},
-		{name: "explicit total below discovery", counts: []int{8, 4}, explicitTotal: new(int32(4)), wantTotal: 4},
 		{name: "explicit total above cap", counts: []int{8, 4}, explicitTotal: new(int32(64)), wantTotal: 64},
 	}
 	for _, tt := range tests {

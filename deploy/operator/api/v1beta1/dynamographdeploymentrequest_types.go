@@ -407,8 +407,8 @@ type FeaturesSpec struct {
 // If all four fields are set, discovery is skipped.
 type HardwareSpec struct {
 	// GPUSKU selects the GPU type to target.
-	// When omitted, auto-detected by selecting the GPU with the highest
-	// node count, then highest VRAM. In mixed-GPU clusters, set this to
+	// When omitted, auto-detected by selecting the node with the most GPUs,
+	// then highest VRAM per GPU. In mixed-GPU clusters, set this to
 	// choose which GPU type to use. Discovery and totalGpus are then
 	// restricted to nodes matching this SKU.
 	// The legacy value gb200_sxm is deprecated; use gb200 instead.
@@ -423,8 +423,8 @@ type HardwareSpec struct {
 
 	// TotalGPUs is the GPU budget for profiling and deployment.
 	// The profiler uses this to determine parallelism and replica count.
-	// When omitted, computed by counting GPUs on discovered nodes
-	// (filtered by gpuSku when set), temporarily capped at 32 to
+	// When omitted, computed by summing GPUs on discovered nodes with the
+	// selected GPU type (filtered by gpuSku when set), temporarily capped at 32 to
 	// limit profiler search space. This cap may be removed in a future
 	// release. Set this field explicitly to override.
 	// +optional

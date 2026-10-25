@@ -270,8 +270,7 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //  6. Selects the "best" GPU node (filtered by SKU when set) based on:
 //     - Highest GPU count
 //     - Highest VRAM per GPU (tie-breaker)
-//  7. Counts nodes and sums GPUs matching the selected SKU for NodesWithGPUs and TotalGPUs.
-//  8. Caches the result per SKU for a short duration to avoid repeated scraping.
+//  7. Caches the result per SKU for a short duration to avoid repeated scraping.
 //
 // Behavior Notes:
 //
@@ -279,7 +278,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //     load-balancing ambiguity in multi-node clusters.
 //   - If at least one pod is successfully scraped, partial failures are tolerated.
 //   - If all pods fail to scrape, an aggregated error is returned.
-//   - Assumes DCGM exporter runs as a DaemonSet (one pod per GPU node).
+//   - Assumes each exporter reports metrics for its whole node; multiple
+//     exporters on the same node count only once.
 //
 // Returns:
 //   - *GPUInfo for the selected node
@@ -404,12 +404,17 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
 	totalGPUs := 0
+	seenNodes := make(map[string]struct{})
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
 		if n.sku != bestSKU {
 			continue
 		}
+		if _, seen := seenNodes[n.nodeName]; seen {
+			continue
+		}
+		seenNodes[n.nodeName] = struct{}{}
 		nodesWithGPUs++
 		totalGPUs += n.info.GPUsPerNode
 		if !rdmaDetected {

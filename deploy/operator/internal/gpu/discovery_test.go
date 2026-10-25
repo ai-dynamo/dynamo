@@ -63,8 +63,6 @@ func TestGPUDiscovery_TotalGPUs(t *testing.T) {
 				wantNodes   int
 				wantTotal   int
 			}{
-				{name: "single node", h100Counts: []int{8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 1, wantTotal: 8},
-				{name: "uniform nodes", h100Counts: []int{8, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 16},
 				{name: "heterogeneous nodes", h100Counts: []int{8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
 				{name: "maximum selected after smaller node", h100Counts: []int{4, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
 				{name: "unfiltered excludes other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
@@ -108,20 +106,13 @@ func TestGPUDiscovery_TotalGPUs(t *testing.T) {
 					var err error
 					if source == "DCGM" {
 						discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
-							info, ok := metrics[endpoint]
+							scraped, ok := metrics[endpoint]
 							if !ok {
 								return nil, fmt.Errorf("unexpected DCGM endpoint %q", endpoint)
 							}
-							return &info, nil
+							return &scraped, nil
 						})
-						cache := NewGPUDiscoveryCache()
-						info, err = discovery.DiscoverGPUsFromDCGMFiltered(t.Context(), k8sClient, cache, tt.filterSKU)
-						require.NoError(t, err)
-
-						t.Log("checking that the cached result retains the aggregate")
-						cached, err := discovery.DiscoverGPUsFromDCGMFiltered(t.Context(), k8sClient, cache, tt.filterSKU)
-						require.NoError(t, err)
-						assert.Equal(t, tt.wantTotal, cached.TotalGPUs)
+						info, err = discovery.DiscoverGPUsFromDCGMFiltered(t.Context(), k8sClient, nil, tt.filterSKU)
 					} else {
 						info, err = DiscoverGPUsFiltered(t.Context(), k8sClient, tt.filterSKU)
 					}
@@ -155,6 +146,7 @@ func TestDiscoverGPUs_SingleNode(t *testing.T) {
 	require.NotNil(t, gpuInfo)
 
 	assert.Equal(t, 8, gpuInfo.GPUsPerNode)
+	assert.Equal(t, 8, gpuInfo.TotalGPUs)
 	assert.Equal(t, "H100-SXM5-80GB", gpuInfo.Model)
 	assert.Equal(t, 81920, gpuInfo.VRAMPerGPU)
 	assert.Equal(t, "h100_sxm", string(gpuInfo.System))
@@ -188,6 +180,7 @@ func TestDiscoverGPUs_MultipleNodesHomogeneous(t *testing.T) {
 	require.NotNil(t, gpuInfo)
 
 	assert.Equal(t, 8, gpuInfo.GPUsPerNode)
+	assert.Equal(t, 16, gpuInfo.TotalGPUs)
 	assert.Equal(t, "H100-SXM5-80GB", gpuInfo.Model)
 	assert.Equal(t, 81920, gpuInfo.VRAMPerGPU)
 }
@@ -1068,6 +1061,40 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 	})
 }
 
+func TestDiscoverGPUsFromDCGM_DeduplicatesNodes(t *testing.T) {
+	for _, failFirstExporter := range []bool{false, true} {
+		t.Run(fmt.Sprintf("first exporter fails=%t", failFirstExporter), func(t *testing.T) {
+			t.Log("creating two exporters on one node and one on another node")
+			var objects []client.Object
+			for i, node := range []string{"node-a", "node-a", "node-b"} {
+				objects = append(objects, &corev1.Pod{
+					Name: fmt.Sprintf("dcgm-%d", i), Namespace: "gpu-operator",
+					Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+					Spec:   corev1.PodSpec{NodeName: node},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: fmt.Sprintf("10.0.0.%d", i+1)},
+				})
+			}
+			discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+				if failFirstExporter && endpoint == buildDCGMEndpoint("10.0.0.1") {
+					return nil, errors.New("exporter unavailable")
+				}
+				count := 8
+				if endpoint == buildDCGMEndpoint("10.0.0.3") {
+					count = 4
+				}
+				return &GPUInfo{GPUsPerNode: count, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920}, nil
+			})
+
+			t.Log("counting each successfully discovered node once")
+			info, err := discovery.DiscoverGPUsFromDCGM(t.Context(), newFakeClient(objects...), nil)
+			require.NoError(t, err)
+			assert.Equal(t, 8, info.GPUsPerNode)
+			assert.Equal(t, 2, info.NodesWithGPUs)
+			assert.Equal(t, 12, info.TotalGPUs)
+		})
+	}
+}
+
 func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	ctx := context.Background()
 
@@ -1125,6 +1152,7 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	require.Equal(t, 1, callCount)
 
 	require.Equal(t, info1, info2)
+	require.Equal(t, 4, info2.TotalGPUs)
 }
 
 func TestDiscoverGPUsFromDCGM_SharesConcurrentScrape(t *testing.T) {
