@@ -10,7 +10,9 @@
 //! trait.
 
 mod catalog;
+mod discovery;
 mod selector;
 
 pub use catalog::{Pool, PoolCatalog, PoolSnapshot, StaticPoolCatalog};
-pub use selector::{FirstPoolSelector, PoolSelector, PoolTarget, RoutingRequest};
+pub use discovery::DiscoveryPoolCatalog;
+pub use selector::{PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest};

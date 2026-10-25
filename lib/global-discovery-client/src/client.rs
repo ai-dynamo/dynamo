@@ -4,11 +4,13 @@
 use std::time::Duration;
 
 use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 use url::Url;
 
 use crate::replicas::ReplicaEndpoint;
-use crate::wire::{PoolRegistration, RoutersResponse};
+use crate::watch::{Completeness, Snapshot};
+use crate::wire::{PoolListing, PoolRegistration, PoolsResponse, RoutersResponse};
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -74,7 +76,28 @@ impl GlobalDiscoveryClient {
     /// Each call returns the full current set. If any entry does not parse,
     /// the whole call fails, so a caller never acts on a partial list.
     pub async fn routers(&self) -> Result<Vec<ReplicaEndpoint>, DiscoveryClientError> {
-        let url = &self.routers_url;
+        let body: RoutersResponse = self.get_json(&self.routers_url).await?;
+        Ok(body.routers)
+    }
+
+    /// Calls `GET /pools` and returns every pool the service lists. A Global
+    /// Router calls this to learn the pools and their frontends.
+    ///
+    /// Like [`Self::routers`], one entry that does not parse fails the whole
+    /// call.
+    pub async fn pools(&self) -> Result<Snapshot<PoolListing>, DiscoveryClientError> {
+        let body: PoolsResponse = self.get_json(&self.pools_url).await?;
+        Ok(Snapshot {
+            items: body.pools,
+            completeness: if body.complete {
+                Completeness::Exact
+            } else {
+                Completeness::Estimated
+            },
+        })
+    }
+
+    async fn get_json<T: DeserializeOwned>(&self, url: &Url) -> Result<T, DiscoveryClientError> {
         let response = self.send(self.http.get(url.clone()), url).await?;
         let body = response
             .bytes()
@@ -83,12 +106,10 @@ impl GlobalDiscoveryClient {
                 url: url.clone(),
                 source,
             })?;
-        let body: RoutersResponse =
-            serde_json::from_slice(&body).map_err(|source| DiscoveryClientError::Decode {
-                url: url.clone(),
-                source,
-            })?;
-        Ok(body.routers)
+        serde_json::from_slice(&body).map_err(|source| DiscoveryClientError::Decode {
+            url: url.clone(),
+            source,
+        })
     }
 
     /// Calls `POST /pools` to register a pool or refresh its registration.

@@ -14,6 +14,33 @@ pub(crate) struct RoutersResponse {
     pub routers: Vec<ReplicaEndpoint>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct PoolsResponse {
+    pub pools: Vec<PoolListing>,
+    /// True when the service lists every pool.
+    pub complete: bool,
+}
+
+/// One pool in the `GET /pools` response.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct PoolListing {
+    pub key: PoolKey,
+    pub location: PoolLocation,
+    /// `None` when the service knows only the pool's name, as with MCS.
+    pub model: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Local frontends the Global Router dispatches requests to.
+    #[serde(default)]
+    pub frontends: Vec<Url>,
+    #[serde(default)]
+    pub capacity: Vec<Capacity>,
+    /// The only Relay allowed to stream this pool's state, when the service
+    /// knows it.
+    #[serde(default)]
+    pub relay_identity: Option<String>,
+}
+
 /// `POST /pools` request body. A PoolRelay sends it on every registration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolRegistration {

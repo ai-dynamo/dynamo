@@ -2667,6 +2667,8 @@ dependencies = [
  "async-trait",
  "axum 0.8.4",
  "clap",
+ "dynamo-global-discovery-client",
+ "dynamo-global-discovery-service",
  "dynamo-global-router",
  "dynamo-global-router-shared",
  "dynamo-llm",
@@ -2686,8 +2688,15 @@ dependencies = [
 name = "dynamo-global-router"
 version = "1.6.0"
 dependencies = [
+ "axum 0.8.4",
+ "dashmap",
+ "dynamo-global-discovery-client",
  "dynamo-global-router-shared",
+ "dynamo-runtime",
+ "serde_json",
  "tokio",
+ "tokio-util",
+ "tracing",
  "url",
 ]
 

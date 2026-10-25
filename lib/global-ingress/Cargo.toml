@@ -16,6 +16,7 @@ name = "global-ingress"
 path = "src/main.rs"
 
 [dependencies]
+dynamo-global-discovery-client = { path = "../global-discovery-client" }
 dynamo-global-router = { path = "../global-router" }
 dynamo-global-router-shared = { path = "../global-router-shared" }
 # The block manager serves workers. A frontend that only forwards requests
@@ -38,4 +39,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+dynamo-global-discovery-service = { path = "../global-discovery-service" }
+
 axum = { workspace = true }
