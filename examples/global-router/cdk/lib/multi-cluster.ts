@@ -75,7 +75,7 @@ const MCS_CRD_FILES = [
 const EXCLUDE_SNAT_ENV = "AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS";
 
 export interface MultiClusterSupportProps {
-  readonly cluster: eks.Cluster;
+  readonly cluster: eks.ICluster & { readonly albController?: IDependable };
   readonly config: MultiClusterConfig;
   readonly region: string;
   /** This cluster's VPC range. It must not be one of the peers. */

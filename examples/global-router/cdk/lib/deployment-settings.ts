@@ -45,26 +45,45 @@ export function loadDeploymentSettings(
   }
   let settings: unknown;
   try {
-    settings = JSON.parse(fs.readFileSync(path.resolve(cwd, configPathValue), "utf8"));
+    settings = JSON.parse(
+      fs.readFileSync(path.resolve(cwd, configPathValue), "utf8"),
+    );
   } catch (error) {
-    throw new Error("Could not read deployment settings JSON.", { cause: error });
+    throw new Error("Could not read deployment settings JSON.", {
+      cause: error,
+    });
   }
-  if (!isObject(settings) || !isObject(settings.deployments)
-      || Object.keys(settings.deployments).length === 0
-      || !Object.values(settings.deployments).every(isObject)
-      || !isObject(settings.peering)
-      || !isObject(settings.peering.ohio) || !isObject(settings.peering.west)) {
-    throw new Error("Deployment settings must contain deployments and peering.ohio/peering.west objects.");
+  if (
+    !isObject(settings) ||
+    !isObject(settings.deployments) ||
+    Object.keys(settings.deployments).length === 0 ||
+    !Object.values(settings.deployments).every(isObject) ||
+    !isObject(settings.peering) ||
+    !isObject(settings.peering.ohio) ||
+    !isObject(settings.peering.west)
+  ) {
+    throw new Error(
+      "Deployment settings must contain deployments and peering.ohio/peering.west objects.",
+    );
   }
   // The stack validates deployment fields; peering fields are checked here
   // because those stacks do not pass through DynamoMockerCpuStack.
   for (const region of [settings.peering.ohio, settings.peering.west]) {
-    if (typeof region.region !== "string" || typeof region.cidrBlock !== "string"
-        || typeof region.vpcId !== "string" || !/^vpc-[0-9a-f]{8,17}$/.test(region.vpcId)
-        || !Array.isArray(region.privateRouteTableIds) || region.privateRouteTableIds.length === 0
-        || !region.privateRouteTableIds.every((id: unknown) =>
-          typeof id === "string" && /^rtb-[0-9a-f]{8,17}$/.test(id))) {
-      throw new Error("Each peering region must specify region, cidrBlock, vpcId and privateRouteTableIds.");
+    if (
+      typeof region.region !== "string" ||
+      typeof region.cidrBlock !== "string" ||
+      typeof region.vpcId !== "string" ||
+      !/^vpc-[0-9a-f]{8,17}$/.test(region.vpcId) ||
+      !Array.isArray(region.privateRouteTableIds) ||
+      region.privateRouteTableIds.length === 0 ||
+      !region.privateRouteTableIds.every(isRouteTableId) ||
+      (region.publicRouteTableIds !== undefined &&
+        (!Array.isArray(region.publicRouteTableIds) ||
+          !region.publicRouteTableIds.every(isRouteTableId)))
+    ) {
+      throw new Error(
+        "Each peering region must specify region, cidrBlock, vpcId and privateRouteTableIds.",
+      );
     }
   }
   return settings as unknown as DeploymentSettings;
@@ -72,4 +91,8 @@ export function loadDeploymentSettings(
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isRouteTableId(id: unknown): boolean {
+  return typeof id === "string" && /^rtb-[0-9a-f]{8,17}$/.test(id);
 }
