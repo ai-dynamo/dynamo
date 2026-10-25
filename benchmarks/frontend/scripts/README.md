@@ -357,3 +357,30 @@ artifacts/sweep_YYYYMMDD_HHMMSS/
             frontend.nsys-rep
             frontend.sqlite
 ```
+
+## Delta tokenizer CPU microbenchmark
+
+`benchmark_delta_tokenizer.py` measures the Python SGLang adapter's configured
+HF reference, warm appends, verification, invalidation, eviction and expiration.
+The existing Rust `lib/llm/benches/tokenizer_simple.rs` benchmarks the Rust
+backends; it does not exercise this Python-only adapter.
+
+Install the `delta-tokenizer` extra and stage tokenizer-only artifacts first.
+Pass an absolute local Hugging Face snapshot directory. The benchmark does not
+download artifacts, load model weights, start services or use GPUs.
+
+```bash
+python3 benchmarks/frontend/scripts/benchmark_delta_tokenizer.py \
+  --model-dir /absolute/path/to/tokenizer-snapshot \
+  --output /absolute/path/to/results.json
+```
+
+Warm runs wait for the initial background seed before timing requests. Expired
+and invalidated requests measure the reference response path and wait for seed
+work between iterations. Compare request latency separately from background
+seed CPU cost. The report includes exact parity counts, latency quantiles,
+throughput, CPU time, retained-byte estimates and peak RSS. Use enough iterations
+for useful tail estimates and pin the process to an otherwise idle CPU.
+
+These results are tokenizer microbenchmarks. Use `run_perf.sh` and mock workers
+for serving-level TTFT. A tokenizer speedup alone establishes no TTFT improvement.

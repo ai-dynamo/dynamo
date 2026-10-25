@@ -949,3 +949,25 @@ All endpoint paths can be overridden via environment variables:
     Custom per-request fields for routing, preprocessing, and response metadata.
   </Card>
 </CardGroup>
+
+## Experimental delta tokenizer
+
+<Warning>
+  Experimental and disabled by default. This path retains rendered prompt text
+  in process memory. It requires a trusted gateway that supplies authenticated
+  session scope. See [Tokenizer](../../developer-guide/knowledge-base/modular-components/frontend/tokenizer.md#experimental-incremental-prompt-tokenization)
+  for admission, privacy and lifecycle constraints.
+</Warning>
+
+| Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- |
+| `--experimental-delta-tokenizer` | `DYN_EXPERIMENTAL_DELTA_TOKENIZER` | `false` | Enable the single-process Python SGLang Chat Completions adapter. Requires the default tokenizer and staged TokTier artifacts. |
+| `--delta-tokenizer-max-entries` | `DYN_DELTA_TOKENIZER_MAX_ENTRIES` | `16` | Positive process-wide session-entry limit, including in-flight seeds. |
+| `--delta-tokenizer-max-bytes` | `DYN_DELTA_TOKENIZER_MAX_BYTES` | `1073741824` | Positive process-wide approximate retained-byte budget, including tokenizer tables and in-flight reservations. |
+| `--delta-tokenizer-ttl-secs` | `DYN_DELTA_TOKENIZER_TTL_SECS` | `300` | Positive finite idle TTL in seconds. |
+| `--delta-tokenizer-verify-rate` | `DYN_DELTA_TOKENIZER_VERIFY_RATE` | `0` | Finite sampling fraction in `[0, 1]` for full-reference verification of warm candidates. |
+
+Enabling the feature selects zero preprocessing workers when their count is
+unspecified. An explicitly nonzero `--dyn-preprocess-workers` value is rejected.
+CLI settings override environment defaults. The adapter falls back to full
+reference tokenization whenever state or certification is unavailable.

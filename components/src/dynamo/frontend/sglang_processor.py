@@ -27,6 +27,7 @@ from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
+from .delta_tokenizer import DeltaConfig, DeltaTokenizer, delta_request_context
 from .sglang_prepost import (
     ReasoningParser,
     SglangStreamingPostProcessor,
@@ -564,8 +565,12 @@ class SglangProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        delta_tokenizer: DeltaTokenizer | None = None,
+        delta_requested: bool = False,
     ):
         self.tokenizer = tokenizer
+        self.delta_tokenizer = delta_tokenizer
+        self.delta_requested = delta_requested
         # Detect force_reasoning once from the chat template, matching
         # sglang's template_manager. Per-request overrides still apply
         # (see resolve_request_force_reasoning).
@@ -640,8 +645,13 @@ class SglangProcessor:
             if self.debug_perf:
                 t0 = time.monotonic()
 
+            delta_context = delta_request_context(
+                self.delta_tokenizer, context, enabled=self.delta_requested
+            )
+
             pre = preprocess_chat_request(
                 request,
+                **delta_context,
                 tokenizer=self.tokenizer,
                 tool_call_parser_name=self.tool_call_parser_name,
                 reasoning_parser_name=self.reasoning_parser_name,
@@ -1243,6 +1253,23 @@ class SglangEngineFactory:
 
         logger.info("SGLang processor stream_interval=%d", self.stream_interval)
 
+        delta_tokenizer = None
+        if self.config.experimental_delta_tokenizer:
+            from .toktier_session import create_delta_tokenizer
+
+            delta_tokenizer = await asyncio.to_thread(
+                create_delta_tokenizer,
+                tokenizer,
+                local_dir,
+                mdc.name(),
+                DeltaConfig(
+                    max_entries=self.config.delta_tokenizer_max_entries,
+                    max_bytes=self.config.delta_tokenizer_max_bytes,
+                    ttl_secs=self.config.delta_tokenizer_ttl_secs,
+                    verify_rate=self.config.delta_tokenizer_verify_rate,
+                ),
+            )
+
         gen = SglangProcessor(
             tokenizer,
             routed_engine,
@@ -1252,6 +1279,8 @@ class SglangEngineFactory:
             debug_perf=self.debug_perf,
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
+            delta_tokenizer=delta_tokenizer,
+            delta_requested=self.config.experimental_delta_tokenizer,
             stream_interval=self.stream_interval,
             default_thinking_mode=default_thinking_mode,
             structural_tag_mode=structural_tag_mode,

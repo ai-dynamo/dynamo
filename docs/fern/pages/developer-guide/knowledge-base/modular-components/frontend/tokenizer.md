@@ -118,3 +118,91 @@ When a non-default backend is selected:
 3. Dynamo constructs `FastTokenizer` for `fastokens` or `BasetenTokenizer` for `basetenkenizer` from the same `tokenizer.json` file.
 4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--no-tokenizer-fallback`, model initialization fails and reports the backend loading error instead. In dynamic mode, discovery retries the load while the frontend continues running.
 5. When the L1 prefix cache is enabled, Dynamo wraps the selected backend with the same special-token boundary metadata and cache metrics used by the default path.
+
+## Experimental incremental prompt tokenization
+
+**Experimental.** The optional TokTier adapter accelerates append-only, rendered
+text prompts in the single-process Python SGLang HTTP Chat Completions frontend. It
+wraps the configured Hugging Face reference; it adds no tokenizer backend choice
+and changes no model-engine tokenization. The Rust frontend, gRPC, Responses,
+Completions, Anthropic, embedding, native token-input, multimodal and
+engine-specific conversation-template paths keep their existing behavior.
+
+Install the `delta-tokenizer` extra and stage TokTier's certified tokenizer
+artifacts before enabling `--experimental-delta-tokenizer`. Startup and request
+handling never download tokenizer artifacts. Use `--dyn-chat-processor sglang`
+and `--dyn-preprocess-workers 0`. Other processor/backend combinations are
+rejected when the feature is enabled.
+
+TokTier 0.3.0 is pinned. Admission requires a canonical artifact digest, a
+standard Hugging Face fast-tokenizer loader, an equivalent effective pipeline
+including added and special tokens, and a certified CPU execution report.
+Python `tokenizers` 0.22.2, 0.23.2 and 0.23.3 are the initially admitted
+oracle versions. Other versions and custom tokenizers use full reference
+tokenization. This does not change the Rust frontend's reference dependency.
+
+### Session scope
+
+A trusted gateway supplies both `x-dynamo-meta-delta-tokenizer-session` and
+`x-dynamo-meta-delta-tokenizer-scope` using the configured metadata-header
+prefix. The scope identifies an authenticated tenant or equivalent isolation
+domain. The gateway must strip client-supplied scope headers and set the scope
+from its authentication result. These headers do not provide authentication.
+
+Without both values, the frontend uses the existing full-tokenization path.
+Dynamo marks the Chat Completions API origin internally and prevents callers
+from forging that marker through metadata headers. Session affinity is separate;
+tokenizer state never changes routing. Another frontend replica or a restarted
+frontend has no state and performs a full encode.
+
+### Exactness and lifecycle
+
+Each model load captures a private reference tokenizer snapshot and binds it to
+the model, artifact, loader versions, effective configuration and backend.
+Tokenizer changes require a new model/preprocessor lifecycle. A chat-template
+fingerprint accompanies each rendered prompt; changes invalidate session state.
+Applications must not mutate the frontend's tokenizer core after model
+initialization.
+
+Cold requests return full reference tokens and retain a reference-only snapshot.
+Only a confirmed second append justifies preparing TokTier state. Two bounded
+background workers prepare admitted session seeds, compare them to the reference, and
+publish only while the reservation remains live and uncancelled. Requests that
+arrive before a seed is ready use the reference. Prompts below 4096 UTF-8 bytes
+bypass session admission. Initial tokenizer preparation can consume seconds of
+CPU, even though it runs outside the request's encode call. Avoid enabling the
+feature for workloads with little session reuse.
+
+Warm appends use TokTier's public `Session.append_patch` and apply its suffix
+splice to retained token IDs. The downstream request still needs a full token
+vector. No full TokTier session snapshot is requested. An absent or declined
+repair certificate, a non-append edit, a template change, state loss, corruption,
+a stale reservation or an unsupported input causes reference tokenization.
+A cold seed may use TokTier's certified oracle because Dynamo compares the
+complete seed before reuse.
+
+`--delta-tokenizer-verify-rate` samples warm requests for a second reference
+encode. Sampling is disabled by default. A mismatch returns the reference IDs,
+increments a mismatch metric, discards affected cached state and disables reuse
+for that manager. Verification never authorizes an otherwise uncertified route.
+
+Entry count and conservative approximate retained bytes are bounded across
+model-specific managers in one frontend process. The byte budget includes
+reference snapshots, loaded per-session TokTier tables, retained text/tokens and
+in-flight reservations. The estimate is not an operating-system RSS limit.
+Each session owns a separate TokTier store, so independent sessions do not
+serialize on TokTier's shared-tokenizer store lock.
+
+Idle TTL cleanup removes at most 16 entries per pass. LRU eviction breaks ties
+by access order. Busy entries delegate competing requests to the reference.
+Eviction, expiry and retirement prevent a running worker from publishing stale
+state. Already running native work cannot be interrupted; its charged state is
+released when that worker exits.
+
+Raw rendered prompts remain in process memory while sessions are retained.
+Expiration and eviction drop reachable text and close the owned TokTier store.
+No persistent session store is opened. Allocator memory is not guaranteed to be
+zeroed. Logs and metrics contain no prompt text, token lists or session IDs.
+
+For flags and defaults, see
+[Frontend configuration](../../../../reference/components/frontend-configuration.mdx#experimental-delta-tokenizer).
