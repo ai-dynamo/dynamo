@@ -13,6 +13,7 @@ Used by create_report.py for report generation.
 
 import json
 import logging
+import math
 import re
 import sqlite3
 import sys
@@ -80,7 +81,10 @@ def parse_prometheus_text(path: Path) -> Optional[PrometheusSnapshot]:
         prev_le, prev_count = 0.0, 0.0
         for le, count in buckets:
             if count >= target:
-                if count == prev_count:
+                # The +Inf bucket has no upper bound to interpolate towards;
+                # Prometheus' histogram_quantile returns the highest finite
+                # bound instead, so a finite distribution never reports inf.
+                if math.isinf(le) or count == prev_count:
                     return prev_le
                 frac = (target - prev_count) / (count - prev_count)
                 return prev_le + frac * (le - prev_le)
