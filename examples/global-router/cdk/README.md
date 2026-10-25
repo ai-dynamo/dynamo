@@ -752,3 +752,7 @@ pnpm exec cdk destroy -c deployment=west \
 
 The shared CDK bootstrap stack is not removed. Keep it for other CDK deployments, or remove it
 separately only after confirming that no other stack uses its assets and roles.
+
+## Reserved GPU capacity
+
+See [Reserved GPU compute](GPU_COMPUTE.md) for independent compute stacks that target externally owned Capacity Reservations.
