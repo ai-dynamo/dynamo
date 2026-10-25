@@ -12,10 +12,13 @@
 //!
 //! The operator creates a `ServiceExport` for each pool's PoolRelay Service,
 //! named `<DGD name>-pool-relay` by default. The hub exports the router's
-//! Service, so its replicas appear in every importing cluster. No registrar,
-//! no leases: a pool is live while its PoolRelay endpoint is Ready. Router
-//! replicas still register with the hub's Dynamo runtime discovery, as in
-//! every mode.
+//! Service, so its replicas appear in every importing cluster. Read
+//! directly, a pool is live while its PoolRelay endpoint is Ready. The Global
+//! Discovery Service also needs a live registration, which says what the
+//! pool serves ([`crate::backends::registered`]), and reads the pool's
+//! frontend addresses from its exported frontend Service, named
+//! `<DGD name>-frontend` by default. Router replicas still register with the
+//! hub's Dynamo runtime discovery, as in every mode.
 //!
 //! Create the PoolRelay Service and its `ServiceExport` in the workload
 //! cluster, not through Karmada propagation. Kubernetes copies a Service's
@@ -43,11 +46,16 @@
 //! Global Discovery Service with the MCS store:
 //!
 //! ```ignore
+//! let registrations = Arc::new(MemoryPoolStore::new(lease)?);
+//! let imported =
+//!     McsPoolDirectory::with_frontends(client.clone(), mcs, suffix, true, locations, frontends)?;
 //! let store = DiscoveryStore {
-//!     pools: Arc::new(McsPoolDirectory::new(client.clone(), mcs, suffix, true, locations)),
+//!     pools: Arc::new(RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease)),
 //!     routers: Arc::new(EndpointSliceReplicaDirectory::imported(client, &router, mcs)),
-//!     registrar: None,
+//!     registrar: Some(registrations),
 //!     authenticator: Arc::new(TrustedNetworkAuthenticator),
+//!     // Or `Some`, with a `crate::peers::PeerSync` task.
+//!     sharing: None,
 //! };
 //! service::serve(listener, store, shutdown).await?;
 //! ```
@@ -59,6 +67,6 @@ pub mod mcs;
 
 pub use endpoints::{EndpointSliceReplicaDirectory, RouterService};
 pub use hub::{
-    McsPoolDirectory, McsPoolDiscovery, MeshAuthenticator, RelayAuth, TrustedNetworkAuthenticator,
-    address_identity,
+    FrontendService, McsPoolDirectory, McsPoolDiscovery, MeshAuthenticator, RelayAuth,
+    TrustedNetworkAuthenticator, address_identity,
 };

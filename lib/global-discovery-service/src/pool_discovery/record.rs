@@ -22,7 +22,8 @@ pub struct PoolRecord {
     pub key: PoolKey,
     pub location: PoolLocation,
     // The fields below are empty until the pool registers them or the Relay's
-    // catalog reports them. Kubernetes (MCS) mode knows only the pool's name.
+    // catalog reports them. Read directly, Kubernetes (MCS) mode knows only the
+    // pool's name and frontends.
     /// With `frontend_endpoint`, becomes `RelayPoolScope` in dynamo-llm.
     #[builder(default)]
     pub runtime_namespace: Option<String>,

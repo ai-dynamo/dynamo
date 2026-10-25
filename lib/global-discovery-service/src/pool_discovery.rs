@@ -23,7 +23,7 @@
 //! |---|---|---|
 //! | gRPC | Router memory | `RegisterPool` on the router |
 //! | Hybrid | Hub Kubernetes API, written by the Global Discovery Service | `RegisterPool` on the service |
-//! | Kubernetes (SIG Multicluster) | Imported EndpointSlices, written by the MCS implementation | Nothing: the operator creates a `ServiceExport` |
+//! | Kubernetes (SIG Multicluster) | Imported EndpointSlices, written by the MCS implementation, joined with registrations in the Global Discovery Service | `RegisterPool` on the service; the operator creates a `ServiceExport` |
 //! | File | Static file (tests, first deployments) | Nothing |
 
 pub mod admission;

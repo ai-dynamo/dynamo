@@ -4,26 +4,33 @@
 //! Global Discovery Service: pool discovery for the Global Router, over HTTP.
 //!
 //! - `POST /pools`: a PoolRelay registers its pool. It calls this on a timer,
-//!   and each call is also the pool's heartbeat.
+//!   and each call is also the pool's heartbeat. The MCS store does not use
+//!   the body's `frontends`: MCS gives addresses other clusters can reach.
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
 //! - `GET /pools`: the pools a Global Router routes to.
+//! - `GET /registrations`: the registrations this instance's PoolRelays
+//!   made, for the other instances ([`crate::peers`]).
 //! - `GET /healthz`: OK while the service can answer from its store. Use it
 //!   for readiness; liveness needs only the TCP port.
 //!
 //! The service reads and writes through the `crate::pool_discovery`
 //! traits, so the store can change without changing PoolRelays or routers.
-//! [`MemoryPoolStore`](crate::backends::memory::MemoryPoolStore)
-//! keeps registrations in this process. The MCS store
-//! ([`kubernetes`](crate::backends::kubernetes)) reads
-//! pools and router replicas from the EndpointSlices that MCS imports. It
-//! has no registrar, because an MCS pool is announced by the `ServiceExport`
-//! of its PoolRelay Service.
+//! [`MemoryPoolStore`] keeps registrations in this process. The MCS store
+//! ([`RegisteredPoolDirectory`](crate::backends::registered::RegisteredPoolDirectory))
+//! lists a pool while MCS imports a Ready PoolRelay endpoint for it and the
+//! pool has a live registration, and reads router replicas from the
+//! EndpointSlices that MCS imports
+//! ([`kubernetes`](crate::backends::kubernetes)). PoolRelays call
+//! `POST /pools` the same way with either store.
 //!
 //! The JSON matches the `dynamo-global-discovery-client` crate.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
+use crate::backends::memory::MemoryPoolStore;
 use crate::pool_discovery::{
     Capacity, Completeness, LeasePolicy, PeerCredentials, PoolDirectory, PoolDiscoveryError,
     PoolRecord, PoolRegistrar, RelayAuthenticator, ReplicaDirectory, ReplicaEndpoint, Revision,
@@ -45,16 +52,31 @@ use url::Url;
 pub struct DiscoveryStore {
     pub pools: Arc<PoolDirectory>,
     pub routers: Arc<ReplicaDirectory>,
-    /// `None` when pools are announced another way, as with MCS.
+    /// `None` for a store that takes no registrations.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
     /// Names the caller of `POST /pools` from its connection.
     pub authenticator: Arc<dyn RelayAuthenticator>,
+    /// `Some` to serve `GET /registrations` to the other instances.
+    pub sharing: Option<Sharing>,
+}
+
+/// The registrations this instance shares (see [`crate::peers`]).
+pub struct Sharing {
+    /// Names this process in `GET /registrations`, so it can skip its own
+    /// reply.
+    pub instance: String,
+    pub registrations: Arc<MemoryPoolStore>,
+    /// Set once this instance has asked every other one; until then
+    /// `GET /healthz` fails, so a new replica does not serve a partial pool
+    /// list. See [`crate::peers::PeerSync::synced`].
+    pub synced: Arc<AtomicBool>,
 }
 
 pub fn router(store: DiscoveryStore) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
         .route("/routers", get(list_routers))
+        .route("/registrations", get(shared_registrations))
         .route("/healthz", get(healthz))
         .with_state(Arc::new(store))
 }
@@ -81,7 +103,7 @@ async fn register_pool(
     let Some(registrar) = &store.registrar else {
         return (
             StatusCode::NOT_IMPLEMENTED,
-            "this store takes no registrations: each pool is announced by its ServiceExport",
+            "this store takes no registrations",
         )
             .into_response();
     };
@@ -125,11 +147,42 @@ async fn list_routers(State(store): State<Arc<DiscoveryStore>>) -> Response {
     }
 }
 
+async fn shared_registrations(State(store): State<Arc<DiscoveryStore>>) -> Response {
+    let Some(sharing) = &store.sharing else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "this instance does not share registrations",
+        )
+            .into_response();
+    };
+    Json(SharedRegistrations {
+        instance: sharing.instance.clone(),
+        registrations: sharing
+            .registrations
+            .local_registrations()
+            .into_iter()
+            .filter_map(|(record, remaining)| {
+                Some(SharedRegistration {
+                    registration: PoolRegistration::from_record(record)?,
+                    expires_in_ms: u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+                })
+            })
+            .collect(),
+    })
+    .into_response()
+}
+
 /// Lists what `GET /pools` and `GET /routers` would serve. A Kubernetes store
 /// answers from its cache once that has synced, so an API server outage does
 /// not turn every replica unready at once. The first probe also starts the
-/// store's watch.
+/// store's watch. An instance that shares registrations is ready only once it
+/// has asked the others; an unreachable one later does not make it unready.
 async fn healthz(State(store): State<Arc<DiscoveryStore>>) -> StatusCode {
+    if let Some(sharing) = &store.sharing
+        && !sharing.synced.load(Ordering::Acquire)
+    {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     let (pools, routers) = tokio::join!(store.pools.list(), store.routers.list());
     match pools.and(routers) {
         Ok(_) => StatusCode::OK,
@@ -153,8 +206,8 @@ fn error_response(error: PoolDiscoveryError) -> Response {
 }
 
 /// `POST /pools` body.
-#[derive(Debug, Deserialize)]
-struct PoolRegistration {
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct PoolRegistration {
     key: WirePoolKey,
     location: WirePoolLocation,
     /// The model or checkpoint the pool serves.
@@ -169,6 +222,23 @@ struct PoolRegistration {
 }
 
 impl PoolRegistration {
+    /// The body a PoolRelay sent for `record`. `None` without a model, which
+    /// every registration has.
+    fn from_record(record: PoolRecord) -> Option<Self> {
+        Some(Self {
+            key: WirePoolKey::from(&record.key),
+            location: record.location.into(),
+            model: record.model?,
+            capabilities: record.capabilities,
+            frontends: record.frontends,
+            capacity: record
+                .capacity
+                .into_iter()
+                .map(WireCapacity::from)
+                .collect(),
+        })
+    }
+
     /// Sorts the lists, so that a heartbeat listing them in another order, for
     /// example from another PoolRelay replica, is not a change.
     fn into_record(mut self) -> Result<PoolRecord, PoolKeyError> {
@@ -263,6 +333,31 @@ impl From<Capacity> for WireCapacity {
             sku: capacity.sku,
             count: capacity.count,
         }
+    }
+}
+
+/// `GET /registrations` reply.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct SharedRegistrations {
+    /// The instance that answered.
+    pub(crate) instance: String,
+    pub(crate) registrations: Vec<SharedRegistration>,
+}
+
+/// A registration as its PoolRelay sent it, and how long it has left.
+/// Durations, not times, so the instances' clocks need not agree.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct SharedRegistration {
+    registration: PoolRegistration,
+    expires_in_ms: u64,
+}
+
+impl SharedRegistration {
+    pub(crate) fn into_record(self) -> Result<(PoolRecord, Duration), PoolKeyError> {
+        Ok((
+            self.registration.into_record()?,
+            Duration::from_millis(self.expires_in_ms),
+        ))
     }
 }
 
@@ -394,6 +489,7 @@ mod tests {
             routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
             registrar: Some(pools),
             authenticator: Arc::new(TrustedNetworkAuthenticator),
+            sharing: None,
         }
     }
 
@@ -527,6 +623,7 @@ mod tests {
             routers: Arc::new(Down),
             registrar: None,
             authenticator: Arc::new(TrustedNetworkAuthenticator),
+            sharing: None,
         })
         .await;
         for path in ["/pools", "/routers", "/healthz"] {
@@ -539,6 +636,47 @@ mod tests {
             // The cause stays in the log.
             assert!(!response.text().await.unwrap().contains("down"), "{path}");
         }
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn registrations_are_shared_only_when_enabled() {
+        let (base, shutdown) = start(memory_store()).await;
+        let response = reqwest::get(format!("{base}/registrations")).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+        shutdown.cancel();
+
+        let pools = Arc::new(MemoryPoolStore::new(LEASE).unwrap());
+        let synced = Arc::new(AtomicBool::new(false));
+        let mut store = memory_store();
+        store.pools = pools.clone();
+        store.registrar = Some(pools.clone());
+        store.sharing = Some(Sharing {
+            instance: "a".to_owned(),
+            registrations: pools,
+            synced: synced.clone(),
+        });
+        let (base, shutdown) = start(store).await;
+        // Not ready until it has asked the other instances once.
+        let response = reqwest::get(format!("{base}/healthz")).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        synced.store(true, Ordering::Release);
+        let response = reqwest::get(format!("{base}/healthz")).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        post_pool(&base, &registration()).await;
+        let (status, shared) = get_json(&base, "/registrations").await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(shared["instance"], json!("a"));
+        let expires_in_ms = shared["registrations"][0]["expires_in_ms"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            expires_in_ms > 0 && expires_in_ms <= 15_000,
+            "{expires_in_ms}"
+        );
+        // Shared as the PoolRelay sent it.
+        assert_eq!(shared["registrations"][0]["registration"], registration());
         shutdown.cancel();
     }
 

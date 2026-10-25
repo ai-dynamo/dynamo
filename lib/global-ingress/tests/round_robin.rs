@@ -35,6 +35,7 @@ async fn discovery_service() -> (Server, GlobalDiscoveryClient) {
         routers: Arc::new(StaticReplicaDirectory::new(Vec::new())),
         registrar: Some(pools),
         authenticator: Arc::new(TrustedNetworkAuthenticator),
+        sharing: None,
     };
     let (listener, url) = common::bind().await;
     let cancel = CancellationToken::new();

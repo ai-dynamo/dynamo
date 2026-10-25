@@ -29,6 +29,7 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -36,6 +37,4 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-
-[dev-dependencies]
-reqwest = { workspace = true }
+uuid = { workspace = true }

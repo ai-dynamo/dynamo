@@ -29,8 +29,9 @@ pub struct Registration {
 /// Write side behind `RegisterPool` and `UnregisterPool`. A PoolRelay calls
 /// `register` on a timer, and each call is also the pool's heartbeat:
 /// registering an unchanged record again only renews it. gRPC mode keeps
-/// records in memory. Hybrid writes them to the hub's Kubernetes API.
-/// Kubernetes and File modes have no registrar.
+/// records in memory. Hybrid writes them to the hub's Kubernetes API. In
+/// Kubernetes mode, the Global Discovery Service keeps them in memory and
+/// shares them between its instances. File mode has no registrar.
 #[async_trait]
 pub trait PoolRegistrar: Send + Sync {
     async fn register(

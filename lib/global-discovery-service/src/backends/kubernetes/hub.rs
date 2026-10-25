@@ -5,7 +5,7 @@
 //! Global Discovery Service's MCS store.
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use crate::pool_discovery::watch::{Directory, Snapshot, WatchStream};
@@ -20,6 +20,7 @@ use dynamo_global_router_shared::PoolLocation;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use super::cache::{SliceDirectory, SliceIndex, SliceKey};
 use super::mcs;
@@ -87,6 +88,34 @@ impl BuildPoolDiscovery for McsPoolDiscovery {
 /// when the directory is dropped.
 pub struct McsPoolDirectory(SliceDirectory<PoolIndex>);
 
+/// The Service in front of a pool's frontends, named `<DGD name><suffix>`
+/// and exported like the PoolRelay Service. Its Ready endpoints on the named
+/// port become the pool's `frontends`: addresses that other clusters can
+/// reach, kept current as frontend pods come and go.
+#[derive(Clone, Debug)]
+pub struct FrontendService {
+    pub suffix: String,
+    pub port_name: String,
+}
+
+impl FrontendService {
+    /// A Service name must not match both suffixes, so neither may end with
+    /// the other.
+    pub fn check(&self, pool_service_suffix: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.suffix.is_empty()
+                && !pool_service_suffix.is_empty()
+                && !self.suffix.ends_with(pool_service_suffix)
+                && !pool_service_suffix.ends_with(self.suffix.as_str()),
+            "the frontend Service suffix {:?} and the PoolRelay Service suffix {:?} must differ, \
+             and neither may end with the other",
+            self.suffix,
+            pool_service_suffix,
+        );
+        Ok(())
+    }
+}
+
 impl McsPoolDirectory {
     pub fn new(
         imports: Client,
@@ -95,15 +124,46 @@ impl McsPoolDirectory {
         bind_relay_address: bool,
         locations: HashMap<String, PoolLocation>,
     ) -> Self {
-        Self(SliceDirectory::new(
-            Api::all(imports),
-            mcs::imported_selector(mcs),
+        Self::create(
+            imports,
             PoolNaming {
                 mcs,
                 pool_service_suffix,
                 bind_relay_address,
                 locations,
+                frontends: None,
             },
+        )
+    }
+
+    /// Also lists each pool's Ready frontends. A pool with frontends but no
+    /// Ready PoolRelay is still not live.
+    pub fn with_frontends(
+        imports: Client,
+        mcs: McsImplementation,
+        pool_service_suffix: String,
+        bind_relay_address: bool,
+        locations: HashMap<String, PoolLocation>,
+        frontends: FrontendService,
+    ) -> anyhow::Result<Self> {
+        frontends.check(&pool_service_suffix)?;
+        Ok(Self::create(
+            imports,
+            PoolNaming {
+                mcs,
+                pool_service_suffix,
+                bind_relay_address,
+                locations,
+                frontends: Some(frontends),
+            },
+        ))
+    }
+
+    fn create(imports: Client, naming: PoolNaming) -> Self {
+        Self(SliceDirectory::new(
+            Api::all(imports),
+            mcs::imported_selector(naming.mcs),
+            naming,
         ))
     }
 }
@@ -138,26 +198,38 @@ struct PoolNaming {
     /// [`TrustedNetworkAuthenticator`].
     bind_relay_address: bool,
     locations: HashMap<String, PoolLocation>,
+    /// `Some` to list each pool's frontends too.
+    frontends: Option<FrontendService>,
 }
 
 impl PoolNaming {
     /// Source cluster from [`mcs::source_cluster`]; DGD name from the
-    /// Service name without `pool_service_suffix`. `None` for imports that
-    /// are not pools.
-    fn pool_key(&self, slice: &EndpointSlice) -> Option<PoolKey> {
+    /// Service name without `suffix`. `None` for imports of other Services.
+    fn pool_key(&self, slice: &EndpointSlice, suffix: &str) -> Option<PoolKey> {
         let service = mcs::service_name(self.mcs, slice)?;
         let dgd_name = service
-            .strip_suffix(self.pool_service_suffix.as_str())
+            .strip_suffix(suffix)
             .filter(|name| !name.is_empty())?;
         let cluster = mcs::source_cluster(self.mcs, slice)?;
         let namespace = slice.metadata.namespace.as_deref()?;
         PoolKey::new(cluster, namespace, dgd_name).ok()
     }
 
+    /// A PoolRelay slice, or with `frontends`, a frontend slice with the
+    /// named port.
     fn slice(&self, slice: &EndpointSlice) -> Option<SliceEntry> {
+        if let Some(pool) = self.pool_key(slice, &self.pool_service_suffix) {
+            return Some(SliceEntry {
+                pool,
+                ready: ready_addresses(slice),
+                frontend_port: None,
+            });
+        }
+        let frontends = self.frontends.as_ref()?;
         Some(SliceEntry {
-            pool: self.pool_key(slice)?,
+            pool: self.pool_key(slice, &frontends.suffix)?,
             ready: ready_addresses(slice),
+            frontend_port: Some(tcp_port(slice, &frontends.port_name)?),
         })
     }
 
@@ -200,9 +272,35 @@ fn ready_addresses(slice: &EndpointSlice) -> Vec<IpAddr> {
         .collect()
 }
 
+/// A slice's named TCP port. One slice lists one set of ports for all its
+/// endpoints.
+fn tcp_port(slice: &EndpointSlice, name: &str) -> Option<u16> {
+    slice
+        .ports
+        .iter()
+        .flatten()
+        .find(|port| {
+            port.name.as_deref() == Some(name)
+                && port
+                    .protocol
+                    .as_deref()
+                    .is_none_or(|protocol| protocol == "TCP")
+        })
+        .and_then(|port| port.port)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+}
+
+/// Formatted through `SocketAddr`, so IPv6 gets brackets.
+fn frontend_url(address: IpAddr, port: u16) -> Option<Url> {
+    Url::parse(&format!("http://{}/", SocketAddr::new(address, port))).ok()
+}
+
 struct SliceEntry {
     pool: PoolKey,
     ready: Vec<IpAddr>,
+    /// `Some` for a frontend slice: the port its endpoints serve HTTP on.
+    frontend_port: Option<u16>,
 }
 
 #[derive(Default)]
@@ -302,14 +400,27 @@ impl PoolIndex {
     /// the record changed.
     fn rebuild(&mut self, naming: &PoolNaming, key: &PoolKey) -> Option<PoolEvent> {
         let state = self.pools.get(key)?;
-        let mut ready: Vec<IpAddr> = state
+        let mut ready = Vec::new();
+        let mut frontends = Vec::new();
+        for entry in state
             .slices
             .iter()
             .filter_map(|slice| self.slices.get(slice))
-            .flat_map(|entry| entry.ready.iter().copied())
-            .collect();
+        {
+            match entry.frontend_port {
+                None => ready.extend_from_slice(&entry.ready),
+                Some(port) => frontends.extend(
+                    entry
+                        .ready
+                        .iter()
+                        .filter_map(|address| frontend_url(*address, port)),
+                ),
+            }
+        }
         ready.sort_unstable();
         ready.dedup();
+        frontends.sort_unstable();
+        frontends.dedup();
 
         let state = self.pools.get_mut(key)?;
         let Some(&lowest) = ready.first() else {
@@ -333,7 +444,7 @@ impl PoolIndex {
             frontend_endpoint: None,
             model: None,
             capabilities: Vec::new(),
-            frontends: Vec::new(),
+            frontends,
             capacity: Vec::new(),
             relay_identity: bound.map(address_identity),
             revision: Revision::default(),
@@ -402,7 +513,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use futures::{FutureExt, StreamExt};
-    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
+    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
@@ -426,7 +537,34 @@ mod tests {
                     datacenter: None,
                 },
             )]),
+            frontends: None,
         }
+    }
+
+    fn frontend_service(suffix: &str) -> FrontendService {
+        FrontendService {
+            suffix: suffix.to_owned(),
+            port_name: "http".to_owned(),
+        }
+    }
+
+    /// A Karmada-imported slice of `<dgd>-frontend` from `cluster`, serving
+    /// HTTP on the port named `http`.
+    fn frontend_slice(cluster: &str, dgd: &str, endpoints: &[(&str, bool)]) -> EndpointSlice {
+        let service = format!("{dgd}-frontend");
+        let mut slice = slice(cluster, dgd, "f1", endpoints);
+        slice.metadata.name = Some(format!("imported-{cluster}-{service}-f1"));
+        slice.metadata.labels.as_mut().unwrap().insert(
+            KUBERNETES_SERVICE_NAME_LABEL.to_owned(),
+            format!("derived-{service}"),
+        );
+        slice.ports = Some(vec![EndpointPort {
+            name: Some("http".to_owned()),
+            port: Some(8000),
+            protocol: Some("TCP".to_owned()),
+            ..Default::default()
+        }]);
+        slice
     }
 
     /// A Karmada-imported slice of `<dgd>-pool-relay` from `cluster`.
@@ -503,6 +641,64 @@ mod tests {
             Some(RelayIdentity("ip:10.43.66.175".to_owned()))
         );
         assert_eq!((record.runtime_namespace, record.model), (None, None));
+    }
+
+    #[test]
+    fn frontends_come_from_the_frontend_service() {
+        let cache = Arc::new(SliceCache::new(PoolNaming {
+            frontends: Some(frontend_service("-frontend")),
+            ..naming(true)
+        }));
+        let pool = key("west", "mocker");
+        // Frontends alone do not make a pool live.
+        sync(
+            &cache,
+            vec![frontend_slice(
+                "west",
+                "mocker",
+                &[("10.43.0.2", true), ("10.43.0.3", false)],
+            )],
+        );
+        assert!(record(&cache, &pool).is_none());
+
+        cache.apply(watcher::Event::Apply(slice(
+            "west",
+            "mocker",
+            "a1b2c",
+            &[("10.43.0.1", true)],
+        )));
+        let first = record(&cache, &pool).expect("live pool");
+        assert_eq!(
+            first.frontends,
+            [Url::parse("http://10.43.0.2:8000/").unwrap()]
+        );
+
+        // A replaced frontend is a new revision. IPv6 gets brackets.
+        cache.apply(watcher::Event::Apply(frontend_slice(
+            "west",
+            "mocker",
+            &[("fd00::2", true)],
+        )));
+        let second = record(&cache, &pool).unwrap();
+        assert!(second.revision > first.revision);
+        assert_eq!(
+            second.frontends,
+            [Url::parse("http://[fd00::2]:8000/").unwrap()]
+        );
+
+        // A slice without the named port lists no frontends.
+        let mut other_port = frontend_slice("west", "mocker", &[("10.43.0.4", true)]);
+        other_port.ports.as_mut().unwrap()[0].name = Some("grpc".to_owned());
+        cache.apply(watcher::Event::Apply(other_port));
+        assert!(record(&cache, &pool).unwrap().frontends.is_empty());
+    }
+
+    #[test]
+    fn frontend_suffix_must_not_overlap_the_relay_suffix() {
+        assert!(frontend_service("-frontend").check(SUFFIX).is_ok());
+        for suffix in ["", "-relay", SUFFIX, "-frontend-pool-relay"] {
+            assert!(frontend_service(suffix).check(SUFFIX).is_err(), "{suffix}");
+        }
     }
 
     #[test]

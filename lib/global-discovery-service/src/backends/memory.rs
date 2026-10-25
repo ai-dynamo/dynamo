@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! In-memory store: one process keeps every registration. It needs no
-//! Kubernetes, so it suits tests and a first deployment. A restarted process
-//! starts empty and fills as PoolRelays register again, so its lists are
-//! `Estimated`. Router replicas come from configuration until routers
-//! register too.
+//! Kubernetes, so it suits tests and a first deployment. The MCS store keeps
+//! its registrations here too, with copies of the ones other service
+//! instances received (see `crate::peers`). A restarted process starts empty
+//! and fills as PoolRelays register again, so its lists are `Estimated`.
+//! Router replicas come from configuration until routers register too.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -25,9 +26,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::stream::{EVENT_BUFFER, watch_stream};
 
+/// The longest an expired record waits for the sweep. Watchers, such as the
+/// MCS store's join, drop a pool only when the sweep removes it.
+pub const SWEEP_EVERY: Duration = Duration::from_secs(1);
+
 /// Pool registrations in memory. A record expires `lease_duration` after its
 /// last registration. Reads skip an expired record at once; a sweep removes
-/// it, with a `Removed` event, within one `heartbeat_interval`.
+/// it, with a `Removed` event, within [`SWEEP_EVERY`] or one
+/// `heartbeat_interval`, whichever is shorter.
 ///
 /// Any authenticated caller may register any pool: V1 assumes a trusted
 /// network, and several PoolRelay replicas may register the same pool.
@@ -50,6 +56,9 @@ struct Pools {
 struct Registered {
     record: PoolRecord,
     expires_at: Instant,
+    /// The latest registration came from a PoolRelay, not from another
+    /// service instance. Only these are shared.
+    local: bool,
 }
 
 impl Pools {
@@ -87,13 +96,62 @@ impl MemoryPoolStore {
         self.pools.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Keeps a registration copied from another service instance (see
+    /// `crate::peers`) for the `remaining` time it had there, capped at this
+    /// store's lease. The latest registration wins, wherever it was made.
+    pub fn adopt(&self, mut record: PoolRecord, remaining: Duration) {
+        self.ensure_sweeping();
+        let now = Instant::now();
+        let expires_at = now + remaining.min(self.lease.lease_duration);
+        let mut pools = self.lock();
+        if let Some(registered) = pools.records.get_mut(&record.key)
+            && registered.expires_at > now
+        {
+            if registered.expires_at >= expires_at {
+                return;
+            }
+            registered.local = false;
+            record.revision = registered.record.revision;
+            if registered.record == record {
+                registered.expires_at = expires_at;
+                return;
+            }
+        }
+        pools.last_revision += 1;
+        record.revision = Revision(pools.last_revision);
+        pools.records.insert(
+            record.key.clone(),
+            Registered {
+                record: record.clone(),
+                expires_at,
+                local: false,
+            },
+        );
+        // No subscribers is not an error.
+        let _ = self.events.send(WatchEvent::Added(record));
+    }
+
+    /// The live registrations PoolRelays made here, with the time each has
+    /// left. Copies are left out, so each registration is shared only by the
+    /// instance that received it, and a copy outlives its original by no more
+    /// than the time a reply takes to arrive.
+    pub fn local_registrations(&self) -> Vec<(PoolRecord, Duration)> {
+        let now = Instant::now();
+        self.lock()
+            .records
+            .values()
+            .filter(|registered| registered.local && registered.expires_at > now)
+            .map(|registered| (registered.record.clone(), registered.expires_at - now))
+            .collect()
+    }
+
     /// Every trait method runs in a Tokio runtime, so the spawn is safe.
     fn ensure_sweeping(&self) {
         self.sweeping.get_or_init(|| {
             tokio::spawn(sweep(
                 Arc::clone(&self.pools),
                 self.events.clone(),
-                self.lease.heartbeat_interval,
+                self.lease.heartbeat_interval.min(SWEEP_EVERY),
                 self.stop.clone(),
             ));
         });
@@ -153,6 +211,7 @@ impl PoolRegistrar for MemoryPoolStore {
             record.revision = registered.record.revision;
             if registered.record == record {
                 registered.expires_at = expires_at;
+                registered.local = true;
                 return Ok(Registration { lease: self.lease });
             }
         }
@@ -163,6 +222,7 @@ impl PoolRegistrar for MemoryPoolStore {
             Registered {
                 record: record.clone(),
                 expires_at,
+                local: true,
             },
         );
         // No subscribers is not an error.
@@ -408,6 +468,60 @@ mod tests {
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r.revision == Revision(2))
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_copy_lasts_its_remaining_time_and_never_longer_than_the_lease() {
+        let store = MemoryPoolStore::new(LEASE).unwrap();
+        store.adopt(record("mocker", "m1"), Duration::from_secs(10));
+        assert!(store.get(&key("mocker")).await.unwrap().is_some());
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert!(store.get(&key("mocker")).await.unwrap().is_none());
+
+        store.adopt(record("mocker", "m1"), Duration::from_secs(3600));
+        tokio::time::advance(Duration::from_secs(16)).await;
+        assert!(store.get(&key("mocker")).await.unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_latest_registration_wins_and_only_local_ones_are_shared() {
+        let store = MemoryPoolStore::new(LEASE).unwrap();
+        let caller = caller().await;
+        store
+            .register(record("mocker", "m1"), &caller)
+            .await
+            .unwrap();
+        let shared = store.local_registrations();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].1, LEASE.lease_duration);
+
+        // A copy older than the local registration changes nothing.
+        store.adopt(record("mocker", "m2"), Duration::from_secs(10));
+        let model =
+            |store: &MemoryPoolStore| store.lock().records[&key("mocker")].record.model.clone();
+        assert_eq!(model(&store).as_deref(), Some("m1"));
+
+        // A newer copy of the same record only extends it, and it is no longer
+        // shared from here.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        store.adopt(record("mocker", "m1"), Duration::from_secs(14));
+        let renewed = store.get(&key("mocker")).await.unwrap().unwrap();
+        assert_eq!(renewed.revision, Revision(1));
+        assert!(store.local_registrations().is_empty());
+
+        // A newer copy of a changed record replaces it.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        store.adopt(record("mocker", "m2"), Duration::from_secs(14));
+        let changed = store.get(&key("mocker")).await.unwrap().unwrap();
+        assert_eq!(changed.model.as_deref(), Some("m2"));
+        assert_eq!(changed.revision, Revision(2));
+
+        // The PoolRelay registering here again makes it local again.
+        store
+            .register(record("mocker", "m2"), &caller)
+            .await
+            .unwrap();
+        assert_eq!(store.local_registrations().len(), 1);
     }
 
     #[tokio::test]
