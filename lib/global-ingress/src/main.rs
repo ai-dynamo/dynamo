@@ -4,6 +4,10 @@
 //! Global Frontend. See `dynamo_global_ingress`.
 //!
 //! ```bash
+//! # Pools from the Global Discovery Service:
+//! cargo run -p dynamo-global-ingress -- --port 8000 \
+//!     --discovery-url http://global-discovery:8080/
+//! # Or pools given by hand:
 //! cargo run -p dynamo-global-ingress -- --port 8000 \
 //!     --pool ohio/dynamo/mocker-1=Qwen/Qwen3-0.6B@http://10.42.0.5:8000
 //! ```
@@ -13,9 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
+use dynamo_global_discovery_client::GlobalDiscoveryClient;
 use dynamo_global_ingress::{ModelSync, PoolForwardingEngine};
-use dynamo_global_router::{FirstPoolSelector, Pool, PoolCatalog, StaticPoolCatalog};
+use dynamo_global_router::{
+    DiscoveryPoolCatalog, Pool, PoolCatalog, RoundRobinSelector, StaticPoolCatalog,
+};
 use dynamo_global_router_shared::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
 use dynamo_llm::http::service::service_v2::HttpService;
 use tokio_util::sync::CancellationToken;
@@ -23,16 +30,25 @@ use url::Url;
 
 #[derive(Parser)]
 #[command(about = "Serve the OpenAI API and forward each request to a pool frontend")]
+#[command(group(ArgGroup::new("pool_source").required(true).args(["discovery_url", "pools"])))]
 struct Args {
     /// Address to serve HTTP on.
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
     #[arg(long, default_value_t = 8000)]
     port: u16,
-    /// A pool as `<site>/<namespace>/<DGD name>=<model>@<frontend URL>`.
-    /// Separate several frontend URLs with commas, and repeat the flag for
-    /// each pool. The site is also the pool's region.
-    #[arg(long = "pool", value_parser = parse_pool, required = true)]
+    /// Root of the Global Discovery Service to read pools from, for example
+    /// `http://global-discovery:8080/`.
+    #[arg(long)]
+    discovery_url: Option<Url>,
+    /// How often to read pools from the Global Discovery Service. A read
+    /// that takes longer is abandoned.
+    #[arg(long, default_value_t = 5)]
+    discovery_interval_secs: u64,
+    /// A pool as `<site>/<namespace>/<DGD name>=<model>@<frontend URL>`, in
+    /// place of `--discovery-url`. Separate several frontend URLs with commas,
+    /// and repeat the flag for each pool. The site is also the pool's region.
+    #[arg(long = "pool", value_parser = parse_pool)]
     pools: Vec<Pool>,
     /// How long to wait for a pool frontend to accept a connection.
     #[arg(long, default_value_t = 5)]
@@ -86,7 +102,15 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
 
-    let catalog = StaticPoolCatalog::new(args.pools);
+    let catalog: Box<dyn PoolCatalog> = match args.discovery_url {
+        Some(url) => {
+            let interval = Duration::from_secs(args.discovery_interval_secs);
+            let client = GlobalDiscoveryClient::new(url, interval)
+                .context("build the Global Discovery client")?;
+            Box::new(DiscoveryPoolCatalog::start(client, interval, shutdown.child_token()).await)
+        }
+        None => Box::new(StaticPoolCatalog::new(args.pools)),
+    };
     let service = HttpService::builder()
         .host(args.host.clone())
         .port(args.port)
@@ -99,7 +123,7 @@ async fn main() -> Result<()> {
         .context("build the pool HTTP client")?;
     let engine = Arc::new(PoolForwardingEngine::new(
         catalog.subscribe(),
-        Arc::new(FirstPoolSelector),
+        Arc::new(RoundRobinSelector::new()),
         http,
     ));
 
