@@ -137,7 +137,7 @@ class VideoLoader:
         self._vllm_media_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
-            run_async(self._nixl_connector.initialize)
+            run_async(self._nixl_connector.warmup)
 
     def _get_vllm_media_connector(self) -> Any:
         if self._vllm_media_connector is None:
@@ -272,7 +272,8 @@ class VideoLoader:
             )
             if frames.size == 0:
                 raise ValueError(
-                    f"Failed to extract video frames from {video_url}. Decoded clip is empty."
+                    "Failed to extract video frames from "
+                    f"{describe_media_source(video_url)}. Decoded clip is empty."
                 )
             return np.ascontiguousarray(frames), metadata
         except FileNotFoundError:
@@ -289,11 +290,17 @@ class VideoLoader:
             # Already actionable (names the codec and the install); a missing
             # decoder is deployment configuration, not a bad request, so keep
             # the type instead of degrading it to the ValueError below.
-            logger.error("No decoder available for video: '%s'", video_url)
+            logger.error(
+                "No decoder available for video: '%s'", describe_media_source(video_url)
+            )
             raise
         except Exception as exc:
-            logger.error("Error loading video from %s: %s", video_url, exc)
-            raise ValueError(f"Failed to load video from {video_url}: {exc}") from exc
+            # Bound the URL like the branches above: a signed URL (GCS, S3,
+            # Azure SAS) is a bearer credential, and its signature must reach
+            # neither the log nor the client's error body.
+            source = describe_media_source(video_url)
+            logger.error("Error loading video from %s: %s", source, exc)
+            raise ValueError(f"Failed to load video from {source}: {exc}") from exc
 
     async def _load_decoded_video(
         self, decoded_metadata: Dict[str, Any]
@@ -392,7 +399,11 @@ class VideoLoader:
             if URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 video_futures.append(self.load_video(url, media_io_kwargs))
-                logger.debug("Preparing to load video from URL: %s...", url[:80])
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Preparing to load video from URL: %s",
+                        describe_media_source(url),
+                    )
             else:
                 metadata = item[DECODED_VARIANT_KEY]
                 video_futures.append(self._load_decoded_video(metadata))
@@ -408,10 +419,12 @@ class VideoLoader:
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result
-                source = media_item.get(URL_VARIANT_KEY, "decoded")
-                logger.error("Failed to load video from %s...: %s", source[:80], result)
+                source = describe_media_source(
+                    media_item.get(URL_VARIANT_KEY, "decoded")
+                )
+                logger.error("Failed to load video from %s: %s", source, result)
                 collective_exceptions.append(
-                    f"Failed to load video from {source[:80]}...: {result}\n"
+                    f"Failed to load video from {source}: {result}\n"
                 )
                 if status_error is None and isinstance(result, HttpStatusError):
                     status_error = result

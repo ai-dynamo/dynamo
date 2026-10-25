@@ -22,29 +22,42 @@ const (
 
 // appendModelProjections appends one component's immutable model projections to
 // the caller-owned destination, which may be nil. Existing elements are unchanged.
-// intent.BuildSnapshot contains a normalized, non-nil build; Models is nonempty
+// intent.Build contains a normalized, non-nil build; Models is nonempty
 // and Pipeline is selected by the validated resolver. Source inputs are not mutated;
 // discard error results.
 func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
 	var projections []*ModelProjection
 	var err error
-	switch intent.BuildSnapshot.build.Family {
+	switch intent.Build.family {
 	case BuildFamilyXT:
 		projections, err = appendV2ModelProjections(dst, intent)
 	case BuildFamilyHX:
 		projections, err = appendV3ModelProjections(dst, intent)
 	default:
-		return nil, fmt.Errorf("unsupported LPX target family %q", intent.BuildSnapshot.build.Family)
+		return nil, fmt.Errorf("unsupported LPX target family %q", intent.Build.family)
 	}
 	if err != nil {
 		return nil, err
 	}
+
+	// Only a hybrid build's Cyborg conductor consumes a checkpoint.
+	var checkpoint *Checkpoint
+	if intent.Pipeline == PipelineHybrid {
+		if err := intent.Build.checkpointErr; err != nil {
+			return nil, err
+		}
+		checkpoint = intent.Build.checkpoint
+	}
+	for _, projection := range projections[len(dst):] {
+		projection.checkpoint = checkpoint
+	}
+
 	// Bound the component's physical build before runtime expansion and request publication.
 	projection := projections[len(dst)]
 	boundedPartitions := len(projection.partitions)
 	if len(projection.localPartitionIDs) > 0 {
 		// A local selection may leave no remote partitions, but the build itself stays bounded.
-		boundedPartitions = len(intent.BuildSnapshot.build.Partitions)
+		boundedPartitions = len(intent.Build.partitions)
 	} else if boundedPartitions < 1 {
 		return nil, fmt.Errorf("LPX projection has %d partitions, limit is 1..%d", boundedPartitions, maxLPXPartitions)
 	}
@@ -62,11 +75,11 @@ func workloadSetDigest(projections []*ModelProjection) (WorkloadDigest, error) {
 	transcript := &digestTranscript{hash: sha256.New()}
 	transcript.field("schema", []byte(workloadSetDigestVersion))
 	for _, projection := range projections {
-		if projection.configuredBuild.Family != first.configuredBuild.Family {
+		if projection.configuredBuild.family != first.configuredBuild.family {
 			return WorkloadDigest{}, fmt.Errorf(
 				"LPX model projections have mixed target families %q and %q",
-				first.configuredBuild.Family,
-				projection.configuredBuild.Family,
+				first.configuredBuild.family,
+				projection.configuredBuild.family,
 			)
 		}
 		transcript.field("model", []byte(projection.model))
@@ -89,11 +102,11 @@ func newModelProjectionTranscripts(intent ModelProjectionInput, projectionVersio
 		transcript.field("lowerer", []byte(projectionVersion))
 		// Ref is an acquisition locator, not build content. In particular, a
 		// file-backed snapshot's ref contains its absolute checkout path.
-		transcript.field("build-content-id", []byte(intent.BuildSnapshot.contentID))
+		transcript.field("build-content-id", []byte(intent.Build.contentID))
 		// Bind the family derived from immutable build metadata without retaining the
 		// removed API selector.
 		version := "v2"
-		if intent.BuildSnapshot.build.Family == BuildFamilyHX {
+		if intent.Build.family == BuildFamilyHX {
 			version = "v3"
 		}
 		transcript.field("device-version", []byte(version))
@@ -101,7 +114,7 @@ func newModelProjectionTranscripts(intent ModelProjectionInput, projectionVersio
 
 		// Preserve the digest's wire values without storing a second runtime discriminator.
 		mode := "lpuOnly"
-		if intent.Pipeline == PipelineLPX {
+		if intent.Pipeline == PipelineHybrid {
 			mode = "strictHybrid"
 		}
 		transcript.field("workload-mode", []byte(mode))
@@ -118,7 +131,7 @@ func bindHybridRuntimeIO(
 	ioFPGACount int32,
 	ioFanoutFactor int32,
 ) {
-	if pipeline != PipelineLPX {
+	if pipeline != PipelineHybrid {
 		return
 	}
 

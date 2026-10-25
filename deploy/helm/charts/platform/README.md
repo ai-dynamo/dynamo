@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 1.6.0](https://img.shields.io/badge/Version-1.6.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 1.7.0](https://img.shields.io/badge/Version-1.7.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -45,6 +45,40 @@ Releases are listed newest first. Read bottom-up through releases newer than you
 up to your target version. Each entry describes changes introduced in that release. Releases and
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
+
+### v1.7.0
+
+#### Operator behavior breaking changes
+
+##### Native sidecar backend inference
+
+**Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,
+including a literal absolute path. It continues to inspect the engine for backend
+validation and compilation-cache defaults, independently of the runtime sidecar launch.
+The inferred framework participates in the graph-wide worker-generation hash.
+
+**Affected:** Deployments with this engine command and no explicit `backendFramework`
+previously resolved to an undetected backend. The vLLM reference manifests already set
+`backendFramework: vllm` and are unaffected by this inference change.
+
+**Action:** Plan for a one-time worker rollout when upgrading to v1.7.0. To perform the
+migration before the operator upgrade, set `spec.backendFramework: vllm` on affected
+DGDs and complete that manifest-driven rollout first. This moves the migration earlier;
+it does not eliminate it. Explicit frameworks must match the engine launch. Opaque
+engine commands, including shell wrappers and image entrypoints, still require an
+explicit framework.
+
+**Existing deployments:** Reconciliation can roll all workers in an affected DGD without
+an authored manifest change. With `compilationCache.mountPath` set, the engine also gains
+`VLLM_CACHE_ROOT` pointing to that path. Standalone DCDs can roll when newly inferred cache
+defaults change their pod template. Runtime registration used by Planner does not affect
+the desired worker hash or engine configuration.
+
+**Planner permissions:** Registration-based native identity requires `list` on `pods`
+in addition to worker metadata access. If an older Planner service account receives
+HTTP 403 when listing Pods, Planner warns and uses existing status/default fallbacks.
+Grant Pod-list access to enable registered native names, models, and capabilities;
+other API errors still propagate.
 
 ### v1.6.0
 
@@ -153,9 +187,15 @@ dependency or platform chart does not upgrade separately managed Grove installat
 #### External Grove installation preflight
 
 With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
-`pre-install,pre-upgrade` Job verifies the Grove controller version (currently alpha.15 or
-later), completed rollout, and established CRDs before applying the operator Deployment.
-It does not verify CRD schema/version equality; upgrade Grove and matching CRDs first.
+`pre-install,pre-upgrade` Job verifies the Grove controller version against the pinned
+dependency and completed rollout before applying the operator Deployment.
+It assumes a compatible, fully rolled out controller has matching Grove CRDs installed;
+CRDs are not inspected. Upgrade Grove and matching CRDs first.
+The minimum version comes from the `grove-charts` dependency in `Chart.yaml`.
+Its YAML scalar is anchored in the chart annotation and referenced by the dependency,
+so Helm can pass the same value directly to the checker even when external Grove disables
+that dependency. No symlink, generator, or synchronization step is required. The
+standalone operator chart does not run this platform preflight.
 Unknown/custom/RC image tags and digest-only images fail rather than claiming compatibility.
 To resolve missing or ambiguous discovery, select the controller explicitly:
 
@@ -385,11 +425,11 @@ Kubernetes: `>=1.30.0-0`
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 1.6.0 |
+| file://components/operator | dynamo-operator | 1.7.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |
-| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0-rc.3 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
 ## Values
@@ -414,7 +454,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.grovePreflight.deploymentName | string | `""` | External Grove Deployment name. Requires namespace; empty discovers by container name. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
-| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2 API schemas. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. The operator does not reconcile v1beta2 resources. |
+| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. The operator does not reconcile v1beta2 requests. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
