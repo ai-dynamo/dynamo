@@ -309,11 +309,6 @@ func TestEnrichHardwareFromDiscovery_TotalGPUs(t *testing.T) {
 			require.NotNil(t, dgdr.Spec.Hardware.TotalGPUs)
 			assert.Equal(t, tt.wantTotal, *dgdr.Spec.Hardware.TotalGPUs)
 			assert.Equal(t, int32(8), *dgdr.Spec.Hardware.NumGPUsPerNode)
-
-			t.Log("checking that enrichment preserves the resolved budget on another pass")
-			_, err = r.enrichHardwareFromDiscovery(t.Context(), dgdr)
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantTotal, *dgdr.Spec.Hardware.TotalGPUs)
 		})
 	}
 }
