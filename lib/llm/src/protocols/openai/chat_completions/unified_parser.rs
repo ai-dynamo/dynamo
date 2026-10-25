@@ -10590,6 +10590,14 @@ pub(crate) mod tests {
 
     // Issue #17030: Explicit-V1 route-matrix coverage
     // QUALIFICATION TEST: This test addresses the explicit-V1 route-matrix coverage requirement
+    /// Test explicit V1/V2/Auto parser version selection across all model families.
+    ///
+    /// This qualification test verifies that the parser selection logic correctly handles
+    /// different parser version configurations (V1, V2, Auto) for all 8 supported model families.
+    /// It tests 10 different parser configurations (8 paired + tool-only + reasoning-only) and
+    /// verifies that `selected_family_for_selection` returns the expected results for each version.
+    ///
+    /// Addresses issue #17030 requirement: Explicit-V1 route-matrix coverage.
     #[test]
     fn issue_17030_explicit_v1_route_matrix_coverage() {
         use dynamo_runtime::config::ParserVersion;
@@ -10651,6 +10659,14 @@ pub(crate) mod tests {
 
     // Issue #17030: Kimi default/auto pre-close assertions
     // QUALIFICATION TEST: This test addresses the Kimi pre-close assertions requirement
+    /// Test Kimi model streaming behavior with default/auto parser settings.
+    ///
+    /// This qualification test verifies that Kimi K2 and K3 models correctly emit tool call
+    /// events before stream completion when using Native output mode (default/auto behavior).
+    /// It tests that the parser emits events early and that tool call events are present
+    /// before the stream finishes.
+    ///
+    /// Addresses issue #17030 requirement: Kimi default/auto pre-close assertions.
     #[tokio::test]
     async fn issue_17030_kimi_default_auto_pre_close_assertions() {
         // Test Kimi models with different parser configurations
