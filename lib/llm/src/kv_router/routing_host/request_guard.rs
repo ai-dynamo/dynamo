@@ -470,6 +470,12 @@ impl KvRequestCleanup {
         self.lifecycle.as_ref()
     }
 
+    /// A handle that releases this attempt's scheduler booking ahead of the
+    /// lease, for a migration retry that re-books the same request ID.
+    pub(super) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
+        self.lifecycle().map(RequestAttemptLease::release_handle)
+    }
+
     pub(super) async fn finish(&self) {
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.finish().await;
@@ -733,12 +739,6 @@ impl RequestGuard {
                 lifecycle.sent(worker);
             }
         }
-    }
-
-    pub(super) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
-        self.cleanup
-            .lifecycle()
-            .map(RequestAttemptLease::release_handle)
     }
 
     pub(super) fn has_approximate_lru(&self) -> bool {

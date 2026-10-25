@@ -320,9 +320,13 @@ pub struct RoutingHost {
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 
-/// An admitted KV route awaiting dispatch.
+/// An admitted KV route awaiting dispatch: the one form "booked but not sent"
+/// takes. Every KV route, direct or previewed, passes through here.
 pub(crate) struct RoutePlan {
     pub(crate) signals: RoutePlanSignals,
+    /// The phase the worker was selected for; dispatch tracks under it rather
+    /// than re-reading the request.
+    phase: RequestPhase,
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
     affinity: Option<Hold>,
@@ -371,9 +375,29 @@ impl RoutePlan {
         self.budget.remaining()
     }
 
+    /// The worker this plan booked.
+    pub(crate) fn worker(&self) -> WorkerWithDpRank {
+        self.signals.worker
+    }
+
+    /// Early release for the booking, taken before dispatch so a migration
+    /// retry can free it while the prefill stream still runs.
+    pub(crate) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
+        self.cleanup.attempt_release()
+    }
+
+    /// Give the route up before dispatch: abort the classifier lifecycle with
+    /// `error` as its cause, release the booking, and drop the affinity hold.
+    pub(crate) async fn abort_with_error(mut self, error: Option<&Error>) {
+        if let Some(mut lifecycle) = self.selection.request_lifecycle.take() {
+            lifecycle.abort(error.map(|error| owned_abort_error(error.as_ref())));
+        }
+        self.cleanup.finish().await;
+    }
+
     #[cfg(test)]
     pub(crate) async fn abort(self) {
-        self.cleanup.finish().await;
+        self.abort_with_error(None).await;
     }
 }
 
@@ -761,12 +785,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let phase = request.phase();
-        let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only, &budget)
-            .await?;
         if is_query_only {
+            let phase_label = phase.to_string();
+            let _route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+            let (selection, _) = self
+                .select_with_affinity(&request, phase, true, &budget)
+                .await?;
             let routing_parts = RoutingRequestParts::new(&request);
             if let Some(ref tracker) = request.tracker {
                 let isl_blocks = routing_parts
@@ -808,31 +832,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let guard = match self
-            .track_selection(&request, &mut selection, phase, false, &budget)
-            .await
-        {
-            Ok(guard) => guard,
-            Err(error) => return Err(error),
-        };
-        drop(route_guard);
-        let selected_target = route_target(selection.worker);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_valid(selected_target)
-                    && let Some(operation) = operation.take()
-                {
-                    operation.invalidate();
-                }
-                return Err(error);
-            }
-        };
-        self.bind_affinity(operation, selected_target, stream)
+        let plan = self.plan_kv_route(&request, phase, None, budget).await?;
+        self.dispatch_kv_plan(request, plan).await
     }
 }
 
