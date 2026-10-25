@@ -1032,6 +1032,7 @@ impl HttpService {
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+            self.start_frontend_load_publisher(&publisher_cancel);
 
             tokio::pin!(server);
             tokio::select! {
@@ -1095,9 +1096,9 @@ impl HttpService {
             let std_listener = listener.into_std()?;
             self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
-        // Spawn canary after all fallible startup so it won't leak on early errors
-        tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-        self.start_frontend_load_publisher(&publisher_cancel);
+            // Spawn canary after all fallible startup so it won't leak on early errors
+            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+            self.start_frontend_load_publisher(&publisher_cancel);
 
             let handle = server_handle.unwrap_or_default();
             let server = axum_server::from_tcp(std_listener)
