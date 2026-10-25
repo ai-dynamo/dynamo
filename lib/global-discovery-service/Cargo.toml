@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-global-discovery-service"
+description = "Pool discovery for the Global Router, served over HTTP"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "global-discovery-service"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-global-router-shared = { path = "../global-router-shared" }
+dynamo-runtime = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+clap = { version = "4.5.49", features = ["derive"] }
+derive_builder = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }

@@ -14,6 +14,8 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/global-discovery-client",
+    "lib/global-discovery-service",
+    "lib/global-router-shared",
     "lib/router-plugins/catalog",
     "lib/router-plugins/builtin",
     "examples/router/custom-policy-example/soft-pin-repin",

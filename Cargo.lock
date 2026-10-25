@@ -2633,6 +2633,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-global-discovery-service"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "derive_builder",
+ "dynamo-global-router-shared",
+ "dynamo-runtime",
+ "futures",
+ "futures-util",
+ "k8s-openapi",
+ "kube",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-router-shared"
+version = "1.6.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-global-view-receiver"
 version = "1.6.0"
 dependencies = [
