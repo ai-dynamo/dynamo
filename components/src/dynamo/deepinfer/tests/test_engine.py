@@ -367,6 +367,45 @@ def test_parse_args_defaults(fake_env):
     with pytest.raises(ValueError, match="--kv-cache-manager prefix"):
         make_args("--prefix-host-bytes", "1G")
 
+    ssd = ["--prefix-host-bytes", "1G", "--prefix-ssd-dir", "/ssd"]
+    tier = make_args("--kv-cache-manager", "prefix", "--prefix-ssd-bytes", "2T", *ssd)
+    for rank, spec in enumerate(tier.rank_specs("e")):
+        assert spec.cache_options["ssd_dir"] == "/ssd" and spec.rank == rank
+        assert spec.cache_options["ssd_bytes"] == 2 << 40
+        assert spec.cache_options["ssd_rank"] == rank
+    assert make_args("--kv-cache-manager", "prefix").rank_specs("e")[0].cache_options[
+        "ssd_bytes"
+    ] == 0
+    with pytest.raises(ValueError, match="ssd-bytes needs --kv-cache-manager prefix"):
+        make_args("--prefix-ssd-bytes", "1G", "--prefix-ssd-dir", "/ssd")
+    with pytest.raises(ValueError, match="needs --prefix-host-bytes"):
+        make_args(
+            "--kv-cache-manager",
+            "prefix",
+            "--prefix-ssd-bytes",
+            "1G",
+            "--prefix-ssd-dir",
+            "/ssd",
+        )
+    with pytest.raises(ValueError, match="--prefix-ssd-dir needs --prefix-ssd-bytes"):
+        make_args(
+            "--kv-cache-manager",
+            "prefix",
+            "--prefix-host-bytes",
+            "1G",
+            "--prefix-ssd-dir",
+            "/ssd",
+        )
+    with pytest.raises(ValueError, match="--prefix-ssd-bytes needs --prefix-ssd-dir"):
+        make_args(
+            "--kv-cache-manager",
+            "prefix",
+            "--prefix-host-bytes",
+            "1G",
+            "--prefix-ssd-bytes",
+            "1G",
+        )
+
 
 def test_launch_env_defaults(fake_env):
     env = deepinfer_env(make_args("--kv-cache-manager", "prefix"))

@@ -230,6 +230,18 @@ class HostBlockPool:
     def release(self, slot: int) -> None:
         self._free.append(slot)
 
+    def row(self, slot: int) -> Any:
+        """The host row of ``slot`` (a view; for the SSD tier's reads and writes)."""
+        return self._rows.row(slot)
+
+    def fence(self) -> Optional[Any]:
+        """A ``torch.cuda.Event`` that completes when every copy queued so far
+        has: rows freed meanwhile may then be written by the CPU. None on the
+        numpy path, where copies are done on return."""
+        if self._rows.numpy:
+            return None
+        return self._record(_torch().cuda.current_stream(self._gpu.device))
+
     def store(self, gpu_ids: list[int], slots: list[int]) -> Optional[Any]:
         """GPU block rows -> host rows (before the blocks are freed).
 

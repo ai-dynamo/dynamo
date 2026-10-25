@@ -124,6 +124,9 @@ class KVCacheManager(ABC):
     def stats(self) -> CacheStats:
         ...
 
+    def close(self) -> None:
+        """The engine is closing: finish background work that uses host memory."""
+
     @abstractmethod
     def hold_for_transfer(self, seq: Any) -> HeldKV:
         """Prefill role: pin the seq's blocks and state slot, release the rest of

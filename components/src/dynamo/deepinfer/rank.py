@@ -389,8 +389,14 @@ class RankRunner:
         try:
             self.engine.close()
         finally:
-            if self.prefill is not None:
-                self.prefill.close()
-            if self.engine.dynamo_transfer is not None:
-                self.engine.dynamo_transfer.shutdown()
-            self.sink.close()
+            try:
+                if self.prefill is not None:
+                    self.prefill.close()
+            finally:
+                try:
+                    # After the prefill flow's holds are released: they may evict.
+                    self.cache.close()
+                finally:
+                    if self.engine.dynamo_transfer is not None:
+                        self.engine.dynamo_transfer.shutdown()
+                    self.sink.close()

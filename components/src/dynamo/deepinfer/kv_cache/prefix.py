@@ -32,12 +32,25 @@ A request that recomputes host blocks hands the cache its GPU copy instead.
 Host eviction (LRU over host leaves) emits ``BlockRemoved``. Snapshots default
 to host memory with the tier, and their slots grow with it.
 
+SSD tier (``ssd_bytes``, below the host tier): a block demoted to host is also
+written to a slot of a per-rank file (write-through, from the host row, once its
+GPU copy has landed), and a block with such a copy leaves host or GPU for the
+SSD tier without I/O and without an event: the copy is the block. The chain is
+GPU blocks, then host, then SSD. ``admit`` serves only the GPU and host part of
+a hit (up to its last snapshot) and, when the SSD blocks behind it are worth
+it, starts a best-effort read of them into host rows: the request is not
+delayed, later ones hit from host. A host row stays reserved while a write reads
+it. Blocks and snapshots stay on the engine thread; the I/O threads (``ssd.py``)
+only move bytes, and their completions are applied on the engine thread (in
+``before_step``, ``admit`` and ``_make_room``).
+
 Imported lazily by rank workers: no ``dynamo._core``; torch only when the
 engine's state tensor is a torch tensor.
 """
 
 from __future__ import annotations
 
+import enum
 import heapq
 import importlib
 import itertools
@@ -54,6 +67,7 @@ import numpy as np
 from .base import PREFILL_FREE_FRACTION, Admission, CacheStats, HeldKV, KVEvent
 from .host import HostBlockPool, PinnedRows, row_nbytes
 from .noop import NoopCacheManager
+from .ssd import ALIGN, SSDPool, Ticket
 from .vllm.hashing import get_hash_fn_by_name
 from .vllm.kv_cache_utils import (
     BlockHash,
@@ -72,36 +86,74 @@ _HASH_ALGO = "sha256"
 # snapshots (~1.4 MB each against ~29 MB of KV per 32K-token interval).
 HOST_SNAPSHOT_SHARE = 16
 STATS_LOG_INTERVAL_S = 60.0
+# An SSD hit shorter than this many blocks is not read back into host: the
+# read would cost more than recomputing it.
+SSD_MIN_READ_BLOCKS = 8
+SSD_MAX_INFLIGHT_WRITES = 64
+# Leave this share of the SSD directory's free space alone.
+SSD_RESERVE_FRACTION = 0.05
+
+
+class Tier(enum.IntEnum):
+    """Where a hit reads a block from; chains run GPU, then host, then SSD."""
+
+    GPU = 0
+    HOST = 1
+    SSD = 2
+
+
+class SsdState(enum.Enum):
+    """The block's SSD copy: none (or none yet), being written, or complete."""
+
+    NONE = 0
+    WRITING = 1
+    DONE = 2
 
 
 @dataclass(eq=False)
 class _Block:
-    """A cached full block, on GPU (the cache holds one pin on ``block_id``)
-    or in a host row (``host_slot``)."""
+    """A cached full block, on GPU (the cache holds one pin on ``block_id``),
+    in a host row (``host_slot``) or only in the SSD file (``ssd_slot``)."""
 
     block_hash: BlockHash
-    # -1 while the block is on host.
+    # -1 while the block is off GPU.
     block_id: int
     parent: Optional[_Block]
     # Chain position: the block holds tokens [index * 128, (index + 1) * 128).
     index: int
+    tier: Tier = Tier.GPU
     children: int = 0
-    # Children on GPU: a GPU block is a leaf for eviction without them.
+    # Children per tier: a block is a leaf for eviction from a tier once no child
+    # is on that tier or above it (children on lower tiers do not need it).
     gpu_children: int = 0
+    host_children: int = 0
     # Live requests whose block table holds block_id (while admit promotes a
     # host block: the request that will).
     users: int = 0
     # Snapshot slot with the state after this block, or -1.
     snapshot: int = -1
-    # Host tier row holding the block while it is off GPU, or -1.
+    # Host tier row holding the block while it is on host, or -1.
     host_slot: int = -1
+    # SSD slot of the copy (a backup while the block is on GPU or host): set
+    # from the start of the write until the copy is dropped.
+    ssd_slot: int = -1
+    ssd_state: SsdState = SsdState.NONE
+    # The write in flight (ssd_state WRITING): it reads a host row.
+    write: Optional[_Write] = None
+    # An SSD read of this block is in flight: it must stay put.
+    reading: bool = False
+    # Read from SSD into host and not served from there yet.
+    ssd_warm: bool = False
     last_used: int = 0
-    # Priority of this block's current eviction-heap entry (None: not queued).
+    # Priority of this block's current entry in its tier's eviction heap, in the
+    # SSD heap and in the heap of SSD-tier snapshot holders (None: not queued).
     heap_key: Optional[int] = None
+    ssd_key: Optional[int] = None
+    snap_key: Optional[int] = None
 
     @property
     def on_gpu(self) -> bool:
-        return self.block_id >= 0
+        return self.tier is Tier.GPU
 
 
 @dataclass(eq=False)
@@ -125,8 +177,30 @@ class _Evicted:
     ids: list[int] = field(default_factory=list)
     # Of those, (block_id, host_slot) to copy to host first.
     stores: list[tuple[int, int]] = field(default_factory=list)
+    # Of those, the blocks to write to SSD from their host row once copied.
+    writes: list[_Block] = field(default_factory=list)
     # External hashes of the blocks that left the cache.
     removed: list[int] = field(default_factory=list)
+
+
+@dataclass(eq=False)
+class _Write:
+    """An SSD write in flight: it reads the host ``row`` until it completes."""
+
+    block: _Block
+    row: int
+    # The block left that row meanwhile: free it when the write is done.
+    free_row: bool = False
+
+
+@dataclass(eq=False)
+class _Read:
+    """An SSD read in flight: the blocks, the SSD slots read and the host rows
+    reserved for them."""
+
+    blocks: list[_Block]
+    slots: list[int]
+    rows: list[int]
 
 
 def _finished(seq: Any) -> bool:
@@ -226,6 +300,9 @@ class PrefixCacheManager(NoopCacheManager):
         snapshot_device: Optional[str] = None,
         free_watermark: float = 0.05,
         host_bytes: int = 0,
+        ssd_dir: Optional[str] = None,
+        ssd_bytes: int = 0,
+        ssd_rank: int = 0,
     ) -> None:
         super().__init__(engine)
         if not engine.scheduler_config.chunked_prefill:
@@ -268,10 +345,24 @@ class PrefixCacheManager(NoopCacheManager):
             if not self._host.capacity:
                 logger.warning("No host memory left for the prefix cache's host tier")
                 self._host = None
+        self._ssd: Optional[SSDPool] = None
+        ssd_bytes = max(0, int(ssd_bytes))
+        if ssd_bytes and self._host is not None and ssd_dir:
+            self._ssd = self._open_ssd(
+                ssd_dir, ssd_bytes, ssd_rank, row_nbytes(cache_engine.gpu_blocks[0])
+            )
+        elif ssd_bytes:
+            logger.warning("The prefix cache's SSD tier needs the host tier and a dir")
         self._blocks: dict[BlockHash, _Block] = {}
         # Eviction candidates: (key, tiebreak, block); stale entries are skipped.
         self._heap: list[tuple[int, int, _Block]] = []
         self._host_heap: list[tuple[int, int, _Block]] = []
+        # Blocks with a complete SSD copy, and the SSD-tier leaves among them
+        # that hold a snapshot (what a full snapshot pool drops first).
+        self._ssd_heap: list[tuple[int, int, _Block]] = []
+        self._ssd_snap_heap: list[tuple[int, int, _Block]] = []
+        # Blocks in the SSD tier.
+        self._num_ssd = 0
         self._tiebreak = itertools.count()
         self._clock = itertools.count(1)
         # GPU blocks no live request holds (an upper bound on what eviction frees).
@@ -292,10 +383,18 @@ class PrefixCacheManager(NoopCacheManager):
         self.host_loads = 0
         self.host_rehomed = 0
         self.host_evictions = 0
+        # SSD tier counters: blocks written, read back into host, slots reclaimed
+        # (backup copies cleared and SSD-tier blocks dropped), failed I/O
+        # operations, and hit tokens served from host rows an SSD read filled.
+        self.ssd_stores = 0
+        self.ssd_loads = 0
+        self.ssd_evictions = 0
+        self.ssd_errors = 0
+        self.ssd_hit_tokens = 0
         self._last_log = time.monotonic()
         logger.info(
             "DeepInfer prefix cache: keep=%d interval=%d snapshots=%d x %d B on %s, "
-            "free floor=%d/%d blocks, host tier=%s",
+            "free floor=%d/%d blocks, host tier=%s, ssd tier=%s",
             self.keep_tokens,
             self.snapshot_interval,
             self._pool.num_slots,
@@ -308,18 +407,72 @@ class PrefixCacheManager(NoopCacheManager):
                 if self._host is not None
                 else "off"
             ),
+            (
+                f"{self._ssd.capacity} blocks ({self._ssd.nbytes / 2**30:.1f} GiB)"
+                if self._ssd is not None
+                else "off"
+            ),
+        )
+
+    def _open_ssd(
+        self, ssd_dir: str, ssd_bytes: int, rank: int, row_bytes: int
+    ) -> Optional[SSDPool]:
+        """The rank's SSD file, clamped to what snapshots can make servable and
+        to the free space of ``ssd_dir``; None when nothing is left."""
+        stride = -(-row_bytes // ALIGN) * ALIGN
+        want = ssd_bytes // stride
+        count = want
+        # A hit ends at a snapshot, so no more blocks than the snapshots (each
+        # resumes at most one interval) can ever serve are worth keeping.
+        per_snapshot = self.snapshot_interval // self.block_size
+        servable = self._pool.num_slots * per_snapshot
+        if per_snapshot:
+            count = min(count, servable)
+        os.makedirs(ssd_dir, exist_ok=True)
+        path = os.path.join(ssd_dir, f"rank{rank}.kv")
+        try:
+            # A file left by an earlier run is recreated: its space is free.
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        free = os.statvfs(ssd_dir)
+        room = int(free.f_bavail * free.f_frsize * (1 - SSD_RESERVE_FRACTION))
+        count = min(count, room // stride)
+        if count < want:
+            logger.warning(
+                "SSD tier clamped to %d of %d blocks (%.1f of %.1f GiB): snapshots "
+                "can serve %s blocks, %s has %.1f GiB free",
+                count,
+                want,
+                count * stride / 2**30,
+                want * stride / 2**30,
+                servable if per_snapshot else "any number of",
+                ssd_dir,
+                free.f_bavail * free.f_frsize / 2**30,
+            )
+        if count <= 0:
+            logger.warning("No room left for the prefix cache's SSD tier: off")
+            return None
+        return SSDPool(
+            path,
+            row_bytes,
+            count,
+            max_inflight_writes=SSD_MAX_INFLIGHT_WRITES,
         )
 
     # -- KVCacheManager -------------------------------------------------------
 
     def admit(self, seq: Any, token_ids: np.ndarray) -> Admission:
+        self._poll_ssd()
         seq_id = int(seq.seq_id)
         num_tokens = len(token_ids)
         req = self._retry
         if req is None or req.seq_id != seq_id:
             req = _Request(seq_id, seq, token_ids)
         self._retry = None
-        chain = self._lookup(req, self._last_checkpoint(num_tokens) // self.block_size)
+        chain, ssd_run = self._lookup(
+            req, self._last_checkpoint(num_tokens) // self.block_size
+        )
         scheduler = self.engine.scheduler
         hit = len(chain) * self.block_size
         if chain:
@@ -365,6 +518,9 @@ class PrefixCacheManager(NoopCacheManager):
                 num_tokens,
                 (len(chain) - shared) * self.block_size,
             )
+        if ssd_run:
+            # Best effort: this request goes on without them.
+            self._read_ssd(ssd_run)
         req.checkpoints = deque(self._checkpoints(hit, num_tokens))
         if req.checkpoints:
             seq.chunk_checkpoints = list(req.checkpoints)
@@ -375,6 +531,7 @@ class PrefixCacheManager(NoopCacheManager):
         return Admission(admitted=True, hit_tokens=hit)
 
     def before_step(self) -> None:
+        self._poll_ssd()
         scheduler = self.engine.scheduler
         waiting = scheduler.waiting
         if len(self._requests) > len(waiting) + len(scheduler.running):
@@ -432,6 +589,13 @@ class PrefixCacheManager(NoopCacheManager):
             stats.hit_rate = self._hit_tokens / self._query_tokens
         return stats
 
+    def close(self) -> None:
+        """Wait for the SSD I/O in flight: it reads and writes host rows that
+        are unpinned and unmapped once the cache is gone."""
+        if self._ssd is not None:
+            self._ssd.close()
+            self._ssd = None
+
     def hold_for_transfer(self, seq: Any) -> HeldKV:
         req = self._requests.pop(seq.seq_id, None)
         held = super().hold_for_transfer(seq)
@@ -478,19 +642,26 @@ class PrefixCacheManager(NoopCacheManager):
             )
         return hashes[index]
 
-    def _lookup(self, req: _Request, max_blocks: int) -> list[_Block]:
-        """The longest cached chain of the prompt that ends at a snapshot: GPU
-        blocks, then host blocks."""
+    def _lookup(
+        self, req: _Request, max_blocks: int
+    ) -> tuple[list[_Block], list[_Block]]:
+        """The longest cached chain of the prompt that ends at a snapshot, in two
+        parts: what ``admit`` serves now (GPU blocks, then host blocks, up to a
+        snapshot), and the blocks behind it up to the last snapshot of the
+        whole chain (which then continues on SSD)."""
         chain: list[_Block] = []
-        best = 0
+        served = best = 0
         for i in range(max_blocks):
             block = self._blocks.get(self._block_hash(req, i))
-            if block is None or (block.on_gpu and chain and not chain[-1].on_gpu):
+            # Tiers only go down the chain: GPU, host, SSD.
+            if block is None or (chain and block.tier < chain[-1].tier):
                 break
             chain.append(block)
             if block.snapshot >= 0:
                 best = i + 1
-        return chain[:best]
+                if block.tier is not Tier.SSD:
+                    served = i + 1
+        return chain[:served], chain[served:best]
 
     # -- host tier ------------------------------------------------------------
 
@@ -503,21 +674,80 @@ class PrefixCacheManager(NoopCacheManager):
         self.engine.block_manager.pin_blocks(ids)
         for block, block_id in zip(blocks, ids):
             # The load is queued on the stream before any later store into the row.
-            self._host.release(block.host_slot)
-            block.host_slot, block.block_id, block.heap_key = -1, block_id, None
-            if block.parent is not None:
-                block.parent.gpu_children += 1
+            self._release_row(block)
+            block.block_id = block_id
+            self._move(block, Tier.GPU)
+            if block.ssd_warm:
+                block.ssd_warm = False
+                self.ssd_hit_tokens += self.block_size
         self.host_loads += len(blocks)
 
     def _rehome(self, block: _Block, block_id: int) -> None:
-        """A request recomputed a host block into ``block_id``: cache that."""
+        """A request recomputed an off-GPU block into ``block_id``: cache that."""
         assert self._host is not None
-        self._host.release(block.host_slot)
-        block.host_slot, block.block_id, block.heap_key = -1, block_id, None
+        if block.tier is Tier.HOST:
+            self._release_row(block)
+        block.block_id, block.ssd_warm = block_id, False
+        self._move(block, Tier.GPU)
         self._num_unused += 1
-        if block.parent is not None:
-            block.parent.gpu_children += 1
         self.host_rehomed += 1
+
+    def _release_row(self, block: _Block) -> None:
+        """Give up the block's host row; a write in flight still reads it, and
+        frees it when done."""
+        assert self._host is not None
+        row, block.host_slot = block.host_slot, -1
+        write = block.write
+        if write is not None and write.row == row:
+            write.free_row = True
+        else:
+            self._host.release(row)
+
+    def _move(self, block: _Block, tier: Tier) -> None:
+        """Change the block's tier and its parent's child counts."""
+        parent = block.parent
+        if parent is not None:
+            if block.tier is Tier.GPU:
+                parent.gpu_children -= 1
+            elif block.tier is Tier.HOST:
+                parent.host_children -= 1
+            if tier is Tier.GPU:
+                parent.gpu_children += 1
+            elif tier is Tier.HOST:
+                parent.host_children += 1
+        self._num_ssd += (tier is Tier.SSD) - (block.tier is Tier.SSD)
+        block.tier = tier
+        # A queued entry was for the old tier's heap.
+        block.heap_key = None
+        if parent is not None:
+            self._maybe_push(parent)
+
+    def _drop(self, block: _Block, out: _Evicted) -> None:
+        """Take the block out of the cache: its host row, snapshot and SSD slot
+        go back to their pools (a slot an I/O in flight uses, when it is done)."""
+        del self._blocks[block.block_hash]
+        if block.tier is Tier.HOST:
+            self._release_row(block)
+        elif block.tier is Tier.SSD:
+            self._num_ssd -= 1
+        if block.snapshot >= 0:
+            self._pool.release(block.snapshot)
+            block.snapshot = -1
+        if block.ssd_slot >= 0 and block.write is None and not block.reading:
+            # Nothing to give back once the cache is closed: the file is gone.
+            if self._ssd is not None:
+                self._ssd.release(block.ssd_slot)
+            block.ssd_slot = -1
+        block.heap_key = block.ssd_key = block.snap_key = None
+        out.removed.append(_external(block))
+        parent = block.parent
+        if parent is not None:
+            parent.children -= 1
+            if block.tier is Tier.GPU:
+                parent.gpu_children -= 1
+            elif block.tier is Tier.HOST:
+                parent.host_children -= 1
+            self._maybe_push(parent)
 
     def _host_slot(self, out: _Evicted) -> Optional[int]:
         assert self._host is not None
@@ -531,26 +761,268 @@ class PrefixCacheManager(NoopCacheManager):
         return slot
 
     def _evict_host(self, block: _Block, out: _Evicted) -> None:
+        """Free the host row of a leaf: a block with a complete SSD copy moves to
+        the SSD tier (no I/O, no event), any other leaves the cache. That takes
+        what is chained behind it on SSD along (the block has no copy to hang
+        it on, and nothing could reach it any more), so such a block never pins
+        its row."""
         assert self._host is not None
-        del self._blocks[block.block_hash]
-        self._host.release(block.host_slot)
-        block.host_slot = -1
-        if block.snapshot >= 0:
-            self._pool.release(block.snapshot)
-            block.snapshot = -1
-        out.removed.append(_external(block))
         self.host_evictions += 1
-        parent = block.parent
-        if parent is not None:
-            parent.children -= 1
-            self._maybe_push(parent)
+        if block.ssd_state is SsdState.DONE:
+            self._release_row(block)
+            block.ssd_warm = False
+            self._move(block, Tier.SSD)
+            self._maybe_push(block)
+        else:
+            if block.children:
+                kids = [b for b in self._blocks.values() if b.parent is block]
+                self._drop_subtree(kids, out)
+            self._drop(block, out)
+
+    # -- SSD tier -------------------------------------------------------------
+
+    def _can_write(self, out: _Evicted) -> bool:
+        ssd = self._ssd
+        return ssd is not None and (
+            ssd.inflight_writes + len(out.writes) < ssd.max_inflight_writes
+        )
+
+    def _ssd_slot(self, out: _Evicted) -> Optional[int]:
+        """A free SSD slot, reclaiming the coldest copy when none is free; None
+        (skip the write) when nothing can be."""
+        assert self._ssd is not None
+        slot = self._ssd.alloc()
+        while slot is None:
+            victim = self._pop_ssd()
+            if victim is None:
+                return None
+            self._evict_ssd(victim, out)
+            slot = self._ssd.alloc()
+        return slot
+
+    def _evict_ssd(self, block: _Block, out: _Evicted) -> None:
+        """Reclaim the SSD slot of a complete copy. The backup of a block that
+        is still on GPU or host is cleared (the block stays cached, no event);
+        a block that is only on SSD leaves the cache."""
+        assert self._ssd is not None
+        self.ssd_evictions += 1
+        if block.tier is Tier.SSD:
+            self._drop(block, out)
+            return
+        self._ssd.release(block.ssd_slot)
+        block.ssd_slot, block.ssd_state, block.ssd_key = -1, SsdState.NONE, None
+
+    def _write_through(self, block: _Block, row: int, out: _Evicted) -> None:
+        """Queue the SSD copy of a block just demoted to host ``row``, unless it
+        has one or writes are backed up. The row stays put until it is written."""
+        if block.ssd_state is not SsdState.NONE or not self._can_write(out):
+            return
+        slot = self._ssd_slot(out)
+        if slot is None:
+            return
+        block.ssd_slot, block.ssd_state = slot, SsdState.WRITING
+        block.write = _Write(block, row)
+        out.writes.append(block)
+
+    def _poll_ssd(self) -> None:
+        """Apply the SSD I/O that completed since the last step."""
+        if self._ssd is None:
+            return
+        out = _Evicted()
+        for ticket in self._ssd.poll():
+            if ticket.error is not None:
+                self.ssd_errors += 1
+                logger.warning("SSD %s failed: %r", ticket.kind, ticket.error)
+            if ticket.kind == "store":
+                self._write_done(ticket)
+            else:
+                self._read_done(ticket, out)
+        self._flush(out, [])
+
+    def _write_done(self, ticket: Ticket) -> None:
+        assert self._host is not None and self._ssd is not None
+        write: _Write = ticket.tag
+        block = write.block
+        block.write = None
+        if write.free_row:
+            self._host.release(write.row)
+        live = self._blocks.get(block.block_hash) is block
+        if ticket.error is not None or not live:
+            self._ssd.release(block.ssd_slot)
+            block.ssd_slot, block.ssd_state = -1, SsdState.NONE
+        else:
+            block.ssd_state = SsdState.DONE
+            self.ssd_stores += 1
+        if live:
+            # Evictable from host again, and a backup copy to reclaim.
+            self._maybe_push(block)
+
+    def _read_ssd(self, run: list[_Block]) -> None:
+        """Start reading the SSD blocks of ``run`` into host rows (best effort:
+        the request that found them goes on without them)."""
+        if self._ssd is None or self._host is None:
+            return
+        run = self._live(run)
+        # Host blocks between the served part and the SSD blocks stay: a read
+        # under a parent that left host would be of no use.
+        held = [b for b in run if b.tier is Tier.HOST]
+        for block in held:
+            block.users += 1
+        try:
+            self._start_read(self._readable(run))
+        finally:
+            for block in held:
+                block.users -= 1
+                self._maybe_push(block)
+
+    def _start_read(self, run: list[_Block]) -> None:
+        assert self._ssd is not None and self._host is not None
+        todo = [b for b in run if b.tier is Tier.SSD and not b.reading]
+        if not todo or sum(b.tier is Tier.SSD for b in run) < SSD_MIN_READ_BLOCKS:
+            return
+        out = _Evicted()
+        rows: list[int] = []
+        for _ in todo:
+            row = self._host_slot(out)
+            if row is None:
+                break
+            rows.append(row)
+        if len(rows) < len(todo):
+            for row in rows:
+                self._host.release(row)
+        else:
+            for block in todo:
+                # Held against eviction until the read is done.
+                block.reading = True
+            slots = [b.ssd_slot for b in todo]
+            self._ssd.load(
+                slots,
+                [self._host.row(r) for r in rows],
+                # Rows freed since (by a promotion or an eviction) may still be
+                # the target of a copy queued before this read.
+                after=self._host.fence(),
+                tag=_Read(todo, slots, rows),
+            )
+        self._flush(out, [])
+
+    def _live(self, run: list[_Block]) -> list[_Block]:
+        """The part of ``run`` that is still cached and still ends at a snapshot:
+        evictions since the lookup (``_make_room``) may have dropped blocks and
+        their SSD slots."""
+        end = 0
+        for i, block in enumerate(run):
+            if self._blocks.get(block.block_hash) is not block or (
+                block.tier is Tier.SSD and block.ssd_slot < 0
+            ):
+                break
+            if block.snapshot >= 0:
+                end = i + 1
+        return run[:end]
+
+    def _readable(self, run: list[_Block]) -> list[_Block]:
+        """The longest part of ``run`` that ends at a snapshot and whose reads
+        get host rows without evicting more than can be had: an abandoned read
+        must not have evicted anything."""
+        rows = self._host_rows(sum(b.tier is Tier.SSD and not b.reading for b in run))
+        need = end = 0
+        for i, block in enumerate(run):
+            need += block.tier is Tier.SSD and not block.reading
+            if need > rows:
+                break
+            if block.snapshot >= 0:
+                end = i + 1
+        return run[:end]
+
+    def _host_rows(self, limit: int) -> int:
+        """How many host rows (up to ``limit``) allocating can get: the free ones
+        plus those eviction frees, leaf by leaf and then the parents it exposes.
+        Walks the host heap in eviction order and puts the entries back."""
+        assert self._host is not None
+        rows, heap = self._host.num_free, self._host_heap
+        taken: list[tuple[int, int, _Block]] = []
+        seen: set[int] = set()
+        # Host children each parent still has, after the leaves counted so far.
+        left: dict[int, int] = {}
+        exposed: list[_Block] = []
+        while rows < limit and (exposed or heap):
+            if exposed:
+                block = exposed.pop()
+            else:
+                entry = heapq.heappop(heap)
+                block = entry[2]
+                if entry[0] != block.heap_key or block.tier is not Tier.HOST:
+                    continue
+                if block.users or not self._host_leaf(block):
+                    block.heap_key = None
+                    continue
+                if id(block) in seen:
+                    continue
+                seen.add(id(block))
+                taken.append(entry)
+            rows += 1
+            parent = block.parent
+            if parent is not None and parent.tier is Tier.HOST:
+                n = left.get(id(parent), parent.host_children) - 1
+                left[id(parent)] = n
+                if not (
+                    n
+                    or parent.users
+                    or parent.gpu_children
+                    or parent.ssd_state is SsdState.WRITING
+                ):
+                    exposed.append(parent)
+        for entry in taken:
+            heapq.heappush(heap, entry)
+        return rows
+
+    def _read_done(self, ticket: Ticket, out: _Evicted) -> None:
+        assert self._host is not None and self._ssd is not None
+        read: _Read = ticket.tag
+        failed: list[_Block] = []
+        for block, slot, row in zip(read.blocks, read.slots, read.rows):
+            block.reading = False
+            if self._blocks.get(block.block_hash) is not block:
+                # Dropped meanwhile; its slot waited for the read.
+                if block.ssd_slot >= 0:
+                    self._ssd.release(block.ssd_slot)
+                    block.ssd_slot = -1
+                self._host.release(row)
+            elif block.tier is not Tier.SSD or block.ssd_slot != slot:
+                # Re-homed meanwhile (recomputed into the GPU, ...): keep it.
+                self._host.release(row)
+                self._maybe_push(block)
+            elif ticket.error is not None:
+                self._host.release(row)
+                failed.append(block)
+            elif block.parent is not None and block.parent.tier is Tier.SSD:
+                # Its parent left host meanwhile.
+                self._host.release(row)
+                self._maybe_push(block)
+            else:
+                block.host_slot, block.ssd_warm = row, True
+                self._move(block, Tier.HOST)
+                self._maybe_push(block)
+                self.ssd_loads += 1
+        if failed:
+            self._drop_subtree(failed, out)
+
+    def _drop_subtree(self, roots: list[_Block], out: _Evicted) -> None:
+        """Drop SSD-tier blocks and everything chained behind them (leaves first):
+        a block whose parent is gone could never be reached again."""
+        dead = set(roots)
+        for block in sorted(self._blocks.values(), key=lambda b: b.index):
+            if block.parent in dead:
+                dead.add(block)
+        for block in sorted(dead, key=lambda b: -b.index):
+            assert block.tier is Tier.SSD
+            self._drop(block, out)
 
     def _log_stats(self) -> None:
         now = time.monotonic()
         if now - self._last_log < STATS_LOG_INTERVAL_S or not self._query_tokens:
             return
         self._last_log = now
-        on_host = self._host.capacity - self._host.num_free if self._host else 0
+        on_host = sum(b.tier is Tier.HOST for b in self._blocks.values())
         logger.info(
             "DeepInfer prefix cache: hit rate %.3f (%d of %d prompt tokens, %d "
             "from host), %d blocks cached on GPU, %d of %d on host, host stores "
@@ -559,7 +1031,7 @@ class PrefixCacheManager(NoopCacheManager):
             self._hit_tokens,
             self._query_tokens,
             self.host_hit_tokens,
-            len(self._blocks) - on_host,
+            len(self._blocks) - on_host - self._num_ssd,
             on_host,
             self._host.capacity if self._host else 0,
             self.host_stores,
@@ -567,6 +1039,20 @@ class PrefixCacheManager(NoopCacheManager):
             self.host_rehomed,
             self.host_evictions,
         )
+        if self._ssd is not None:
+            logger.info(
+                "DeepInfer prefix cache SSD: %d blocks only on SSD, %d of %d slots "
+                "used, %d hit tokens warmed by SSD reads, stores %d, loads %d, "
+                "evictions %d, errors %d",
+                self._num_ssd,
+                self._ssd.capacity - self._ssd.num_free,
+                self._ssd.capacity,
+                self.ssd_hit_tokens,
+                self.ssd_stores,
+                self.ssd_loads,
+                self.ssd_evictions,
+                self.ssd_errors,
+            )
 
     # -- capture --------------------------------------------------------------
 
@@ -637,6 +1123,13 @@ class PrefixCacheManager(NoopCacheManager):
         out = _Evicted()
         kept: list[_Block] = []
         while slot is None:
+            # Snapshots of blocks that only the SSD holds go first: a demoted
+            # block keeps its own, so evicting those would free nothing.
+            block = self._pop_ssd_snapshot() if self._ssd else None
+            if block is not None:
+                self._evict_ssd(block, out)
+                slot = self._pool.alloc()
+                continue
             # The coldest snapshots are on host; a demoted block keeps its own.
             block = self._pop_evictable(gpu=False) if self._host else None
             if block is not None:
@@ -684,81 +1177,161 @@ class PrefixCacheManager(NoopCacheManager):
     # -- eviction -------------------------------------------------------------
 
     def _maybe_push(self, block: _Block) -> None:
-        if block.users:
-            return
-        if block.on_gpu:
-            if block.gpu_children:
-                return
-            heap = self._heap
-        else:
-            if block.children:
-                return
-            heap = self._host_heap
+        if block.tier is Tier.SSD:
+            if not block.children and not block.reading and block.snapshot >= 0:
+                self._push(self._ssd_snap_heap, block, "snap_key", None)
+        elif not block.users:
+            if block.tier is Tier.GPU:
+                if not block.gpu_children:
+                    self._push(self._heap, block, "heap_key", Tier.GPU)
+            elif self._host_leaf(block):
+                self._push(self._host_heap, block, "heap_key", Tier.HOST)
+        if block.ssd_state is SsdState.DONE and self._ssd_victim(block):
+            self._push(self._ssd_heap, block, "ssd_key", None)
+
+    @staticmethod
+    def _host_leaf(block: _Block) -> bool:
+        """A host block that can leave host: nothing above it needs it (its
+        children, if any, are on SSD) and no write reads its row."""
+        return (
+            not block.gpu_children
+            and not block.host_children
+            and block.ssd_state is not SsdState.WRITING
+        )
+
+    @staticmethod
+    def _ssd_victim(block: _Block) -> bool:
+        """A complete SSD copy whose slot can be reclaimed, unless a read uses it:
+        a backup when no child is on SSD (the SSD children would go with the
+        block once it left host), an SSD-only block when it is a leaf."""
+        if block.reading:
+            return False
+        if block.tier is Tier.SSD:
+            return not block.children
+        return block.children == block.gpu_children + block.host_children
+
+    def _push(
+        self,
+        heap: list[tuple[int, int, _Block]],
+        block: _Block,
+        attr: str,
+        tier: Optional[Tier],
+    ) -> None:
         # A leaf that cannot serve a hit (no snapshot, nothing cached below)
         # goes first.
         key = block.last_used if block.snapshot >= 0 or block.children else 0
-        block.heap_key = key
+        setattr(block, attr, key)
         heapq.heappush(heap, (key, next(self._tiebreak), block))
         if len(heap) > 2 * len(self._blocks) + 1024:
             heap[:] = [
-                (b.heap_key, next(self._tiebreak), b)
+                (k, next(self._tiebreak), b)
                 for b in self._blocks.values()
-                if b.heap_key is not None and (b.on_gpu == (heap is self._heap))
+                if (k := getattr(b, attr)) is not None
+                and (tier is None or b.tier is tier)
             ]
             heapq.heapify(heap)
 
     def _pop_evictable(self, *, gpu: bool) -> Optional[_Block]:
         heap = self._heap if gpu else self._host_heap
+        tier = Tier.GPU if gpu else Tier.HOST
         while heap:
             key, _, block = heapq.heappop(heap)
-            if key != block.heap_key or block.on_gpu != gpu:
+            if key != block.heap_key or block.tier is not tier:
                 continue
             block.heap_key = None
-            below = block.gpu_children if gpu else block.children
-            if block.users == 0 and below == 0:
+            if block.users == 0 and (
+                not block.gpu_children if gpu else self._host_leaf(block)
+            ):
+                return block
+        return None
+
+    def _pop_ssd(self) -> Optional[_Block]:
+        """The coldest complete SSD copy whose slot can be reclaimed."""
+        heap = self._ssd_heap
+        while heap:
+            key, _, block = heapq.heappop(heap)
+            if key != block.ssd_key:
+                continue
+            block.ssd_key = None
+            if block.ssd_state is SsdState.DONE and self._ssd_victim(block):
+                return block
+        return None
+
+    def _pop_ssd_snapshot(self) -> Optional[_Block]:
+        """The coldest SSD-only leaf that holds a snapshot."""
+        heap = self._ssd_snap_heap
+        while heap:
+            key, _, block = heapq.heappop(heap)
+            if key != block.snap_key:
+                continue
+            block.snap_key = None
+            if (
+                block.tier is Tier.SSD
+                and not block.children
+                and not block.reading
+                and block.snapshot >= 0
+            ):
                 return block
         return None
 
     def _evict_gpu(self, block: _Block, out: _Evicted, *, demote: bool = True) -> bool:
         """Take an unheld GPU leaf off the GPU: to the host tier when it can
-        still serve a hit, else out of the cache. False (nothing changed) when
-        it can do neither: the host blocks below it need it."""
+        still serve a hit, else to the SSD tier when a complete copy is there,
+        else out of the cache. False (nothing changed) when it can do none: the
+        blocks below it need it."""
         slot = None
-        if (
-            demote
-            and self._host is not None
-            and (block.snapshot >= 0 or block.children)
-        ):
+        servable = block.snapshot >= 0 or block.children
+        if demote and self._host is not None and servable:
             slot = self._host_slot(out)
-        if slot is None and block.children:
+        # The SSD copy is the block: no I/O. Not under a child on host, which
+        # would then sit above its parent; not for a snapshot slot (it is kept).
+        to_ssd = (
+            slot is None
+            and demote
+            and servable
+            and block.ssd_state is SsdState.DONE
+            and not block.host_children
+        )
+        if slot is None and block.children and not to_ssd:
             return False
         self._num_unused -= 1
         out.ids.append(block.block_id)
-        parent = block.parent
-        if parent is not None:
-            parent.gpu_children -= 1
         if slot is not None:
             out.stores.append((block.block_id, slot))
             block.block_id, block.host_slot = -1, slot
+            self._move(block, Tier.HOST)
             self.host_stores += 1
+            if self._ssd is not None:
+                self._write_through(block, slot, out)
+            self._maybe_push(block)
+        elif to_ssd:
+            block.block_id = -1
+            self._move(block, Tier.SSD)
             self._maybe_push(block)
         else:
-            del self._blocks[block.block_hash]
-            if block.snapshot >= 0:
-                self._pool.release(block.snapshot)
-                block.snapshot = -1
-            out.removed.append(_external(block))
-            if parent is not None:
-                parent.children -= 1
-        if parent is not None:
-            self._maybe_push(parent)
+            self._drop(block, out)
         return True
 
     def _flush(self, out: _Evicted, kept: list[_Block]) -> None:
+        event = None
         if out.stores:
             assert self._host is not None
             # Before the blocks are freed: the copy is queued ahead of their reuse.
-            self._host.store([i for i, _ in out.stores], [s for _, s in out.stores])
+            event = self._host.store(
+                [i for i, _ in out.stores], [s for _, s in out.stores]
+            )
+        if out.writes:
+            assert self._host is not None and self._ssd is not None
+            # Each write waits for the copy that filled its row.
+            for block in out.writes:
+                assert block.write is not None
+                self._ssd.store(
+                    [self._host.row(block.write.row)],
+                    [block.ssd_slot],
+                    after=event,
+                    tag=block.write,
+                )
+            out.writes.clear()
         if out.ids:
             self.engine.block_manager.unpin_blocks(out.ids)
         if out.removed:
@@ -769,6 +1342,7 @@ class PrefixCacheManager(NoopCacheManager):
     def _make_room(self, want: int, at_least: int) -> int:
         """Evict LRU blocks until ``want`` blocks are free; do nothing when even
         evicting every unheld block would leave fewer than ``at_least``."""
+        self._poll_ssd()
         block_manager = self.engine.block_manager
         free = int(block_manager.get_num_free_blocks())
         if free >= want:

@@ -6,7 +6,8 @@ and writes of host KV rows to and from them on a small thread pool.
 
 A slot holds one host row (one KV block, all layers packed). The data path is
 always host row <-> file, never the GPU: a store waits on the CUDA event of the
-GPU->host copy that filled the row, then writes it. The I/O threads touch only
+GPU->host copy that filled the row, then writes it; a load waits on the event of
+the copies queued before it that still use its rows. The I/O threads touch only
 the file, the rows they were handed and their ticket; completed tickets are
 queued and drained by :meth:`SSDPool.poll` on the engine thread, which owns all
 cache state.
@@ -17,6 +18,7 @@ rows and events it is handed (numpy rows for tests).
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import queue
@@ -42,7 +44,8 @@ def _round_up(n: int, align: int) -> int:
 def _row_view(row: Any) -> memoryview:
     """A flat byte view of a host row (a numpy array or a torch CPU tensor)."""
     if not isinstance(row, np.ndarray):
-        row = row.numpy()
+        # numpy has no bfloat16 or float8: read the bytes.
+        row = row.view(importlib.import_module("torch").uint8).numpy()
     return memoryview(row.reshape(-1).view(np.uint8))
 
 
@@ -146,11 +149,18 @@ class SSDPool:
         self._submit(ticket, rows, after)
         return ticket
 
-    def load(self, slots: list[int], rows: list[Any], tag: Any = None) -> Ticket:
-        """Slots -> host rows. The rows must stay untouched until the ticket is
-        polled."""
+    def load(
+        self,
+        slots: list[int],
+        rows: list[Any],
+        after: Any = None,
+        tag: Any = None,
+    ) -> Ticket:
+        """Slots -> host rows. ``after`` is a CUDA event recorded once the copies
+        that read or wrote the rows before were queued; the read waits for it.
+        The rows must stay untouched until the ticket is polled."""
         ticket = Ticket("load", list(slots), tag)
-        self._submit(ticket, rows, None)
+        self._submit(ticket, rows, after)
         return ticket
 
     def _submit(self, ticket: Ticket, rows: list[Any], after: Any) -> None:
@@ -170,14 +180,11 @@ class SSDPool:
     def _run(self, ticket: Ticket, views: list[memoryview], after: Any) -> None:
         error: Optional[BaseException] = None
         try:
-            if ticket.kind == "store":
-                if after is not None:
-                    after.synchronize()
-                for slot, view in zip(ticket.slots, views):
-                    self._transfer(slot, view, write=True)
-            else:
-                for slot, view in zip(ticket.slots, views):
-                    self._transfer(slot, view, write=False)
+            if after is not None:
+                after.synchronize()
+            write = ticket.kind == "store"
+            for slot, view in zip(ticket.slots, views):
+                self._transfer(slot, view, write=write)
         except BaseException as e:  # never raised from an I/O thread
             error = e
         self._finish(ticket, error)

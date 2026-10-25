@@ -5,7 +5,9 @@
 file, backpressure, errors and completion tickets."""
 
 import os
+import sys
 import threading
+import types
 
 import numpy as np
 import pytest
@@ -142,6 +144,55 @@ def test_store_waits_for_the_event(tmp_path):
         pool.store(rows_of(1, 4096), [0], after=Event())
         drain(pool, 1)
         assert seen == ["sync"]
+    finally:
+        pool.close()
+
+
+def test_load_waits_for_the_event(tmp_path):
+    seen = []
+
+    class Event:
+        def synchronize(self):
+            seen.append("sync")
+
+    pool = SSDPool(str(tmp_path / "k"), 4096, 2)
+    try:
+        (row,) = rows_of(1, 4096)
+        pool.store([row], [0])
+        drain(pool, 1)
+        out = np.zeros(4096, dtype=np.uint8)
+        pool.load([0], [out], after=Event(), tag="t")
+        (done,) = drain(pool, 1)
+        assert seen == ["sync"] and done.tag == "t" and np.array_equal(out, row)
+    finally:
+        pool.close()
+
+
+def test_torch_rows_without_a_numpy_dtype_are_read_as_bytes(tmp_path, monkeypatch):
+    # bfloat16 and float8 tensors have no numpy dtype: .numpy() refuses them.
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(uint8="uint8"))
+
+    class Row:
+        def __init__(self, data):
+            self.data = data
+
+        def numpy(self):
+            raise TypeError("Got unsupported ScalarType BFloat16")
+
+        def view(self, dtype):
+            assert dtype == "uint8"
+            return types.SimpleNamespace(numpy=lambda: self.data)
+
+    pool = SSDPool(str(tmp_path / "k"), 4096, 2)
+    try:
+        (want,) = rows_of(1, 4096)
+        pool.store([Row(want.copy())], [1])
+        (done,) = drain(pool, 1)
+        assert done.error is None
+        out = np.zeros(4096, dtype=np.uint8)
+        pool.load([1], [Row(out)])
+        (done,) = drain(pool, 1)
+        assert done.error is None and np.array_equal(out, want)
     finally:
         pool.close()
 
