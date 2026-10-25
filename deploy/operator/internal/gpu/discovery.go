@@ -258,7 +258,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //
 // When filterSKU is non-empty, only nodes whose inferred SKU matches are
 // considered. When empty, the best node is selected first (highest GPU count,
-// then VRAM) and then only nodes with the same SKU are counted.
+// then VRAM). Each node with the selected SKU contributes once to NodesWithGPUs,
+// and its GPU count is summed into TotalGPUs.
 //
 // The function performs the following:
 //
@@ -278,8 +279,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //     load-balancing ambiguity in multi-node clusters.
 //   - If at least one pod is successfully scraped, partial failures are tolerated.
 //   - If all pods fail to scrape, an aggregated error is returned.
-//   - Assumes each exporter reports metrics for its whole node; multiple
-//     exporters on the same node count only once.
+//   - Multiple exporters on one node use the report with the highest GPU count,
+//     then highest VRAM, for both node selection and aggregation.
 //
 // Returns:
 //   - *GPUInfo for the selected node
@@ -352,6 +353,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 		nodeName string
 	}
 	allNodes := make([]nodeInfo, 0, len(dcgmPods))
+	nodeIndexes := make(map[string]int)
 	var scrapeErrors []error
 
 	for _, pod := range dcgmPods {
@@ -365,7 +367,18 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 			continue
 		}
 
-		allNodes = append(allNodes, nodeInfo{info: info, sku: InferHardwareSystem(info.Model), nodeName: pod.Spec.NodeName})
+		// Running pods have a scheduled node name; keep its strongest report in first-seen node order.
+		n := nodeInfo{info: info, sku: InferHardwareSystem(info.Model), nodeName: pod.Spec.NodeName}
+		if index, seen := nodeIndexes[n.nodeName]; seen {
+			previous := allNodes[index].info
+			if info.GPUsPerNode > previous.GPUsPerNode ||
+				(info.GPUsPerNode == previous.GPUsPerNode && info.VRAMPerGPU > previous.VRAMPerGPU) {
+				allNodes[index] = n
+			}
+			continue
+		}
+		nodeIndexes[n.nodeName] = len(allNodes)
+		allNodes = append(allNodes, n)
 	}
 
 	if len(allNodes) == 0 {
@@ -404,17 +417,12 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
 	totalGPUs := 0
-	seenNodes := make(map[string]struct{})
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
 		if n.sku != bestSKU {
 			continue
 		}
-		if _, seen := seenNodes[n.nodeName]; seen {
-			continue
-		}
-		seenNodes[n.nodeName] = struct{}{}
 		nodesWithGPUs++
 		totalGPUs += n.info.GPUsPerNode
 		if !rdmaDetected {

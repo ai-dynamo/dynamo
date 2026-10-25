@@ -1062,33 +1062,55 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 }
 
 func TestDiscoverGPUsFromDCGM_DeduplicatesNodes(t *testing.T) {
-	for _, failFirstExporter := range []bool{false, true} {
-		t.Run(fmt.Sprintf("first exporter fails=%t", failFirstExporter), func(t *testing.T) {
+	tests := []struct {
+		name              string
+		counts            [2]int
+		vram              [2]int
+		failFirstExporter bool
+		wantVRAM          int
+	}{
+		{name: "matching reports", counts: [2]int{8, 8}, vram: [2]int{81920, 81920}, wantVRAM: 81920},
+		{name: "first exporter fails", counts: [2]int{8, 8}, vram: [2]int{81920, 81920}, failFirstExporter: true, wantVRAM: 81920},
+		{name: "larger count last", counts: [2]int{4, 8}, vram: [2]int{81920, 40960}, wantVRAM: 40960},
+		{name: "larger count first", counts: [2]int{8, 4}, vram: [2]int{40960, 81920}, wantVRAM: 40960},
+		{name: "higher VRAM last", counts: [2]int{8, 8}, vram: [2]int{40960, 81920}, wantVRAM: 81920},
+		{name: "higher VRAM first", counts: [2]int{8, 8}, vram: [2]int{81920, 40960}, wantVRAM: 81920},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Log("creating two exporters on one node and one on another node")
 			var objects []client.Object
+			metrics := make(map[string]GPUInfo)
 			for i, node := range []string{"node-a", "node-a", "node-b"} {
+				ip := fmt.Sprintf("10.0.0.%d", i+1)
+				count, vram := 4, 81920
+				if i < 2 {
+					count, vram = tt.counts[i], tt.vram[i]
+				}
+				metrics[buildDCGMEndpoint(ip)] = GPUInfo{GPUsPerNode: count, Model: "H100-SXM5-80GB", VRAMPerGPU: vram}
 				objects = append(objects, &corev1.Pod{
 					Name: fmt.Sprintf("dcgm-%d", i), Namespace: "gpu-operator",
 					Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
 					Spec:   corev1.PodSpec{NodeName: node},
-					Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: fmt.Sprintf("10.0.0.%d", i+1)},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
 				})
 			}
 			discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
-				if failFirstExporter && endpoint == buildDCGMEndpoint("10.0.0.1") {
+				if tt.failFirstExporter && endpoint == buildDCGMEndpoint("10.0.0.1") {
 					return nil, errors.New("exporter unavailable")
 				}
-				count := 8
-				if endpoint == buildDCGMEndpoint("10.0.0.3") {
-					count = 4
+				scraped, ok := metrics[endpoint]
+				if !ok {
+					return nil, fmt.Errorf("unexpected DCGM endpoint %q", endpoint)
 				}
-				return &GPUInfo{GPUsPerNode: count, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920}, nil
+				return &scraped, nil
 			})
 
 			t.Log("counting each successfully discovered node once")
 			info, err := discovery.DiscoverGPUsFromDCGM(t.Context(), newFakeClient(objects...), nil)
 			require.NoError(t, err)
 			assert.Equal(t, 8, info.GPUsPerNode)
+			assert.Equal(t, tt.wantVRAM, info.VRAMPerGPU)
 			assert.Equal(t, 2, info.NodesWithGPUs)
 			assert.Equal(t, 12, info.TotalGPUs)
 		})
@@ -1251,11 +1273,13 @@ func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
 		&corev1.Pod{
 			Name: "dcgm-h100", Namespace: "gpu-operator",
 			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+			Spec:   corev1.PodSpec{NodeName: "node-h100"},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
 		},
 		&corev1.Pod{
 			Name: "dcgm-a100", Namespace: "gpu-operator",
 			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+			Spec:   corev1.PodSpec{NodeName: "node-a100"},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
 		},
 	}
