@@ -84,6 +84,7 @@ spec:
                     "secondary_tiers": [{
                         "type": "kvcr",
                         "kvcr_service_socket_path": "/run/kvcr/memory.sock",
+                        "startup_timeout_seconds": int(os.environ["KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS"]),
                         "compatibility_digest": "${DYNAMO_KVCR_COMPATIBILITY_DIGEST}",
                         "router_capabilities": ["router_hint"],
                         "control_host": "0.0.0.0",
@@ -115,6 +116,8 @@ spec:
                 fieldPath: metadata.labels['grove.io/podclique-pod-index']
           - name: KVCR_CACHE_SLOT_COUNT
             value: "2"
+          - name: KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS
+            value: "${KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS}"
           - name: POD_IP
             valueFrom:
               fieldRef:
@@ -164,6 +167,8 @@ spec:
             value: ${DYNAMO_KVCR_COMPATIBILITY_DIGEST}
           - name: KVCR_POOL_SIZE_GIB
             value: "${KVCR_POOL_SIZE_GIB}"
+          - name: KVCR_GUARD_STARTUP_TIMEOUT_SECONDS
+            value: "${KVCR_GUARD_STARTUP_TIMEOUT_SECONDS}"
           - name: CONTAINER_NAME
             value: kvcr-services
           - name: DYN_COMPONENT

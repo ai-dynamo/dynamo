@@ -45,9 +45,11 @@ available in a Dynamo release image, build that image from matching Dynamo,
 KVCR, and vLLM revisions. Use [KVCR tag
 `v0.1.1`](https://github.com/ai-dynamo/kvcr/tree/v0.1.1) as the base, or the
 upcoming `v0.2` release when available. The memory-service variant requires KVCR's
-`--health-port`, `--health-host`, and `--health-dependency-url` flags, plus
-vLLM's KVCR secondary tier with `kvcr_service_socket_path` support. With a
-`v0.1.1` base, use the health-enabled wheel overlay below; the released tag does
+`--health-port`, `--health-host`, `--health-dependency-url`, and
+`--startup-timeout-seconds` flags. vLLM's KVCR secondary tier must support
+`kvcr_service_socket_path` and forward `startup_timeout_seconds` to
+`KVCRConfig`. With a `v0.1.1` base, use the health-enabled wheel overlay below;
+the released tag does
 not contain those health flags. Record the exact Dynamo, KVCR, and vLLM commit
 IDs with the image digest used for every qualified deployment.
 
@@ -78,6 +80,14 @@ The script mounts it through `PYTHONPATH` in both containers; it does not instal
 packages or supply native dependencies. Rebuild the runtime image when NIXL,
 CUDA, UCX, or other dependencies must change. Without `KVCR_WHEEL`, the installed
 KVCR must already support the health flags.
+
+For KVCR builds using pinned registration, including the asynchronous Guard
+preparation introduced in KVCR PR 116, remove inherited
+`UCX_REG_NONBLOCK_MEM_TYPES=host` and `UCX_IB_ODP_PREFETCH=n` settings from the
+runtime image. Verify both variables are unset in the engine and memory-service
+containers. A KVCR wheel overlay does not remove image environment settings or
+add vLLM's timeout-forwarding support. Rebuild the image if it retains these
+settings or lacks that support.
 
 `deploy.sh` applies an immutable, content-addressed ConfigMap containing
 `services.sh`, Dynamo's shared `launch_utils.sh`, and the optional wheel before
@@ -126,6 +136,15 @@ cross-container shutdown ordering.
 
 The main container waits up to `KVCR_STARTUP_TIMEOUT_SECONDS` (default: 120)
 for KVCR `/ready` on port 9092 before launching vLLM.
+Native initialization has two separate budgets, both defaulting to 30 seconds:
+
+- `KVCR_GUARD_STARTUP_TIMEOUT_SECONDS` supplies the service's
+  `--startup-timeout-seconds` argument. During promotion, Guard preparation
+  and activation each receive this budget.
+- `KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS` supplies the vLLM secondary tier's
+  `startup_timeout_seconds` value for engine-side NIXL initialization.
+
+Increasing the HTTP readiness wait does not increase either native budget.
 Set `KVCR_POOL_SIZE_GIB` (default: 2) to change each worker's Guard pool.
 The shared-memory volume is pool size plus 1 GiB. The sidecar memory request
 adds 1% of pool size, rounded up to a whole GiB; its limit adds another 1 GiB.
@@ -137,7 +156,7 @@ The engine's separate CPU offload buffer remains
 covering eager page allocation; for a 1 TiB pool, set `KVCR_POOL_SIZE_GIB=1024`
 and measure readiness before choosing the timeout. Large pools also take longer
 to unmap and free during shutdown. Set `KVCR_TERMINATION_GRACE_PERIOD_SECONDS`
-(default: 30) to cover engine drain and pool cleanup. All three settings accept
+(default: 30) to cover engine drain and pool cleanup. All five settings accept
 positive decimal integers without leading zeros. Health readiness precedes
 engine-side NIXL registration, model loading, and inference readiness.
 
@@ -146,7 +165,8 @@ more than 1035 GiB of schedulable memory available on each worker node:
 
 ```bash
 KVCR_MEMORY_SERVICE_ENABLED=true KVCR_POOL_SIZE_GIB=1024 \
-  KVCR_STARTUP_TIMEOUT_SECONDS=600 KVCR_TERMINATION_GRACE_PERIOD_SECONDS=180 \
+  KVCR_STARTUP_TIMEOUT_SECONDS=600 KVCR_GUARD_STARTUP_TIMEOUT_SECONDS=600 \
+  KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS=600 KVCR_TERMINATION_GRACE_PERIOD_SECONDS=180 \
   ./deploy.sh
 ```
 

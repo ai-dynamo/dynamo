@@ -26,6 +26,20 @@ _MANIFEST_DIR = _REPO_ROOT / "examples/backends/vllm/deploy/kvcr"
 _MANIFESTS = ("agg.yaml", "agg-memory-service.yaml")
 
 
+@pytest.fixture(autouse=True)
+def _clear_deployment_options(monkeypatch):
+    for name in (
+        "KVCR_POOL_SIZE_GIB",
+        "KVCR_STARTUP_TIMEOUT_SECONDS",
+        "KVCR_GUARD_STARTUP_TIMEOUT_SECONDS",
+        "KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS",
+        "KVCR_TERMINATION_GRACE_PERIOD_SECONDS",
+        "KVCR_WHEEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize("guard_timeout", (None, "600"))
 @pytest.mark.parametrize(
     "worker,exit_module,exit_code",
     [
@@ -35,7 +49,9 @@ _MANIFESTS = ("agg.yaml", "agg-memory-service.yaml")
         ("1", "kvcr.kvcr_service", 7),
     ],
 )
-def test_services_supervises_children(tmp_path, worker, exit_module, exit_code):
+def test_services_supervises_children(
+    tmp_path, worker, exit_module, exit_code, guard_timeout
+):
     """Exercise the actual wrapper with controllable children, without engines."""
     for source in (
         _MANIFEST_DIR / "services.sh",
@@ -65,6 +81,8 @@ signal.pause()
         "TEST_EXIT_CODE": str(exit_code),
         "KVCR_POOL_SIZE_GIB": "1024",
     }
+    if guard_timeout is not None:
+        env["KVCR_GUARD_STARTUP_TIMEOUT_SECONDS"] = guard_timeout
     process = subprocess.Popen(
         ["bash", str(tmp_path / "services.sh")],
         env=env,
@@ -81,6 +99,9 @@ signal.pause()
             children[info["module"]] = info
         guard_args = children["kvcr.kvcr_service"]["args"]
         assert guard_args[guard_args.index("--pool-sizes-gb") + 1] == "1024"
+        assert guard_args[guard_args.index("--startup-timeout-seconds") + 1] == (
+            guard_timeout or "30"
+        )
         assert ("--health-dependency-url" in guard_args) == (worker == "0")
         if exit_module is None:
             process.terminate()
@@ -153,6 +174,7 @@ def test_kvcr_cache_slot_is_validated_and_formatted(manifest_name: str) -> None:
         **os.environ,
         "KVCR_CACHE_SLOT": "1",
         "KVCR_CACHE_SLOT_COUNT": "2",
+        "KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS": "30",
         "POD_IP": "192.0.2.1",
     }
 
@@ -278,8 +300,12 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
 @pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
 @pytest.mark.parametrize("memory_service", ("false", "true"))
 @pytest.mark.parametrize("pool_gib,memory_request_gib", ((2, 3), (1024, 1035)))
+@pytest.mark.parametrize("native_timeouts", (None, (600, 700)))
 def test_deploy_script_renders_selected_variant(
-    memory_service: str, pool_gib: int, memory_request_gib: int
+    memory_service: str,
+    pool_gib: int,
+    memory_request_gib: int,
+    native_timeouts: tuple[int, int] | None,
 ) -> None:
     env = os.environ.copy()
     env.update(
@@ -296,6 +322,13 @@ def test_deploy_script_renders_selected_variant(
             else "30",
         }
     )
+
+    if native_timeouts is not None:
+        guard_timeout, engine_timeout = native_timeouts
+        env["KVCR_GUARD_STARTUP_TIMEOUT_SECONDS"] = str(guard_timeout)
+        env["KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS"] = str(engine_timeout)
+    else:
+        guard_timeout = engine_timeout = 30
 
     result = subprocess.run(
         [str(_MANIFEST_DIR / "deploy.sh"), "--render-only"],
@@ -320,6 +353,26 @@ def test_deploy_script_renders_selected_variant(
         )
         env_values = {e["name"]: e.get("value") for e in sidecar["env"]}
         assert env_values["KVCR_POOL_SIZE_GIB"] == str(pool_gib)
+        assert env_values["KVCR_GUARD_STARTUP_TIMEOUT_SECONDS"] == str(guard_timeout)
+        main_env = {e["name"]: e["value"] for e in main["env"] if "value" in e}
+        assert main_env["KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS"] == str(engine_timeout)
+        config_result = subprocess.run(
+            [sys.executable, "-c", _kv_transfer_config_python(main["args"][0])],
+            check=True,
+            capture_output=True,
+            env={
+                **env,
+                **main_env,
+                "KVCR_CACHE_SLOT": "0",
+                "POD_IP": "192.0.2.1",
+            },
+            text=True,
+            timeout=30,
+        )
+        tier = json.loads(config_result.stdout)["kv_connector_extra_config"][
+            "secondary_tiers"
+        ][0]
+        assert tier["startup_timeout_seconds"] == engine_timeout
         assert sidecar["resources"]["requests"]["memory"] == f"{memory_request_gib}Gi"
         assert sidecar["resources"]["limits"]["memory"] == f"{memory_request_gib + 1}Gi"
         memory = next(v for v in pod_spec["volumes"] if v["name"] == "kvcr-memory")
@@ -372,6 +425,38 @@ def test_deploy_script_renders_selected_variant(
         "vllm-agg-kvcr-memory-service" if memory_service == "true" else "vllm-agg-kvcr"
     )
     assert f"name: {expected_name}" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "option",
+    (
+        "KVCR_POOL_SIZE_GIB",
+        "KVCR_STARTUP_TIMEOUT_SECONDS",
+        "KVCR_GUARD_STARTUP_TIMEOUT_SECONDS",
+        "KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS",
+        "KVCR_TERMINATION_GRACE_PERIOD_SECONDS",
+    ),
+)
+@pytest.mark.parametrize("value", ("0", "01", "-1", "1.5", "abc"))
+def test_deploy_script_rejects_invalid_pool_and_timeouts(option, value) -> None:
+    result = subprocess.run(
+        [str(_MANIFEST_DIR / "deploy.sh"), "--render-only"],
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ,
+            "DYNAMO_UCX_NET_DEVICES": "mlx5_test:1",
+            "DYNAMO_VLLM_IMAGE": "runtime:1.4.0@sha256:test",
+            "DYNAMO_KVCR_COMPATIBILITY_DIGEST": "test",
+            "KVCR_MEMORY_SERVICE_ENABLED": "true",
+            option: value,
+        },
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "positive decimal integers without leading zeros" in result.stderr
 
 
 def test_deploy_script_rejects_unknown_argument() -> None:
