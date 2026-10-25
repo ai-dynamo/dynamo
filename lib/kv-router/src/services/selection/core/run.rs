@@ -195,7 +195,6 @@ impl SelectionCore {
             sequence_hashes,
             track_prefill_tokens,
             effective_prefill_tokens,
-            session_binding,
             kv_hint,
             routing_hashes: _,
             shared_cache_hits: _,
@@ -220,7 +219,6 @@ impl SelectionCore {
                 .map(|threshold| load.prefill_load_exceeds(threshold)),
         });
         SelectResponse {
-            session_binding,
             selection_id,
             sequence_hashes: sequence_hashes
                 .map(|hashes| hashes.into_iter().map(|hash| hash as i64).collect()),
@@ -509,7 +507,6 @@ impl SelectionCore {
         // The routing hashes go to exactly one of: the reservation recorded
         // now, or the replay cache a later reservation records from.
         let mut routing_hashes = routing_hashes;
-        let mut session_binding = None;
         let booking = if let Some(claim) = claim {
             let Some(booking) = booking else {
                 return Err(SelectionError::Internal(
@@ -524,7 +521,6 @@ impl SelectionCore {
                 }
                 _ => None,
             };
-            session_binding = affinity_lease.as_ref().map(|lease| lease.binding(&key));
             if let Some(hashes) = routing_hashes.take() {
                 self.record_routing_decision(&entry, response.best_worker, hashes)
                     .await;
@@ -566,7 +562,6 @@ impl SelectionCore {
             sequence_hashes: booked_sequence_hashes,
             track_prefill_tokens,
             effective_prefill_tokens: effective_prefill,
-            session_binding,
             kv_hint,
             routing_hashes: returned_routing_hashes,
             shared_cache_hits: host_shared_cache_hits,
@@ -589,13 +584,14 @@ impl SelectionCore {
             match table.acquire(session_id, None).await {
                 Ok(Hold::Bound { target, mut lease })
                     if !self.catalog.is_schedulable(target, key)
-                        || allowed_worker_ids
-                            .is_some_and(|ids| !ids.contains(&target.worker_id)) =>
+                        || (table.mode() == SessionAffinityMode::Soft
+                            && allowed_worker_ids
+                                .is_some_and(|ids| !ids.contains(&target.worker_id))) =>
                 {
                     tracing::debug!(
                         session_id,
                         worker_id = target.worker_id,
-                        "Session affinity target is not schedulable; re-initializing"
+                        "Session affinity target is unavailable or excluded; re-initializing"
                     );
                     lease.invalidate();
                     drop(lease);

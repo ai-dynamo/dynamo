@@ -33,7 +33,7 @@ const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
 /// Session-affinity bindings ride the same mesh on their own topic, so peers
 /// that do not subscribe to it never see them.
 const AFFINITY_TOPIC: &[u8] = b"dynamo.session-affinity.v1";
-const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
+pub(crate) const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
 
 /// One replicated session binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,10 +63,10 @@ impl AffinityBindingEvent {
 
 #[cfg(feature = "standalone-selection")]
 /// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
-/// into the mesh. Best effort: a full channel drops the update.
-struct AffinityMeshSink {
-    partition: RoutingPartitionId,
-    tx: mpsc::Sender<AffinityBindingEvent>,
+/// into a transport channel. Best effort: a full channel drops the update.
+pub(crate) struct AffinityMeshSink {
+    pub(crate) partition: RoutingPartitionId,
+    pub(crate) tx: mpsc::Sender<AffinityBindingEvent>,
 }
 
 #[cfg(feature = "standalone-selection")]

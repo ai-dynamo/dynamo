@@ -23,9 +23,6 @@ use tokio::sync::futures::OwnedNotified;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::identity::RoutingPartitionId;
-use crate::services::common::replica_sync::AffinityBindingEvent;
-
 pub use crate::protocols::WorkerAffinityTarget as AffinityTarget;
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
@@ -281,7 +278,7 @@ impl SessionAffinity {
                     .unwrap_or_default()
                     .as_nanos() as u64,
             ),
-            writer_id: AtomicU64::new(fastrand::u64(..)),
+            writer_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
             replica: OnceLock::new(),
             #[cfg(any(test, feature = "testing"))]
@@ -483,11 +480,9 @@ impl SessionAffinity {
                         lease: AffinityLease {
                             coordinator: Arc::downgrade(&self.inner),
                             session_id: session_id.to_string(),
-                            binding_target: *target,
                             revision: *revision,
                             version: *version,
                             active: true,
-                            publish_binding_on_release: true,
                         },
                     }))
                 }
@@ -539,11 +534,9 @@ impl SessionAffinity {
         let lease = AffinityLease {
             coordinator: Arc::downgrade(&self.inner),
             session_id: session_id.to_string(),
-            binding_target: target,
             revision,
             version,
             active: true,
-            publish_binding_on_release: true,
         };
         lease.publish(target);
         Some(lease)
@@ -610,45 +603,6 @@ impl SessionAffinity {
             "Session affinity hit: reusing pinned worker"
         );
         Ok(Some(*target))
-    }
-
-    /// Keep session affinity alive while a mirrored reservation is active.
-    /// Only the matching, unexpired target/version can be leased; out-of-order
-    /// reservations must not keep a newer binding alive. Release refreshes the
-    /// local idle TTL without republishing the binding.
-    pub(super) fn acquire_mirrored_reservation_lease(
-        &self,
-        session_id: String,
-        expected_target: AffinityTarget,
-        expected_version: AffinityVersion,
-    ) -> Option<AffinityLease> {
-        let mut entry = self.inner.entries.get_mut(&session_id)?;
-        let AffinityEntry::Bound {
-            target,
-            version,
-            revision,
-            active_leases,
-            idle_deadline,
-        } = entry.value_mut()
-        else {
-            return None;
-        };
-        if *target != expected_target
-            || *version != expected_version
-            || (*active_leases == 0 && *idle_deadline <= self.inner.now())
-        {
-            return None;
-        }
-        *active_leases += 1;
-        Some(AffinityLease {
-            coordinator: Arc::downgrade(&self.inner),
-            session_id,
-            binding_target: *target,
-            revision: *revision,
-            version: *version,
-            active: true,
-            publish_binding_on_release: false,
-        })
     }
 
     pub fn observe_replica_sequence(&self, sequence: u64) {
@@ -892,11 +846,9 @@ impl AffinityInitialization {
                 lease: AffinityLease {
                     coordinator: Arc::downgrade(&inner),
                     session_id: self.session_id.clone(),
-                    binding_target: *bound,
                     revision: self.revision,
                     version: *version,
                     active: true,
-                    publish_binding_on_release: true,
                 },
             };
             drop(entry);
@@ -927,11 +879,9 @@ impl AffinityInitialization {
         let lease = AffinityLease {
             coordinator: Arc::downgrade(&inner),
             session_id: self.session_id.clone(),
-            binding_target: target,
             revision: self.revision,
             version,
             active: true,
-            publish_binding_on_release: true,
         };
         lease.publish(target);
         Ok(lease)
@@ -975,26 +925,12 @@ impl Drop for AffinityInitialization {
 pub struct AffinityLease {
     coordinator: Weak<Inner>,
     session_id: String,
-    binding_target: AffinityTarget,
     revision: u64,
     version: AffinityVersion,
     active: bool,
-    publish_binding_on_release: bool,
 }
 
 impl AffinityLease {
-    /// Snapshot this booking's committed assignment, even if a peer changes the table.
-    pub(super) fn binding(&self, partition: &RoutingPartitionId) -> AffinityBindingEvent {
-        AffinityBindingEvent {
-            partition: partition.clone(),
-            session_id: self.session_id.clone(),
-            worker_id: self.binding_target.worker_id,
-            dp_rank: self.binding_target.dp_rank,
-            sequence: self.version.sequence,
-            writer_id: self.version.writer_id,
-        }
-    }
-
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -1029,7 +965,6 @@ impl AffinityLease {
         let next_version = inner.next_version();
         *current = target;
         *version = next_version;
-        self.binding_target = target;
         self.version = next_version;
         true
     }
@@ -1078,9 +1013,7 @@ impl AffinityLease {
             *idle_deadline = inner.now() + inner.ttl;
             (*target, *version)
         };
-        if self.publish_binding_on_release {
-            inner.publish_replica_update(&self.session_id, target, version);
-        }
+        inner.publish_replica_update(&self.session_id, target, version);
     }
 
     /// Drop the binding this lease holds (the bound worker is gone). A binding

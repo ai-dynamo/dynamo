@@ -15,7 +15,6 @@ use crate::protocols::{
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 use crate::scheduling::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
-use crate::services::common::replica_sync::AffinityBindingEvent;
 use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::PromptRequest;
@@ -552,8 +551,7 @@ fn resolve_session_context(
 
 /// Booking request: replay the selection cached under `selection_id`, or book
 /// self-contained with `worker_id`. The replay books exactly what `select` captured;
-/// booking fields other than the ids and model/routing-group are ignored on replay.
-/// A peer's session binding is applied independently, including when booking is skipped.
+/// request fields other than the ids and model/routing-group are ignored.
 #[derive(Debug, Deserialize)]
 pub struct ReservationRequest {
     #[serde(default = "default_model_name")]
@@ -573,11 +571,6 @@ pub struct ReservationRequest {
     pub expected_output_tokens: Option<u32>,
     pub effective_prefill_tokens: Option<usize>,
     pub track_prefill_tokens: Option<bool>,
-    /// Assignment received from a peer; applied before booking, without republishing.
-    pub session_binding: Option<AffinityBindingEvent>,
-    /// Skip load booking for requests already tracked or completed locally.
-    #[serde(default)]
-    pub skip_load_booking: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -609,9 +602,6 @@ pub struct OverlapScoresRequest {
 
 #[derive(Debug, Serialize)]
 pub struct SelectResponse {
-    /// Assignment to replicate alongside the reservation; absent for unpinned requests.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_binding: Option<AffinityBindingEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
