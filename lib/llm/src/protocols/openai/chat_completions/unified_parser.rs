@@ -10589,7 +10589,7 @@ pub(crate) mod tests {
     // Issue #17030: Explicit-V1 route-matrix coverage
     // QUALIFICATION TEST: This test addresses the explicit-V1 route-matrix coverage requirement
     #[test]
-    fn explicit_v1_route_matrix_coverage() {
+    fn issue_17030_explicit_v1_route_matrix_coverage() {
         use dynamo_runtime::config::ParserVersion;
 
         // Test parser selection across different configurations and versions
@@ -10650,7 +10650,7 @@ pub(crate) mod tests {
     // Issue #17030: Kimi default/auto pre-close assertions
     // QUALIFICATION TEST: This test addresses the Kimi pre-close assertions requirement
     #[tokio::test]
-    async fn kimi_default_auto_pre_close_assertions() {
+    async fn issue_17030_kimi_default_auto_pre_close_assertions() {
         // Test Kimi models with different parser configurations
         for family in [KIMI_K2_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY] {
             let value = "test content for streaming";
