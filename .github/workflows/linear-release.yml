@@ -136,13 +136,23 @@ jobs:
             curl -sS --fail-with-body https://api.linear.app/graphql \
               -H "Authorization: ${LINEAR_API_KEY}" -H "Content-Type: application/json" -d "$1"
           }
-          existing=$(linear "$(jq -n --arg id "$PIPELINE_ID" \
-            '{query: "query($id: String!) { releasePipeline(id: $id) { releases(first: 250) { nodes { version } } } }", variables: {id: $id}}')" \
-            | jq -r '.data.releasePipeline.releases.nodes[].version')
+          page=$(linear "$(jq -n --arg id "$PIPELINE_ID" \
+            '{query: "query($id: String!) { releasePipeline(id: $id) { releases(first: 250) { nodes { version } pageInfo { hasNextPage } } } }", variables: {id: $id}}')")
+          if [[ "$(jq -r '.data.releasePipeline.releases.pageInfo.hasNextPage' <<< "$page")" != "false" ]]; then
+            echo "::error::Could not read every Dynamo release in one page: ${page}"
+            exit 1
+          fi
+          existing=$(jq -r '.data.releasePipeline.releases.nodes[].version' <<< "$page")
           for version in $VERSIONS; do
-            if grep -qx -e "$version" -e "v$version" <<< "$existing"; then
+            if grep -qx -e "$version" <<< "$existing"; then
               echo "Dynamo v${version} exists"
               continue
+            fi
+            # The stage moves match the bare version, so a "v"-prefixed one
+            # would block them. Fail instead of creating a duplicate.
+            if grep -qx -e "v$version" <<< "$existing"; then
+              echo "::error::Dynamo v${version} has version 'v${version}'; set it to '${version}' in Linear"
+              exit 1
             fi
             result=$(linear "$(jq -n --arg name "Dynamo v${version}" --arg version "$version" \
               --arg pipeline "$PIPELINE_ID" --arg stage "$PLANNED_STAGE_ID" \
