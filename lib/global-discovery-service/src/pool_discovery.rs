@@ -10,14 +10,16 @@
 //! assembled by the Global View.
 //!
 //! Only the parts that differ between modes are traits: [`PoolDirectory`],
-//! [`PoolRegistrar`], [`ReplicaDirectory`] and [`RelayAuthenticator`].
+//! [`PoolRegistrar`], [`ReplicaDirectory`], [`ReplicaRegistrar`] and
+//! [`RelayAuthenticator`].
 //! Admission and the Relay's `RegisterPool` client work the same in every
 //! mode, so they are concrete code. The state connections in [`connection`]
 //! are shown for the full picture and are subject to change.
 //!
 //! In the Kubernetes modes, the Global Discovery Service serves these traits
 //! over HTTP: `POST /pools` registers a pool, and `GET /pools` and
-//! `GET /routers` list pools and router replicas.
+//! `GET /routers` list pools and router replicas. Where nothing else lists
+//! router replicas, they register with `POST /routers`.
 //!
 //! | Mode | Pool list stored in | Pools call |
 //! |---|---|---|
@@ -43,7 +45,7 @@ pub use identity::{
 pub use mode::{BuildPoolDiscovery, McsImplementation, PoolDiscovery, PoolDiscoveryMode};
 pub use record::{Capacity, PoolDirectory, PoolEvent, PoolRecord, PoolRecordBuilder, Revision};
 pub use registrar::{LeasePolicy, PoolRegistrar, Registration};
-pub use replicas::{ReplicaDirectory, ReplicaEndpoint, ReplicaEvent, ReplicaId};
+pub use replicas::{ReplicaDirectory, ReplicaEndpoint, ReplicaEvent, ReplicaId, ReplicaRegistrar};
 pub use watch::{Completeness, Directory, Snapshot, WatchEvent, WatchStream};
 
 use thiserror::Error;

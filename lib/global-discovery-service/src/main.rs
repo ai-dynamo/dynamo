@@ -18,9 +18,10 @@ use clap::{Parser, ValueEnum};
 use dynamo_global_discovery_service::backends::kubernetes::{
     EndpointSliceReplicaDirectory, McsPoolDirectory, RouterService, TrustedNetworkAuthenticator,
 };
-use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
+use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, MemoryReplicaStore};
 use dynamo_global_discovery_service::pool_discovery::{
     LeasePolicy, McsImplementation, PoolDirectory, PoolRegistrar, ReplicaEndpoint, ReplicaId,
+    ReplicaRegistrar,
 };
 use dynamo_global_discovery_service::service::{self, DiscoveryStore};
 use kube::Client;
@@ -37,14 +38,15 @@ struct Args {
     /// Where pools and router replicas come from.
     #[arg(long, value_enum, default_value_t = Store::Memory)]
     store: Store,
-    /// Memory store: how often a PoolRelay registers again.
+    /// Memory store: how often a PoolRelay or router replica registers again.
     #[arg(long, default_value_t = 5)]
     heartbeat_interval_secs: u64,
     /// Memory store: how long a registration lasts.
     #[arg(long, default_value_t = 15)]
     lease_duration_secs: u64,
-    /// Memory store: a Global Router replica as `<id>=<url>`. Repeat it for
-    /// each replica.
+    /// Memory store: a Global Router replica as `<id>=<url>`, listed until
+    /// shutdown. Repeat it for each replica. Replicas can also register
+    /// themselves with `POST /routers`.
     #[arg(long = "router", value_parser = parse_router)]
     routers: Vec<ReplicaEndpoint>,
     /// Kubernetes stores: each PoolRelay Service is named
@@ -64,7 +66,8 @@ struct Args {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Store {
-    /// Registrations in this process; router replicas from `--router`.
+    /// Registrations in this process, from pools and router replicas; router
+    /// replicas also from `--router`.
     Memory,
     /// Imported EndpointSlices, named the Karmada way. No registrations.
     Karmada,
@@ -131,12 +134,15 @@ fn memory_store(args: &Args) -> Result<DiscoveryStore> {
     {
         bail!("--router {} is given twice", repeated.replica.0);
     }
+    let routers = Arc::new(MemoryReplicaStore::new(args.routers.clone(), lease)?);
     let pools: Arc<PoolDirectory> = store.clone();
     let registrar: Arc<dyn PoolRegistrar> = store;
+    let router_registrar: Arc<dyn ReplicaRegistrar> = routers.clone();
     Ok(DiscoveryStore {
         pools,
-        routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
+        routers,
         registrar: Some(registrar),
+        router_registrar: Some(router_registrar),
         authenticator: Arc::new(TrustedNetworkAuthenticator),
     })
 }
@@ -173,6 +179,9 @@ async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<Discove
             client, &router, mcs,
         )),
         registrar: None,
+        // MCS lists the router replicas, so `POST /routers` explains that
+        // they need not register.
+        router_registrar: None,
         authenticator: Arc::new(TrustedNetworkAuthenticator),
     })
 }
