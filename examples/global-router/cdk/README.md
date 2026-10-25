@@ -359,6 +359,20 @@ karmadactl register <printed address and flags> --cluster-name aws-ohio --namesp
 To remove Ohio later, pass the same `--namespace karmada-agent` to `karmadactl unregister`.
 With the default namespace, it would delete the Secret that the control plane uses.
 
+For an agent registered with `--namespace karmada-agent`, its leader-election lease
+uses that namespace on the Karmada API too. Create it there before checking readiness:
+
+```bash
+kubectl --kubeconfig karmada-apiserver.config apply -f - <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: karmada-agent
+  labels:
+    namespace.karmada.io/skip-auto-propagation: "true"
+YAML
+```
+
 Then, on the Ohio bastion, both members should be `Pull` and `Ready`:
 
 ```bash
@@ -367,8 +381,10 @@ kubectl --kubeconfig karmada-apiserver.config get clusters
 
 ### Export and import Services
 
-Create a Service and its `ServiceExport` directly in the cluster that runs the pods, not
-through Karmada propagation. Kubernetes copies a Service's labels onto its EndpointSlices, so a
+Create the Service directly in the cluster that runs the pods. Propagate its
+`ServiceExport` from Karmada to that source cluster, without propagating the Service.
+Karmada 1.19 starts the export informer after an applied Work containing a ServiceExport;
+a fresh agent will not discover local-only exports until such a Work exists. Kubernetes copies a Service's labels onto its EndpointSlices, so a
 Service that Karmada propagates gives its slices Karmada's labels. In a test with Karmada 1.19.0,
 deleting the `ServiceExport` of such a Service also made `karmada-agent` delete the Service's
 EndpointSlice, and exporting it again found no slice until the Service changed.
@@ -896,3 +912,7 @@ separately only after confirming that no other stack uses its assets and roles.
 ## Reserved GPU capacity
 
 See [Reserved GPU compute](GPU_COMPUTE.md) for independent compute stacks that target externally owned Capacity Reservations.
+
+## Existing four-region MCS fleet
+
+See [MCS on existing regional clusters](MCS_FLEET.md) for additive networking and member setup that preserves the running hub and reserved GPU nodes.
