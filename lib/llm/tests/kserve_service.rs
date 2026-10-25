@@ -1269,6 +1269,7 @@ pub mod kserve_test {
         validate_tensor_response(
             response,
             model_name,
+            "1234",
             inputs,
             std::collections::HashMap::new(),
         );
@@ -1639,6 +1640,7 @@ pub mod kserve_test {
             validate_tensor_response(
                 response,
                 model_name,
+                &client_id,
                 inputs.clone(),
                 std::collections::HashMap::new(),
             );
@@ -1737,6 +1739,7 @@ pub mod kserve_test {
                     validate_tensor_response(
                         Response::new(response.clone()),
                         model_name,
+                        "1234",
                         inputs.clone(),
                         std::collections::HashMap::from([
                             ("text_input".into(), serialized_text_input.clone()),
@@ -1753,6 +1756,7 @@ pub mod kserve_test {
     fn validate_tensor_response(
         response: Response<ModelInferResponse>,
         model_name: &str,
+        request_id: &str,
         inputs: Vec<inference::model_infer_request::InferInputTensor>,
         expected_raw_outputs: std::collections::HashMap<String, Vec<u8>>,
     ) {
@@ -1768,7 +1772,7 @@ pub mod kserve_test {
         );
         assert_eq!(
             response.get_ref().id,
-            "1234",
+            request_id,
             "Expected response of the same request ID"
         );
         assert_eq!(
