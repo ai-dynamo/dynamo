@@ -233,6 +233,8 @@ navigation:
             path: pages/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning
             path: pages/kubernetes/operations/performance-tuning.md
+          - page: NUMA Binding
+            path: pages/kubernetes/operations/numa-binding.md
           - page: LoRA Adapters
             path: pages/kubernetes/operations/lora-adapters.md
 
@@ -303,6 +305,8 @@ navigation:
             path: pages/cli/operations/observability.mdx
           - page: Benchmarking with AIPerf
             path: pages/cli/operations/benchmarking-with-aiperf.mdx
+          - page: NUMA Binding
+            path: pages/cli/operations/numa-binding.md
           - page: LoRA Adapters
             path: pages/cli/operations/lora-adapters.md
 
