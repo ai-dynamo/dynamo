@@ -255,7 +255,7 @@ def load_weights(
     Returns without loading if the server already has committed weights.
     ``backend_config`` holds the transfer backend's settings, keyed as each
     backend reads them: ``posix_backend_params`` for the NIXL POSIX backends,
-    ``sharded_ssd_queues_per_root`` for ``sharded-ssd``.
+    ``sharded_ssd_queues_per_root`` for ``sharded-ssd``, ``mx_*`` for ``mx``.
     ``sharded_ssd_roots`` also lists where the artifact may keep its shards.
     """
     started_at = monotonic()
