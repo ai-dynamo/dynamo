@@ -7,7 +7,7 @@ import pytest
 
 from tests.utils.trtllm_media_overlay import _replace_definition
 
-pytestmark = [pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
 @pytest.mark.parametrize("existing", [False, True])
