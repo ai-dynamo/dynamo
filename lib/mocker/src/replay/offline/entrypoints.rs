@@ -173,6 +173,7 @@ fn run_aggregated(
         capture_lifecycle_evidence: scaling_policy
             .as_deref()
             .is_some_and(ReplayScalingPolicy::capture_lifecycle_evidence),
+        determinism: crate::replay::replay_scope().determinism,
         ..Default::default()
     };
     run_aggregated_with_capture_options(
@@ -271,6 +272,7 @@ fn run_disaggregated(
         capture_lifecycle_evidence: scaling_policy
             .as_deref()
             .is_some_and(ReplayScalingPolicy::capture_lifecycle_evidence),
+        determinism: crate::replay::replay_scope().determinism,
         ..Default::default()
     };
     run_disaggregated_with_capture_options(
