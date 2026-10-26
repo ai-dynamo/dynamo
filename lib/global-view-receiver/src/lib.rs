@@ -1,13 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Reconciles complete logical-pool snapshots and subsequent updates from Pool Relay replicas.
+//! Reconciles complete per-source snapshots and subsequent per-key updates.
 //!
-//! The transport adapter supplies Relay identity, logical pool keys, and validated pool payloads.
-//! A logical routing pool (for example, a DGD) may contain multiple KV catalog `PoolId`s.
-//! The adapter reconciles the Relay's independent catalog, readiness, and load streams before
-//! passing a per-pool view here; this crate defines no wire format or transport.
-//! This crate keeps Relay replicas separate and does not merge or sum their payloads.
+//! Callers supply source identities, keys, and values. This crate keeps each source's values
+//! separate and defines no transport or merge policy.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -38,18 +35,16 @@ struct RelayStream<P> {
     pools: Option<HashSet<P>>,
 }
 
-/// The current per-pool views from connected Relay replicas.
+/// The current per-key values from connected sources.
 ///
-/// `R` identifies one Relay replica, `P` identifies a logical routing pool across clusters and
-/// namespaces, and `V` is a validated per-pool view supplied by the transport adapter. A pool
-/// is visible while at least one connected Relay advertises it. Discovery alone does not make
-/// a withdrawn pool live.
-pub struct GlobalViewReceiver<R, P, V> {
+/// `R` identifies one source, `P` identifies a key, and `V` is its value. A key is visible while
+/// at least one current source advertises it.
+pub struct RelayPoolViews<R, P, V> {
     relays: HashMap<R, RelayStream<P>>,
     pools: HashMap<P, HashMap<R, V>>,
 }
 
-impl<R, P, V> Default for GlobalViewReceiver<R, P, V> {
+impl<R, P, V> Default for RelayPoolViews<R, P, V> {
     fn default() -> Self {
         Self {
             relays: HashMap::new(),
@@ -58,7 +53,7 @@ impl<R, P, V> Default for GlobalViewReceiver<R, P, V> {
     }
 }
 
-impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> GlobalViewReceiver<R, P, V> {
+impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> RelayPoolViews<R, P, V> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -98,7 +93,19 @@ impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> GlobalViewReceiver<R, P, V> 
             .current_mut(stream)?
             .pools
             .replace(replacement.keys().cloned().collect());
-        self.remove_relay_views(&stream.relay, old_pools);
+        let current_pools = self
+            .relays
+            .get(&stream.relay)
+            .and_then(|relay| relay.pools.as_ref())
+            .expect("snapshot was just installed");
+        let removed: Vec<P> = old_pools
+            .into_iter()
+            .flatten()
+            .filter(|pool_id| !current_pools.contains(pool_id))
+            .collect();
+        for pool_id in removed {
+            self.remove_relay_pool(&stream.relay, &pool_id);
+        }
         for (pool_id, view) in replacement {
             self.pools
                 .entry(pool_id)
@@ -115,26 +122,35 @@ impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> GlobalViewReceiver<R, P, V> 
         pool_id: P,
         view: V,
     ) -> Result<(), ApplyError> {
-        self.current_mut(stream)?
+        let known_pools = self
+            .current_mut(stream)?
             .pools
             .as_mut()
-            .ok_or(ApplyError::SnapshotRequired)?
-            .insert(pool_id.clone());
-        self.pools
-            .entry(pool_id)
-            .or_default()
-            .insert(stream.relay.clone(), view);
+            .ok_or(ApplyError::SnapshotRequired)?;
+        if !known_pools.contains(&pool_id) {
+            known_pools.insert(pool_id.clone());
+        }
+        if let Some(views) = self.pools.get_mut(&pool_id) {
+            if let Some(current) = views.get_mut(&stream.relay) {
+                *current = view;
+            } else {
+                views.insert(stream.relay.clone(), view);
+            }
+        } else {
+            self.pools
+                .insert(pool_id, HashMap::from([(stream.relay.clone(), view)]));
+        }
         Ok(())
     }
 
     /// Withdraw one pool from this Relay without affecting other Relay replicas.
-    pub fn remove(&mut self, stream: &StreamToken<R>, pool_id: P) -> Result<(), ApplyError> {
+    pub fn remove(&mut self, stream: &StreamToken<R>, pool_id: &P) -> Result<(), ApplyError> {
         self.current_mut(stream)?
             .pools
             .as_mut()
             .ok_or(ApplyError::SnapshotRequired)?
-            .remove(&pool_id);
-        self.remove_relay_pool(&stream.relay, &pool_id);
+            .remove(pool_id);
+        self.remove_relay_pool(&stream.relay, pool_id);
         Ok(())
     }
 
@@ -149,8 +165,7 @@ impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> GlobalViewReceiver<R, P, V> 
         Ok(())
     }
 
-    /// Return every live Relay view of one pool. Consumers can reconcile redundant observations
-    /// without accidentally adding the same pool's load from multiple Relays.
+    /// Return each current source's value for one key.
     pub fn pool_views(&self, pool_id: &P) -> impl Iterator<Item = (&R, &V)> + use<'_, R, P, V> {
         self.pools
             .get(pool_id)
@@ -158,7 +173,7 @@ impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> GlobalViewReceiver<R, P, V> 
             .flat_map(|views| views.iter())
     }
 
-    /// Logical pool keys advertised by at least one live Relay stream.
+    /// Keys advertised by at least one current source.
     pub fn pool_ids(&self) -> impl Iterator<Item = &P> {
         self.pools.keys()
     }
@@ -196,7 +211,7 @@ mod tests {
 
     #[test]
     fn one_relay_loss_does_not_brown_out_a_pool_seen_by_another() {
-        let mut receiver = GlobalViewReceiver::<&str, String, u64>::new();
+        let mut receiver = RelayPoolViews::<&str, String, u64>::new();
         let a = receiver.open("relay-a");
         let b = receiver.open("relay-b");
         let pool = "blue-dgd".to_owned();
@@ -211,8 +226,29 @@ mod tests {
     }
 
     #[test]
+    fn removing_one_source_view_keeps_the_other() {
+        let mut receiver = RelayPoolViews::<&str, String, u64>::new();
+        let a = receiver.open("relay-a");
+        let b = receiver.open("relay-b");
+        let pool = String::from("blue-dgd");
+        receiver.replace_snapshot(&a, [(pool.clone(), 10)]).unwrap();
+        receiver.replace_snapshot(&b, [(pool.clone(), 11)]).unwrap();
+
+        receiver.remove(&a, &pool).unwrap();
+        assert_eq!(
+            receiver
+                .pool_views(&pool)
+                .map(|(_, view)| *view)
+                .collect::<Vec<_>>(),
+            vec![11]
+        );
+        receiver.remove(&b, &pool).unwrap();
+        assert_eq!(receiver.pool_ids().count(), 0);
+    }
+
+    #[test]
     fn reconnect_requires_fresh_snapshot_and_fences_the_old_stream() {
-        let mut receiver = GlobalViewReceiver::<&str, u64, u64>::new();
+        let mut receiver = RelayPoolViews::<&str, u64, u64>::new();
         let old = receiver.open("relay-a");
         let pool = 1;
         receiver.replace_snapshot(&old, [(pool, 10)]).unwrap();
@@ -237,7 +273,7 @@ mod tests {
 
     #[test]
     fn invalid_snapshot_does_not_replace_the_current_view() {
-        let mut receiver = GlobalViewReceiver::<&str, u64, u64>::new();
+        let mut receiver = RelayPoolViews::<&str, u64, u64>::new();
         let stream = receiver.open("relay-a");
         let pool = 1;
         receiver.replace_snapshot(&stream, [(pool, 10)]).unwrap();
