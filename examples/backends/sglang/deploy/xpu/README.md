@@ -37,7 +37,7 @@ docker build -t my-registry/dynamo-planner:my-tag \
 
 The Planner template uses `optimization_target: sla` and requires Prometheus. Install `kube-prometheus-stack` as described in the [Dynamo Platform installation guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/install-dynamo.md). Planner uses `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090` by default. If your Prometheus service uses a different address, set `PROMETHEUS_ENDPOINT` in the Planner container.
 
-The manifests use placeholder images (`my-registry/...:my-tag`) and `imagePullPolicy: IfNotPresent`. Replace `my-registry` and `my-tag` in each manifest with your image, then load it on every eligible Kubernetes node or push it to a registry. The operator reads the Dynamo version from the image tag, so the manifests set no `runtimeVersionOverride`.
+The manifests use placeholder images (`my-registry/...:my-tag`) and `imagePullPolicy: IfNotPresent`. Replace `my-registry` and `my-tag` in each manifest with your image, then load it on every eligible Kubernetes node or push it to a registry. The operator reads the Dynamo version from the image tag, so the manifests set no `runtimeVersionOverride`. Use a tag that holds the Dynamo version you built, such as `1.7.0`. If the tag has no version, such as `my-tag` or `latest`, the admission webhook rejects the manifest and asks for `runtimeVersionOverride`.
 
 Create the Hugging Face token secret:
 
