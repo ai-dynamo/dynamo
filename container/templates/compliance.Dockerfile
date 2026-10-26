@@ -178,6 +178,7 @@ RUN mkdir -p /sources /opt/compliance /opt/native-sources /opt/dynamo-vendor-ful
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
 COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
+COPY --from=go_tools_builder /out/native-sources/ /opt/native-sources/
 COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
 {% if target == "frontend" %}
 # Same SBOM the licenses stage uses, here to select /epp's crates out of the
