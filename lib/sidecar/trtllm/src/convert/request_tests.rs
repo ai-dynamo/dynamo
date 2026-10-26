@@ -301,6 +301,10 @@ fn unsupported_request_controls_are_rejected() {
         "include_stop_str_in_output",
     );
     assert_rejected(
+        |r| r.sampling_options.logit_bias = Some(std::collections::HashMap::from([(18, -10.0)])),
+        "logit_bias",
+    );
+    assert_rejected(
         |r| r.stop_conditions.max_thinking_tokens = Some(32),
         "max_thinking_tokens",
     );

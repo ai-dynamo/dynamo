@@ -15,9 +15,10 @@ pub use dynamo_kv_router::multi_worker_sequence::{
 };
 use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
-    MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
+    MAX_REPLICA_BATCH_EVENTS, SchedulerGroup, SchedulerLoad, WorkerWithDpRank,
 };
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
+use dynamo_kv_router::services::selection::{ModelLoadResponse, SelectionService};
 
 use anyhow::Result;
 use dynamo_runtime::component::Endpoint;
@@ -25,20 +26,27 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
+use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, SCHEDULER_LOAD_SUBJECT};
+use crate::utils::retry::{Backoff, FailureStreak};
 #[cfg(test)]
 use dynamo_runtime::transports::event_plane::MsgpackCodec;
 
 // Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
+/// One complete rank batch per interval; the relay derives freshness from this cadence.
+pub(crate) const SCHEDULER_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
+const SCHEDULER_LOAD_RETRY_INITIAL: Duration = Duration::from_millis(100);
+const SCHEDULER_LOAD_RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// How active-sequence events are framed on the wire for a transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,7 +368,7 @@ pub(crate) async fn host_replica_channels(
     ReplicaIngress,
 )> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
-    let event_sender = if publishes_outbound {
+    let (event_sender, local_publisher_id) = if publishes_outbound {
         let (event_sender, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
         let publisher_cancellation_token = cancellation_token.clone();
         let event_publisher = EventPublisher::for_endpoint_with_transport(
@@ -369,6 +377,7 @@ pub(crate) async fn host_replica_channels(
             transport_kind,
         )
         .await?;
+        let local_publisher_id = event_publisher.publisher_id();
         match active_sequence_event_wire_format(transport_kind) {
             ActiveSequenceEventWireFormat::Singleton => {
                 tokio::spawn(run_replica_singleton_publisher(
@@ -385,15 +394,16 @@ pub(crate) async fn host_replica_channels(
                 ));
             }
         }
-        Some(event_sender)
+        (Some(event_sender), Some(local_publisher_id))
     } else {
-        None
+        (None, None)
     };
 
     let (inbound_tx, inbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
     let ingress = ReplicaIngress {
         endpoint: endpoint.clone(),
         inbound_tx: inbound_tx.clone(),
+        local_publisher_id,
         cancellation_token,
     };
     Ok((
@@ -414,6 +424,7 @@ pub(crate) async fn host_replica_channels(
 pub(crate) struct ReplicaIngress {
     endpoint: Endpoint,
     inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
+    local_publisher_id: Option<u64>,
     cancellation_token: CancellationToken,
 }
 
@@ -426,6 +437,7 @@ impl ReplicaIngress {
                 self.endpoint,
                 self.inbound_tx,
                 direct.rcvhwm,
+                self.local_publisher_id,
                 self.cancellation_token,
             )
             .await
@@ -474,11 +486,126 @@ async fn forward_replica_events(
     }
 }
 
+/// Publishes scheduler snapshots on the secondary runtime when serving-load reporting is enabled.
+pub(crate) fn start_scheduler_load_publisher(
+    endpoint: &Endpoint,
+    service: Arc<SelectionService>,
+    replica_sync: bool,
+    cancellation_token: CancellationToken,
+) {
+    if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+        return;
+    }
+    let group = if replica_sync {
+        SchedulerGroup::ReplicaGroup {
+            group_id: endpoint.id().to_string(),
+        }
+    } else {
+        // One process may host independent routers for the same endpoint; DRT identity
+        // would merge their disjoint request sets.
+        SchedulerGroup::Standalone {
+            scheduler_id: rand::random(),
+        }
+    };
+    endpoint
+        .drt()
+        .runtime()
+        .secondary()
+        .spawn(run_scheduler_load_publisher(
+            endpoint.clone(),
+            service,
+            group,
+            cancellation_token,
+        ));
+}
+
+fn scheduler_load_batch(
+    models: Vec<ModelLoadResponse>,
+    group: &SchedulerGroup,
+) -> Vec<SchedulerLoad> {
+    let mut ranks = HashMap::<WorkerWithDpRank, SchedulerLoad>::new();
+    for load in models.into_iter().flat_map(|model| model.loads) {
+        let rank = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
+        ranks
+            .entry(rank)
+            .and_modify(|current| {
+                // Each model/routing-group partition tracks disjoint requests.
+                current.active_decode_blocks = current
+                    .active_decode_blocks
+                    .saturating_add(load.potential_decode_blocks as u64);
+                current.active_prefill_tokens = current
+                    .active_prefill_tokens
+                    .saturating_add(load.potential_prefill_tokens as u64);
+            })
+            .or_insert_with(|| SchedulerLoad {
+                worker_id: load.worker_id,
+                dp_rank: load.dp_rank,
+                // loads() supplies no hypothetical request, so these are active values.
+                active_decode_blocks: load.potential_decode_blocks as u64,
+                active_prefill_tokens: load.potential_prefill_tokens as u64,
+                group: group.clone(),
+            });
+    }
+    ranks.into_values().collect()
+}
+
+async fn run_scheduler_load_publisher(
+    endpoint: Endpoint,
+    service: Arc<SelectionService>,
+    group: SchedulerGroup,
+    cancellation_token: CancellationToken,
+) {
+    // Publish on the first tick; retry pacing matches the frontend load publisher.
+    let mut publish_tick = tokio::time::interval(SCHEDULER_LOAD_PUBLISH_INTERVAL);
+    publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut retry = Backoff::new(SCHEDULER_LOAD_RETRY_INITIAL, SCHEDULER_LOAD_RETRY_MAX);
+    let mut failures = FailureStreak::default();
+
+    loop {
+        let connected = tokio::select! {
+            _ = cancellation_token.cancelled() => return,
+            connected = EventPublisher::for_endpoint(&endpoint, SCHEDULER_LOAD_SUBJECT) => connected,
+        };
+        let error = match connected {
+            Ok(publisher) => loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => return,
+                    _ = publish_tick.tick() => {}
+                }
+                let loads = scheduler_load_batch(service.loads(None, None), &group);
+                let published = tokio::select! {
+                    _ = cancellation_token.cancelled() => return,
+                    published = publisher.publish(&loads) => published,
+                };
+                match published {
+                    Ok(()) => {
+                        retry.reset();
+                        if let Some(failures) = failures.recover() {
+                            tracing::info!(failures, "Scheduler load publishing recovered");
+                        }
+                    }
+                    Err(error) => break error,
+                }
+            },
+            Err(error) => error,
+        };
+        let delay = retry.next_delay();
+        if failures.fail() {
+            tracing::warn!(%error, retry_ms = delay.as_millis(), "Scheduler load publishing failed; reconnecting");
+        } else {
+            tracing::debug!(%error, failures = failures.failures(), retry_ms = delay.as_millis(), "Scheduler load publishing still failing");
+        }
+        tokio::select! {
+            _ = cancellation_token.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dynamo_kv_router::protocols::ActiveSequenceEventData;
-    use std::sync::Arc;
     use tokio::time::Instant;
 
     fn free_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
@@ -811,6 +938,65 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn replica_ingress_skips_own_outbound_publisher() -> Result<()> {
+        let runtime = dynamo_runtime::Runtime::from_current()?;
+        let distributed = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await?;
+        let endpoint = distributed
+            .namespace(format!("replica-ingress-self-{}", uuid::Uuid::new_v4()))?
+            .component("workers")?
+            .endpoint("generate");
+        let cancel = CancellationToken::new();
+        let (mut channels, ingress) =
+            host_replica_channels(&endpoint, 1, true, cancel.child_token()).await?;
+        let outbound = channels
+            .outbound
+            .clone()
+            .expect("publishing replica has an outbound sender");
+        ingress.start().await;
+
+        let peer = ActiveSequenceEventPublisher::for_endpoint(&endpoint, 16).await?;
+        let mut received = Vec::new();
+        // Keep sending own events after the peer is live, so a late own
+        // subscription would still surface.
+        let mut rounds_after_peer = 0;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while rounds_after_peer < 5 {
+                outbound.try_send(ActiveSequenceEvent {
+                    request_id: "own-event".to_string(),
+                    worker: WorkerWithDpRank::new(42, 0),
+                    data: ActiveSequenceEventData::MarkPrefillCompleted,
+                    router_id: 1,
+                    lora_name: None,
+                })?;
+                peer.mark_prefill_completed("peer-mark".to_string(), 42, 0)?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                while let Ok(event) = channels.inbound_rx.try_recv() {
+                    received.push(event.request_id);
+                }
+                if received.iter().any(|id| id == "peer-mark") {
+                    rounds_after_peer += 1;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        assert!(
+            received.iter().all(|id| id == "peer-mark"),
+            "replica received its own outbound events: {received:?}"
+        );
+
+        drop(peer);
+        cancel.cancel();
+        distributed.shutdown();
+        Ok(())
+    }
+
     /// Replica sync is scoped to the endpoint: an ingress on endpoint B never
     /// sees events published on endpoint A, even once both planes are live.
     #[tokio::test]
@@ -879,6 +1065,139 @@ mod tests {
 
         drop((publisher_a, publisher_b));
         cancel.cancel();
+        distributed.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_batch_sums_disjoint_partition_loads_per_rank() {
+        let model = |name: &str, worker_id, blocks, tokens| ModelLoadResponse {
+            model_name: name.into(),
+            routing_group: "default".into(),
+            loads: vec![dynamo_kv_router::protocols::PotentialLoad {
+                worker_id,
+                dp_rank: 0,
+                potential_decode_blocks: blocks,
+                potential_prefill_tokens: tokens,
+                active_requests: 0,
+            }],
+            pending_count: 0,
+            pending_isl_tokens: 0,
+        };
+        let group = SchedulerGroup::Standalone { scheduler_id: 9 };
+        let mut batch = scheduler_load_batch(
+            vec![
+                model("a", 1, 3, 7),
+                model("b", 1, 5, 4),
+                model("b", 2, 2, 1),
+            ],
+            &group,
+        );
+        batch.sort_by_key(|load| load.worker_id);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(
+            (
+                batch[0].active_decode_blocks,
+                batch[0].active_prefill_tokens
+            ),
+            (8, 11)
+        );
+        assert_eq!((batch[1].worker_id, batch[1].active_decode_blocks), (2, 2));
+        assert!(batch.iter().all(|load| load.group == group));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn scheduler_publisher_batches_live_loads_and_removes_departed_ranks() -> Result<()> {
+        use dynamo_kv_router::services::selection::{SelectionServiceBuilder, WorkerRequest};
+
+        let distributed = dynamo_runtime::DistributedRuntime::new(
+            dynamo_runtime::Runtime::from_current()?,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await?;
+        let endpoint = distributed
+            .namespace(format!("scheduler-load-{}", uuid::Uuid::new_v4()))?
+            .component("workers")?
+            .endpoint("generate");
+        let service = Arc::new(
+            SelectionServiceBuilder::new(
+                dynamo_kv_router::config::KvRouterConfig {
+                    use_kv_events: false,
+                    router_queue_threshold: None,
+                    ..Default::default()
+                },
+                dynamo_kv_router::WorkerType::Aggregated,
+                dynamo_custom_policy_builtin::default_registry(),
+            )
+            .indexer_threads(1)
+            .build()
+            .await?,
+        );
+        for worker_id in [42, 43] {
+            service
+                .upsert_worker(WorkerRequest {
+                    worker_id,
+                    endpoint: Some("http://127.0.0.1:8000".into()),
+                    block_size: Some(4),
+                    data_parallel_start_rank: Some(0),
+                    data_parallel_size: Some(2),
+                    max_num_batched_tokens: Some(1024),
+                    total_kv_blocks: Some(100),
+                    is_eagle: Some(false),
+                    ..Default::default()
+                })
+                .await?;
+        }
+        // Explicit reservations need a hint to account for prefill tokens.
+        service
+            .create_reservation(serde_json::from_value(serde_json::json!({
+                "selection_id": "busy", "worker_id": 42, "dp_rank": 0,
+                "token_ids": [1, 2, 3, 4], "track_prefill_tokens": true,
+                "effective_prefill_tokens": 4
+            }))?)
+            .await?;
+        let mut subscriber = EventSubscriber::for_endpoint(&endpoint, SCHEDULER_LOAD_SUBJECT)
+            .await?
+            .typed::<Vec<SchedulerLoad>>();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_scheduler_load_publisher(
+            endpoint,
+            Arc::clone(&service),
+            SchedulerGroup::Standalone { scheduler_id: 9 },
+            cancel.clone(),
+        ));
+        let (_, first) = tokio::time::timeout(Duration::from_secs(5), subscriber.next())
+            .await?
+            .expect("scheduler publisher stopped")?;
+        assert_eq!(first.len(), 4);
+        let busy = first
+            .iter()
+            .find(|load| load.worker_id == 42 && load.dp_rank == 0)
+            .unwrap();
+        assert_eq!(busy.active_decode_blocks, 1);
+        assert_eq!(busy.active_prefill_tokens, 4);
+        service.free_reservation("busy").await?;
+        service.delete_worker(42).await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (_, loads) = subscriber
+                    .next()
+                    .await
+                    .expect("scheduler publisher stopped")?;
+                if loads.iter().all(|load| load.worker_id == 43) {
+                    assert_eq!(loads.len(), 2);
+                    assert!(
+                        loads.iter().all(|load| load.active_decode_blocks == 0
+                            && load.active_prefill_tokens == 0)
+                    );
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        })
+        .await??;
+        cancel.cancel();
+        task.await?;
         distributed.shutdown();
         Ok(())
     }

@@ -617,6 +617,15 @@ fn validate_request(
     if sampling.use_beam_search.unwrap_or(false) {
         return Err(client::invalid_argument("beam search is not supported"));
     }
+    if sampling
+        .logit_bias
+        .as_ref()
+        .is_some_and(|bias| !bias.is_empty())
+    {
+        return Err(client::invalid_argument(
+            "logit_bias is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     Ok(())
 }
 

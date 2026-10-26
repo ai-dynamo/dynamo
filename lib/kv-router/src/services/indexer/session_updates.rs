@@ -11,9 +11,10 @@ use std::{
 
 use crate::{
     ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
-    indexer::{KvIndexer, KvRouterError, ThreadPoolIndexer},
+    indexer::{KvIndexer, KvRouterError, LowerTierIndexers, ThreadPoolIndexer},
     protocols::{
-        ExternalSequenceBlockHash, KvCacheEventData, RouterEvent, WorkerId, WorkerWithDpRank,
+        ExternalSequenceBlockHash, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
+        WorkerId, WorkerWithDpRank,
     },
 };
 use dashmap::{DashMap, mapref::entry::Entry};
@@ -29,7 +30,8 @@ pub struct SessionUpdateSender {
 struct ResidencyVersions {
     next: AtomicU64,
     by_rank: DashMap<WorkerWithDpRank, AtomicU64>,
-    by_worker_id: DashMap<WorkerId, AtomicU64>,
+    lifecycle_by_rank: DashMap<WorkerWithDpRank, AtomicU64>,
+    lifecycle_by_worker_id: DashMap<WorkerId, AtomicU64>,
 }
 
 impl ResidencyVersions {
@@ -39,7 +41,7 @@ impl ResidencyVersions {
             .get(&worker)
             .map_or(0, |version| version.load(Ordering::Acquire));
         let worker_version = self
-            .by_worker_id
+            .lifecycle_by_worker_id
             .get(&worker.worker_id)
             .map_or(0, |version| version.load(Ordering::Acquire));
         rank_version.max(worker_version)
@@ -57,9 +59,33 @@ impl ResidencyVersions {
         }
     }
 
-    fn advance_worker_id(&self, worker_id: WorkerId) {
+    fn current_lifecycle(&self, worker: WorkerWithDpRank) -> u64 {
+        let rank_version = self
+            .lifecycle_by_rank
+            .get(&worker)
+            .map_or(0, |version| version.load(Ordering::Acquire));
+        let worker_version = self
+            .lifecycle_by_worker_id
+            .get(&worker.worker_id)
+            .map_or(0, |version| version.load(Ordering::Acquire));
+        rank_version.max(worker_version)
+    }
+
+    fn advance_rank_lifecycle(&self, worker: WorkerWithDpRank) {
         let next_version = self.next.fetch_add(1, Ordering::AcqRel) + 1;
-        match self.by_worker_id.entry(worker_id) {
+        match self.lifecycle_by_rank.entry(worker) {
+            Entry::Occupied(entry) => {
+                entry.get().store(next_version, Ordering::Release);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(AtomicU64::new(next_version));
+            }
+        }
+    }
+
+    fn advance_worker_lifecycle(&self, worker_id: WorkerId) {
+        let next_version = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+        match self.lifecycle_by_worker_id.entry(worker_id) {
             Entry::Occupied(entry) => {
                 entry.get().store(next_version, Ordering::Release);
             }
@@ -84,12 +110,23 @@ pub(super) enum SessionMutation {
     },
     Stored {
         worker: WorkerWithDpRank,
+        tier: StorageTier,
         session_id: String,
         parent_hash: Option<ExternalSequenceBlockHash>,
         block_hashes: Vec<ExternalSequenceBlockHash>,
+        lifecycle_version: u64,
+    },
+    /// A tier stored blocks without naming a session, such as a device offload to host
+    /// memory or a host load-back to the device.
+    Inherited {
+        worker: WorkerWithDpRank,
+        tier: StorageTier,
+        block_hashes: Vec<ExternalSequenceBlockHash>,
+        lifecycle_version: u64,
     },
     Removed {
         worker: WorkerWithDpRank,
+        tier: StorageTier,
         block_hashes: Vec<ExternalSequenceBlockHash>,
     },
     Cleared {
@@ -101,17 +138,41 @@ pub(super) enum SessionMutation {
 }
 
 impl SessionMutation {
-    pub(super) fn from_event(event: &RouterEvent) -> Option<Self> {
+    /// Session frontiers follow device events and worker-owned lower tiers. Shared
+    /// cache-owner residency is not attributed to a worker rank.
+    pub(super) fn from_event(
+        event: &RouterEvent,
+        targets_primary: bool,
+        lifecycle_version: u64,
+    ) -> Option<Self> {
+        if !targets_primary && event.resolved_residency_domain() != Ok(ResidencyDomain::Worker) {
+            return None;
+        }
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let tier = event.storage_tier;
         match &event.event.data {
-            KvCacheEventData::Stored(stored) => Some(Self::Stored {
-                worker,
-                session_id: event.session_id.clone()?,
-                parent_hash: stored.parent_hash,
-                block_hashes: stored.blocks.iter().map(|block| block.block_hash).collect(),
-            }),
+            KvCacheEventData::Stored(stored) => {
+                let block_hashes = stored.blocks.iter().map(|block| block.block_hash).collect();
+                match event.session_id.clone() {
+                    Some(session_id) => Some(Self::Stored {
+                        worker,
+                        tier,
+                        session_id,
+                        parent_hash: stored.parent_hash,
+                        block_hashes,
+                        lifecycle_version,
+                    }),
+                    None => Some(Self::Inherited {
+                        worker,
+                        tier,
+                        block_hashes,
+                        lifecycle_version,
+                    }),
+                }
+            }
             KvCacheEventData::Removed(removed) => Some(Self::Removed {
                 worker,
+                tier,
                 block_hashes: removed.block_hashes.clone(),
             }),
             KvCacheEventData::Cleared => Some(Self::Cleared { worker }),
@@ -122,9 +183,19 @@ impl SessionMutation {
         match self {
             Self::Matched { worker, .. }
             | Self::Stored { worker, .. }
+            | Self::Inherited { worker, .. }
             | Self::Removed { worker, .. }
             | Self::Cleared { worker } => Some(*worker),
             Self::WorkerRemoved { .. } => None,
+        }
+    }
+
+    pub(super) fn tier(&self) -> Option<StorageTier> {
+        match self {
+            Self::Stored { tier, .. }
+            | Self::Inherited { tier, .. }
+            | Self::Removed { tier, .. } => Some(*tier),
+            Self::Matched { .. } | Self::Cleared { .. } | Self::WorkerRemoved { .. } => None,
         }
     }
 
@@ -132,7 +203,7 @@ impl SessionMutation {
         self,
         index: &SessionPrefixIndexer,
         residency_versions: &ResidencyVersions,
-        barrier: &PrimaryBarrier,
+        barrier: &ResidencyBarrier,
     ) {
         match self {
             Self::Matched {
@@ -144,7 +215,11 @@ impl SessionMutation {
                 let is_resident = if residency_versions.current(worker) == residency_version {
                     true
                 } else {
-                    match barrier.contains_worker_block(worker, matched_hash).await {
+                    match barrier
+                        .primary
+                        .contains_worker_block(worker, matched_hash)
+                        .await
+                    {
                         Ok(is_resident) => is_resident,
                         Err(error) => {
                             tracing::warn!(%error, %session_id, ?worker, "failed to revalidate session prefix match");
@@ -163,32 +238,52 @@ impl SessionMutation {
             }
             Self::Stored {
                 worker,
+                tier,
                 session_id,
                 parent_hash,
                 block_hashes,
+                lifecycle_version,
             } => {
-                if let Err(error) = index.update_session_from_stored_blocks(
+                if residency_versions.current_lifecycle(worker) != lifecycle_version {
+                    return;
+                }
+                if let Err(error) = index.update_session_from_stored_blocks_in_tier(
                     &session_id,
                     worker,
+                    tier,
                     parent_hash,
                     &block_hashes,
                 ) {
-                    tracing::warn!(%error, %session_id, ?worker, "failed to record stored session blocks");
+                    tracing::warn!(%error, %session_id, ?worker, ?tier, "failed to record stored session blocks");
                 }
+            }
+            Self::Inherited {
+                worker,
+                tier,
+                block_hashes,
+                lifecycle_version,
+            } => {
+                if residency_versions.current_lifecycle(worker) != lifecycle_version {
+                    return;
+                }
+                index.inherit_stored_blocks(worker, tier, &block_hashes);
             }
             Self::Removed {
                 worker,
+                tier,
                 block_hashes,
             } => {
-                residency_versions.advance(worker);
-                index.update_session_from_removed_blocks(worker, &block_hashes);
+                // Versions guard route-time device matches only.
+                if tier.is_gpu() {
+                    residency_versions.advance(worker);
+                }
+                index.update_session_from_removed_blocks_in_tier(worker, tier, &block_hashes);
             }
             Self::Cleared { worker } => {
                 residency_versions.advance(worker);
                 index.clear_worker_frontiers(worker);
             }
             Self::WorkerRemoved { worker_id } => {
-                residency_versions.advance_worker_id(worker_id);
                 index.clear_worker_id_frontiers(worker_id);
             }
         }
@@ -231,19 +326,57 @@ impl PrimaryBarrier {
     }
 }
 
+/// Orders session mutations after the physical indexes they describe: the primary
+/// for every worker in a batch, and the lower-tier lane for each `(worker, tier)` a
+/// lower-tier mutation names.
+struct ResidencyBarrier {
+    primary: PrimaryBarrier,
+    lower_tier: LowerTierIndexers,
+}
+
+impl ResidencyBarrier {
+    async fn wait_for(&self, mutations: &[SessionMutation]) -> Result<(), KvRouterError> {
+        self.primary.wait_for(mutations).await?;
+        let lanes: HashSet<(WorkerWithDpRank, StorageTier)> = mutations
+            .iter()
+            .filter_map(|mutation| Some((mutation.worker()?, mutation.tier()?)))
+            .filter(|(_, tier)| !tier.is_gpu())
+            .collect();
+        for (worker, tier) in lanes {
+            if let Some(indexer) = self.lower_tier.get(tier) {
+                indexer.flush_worker_lane_and_wait(worker).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl SessionUpdateSender {
-    pub fn for_legacy(index: Arc<SessionPrefixIndexer>, primary: KvIndexer) -> Self {
-        Self::spawn(index, PrimaryBarrier::Legacy(primary))
+    pub fn for_legacy(
+        index: Arc<SessionPrefixIndexer>,
+        primary: KvIndexer,
+        lower_tier: LowerTierIndexers,
+    ) -> Self {
+        Self::spawn(index, PrimaryBarrier::Legacy(primary), lower_tier)
     }
 
     pub fn for_concurrent(
         index: Arc<SessionPrefixIndexer>,
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
+        lower_tier: LowerTierIndexers,
     ) -> Self {
-        Self::spawn(index, PrimaryBarrier::Concurrent(primary))
+        Self::spawn(index, PrimaryBarrier::Concurrent(primary), lower_tier)
     }
 
-    fn spawn(index: Arc<SessionPrefixIndexer>, barrier: PrimaryBarrier) -> Self {
+    fn spawn(
+        index: Arc<SessionPrefixIndexer>,
+        primary: PrimaryBarrier,
+        lower_tier: LowerTierIndexers,
+    ) -> Self {
+        let barrier = ResidencyBarrier {
+            primary,
+            lower_tier,
+        };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let residency_versions = Arc::new(ResidencyVersions::default());
         let task_residency_versions = Arc::clone(&residency_versions);
@@ -293,7 +426,31 @@ impl SessionUpdateSender {
         self.residency_versions.current(worker)
     }
 
+    pub(super) fn mutation_from_event(
+        &self,
+        event: &RouterEvent,
+        targets_primary: bool,
+    ) -> Option<SessionMutation> {
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        SessionMutation::from_event(
+            event,
+            targets_primary,
+            self.residency_versions.current_lifecycle(worker),
+        )
+    }
+
     pub(super) fn enqueue(&self, mutation: SessionMutation) -> Result<(), KvRouterError> {
+        // Lifecycle generations advance in ingestion order, so a store ingested after a
+        // clear carries the new generation even before the clear itself is applied.
+        match &mutation {
+            SessionMutation::Cleared { worker } => {
+                self.residency_versions.advance_rank_lifecycle(*worker);
+            }
+            SessionMutation::WorkerRemoved { worker_id } => {
+                self.residency_versions.advance_worker_lifecycle(*worker_id);
+            }
+            _ => {}
+        }
         self.tx
             .send(SessionUpdateMessage::Mutation(mutation))
             .map_err(|_| KvRouterError::IndexerOffline)

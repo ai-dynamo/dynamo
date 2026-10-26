@@ -19,6 +19,7 @@ package controller
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -26,7 +27,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"k8s.io/utils/ptr"
 )
 
 type Reason string
@@ -80,8 +80,8 @@ func applyComponentGPUShapes(
 		if !ok {
 			continue
 		}
-		status.GPUsPerEngine = ptr.To(shape.GPUsPerEngine)
-		status.GPUsPerReplica = ptr.To(shape.GPUsPerReplica)
+		status.GPUsPerEngine = new(shape.GPUsPerEngine)
+		status.GPUsPerReplica = new(shape.GPUsPerReplica)
 		statuses[componentName] = status
 	}
 }
@@ -128,9 +128,7 @@ func checkResourcesReadiness(resources []Resource) ReconcileResult {
 		ready, reason := resource.IsReady()
 
 		resourceComponentStatuses := resource.GetComponentStatuses()
-		for componentName, componentStatus := range resourceComponentStatuses {
-			componentStatuses[componentName] = componentStatus
-		}
+		maps.Copy(componentStatuses, resourceComponentStatuses)
 
 		if !ready {
 			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s: %s", resource.GetName(), reason))

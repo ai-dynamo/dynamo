@@ -242,7 +242,7 @@ type TestEnv struct {
 
 func newTestEnv(tb testing.TB, rt *runtimeEnv, opts Options) *TestEnv {
 	tb.Helper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "clusterenv-"}}
+	ns := &corev1.Namespace{GenerateName: "clusterenv-"}
 	if err := rt.client.Create(context.Background(), ns); err != nil {
 		tb.Fatalf("create cluster-test namespace: %v", err)
 	}
@@ -310,7 +310,7 @@ func blockQuota(ctx context.Context, c client.Client, quota *corev1.ResourceQuot
 
 func replicaSetBlockQuota(namespace string) *corev1.ResourceQuota {
 	return &corev1.ResourceQuota{
-		ObjectMeta: metav1.ObjectMeta{Name: workloadBlockQuotaName, Namespace: namespace},
+		Name: workloadBlockQuotaName, Namespace: namespace,
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 			corev1.ResourceName("count/replicasets.apps"): resource.MustParse("0"),
 		}},
@@ -446,7 +446,7 @@ func (e *TestEnv) logDiagnostics() {
 }
 
 func (e *TestEnv) deleteNamespace() error {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: e.namespace}}
+	ns := &corev1.Namespace{Name: e.namespace}
 	if err := e.rt.client.Delete(context.Background(), ns); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
