@@ -71,6 +71,7 @@ areas:
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:
+  - lib/global-view-broadcaster/
   - components/src/dynamo/kv_dc_relay/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
   - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md

@@ -3,9 +3,14 @@
 
 [package]
 name = "dynamo-global-view-broadcaster"
-description = "Sends pool state from Pool Relays to Global Routers"
+description = "Fan out Pool Relay views to Global Router replicas"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
+
+[dependencies]
+parking_lot = { workspace = true }
+tokio = { workspace = true }

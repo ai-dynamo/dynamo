@@ -10,6 +10,7 @@ members = [
     "lib/truthy",
     "lib/data-gen",
     "lib/kv-hashing",
+    "lib/global-view-broadcaster",
     "lib/mocker",
     "lib/kv-router",
     "lib/global-common",

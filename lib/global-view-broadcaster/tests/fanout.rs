@@ -1,0 +1,308 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use dynamo_global_view_broadcaster::{Frame, GlobalViewBroadcaster};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout;
+
+type Stream = mpsc::Receiver<Frame<&'static str, u64>>;
+
+async fn next(stream: &mut Stream) -> Frame<&'static str, u64> {
+    timeout(Duration::from_secs(2), stream.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn broadcasts_to_all_routers_and_recovers_a_disconnected_replica() {
+    let broadcaster = GlobalViewBroadcaster::new();
+    broadcaster.upsert("blue", 10);
+
+    let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a", "b"]));
+    let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
+    let running = broadcaster.clone();
+    let task = tokio::spawn(async move {
+        running
+            .run(directory_rx, move |router| {
+                let connections_tx = connections_tx.clone();
+                async move {
+                    let (sink, stream) = mpsc::channel(8);
+                    connections_tx.send((router, stream)).map_err(|_| ())?;
+                    Ok::<_, ()>(sink)
+                }
+            })
+            .await;
+    });
+
+    let mut streams = HashMap::new();
+    for _ in 0..2 {
+        let (router, mut stream) = timeout(Duration::from_secs(2), connections_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            next(&mut stream).await,
+            Frame::Snapshot {
+                revision: 1,
+                pools: HashMap::from([("blue", 10)]),
+            }
+        );
+        streams.insert(router, stream);
+    }
+    assert_eq!(streams.len(), 2);
+
+    broadcaster.upsert("blue", 11);
+    for stream in streams.values_mut() {
+        assert_eq!(
+            next(stream).await,
+            Frame::Upsert {
+                revision: 2,
+                pool: "blue",
+                view: 11,
+            }
+        );
+    }
+
+    directory_tx.send(HashSet::from(["a", "b", "c"])).unwrap();
+    let (router, mut new_stream) = timeout(Duration::from_secs(2), connections_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(router, "c");
+    assert_eq!(
+        next(&mut new_stream).await,
+        Frame::Snapshot {
+            revision: 2,
+            pools: HashMap::from([("blue", 11)]),
+        }
+    );
+    streams.insert(router, new_stream);
+
+    drop(streams.remove("a"));
+    let (router, mut recovered) = timeout(Duration::from_secs(2), connections_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(router, "a");
+    assert_eq!(
+        next(&mut recovered).await,
+        Frame::Snapshot {
+            revision: 2,
+            pools: HashMap::from([("blue", 11)]),
+        }
+    );
+    streams.insert(router, recovered);
+
+    directory_tx.send(HashSet::from(["a", "c"])).unwrap();
+    let mut removed = streams.remove("b").unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(2), removed.recv())
+            .await
+            .unwrap(),
+        None
+    );
+
+    broadcaster.remove(&"blue");
+    for stream in streams.values_mut() {
+        assert_eq!(
+            next(stream).await,
+            Frame::Remove {
+                revision: 3,
+                pool: "blue",
+            }
+        );
+    }
+
+    broadcaster.replace_snapshot(HashMap::from([("green", 20)]));
+    for stream in streams.values_mut() {
+        assert_eq!(
+            next(stream).await,
+            Frame::Snapshot {
+                revision: 4,
+                pools: HashMap::from([("green", 20)]),
+            }
+        );
+    }
+
+    drop(directory_tx);
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn update_during_connection_is_included_in_the_initial_snapshot() {
+    let broadcaster = GlobalViewBroadcaster::new();
+    broadcaster.upsert("blue", 10);
+    let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
+    let (connecting_tx, connecting_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+    let connecting_tx = std::sync::Mutex::new(Some(connecting_tx));
+    let resume_rx = std::sync::Mutex::new(Some(resume_rx));
+    let running = broadcaster.clone();
+    let task = tokio::spawn(async move {
+        running
+            .run(directory_rx, move |_| {
+                let connecting = connecting_tx.lock().unwrap().take().unwrap();
+                let resume = resume_rx.lock().unwrap().take().unwrap();
+                let stream_tx = stream_tx.clone();
+                async move {
+                    connecting.send(()).unwrap();
+                    resume.await.unwrap();
+                    let (sink, stream) = mpsc::channel(8);
+                    stream_tx.send(stream).unwrap();
+                    Ok::<_, ()>(sink)
+                }
+            })
+            .await;
+    });
+    timeout(Duration::from_secs(2), connecting_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    broadcaster.upsert("blue", 11);
+    resume_tx.send(()).unwrap();
+    let mut stream = timeout(Duration::from_secs(2), stream_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        next(&mut stream).await,
+        Frame::Snapshot {
+            revision: 2,
+            pools: HashMap::from([("blue", 11)]),
+        }
+    );
+    broadcaster.upsert("blue", 12);
+    assert_eq!(
+        next(&mut stream).await,
+        Frame::Upsert {
+            revision: 3,
+            pool: "blue",
+            view: 12,
+        }
+    );
+    drop(directory_tx);
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn lagging_router_reconnects_with_the_current_snapshot() {
+    let broadcaster = GlobalViewBroadcaster::new();
+    let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
+    let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
+    let running = broadcaster.clone();
+    let task = tokio::spawn(async move {
+        running
+            .run(directory_rx, move |router| {
+                let connections_tx = connections_tx.clone();
+                async move {
+                    let (sink, stream) = mpsc::channel(1);
+                    connections_tx.send((router, stream)).map_err(|_| ())?;
+                    Ok::<_, ()>(sink)
+                }
+            })
+            .await;
+    });
+    let (_, mut first_stream) = timeout(Duration::from_secs(2), connections_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        next(&mut first_stream).await,
+        Frame::Snapshot {
+            revision: 0,
+            pools: HashMap::new(),
+        }
+    );
+    for revision in 1..=100 {
+        broadcaster.upsert("blue", revision);
+    }
+    let (router, mut recovered) = timeout(Duration::from_secs(2), connections_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(router, "a");
+    assert_eq!(
+        next(&mut recovered).await,
+        Frame::Snapshot {
+            revision: 100,
+            pools: HashMap::from([("blue", 100)]),
+        }
+    );
+    drop(directory_tx);
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stalled_router_resnapshots_without_draining_its_old_channel() {
+    let broadcaster = GlobalViewBroadcaster::new();
+    let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
+    let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
+    let running = broadcaster.clone();
+    let task = tokio::spawn(async move {
+        running
+            .run(directory_rx, move |router| {
+                let connections_tx = connections_tx.clone();
+                async move {
+                    let (sink, stream) = mpsc::channel(1);
+                    connections_tx.send((router, stream)).map_err(|_| ())?;
+                    Ok::<_, ()>(sink)
+                }
+            })
+            .await;
+    });
+
+    let (_, mut stalled) = timeout(Duration::from_secs(2), connections_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(next(&mut stalled).await, Frame::Snapshot { .. }));
+    broadcaster.upsert("blue", 1);
+    assert!(matches!(next(&mut stalled).await, Frame::Upsert { .. }));
+
+    broadcaster.upsert("blue", 2);
+    timeout(Duration::from_secs(2), async {
+        while stalled.capacity() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    broadcaster.upsert("blue", 3);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for revision in 4..=100 {
+        broadcaster.upsert("blue", revision);
+    }
+
+    let (router, mut recovered) = timeout(Duration::from_secs(3), connections_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(router, "a");
+    assert_eq!(
+        next(&mut recovered).await,
+        Frame::Snapshot {
+            revision: 100,
+            pools: HashMap::from([("blue", 100)]),
+        }
+    );
+
+    drop(directory_tx);
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
