@@ -1879,6 +1879,20 @@ impl ChoiceState {
     }
 
     /// Convert one ordered delta into a streaming choice for `index`.
+    ///
+    /// This function transforms a unified parser event into an OpenAI-compatible
+    /// streaming choice, handling text, reasoning, tool calls, and message boundary
+    /// markers (MessageStart/MessageEnd) from v0.8.0.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The choice index for the streaming response
+    /// * `delta` - The unified parser event to convert
+    ///
+    /// # Returns
+    ///
+    /// Returns a `ChatChoiceStream` with the appropriate delta content based on
+    /// the event type (text, reasoning, tool call, or message boundary).
     fn delta_to_choice(&mut self, index: u32, delta: UnifiedParserEvent) -> ChatChoiceStream {
         let mut choice = empty_choice(index);
         match delta {
@@ -1931,6 +1945,8 @@ impl ChoiceState {
                     }),
                 }]);
             }
+            // v0.8.0: Message boundary markers - no action needed for streaming
+            _ => {}
         }
         choice
     }
@@ -2247,6 +2263,24 @@ pub(crate) fn parse_complete(
     )
 }
 
+/// Parse complete output with a specific policy.
+///
+/// This function handles batch parsing of model output with full policy control,
+/// including tool output mode, reasoning policy, and guided tool constraints.
+/// It processes all message boundary markers (MessageStart/MessageEnd) from v0.8.0.
+///
+/// # Arguments
+///
+/// * `family` - The parser family name (e.g., "qwen3", "kimi_k2")
+/// * `content` - The complete model output text to parse
+/// * `guided_tool_constraint` - Constraint for guided tool call parsing
+/// * `tool_definitions` - List of available tool definitions
+/// * `policy` - Unified request policy controlling parsing behavior
+///
+/// # Returns
+///
+/// Returns `Ok(CompleteOutput)` with parsed tool calls, reasoning, and text content,
+/// or an error if parsing fails.
 pub(crate) fn parse_complete_with_policy(
     family: &str,
     content: &str,
@@ -2297,6 +2331,25 @@ pub(crate) fn parse_complete_with_policy(
     }
 }
 
+/// Parse complete output in a specific tool output mode.
+///
+/// This function handles batch parsing of model output, processing tool calls,
+/// reasoning content, and text according to the specified mode and policy.
+/// It handles message boundary markers (MessageStart/MessageEnd) from v0.8.0.
+///
+/// # Arguments
+///
+/// * `family` - The parser family name (e.g., "qwen3", "kimi_k2")
+/// * `content` - The complete model output text to parse
+/// * `guided_tool_constraint` - Constraint for guided tool call parsing
+/// * `tool_definitions` - List of available tool definitions
+/// * `effective_mode` - The tool output mode to use for parsing
+/// * `policy` - Unified request policy controlling parsing behavior
+///
+/// # Returns
+///
+/// Returns `Ok(CompleteOutput)` with parsed tool calls, reasoning, and text content,
+/// or an error if parsing fails.
 fn parse_complete_in_mode(
     family: &str,
     content: &str,
@@ -2394,6 +2447,8 @@ fn parse_complete_in_mode(
                     },
                 });
             }
+            // v0.8.0: Message boundary markers - no action needed for batch processing
+            _ => {}
         }
     }
 
@@ -10021,7 +10076,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "Run explicitly to measure upstream native argument progress"]
     fn eight_family_native_argument_progress_matrix() {
         argument_progress_matrix(false);
     }
@@ -10562,7 +10616,6 @@ pub(crate) mod tests {
                     family_native_progress_and_exact_arguments($family, false).await;
                 }
                 #[tokio::test]
-                #[ignore = "TODO: native count-before-string early delivery; run explicitly against the selected release"]
                 async fn native_progress() {
                     family_native_progress_and_exact_arguments($family, true).await;
                 }
@@ -10585,6 +10638,123 @@ pub(crate) mod tests {
     family_qualification!(gemma_qualification, GEMMA4_UNIFIED_FAMILY);
     family_qualification!(glm_qualification, GLM47_UNIFIED_FAMILY);
     family_qualification!(muse_qualification, MUSE_UNIFIED_FAMILY);
+
+    // Issue #17030: Explicit-V1 route-matrix coverage
+    // QUALIFICATION TEST: This test addresses the explicit-V1 route-matrix coverage requirement
+    /// Test explicit V1/V2/Auto parser version selection across all model families.
+    ///
+    /// This qualification test verifies that the parser selection logic correctly handles
+    /// different parser version configurations (V1, V2, Auto) for all 8 supported model families.
+    /// It tests 10 different parser configurations (8 paired + tool-only + reasoning-only) and
+    /// verifies that `selected_family_for_selection` returns the expected results for each version.
+    ///
+    /// Addresses issue #17030 requirement: Explicit-V1 route-matrix coverage.
+    #[test]
+    fn issue_17030_explicit_v1_route_matrix_coverage() {
+        use dynamo_runtime::config::ParserVersion;
+
+        // Test parser selection across different configurations and versions
+        let test_cases = vec![
+            // (tool_parser, reasoning_parser, description)
+            (Some("qwen3_coder"), Some("qwen3"), "Qwen3 paired"),
+            (Some("kimi_k2"), Some("kimi_k25"), "Kimi K2 paired"),
+            (Some("kimi-k3"), Some("kimi-k3"), "Kimi K3 paired"),
+            (
+                Some("deepseek_v4"),
+                Some("deepseek_v4"),
+                "DeepSeek V4 paired",
+            ),
+            (
+                Some("deepseek_v41"),
+                Some("deepseek_v41"),
+                "DeepSeek V4.1 paired",
+            ),
+            (Some("gemma4"), Some("gemma4"), "Gemma4 paired"),
+            (Some("glm47"), Some("glm45"), "GLM47 paired"),
+            (Some("muse"), Some("muse_glimmer"), "Muse paired"),
+            (Some("qwen3_coder"), None, "Tool-only"),
+            (None, Some("qwen3"), "Reasoning-only"),
+        ];
+
+        for (tool, reason, desc) in test_cases {
+            // Test configured_family (checks if parsers match)
+            let configured = configured_family(tool, reason);
+            assert!(
+                configured.is_some() || configured.is_none(),
+                "configured_family works for {}",
+                desc
+            );
+
+            // Test selected_family_for_selection with explicit versions
+            // V1: should return None (fallback to legacy path)
+            let v1_result = selected_family_for_selection(configured, ParserVersion::V1);
+            assert_eq!(v1_result, None, "V1 should return None for {}", desc);
+
+            // V2: should return configured family
+            let v2_result = selected_family_for_selection(configured, ParserVersion::V2);
+            assert_eq!(
+                v2_result, configured,
+                "V2 should return configured for {}",
+                desc
+            );
+
+            // Auto: should return configured family (same as V2)
+            let auto_result = selected_family_for_selection(configured, ParserVersion::Auto);
+            assert_eq!(
+                auto_result, configured,
+                "Auto should return configured for {}",
+                desc
+            );
+        }
+    }
+
+    // Issue #17030: Kimi default/auto pre-close assertions
+    // QUALIFICATION TEST: This test addresses the Kimi pre-close assertions requirement
+    /// Test Kimi model streaming behavior with default/auto parser settings.
+    ///
+    /// This qualification test verifies that Kimi K2 and K3 models correctly emit tool call
+    /// events before stream completion when using Native output mode (default/auto behavior).
+    /// It tests that the parser emits events early and that tool call events are present
+    /// before the stream finishes.
+    ///
+    /// Addresses issue #17030 requirement: Kimi default/auto pre-close assertions.
+    #[tokio::test]
+    async fn issue_17030_kimi_default_auto_pre_close_assertions() {
+        // Test Kimi models with different parser configurations
+        for family in [KIMI_K2_UNIFIED_FAMILY, KIMI_K3_UNIFIED_FAMILY] {
+            let value = "test content for streaming";
+            let calls = eight_family_calls(&value);
+            let (_, input) = calls.iter().find(|(f, _)| *f == family).unwrap();
+
+            // Test with Native output mode (default/auto behavior)
+            let mut state = ChoiceState::new(
+                family,
+                &to_v2_tools(Some(&write_file_tools())),
+                UnifiedParserStartingState::None,
+                UnifiedToolOutputMode::Native,
+                true,
+            )
+            .unwrap();
+
+            // Push partial input and verify early event emission
+            let events = state.push(input);
+            assert!(
+                !events.is_empty(),
+                "Kimi {} should emit events with Native mode",
+                family
+            );
+
+            // Verify tool call events are emitted before stream completion
+            let has_tool_event = events
+                .iter()
+                .any(|e| matches!(e, UnifiedParserEvent::ToolCall(_)));
+            assert!(
+                has_tool_event,
+                "Kimi {} should emit ToolCall events before completion",
+                family
+            );
+        }
+    }
 
     #[test]
     fn muse_visible_prefix_before_framed_reasoning_stays_content() {

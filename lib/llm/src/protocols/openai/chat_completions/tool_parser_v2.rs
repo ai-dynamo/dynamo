@@ -229,6 +229,8 @@ pub(crate) fn parse_complete_unified(
                         .unwrap_or_else(|_| "{}".to_string()),
                 },
             }),
+            // v0.8.0: Message boundary markers - no action needed
+            _ => {}
         }
     }
 
