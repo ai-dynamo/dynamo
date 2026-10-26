@@ -44,7 +44,10 @@ flowchart LR
 ```
 
 By default, Nsight adds no privileged flag, capabilities, or host access to profiled pods, and `nsys` runs as the
-container's user. Leave GPU metrics off: they need extra privileges, and kernel and CUDA tracing do not use them.
+container's user. To keep it that way, do not turn on GPU metrics sampling (the `nsys` option `--gpu-metrics-devices`):
+Nsight's [GPU metrics setup](https://docs.nvidia.com/nsight-operator/Troubleshooting/index.html#gpu-metrics) gives
+profiled containers `privileged: true` or the `SYS_ADMIN` capability. Tracing CUDA API calls and GPU kernels, as the
+worker configs below do, needs no extra privileges.
 
 ## Try Nsight's Dynamo Helper First
 
