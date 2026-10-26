@@ -37,7 +37,7 @@ Commands and reports take different paths:
 flowchart LR
   U["Developer or agent<br/>nsight_operator.py"] -->|"start, stop, ls"| G["Nsight gateway"]
   G --> C["Nsight coordinator"]
-  P["Profiled Dynamo pods"] -->|"connect, then receive start and stop"| C
+  C -->|"push start and stop to registered pods"| P["Profiled Dynamo pods"]
   P -.->|"upload a report after each window"| S[("S3 bucket")]
   S -.->|"read reports"| U
 ```
