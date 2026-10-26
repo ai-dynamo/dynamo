@@ -17,8 +17,10 @@
 //! The right home for the schema derive is upstream, in `async-openai` or in
 //! `dynamo-protocols`. When it exists there, these types can shrink back to
 //! a wrapper. Until then, the tests in this module hold the wire format to
-//! the OpenAI type: every enum value and every rejected input is checked
-//! against `dynamo_protocols::types::CreateImageRequest`.
+//! the OpenAI type: every field, every enum value, and every rejected input
+//! is checked against `dynamo_protocols::types::CreateImageRequest`, and a
+//! field or an enum value that a later `async-openai` adds fails to compile
+//! there until the owned type has it.
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -393,12 +395,18 @@ mod tests {
         })
     }
 
+    /// A request that sets every OpenAI field.
+    const FULL_IMAGE_REQUEST: &str = r#"{"prompt":"a cat","model":"gpt-image-1","n":2,"quality":"high","response_format":"b64_json","output_format":"webp","output_compression":80,"stream":false,"partial_images":2,"size":"1536x1024","moderation":"low","background":"transparent","style":"natural","user":"user-1"}"#;
+
+    /// A response that sets every OpenAI field, with one image of each kind.
+    const FULL_IMAGE_RESPONSE: &str = r#"{"created":1700000000,"data":[{"url":"http://x/1.png","revised_prompt":"a cat, photo"},{"b64_json":"aGVsbG8="}],"background":"opaque","output_format":"png","size":"1024x1024","quality":"high","usage":{"input_tokens":10,"total_tokens":30,"output_tokens":20,"output_token_details":{"text_tokens":0,"image_tokens":20},"input_tokens_details":{"text_tokens":10,"image_tokens":0}}}"#;
+
     // --- Wire compatibility with the OpenAI types ---
 
     #[test]
     fn image_request_wire_format_matches_the_openai_type() {
         for json in [
-            r#"{"prompt":"a cat","model":"gpt-image-1","n":2,"quality":"high","response_format":"b64_json","output_format":"webp","output_compression":80,"stream":false,"partial_images":2,"size":"1536x1024","moderation":"low","background":"transparent","style":"natural","user":"user-1"}"#,
+            FULL_IMAGE_REQUEST,
             // The OpenAI type accepts any model and size string.
             r#"{"prompt":"a cat","model":"black-forest-labs/FLUX.1-dev","size":"768x512"}"#,
             r#"{"prompt":"a cat","model":null,"n":null}"#,
@@ -451,7 +459,7 @@ mod tests {
     #[test]
     fn image_response_wire_format_matches_the_openai_type() {
         for json in [
-            r#"{"created":1700000000,"data":[{"url":"http://x/1.png","revised_prompt":"a cat, photo"},{"b64_json":"aGVsbG8="}],"background":"opaque","output_format":"png","size":"1024x1024","quality":"high","usage":{"input_tokens":10,"total_tokens":30,"output_tokens":20,"output_token_details":{"text_tokens":0,"image_tokens":20},"input_tokens_details":{"text_tokens":10,"image_tokens":0}}}"#,
+            FULL_IMAGE_RESPONSE,
             // The OpenAI type writes every absent optional field as null.
             r#"{"created":1,"data":[]}"#,
             r#"{"created":1,"data":[{"b64_json":"aGVsbG8=","url":null}],"size":"768x512"}"#,
@@ -491,6 +499,170 @@ mod tests {
                 assert_same_wire_format::<ImagesResponse, NvImagesResponse>(&json);
             }
         }
+    }
+
+    // --- Field drift against the OpenAI types ---
+    //
+    // The patterns below name every field and have no `..`, and the match
+    // on `Image` has no wildcard arm, so a field or a variant that a later
+    // async-openai adds fails to compile here until the owned type has it.
+    // The OpenAI structs are not `non_exhaustive`.
+
+    #[test]
+    fn image_request_fields_match_the_openai_type() {
+        let CreateImageRequest {
+            prompt,
+            model,
+            n,
+            quality,
+            response_format,
+            output_format,
+            output_compression,
+            stream,
+            partial_images,
+            size,
+            moderation,
+            background,
+            style,
+            user,
+        } = serde_json::from_str(FULL_IMAGE_REQUEST).unwrap();
+        assert!(!prompt.is_empty());
+        for (field, set) in [
+            ("model", model.is_some()),
+            ("n", n.is_some()),
+            ("quality", quality.is_some()),
+            ("response_format", response_format.is_some()),
+            ("output_format", output_format.is_some()),
+            ("output_compression", output_compression.is_some()),
+            ("stream", stream.is_some()),
+            ("partial_images", partial_images.is_some()),
+            ("size", size.is_some()),
+            ("moderation", moderation.is_some()),
+            ("background", background.is_some()),
+            ("style", style.is_some()),
+            ("user", user.is_some()),
+        ] {
+            assert!(set, "FULL_IMAGE_REQUEST does not set {field}");
+        }
+
+        // The flatten re-emits an undeclared field, so the wire-format
+        // comparison alone would not see one: it must not be in here.
+        let NvCreateImageRequest {
+            prompt: _,
+            model: _,
+            n: _,
+            quality: _,
+            response_format: _,
+            output_format: _,
+            output_compression: _,
+            stream: _,
+            partial_images: _,
+            size: _,
+            moderation: _,
+            background: _,
+            style: _,
+            user: _,
+            input_reference: _,
+            nvext: _,
+            extra_args: _,
+            passthrough,
+        } = serde_json::from_str(FULL_IMAGE_REQUEST).unwrap();
+        assert!(
+            passthrough.is_empty(),
+            "an OpenAI field is not declared on NvCreateImageRequest: {passthrough:?}"
+        );
+    }
+
+    #[test]
+    fn image_response_fields_match_the_openai_type() {
+        let ImagesResponse {
+            created,
+            data,
+            background,
+            output_format,
+            size,
+            quality,
+            usage,
+        } = serde_json::from_str(FULL_IMAGE_RESPONSE).unwrap();
+        assert!(created > 0);
+        assert_eq!(
+            data.len(),
+            2,
+            "FULL_IMAGE_RESPONSE has one image of each kind"
+        );
+        for image in &data {
+            match &**image {
+                openai::Image::Url {
+                    url,
+                    revised_prompt: _,
+                } => assert!(!url.is_empty()),
+                openai::Image::B64Json {
+                    b64_json,
+                    revised_prompt: _,
+                } => assert!(!b64_json.is_empty()),
+            }
+        }
+        for (field, set) in [
+            ("background", background.is_some()),
+            ("output_format", output_format.is_some()),
+            ("size", size.is_some()),
+            ("quality", quality.is_some()),
+        ] {
+            assert!(set, "FULL_IMAGE_RESPONSE does not set {field}");
+        }
+        let openai::ImageGenUsage {
+            input_tokens: _,
+            total_tokens: _,
+            output_tokens: _,
+            output_token_details,
+            input_tokens_details,
+        } = usage.expect("FULL_IMAGE_RESPONSE does not set usage");
+        let openai::ImageGenOutputTokensDetails {
+            text_tokens: _,
+            image_tokens: _,
+        } = output_token_details.expect("FULL_IMAGE_RESPONSE does not set output_token_details");
+        let openai::ImageGenInputUsageDetails {
+            text_tokens: _,
+            image_tokens: _,
+        } = input_tokens_details;
+
+        let NvImagesResponse {
+            created: _,
+            data,
+            background: _,
+            output_format: _,
+            size: _,
+            quality: _,
+            usage,
+            nvext,
+        } = serde_json::from_str(FULL_IMAGE_RESPONSE).unwrap();
+        for ImageData {
+            url,
+            b64_json,
+            revised_prompt: _,
+        } in &data
+        {
+            assert!(url.is_some() || b64_json.is_some());
+        }
+        let ImageUsage {
+            input_tokens: _,
+            total_tokens: _,
+            output_tokens: _,
+            output_token_details,
+            input_tokens_details,
+        } = usage.unwrap();
+        let ImageTokenDetails {
+            text_tokens: _,
+            image_tokens: _,
+        } = output_token_details.unwrap();
+        let ImageTokenDetails {
+            text_tokens: _,
+            image_tokens: _,
+        } = input_tokens_details;
+        assert!(
+            nvext.is_none(),
+            "FULL_IMAGE_RESPONSE has no Dynamo extension"
+        );
     }
 
     // --- NvCreateImageRequest ---
