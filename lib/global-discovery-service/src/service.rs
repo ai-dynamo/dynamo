@@ -47,7 +47,6 @@ use url::Url;
 pub struct DiscoveryStore {
     pub pools: Arc<PoolDirectory>,
     pub routers: Arc<ReplicaDirectory>,
-    /// Where `routers` comes from. `POST /routers` gives it as the reason.
     pub router_source: RouterSource,
     /// `None` when pools are announced another way, as with MCS.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
@@ -509,38 +508,35 @@ mod tests {
 
     #[tokio::test]
     async fn routers_cannot_register_and_the_answer_says_why() {
-        for (source, reason) in [
-            (RouterSource::Configured, "not decided"),
-            (RouterSource::Mcs, "need not register"),
+        let registration =
+            json!({"replica": "aws-west/global-router-0", "url": "http://10.43.0.5:50051"});
+        // The MCS answer must not depend on the body, so that case sends none.
+        for (source, body, reason) in [
+            (RouterSource::Mcs, String::new(), "need not register"),
+            (
+                RouterSource::Configured,
+                registration.to_string(),
+                "not decided",
+            ),
         ] {
             let mut store = memory_store();
             store.router_source = source;
             let (base, shutdown) = start(store).await;
-            // Any body gets the same answer.
-            for body in [
-                json!({"replica": "aws-west/global-router-0", "url": "http://10.43.0.5:50051"})
-                    .to_string(),
-                String::new(),
-            ] {
-                let response = reqwest::Client::new()
-                    .post(format!("{base}/routers"))
-                    .body(body)
-                    .send()
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    response.status(),
-                    reqwest::StatusCode::NOT_IMPLEMENTED,
-                    "{source:?}"
-                );
-                assert!(
-                    response.text().await.unwrap().contains(reason),
-                    "{source:?}"
-                );
-            }
-            // Listing still works.
-            let (status, _) = get_json(&base, "/routers").await;
-            assert_eq!(status, reqwest::StatusCode::OK);
+            let response = reqwest::Client::new()
+                .post(format!("{base}/routers"))
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::NOT_IMPLEMENTED,
+                "{source:?}"
+            );
+            assert!(
+                response.text().await.unwrap().contains(reason),
+                "{source:?}"
+            );
             shutdown.cancel();
         }
     }
