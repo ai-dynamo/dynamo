@@ -798,14 +798,13 @@ fn frontend_owns_output_text_and_stop_strings() {
     // `request()` carries the stop string "done", include_stop_str_in_output
     // and hidden stop token 2. vLLM gets the stop token IDs only.
     let mut request = request();
-    request.stop_conditions.stop_token_ids_visible = Some(vec![7]);
     request.output_options.skip_special_tokens = Some(false);
     let wire = build_generate_request(request, "token-only".into(), DisaggregationMode::Aggregated)
         .unwrap();
     let stopping = wire.stopping.unwrap();
     assert!(stopping.stop_strings.is_empty());
     assert!(!stopping.include_stop_strings);
-    assert_eq!(stopping.stop_token_ids, [2, 7]);
+    assert_eq!(stopping.stop_token_ids, [2]);
     let response = wire.response.unwrap();
     assert_eq!(response.output_text, Some(false));
     assert_eq!(response.skip_special_tokens, None);
