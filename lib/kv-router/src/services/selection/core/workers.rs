@@ -374,6 +374,7 @@ impl SelectionCore {
                     replica_inbox,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
+                    affinity_replication: self.session_binding_sink(&key),
                 }))
             })?
             .clone();
