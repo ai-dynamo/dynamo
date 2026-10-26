@@ -7,7 +7,7 @@ package runtime
 
 import "github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 
-// Gate controls a feature's rendered defaults by Dynamo runtime version.
+// Gate controls runtime-version-dependent operator behavior.
 type Gate struct {
 	Name              string
 	MinRuntimeVersion runtimeversion.Version

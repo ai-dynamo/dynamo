@@ -37,6 +37,12 @@ struct SimConfig {
     lifetime_stddev: f64,
     /// Random seed for reproducibility
     seed: u64,
+    /// Seconds represented by each simulation tick.
+    timestep_secs: u64,
+    /// Multiplier used to derive the controller's sliding rate window.
+    rate_window_multiplier: u64,
+    /// Number of control ticks to defer scale-down decisions.
+    scale_down_cooldown_ticks: u32,
 }
 
 impl SimConfig {
@@ -65,6 +71,9 @@ impl Default for SimConfig {
             lifetime_mean: 0,
             lifetime_stddev: 0.0,
             seed: 42,
+            timestep_secs: 3,
+            rate_window_multiplier: 30,
+            scale_down_cooldown_ticks: 3,
         }
     }
 }
@@ -103,6 +112,27 @@ struct ChurnMetrics {
     /// Per-tick replica distribution: `per_tick_replica_dist[tick]` is a map from
     /// replica_count → number of LoRAs with that replica count at that tick.
     per_tick_replica_dist: Vec<HashMap<usize, usize>>,
+    /// Physical adapter loads observed on request routing misses.
+    per_tick_adapter_loads: Vec<usize>,
+    /// Physical adapter unloads caused by capacity-bounded LRU eviction.
+    per_tick_adapter_unloads: Vec<usize>,
+    /// Requests issued through the LoRA filter.
+    per_tick_requests: Vec<usize>,
+    /// Requests routed to a worker where the adapter was already resident.
+    per_tick_hits: Vec<usize>,
+    /// Mean and maximum resident slots across workers after each tick.
+    per_tick_mean_occupancy: Vec<f64>,
+    per_tick_max_occupancy: Vec<usize>,
+    /// Coefficient of variation of requests served per worker in each tick.
+    per_tick_worker_load_cov: Vec<f64>,
+    /// Routing-table state after each control tick.
+    per_tick_active_loras: Vec<usize>,
+    per_tick_routing_entries: Vec<usize>,
+    per_tick_cold_start_entries: Vec<usize>,
+    /// Controller recompute latency. This is solver latency for MCF and full recompute latency
+    /// for the non-MCF algorithms.
+    per_tick_solve_ms: Vec<f64>,
+    per_tick_overflow_count: Vec<usize>,
 }
 
 impl ChurnMetrics {
@@ -121,6 +151,18 @@ impl ChurnMetrics {
             per_tick_lora_removals: Vec::new(),
             total_lora_additions: 0,
             total_lora_removals: 0,
+            per_tick_adapter_loads: Vec::new(),
+            per_tick_adapter_unloads: Vec::new(),
+            per_tick_requests: Vec::new(),
+            per_tick_hits: Vec::new(),
+            per_tick_mean_occupancy: Vec::new(),
+            per_tick_max_occupancy: Vec::new(),
+            per_tick_worker_load_cov: Vec::new(),
+            per_tick_active_loras: Vec::new(),
+            per_tick_routing_entries: Vec::new(),
+            per_tick_cold_start_entries: Vec::new(),
+            per_tick_solve_ms: Vec::new(),
+            per_tick_overflow_count: Vec::new(),
         }
     }
 

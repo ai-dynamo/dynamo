@@ -35,6 +35,7 @@ __all__ = [
     "SubComponentNotFoundError",
     "DuplicateSubComponentError",
     "DeploymentValidationError",
+    "GPUShapeUnavailableError",
     "EmptyTargetReplicasError",
     "PowerAnnotationMissingError",
     "PowerAnnotationInvalidError",
@@ -222,6 +223,17 @@ class DeploymentValidationError(PlannerError):
         self.errors = errors
         message = f"Service verification failed: {'; '.join(errors)}"
         super().__init__(message)
+
+
+class GPUShapeUnavailableError(PlannerError):
+    """Raised when authoritative operator GPU shape status is unsafe to use."""
+
+    def __init__(self, component_name: str, reason: str):
+        self.component_name = component_name
+        self.reason = reason
+        super().__init__(
+            f"GPU shape for component '{component_name}' is unavailable: {reason}"
+        )
 
 
 class EmptyTargetReplicasError(PlannerError):

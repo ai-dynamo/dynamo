@@ -23,10 +23,9 @@ use crate::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use crate::scheduling::WorkerSelectionPolicyError;
-use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
-    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
+    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
@@ -51,9 +50,13 @@ impl WorkerScorer for WorkerIdScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        Ok(candidate.worker().worker_id as f64)
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            *cost = candidate.worker().worker_id as f64;
+        }
+        Ok(())
     }
 }
 
@@ -81,9 +84,13 @@ impl WorkerScorer for NonFiniteScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        Ok(f64::NAN)
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (_candidate, cost) in candidates.iter().zip(costs) {
+            *cost = f64::NAN;
+        }
+        Ok(())
     }
 }
 
@@ -105,7 +112,7 @@ impl WorkerFilter for RejectAllFilter {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidate: &WorkerCandidate,
+        _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(false)
     }
@@ -117,28 +124,36 @@ impl WorkerFilter for RejectWorker {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(candidate.worker().worker_id != self.0)
     }
 }
 
+/// Block size 4, partition `model/default`, hashes tracked through `context`.
+fn normalize_with(
+    request: &PromptRequest,
+    context: &TrackingHashContext,
+    assume_kv_reuse: bool,
+) -> Result<super::input::NormalizedPrompt, SelectionError> {
+    request.view().normalize_for_selection(
+        4,
+        false,
+        Some(TrackingHashInput {
+            context,
+            scope: TrackingHashScope {
+                partition: RoutingPartitionRef::new("model", "default"),
+                block_size: 4,
+            },
+            assume_kv_reuse,
+        }),
+    )
+}
+
 fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
     let config = test_config();
     let context = TrackingHashContext::from_config(&config).unwrap();
-    request
-        .normalize_for_selection(
-            false,
-            TrackingHashInput {
-                context: &context,
-                scope: TrackingHashScope {
-                    partition: RoutingPartitionRef::new("model", "default"),
-                    block_size: 4,
-                },
-                assume_kv_reuse: true,
-            },
-        )
-        .expect("normalize prompt")
+    normalize_with(request, &context, true).expect("normalize prompt")
 }
 
 async fn response_json(response: Response) -> serde_json::Value {
@@ -161,6 +176,19 @@ async fn replica_sync_routes_are_mounted() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+
+    // The shared peer routes must be merged before the JSON fallbacks.
+    let wrong_method = app()
+        .oneshot(
+            Request::builder()
+                .uri("/replica_sync/register_peer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(response_json(wrong_method).await["error"].is_string());
 }
 
 async fn post(app: Router, uri: &str, body: &str) -> Response {
@@ -549,6 +577,58 @@ fn prompt_request_cache_salt_changes_normalized_hashes() {
 }
 
 #[test]
+fn prompt_carrying_requests_read_top_level_prompt_fields() {
+    let body = serde_json::json!({
+        "selection_id": "sel-1",
+        "worker_id": 7,
+        "token_ids": [1, 2, 3],
+        "cache_salt": "tenant-a",
+        "is_eagle": true,
+    });
+    let assert_prompt = |prompt: &PromptRequest| {
+        assert_eq!(prompt.token_ids.as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(prompt.cache_namespace.as_deref(), Some("tenant-a"));
+        assert_eq!(prompt.is_eagle, Some(true));
+    };
+
+    let select: SelectRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&select.prompt);
+    assert_eq!(select.selection_id.as_deref(), Some("sel-1"));
+    assert_eq!(select.model_name, DEFAULT_MODEL_NAME);
+    let reserve: SelectAndReserveRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&reserve.prompt);
+    let booking: ReservationRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&booking.prompt);
+    assert_eq!(booking.worker_id, Some(7));
+    let loads: PotentialLoadsRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&loads.prompt);
+    let scores: OverlapScoresRequest = serde_json::from_value(body).unwrap();
+    assert_prompt(&scores.prompt);
+}
+
+#[tokio::test]
+async fn prompt_routes_keep_json_rejection_statuses() {
+    let untyped = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/select")
+                .body(Body::from(r#"{"token_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(untyped.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let malformed = post(app(), "/select", "{").await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    let wrong_shape = post(app(), "/select", r#"{"token_ids":"oops"}"#).await;
+    assert_eq!(wrong_shape.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response_json(wrong_shape).await["error"].is_string());
+}
+
+#[test]
 fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x35; 32]).unwrap();
@@ -565,19 +645,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     }))
     .unwrap();
 
-    let normalized = request
-        .normalize_for_selection(
-            false,
-            TrackingHashInput {
-                context: &context,
-                scope: TrackingHashScope {
-                    partition: RoutingPartitionRef::new("model", "default"),
-                    block_size: 4,
-                },
-                assume_kv_reuse: true,
-            },
-        )
-        .unwrap();
+    let normalized = normalize_with(&request, &context, true).unwrap();
     let public_blocks = compute_block_hash_for_seq(
         &[1, 2, 3, 4, 5, 6, 7, 8],
         4,
@@ -602,21 +670,7 @@ fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8]
     }))
     .unwrap();
-    let normalize = || {
-        request
-            .normalize_for_selection(
-                false,
-                TrackingHashInput {
-                    context: &context,
-                    scope: TrackingHashScope {
-                        partition: RoutingPartitionRef::new("model", "default"),
-                        block_size: 4,
-                    },
-                    assume_kv_reuse: false,
-                },
-            )
-            .unwrap()
-    };
+    let normalize = || normalize_with(&request, &context, false).unwrap();
 
     let first = normalize();
     let second = normalize();
@@ -650,6 +704,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
     };
 
     let normalized = request
+        .view()
         .normalize_for_reservation(
             false,
             TrackingHashInput {
@@ -696,17 +751,9 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
         block_size: 4,
     };
 
-    let selection = request
-        .normalize_for_selection(
-            false,
-            TrackingHashInput {
-                context: &context,
-                scope,
-                assume_kv_reuse: true,
-            },
-        )
-        .unwrap();
+    let selection = normalize_with(&request, &context, true).unwrap();
     let reservation = request
+        .view()
         .normalize_for_reservation(
             false,
             TrackingHashInput {
@@ -750,6 +797,7 @@ fn randomized_reservation_uses_canonical_complete_block_count() {
         }))
         .unwrap();
         let normalized = request
+            .view()
             .normalize_for_reservation(
                 false,
                 TrackingHashInput {
@@ -768,7 +816,7 @@ fn randomized_reservation_uses_canonical_complete_block_count() {
 }
 
 #[test]
-fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
+fn overlap_scores_response_includes_raw_tier_fields() {
     let worker = WorkerWithDpRank::new(1, 0);
     let idle_worker = WorkerWithDpRank::new(2, 0);
     let mut device_scores = OverlapScores::new();
@@ -780,29 +828,14 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
         device: MatchDetails {
             overlap_scores: device_scores,
             last_matched_hashes: Default::default(),
-            router_hint_root_candidates: None,
+            kv_transfer_candidates: None,
         },
         lower_tier: Default::default(),
     };
     tiered.lower_tier.insert(StorageTier::HostPinned, host);
 
-    let mut config = test_config();
-    config.host_cache_hit_weight = 0.75;
-    let override_config = RouterConfigOverride {
-        overlap_score_credit: Some(0.5),
-        ..Default::default()
-    };
-    let response = build_overlap_scores_response(
-        &config,
-        Some(&override_config),
-        &tiered,
-        4,
-        2,
-        [worker, idle_worker],
-        false,
-        None,
-        None,
-    );
+    let response =
+        build_overlap_scores_response(&tiered, 4, 2, [worker, idle_worker], false, None, None);
 
     assert_eq!(response.workers.len(), 2);
     let selected = response
@@ -815,7 +848,6 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
     assert_eq!(selected.disk_blocks, 3);
     assert_eq!(selected.host_pinned_extension_blocks, 1);
     assert_eq!(selected.shared_beyond_device_blocks, None);
-    assert_eq!(selected.router_credit_blocks, 1.75);
     assert!(!response.shared_cache.enabled);
 }
 
@@ -1183,7 +1215,7 @@ policy_classes:
         Some("latency"),
     )
     .await;
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = response_json(rejected).await;
     assert_eq!(body["details"]["policy_class"], "latency");
     assert_eq!(body["details"]["limit_kind"], "requests");
@@ -1759,11 +1791,12 @@ async fn cached_booking_honors_prefill_tracking() {
     assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
 
     // A select-time override is captured and replayed: this booking tracks
-    // prefill load despite the config default.
+    // prefill load despite the config default. A distinct prompt keeps the
+    // approximate indexer (populated by req-1's booking) from crediting it.
     let select_response = post(
         app.clone(),
         "/select",
-        r#"{"model_name":"model","selection_id":"req-2","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":true}}"#,
+        r#"{"model_name":"model","selection_id":"req-2","token_ids":[5,6,7,8],"router_config_override":{"track_prefill_tokens":true}}"#,
     )
     .await;
     assert_eq!(select_response.status(), StatusCode::OK);
@@ -1796,6 +1829,7 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         port: 8092,
         threads: 1,
         indexer_peers: Vec::new(),
+        session_affinity_ttl: None,
         replica_sync_port: Some(port_a),
         replica_sync_peers: Vec::new(),
         kv_router_config: test_config(),
@@ -1805,7 +1839,14 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         config_a
             .service_builder(
                 crate::WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default(),
+                WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                    |config, role, _| {
+                        crate::WorkerSelectionPolicy::reference(
+                            config.clone(),
+                            role.default_selector_label(),
+                        )
+                    },
+                )),
             )
             .build()
             .await
@@ -1815,7 +1856,14 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         SelectionServiceBuilder::new(
             test_config(),
             crate::WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default(),
+            WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                |config, role, _| {
+                    crate::WorkerSelectionPolicy::reference(
+                        config.clone(),
+                        role.default_selector_label(),
+                    )
+                },
+            )),
         )
         .indexer_threads(1)
         .replica_sync(port_b, Vec::new())
@@ -1998,6 +2046,57 @@ async fn hash_path_validation_returns_bad_request() {
         app,
         "/select",
         r#"{"model_name":"model","block_hashes":[1],"sequence_hashes":[1,2],"isl_tokens":4}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn empty_raw_tokens_win_over_supplied_hashes() {
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [],
+        "block_hashes": [11, 12],
+        "sequence_hashes": [21, 22],
+        "isl_tokens": 8
+    }))
+    .unwrap();
+    let normalized = normalize_prompt(&request);
+    assert!(normalized.block_hashes.is_empty());
+    assert_eq!(normalized.isl_tokens, 0);
+}
+
+#[tokio::test]
+async fn select_accepts_empty_token_ids() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    for _ in 0..2 {
+        let response = post(
+            app.clone(),
+            "/select",
+            r#"{"model_name":"model","token_ids":[]}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn register_rejects_oversized_dp_range() {
+    let response = post(
+        app(),
+        "/workers",
+        &serde_json::json!({
+            "worker_id": 1,
+            "model_name": "model",
+            "endpoint": "http://worker-1:8000",
+            "block_size": 4,
+            "data_parallel_size": crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+        })
+        .to_string(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);

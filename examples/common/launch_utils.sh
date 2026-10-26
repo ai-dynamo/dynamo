@@ -28,6 +28,7 @@
 # Requires: bash 4.3+ (wait -n)
 #
 # Functions:
+#   resolve_sidecar        Select a native binary or Python module command
 #   print_launch_banner    Print startup banner with model info and example curl
 #   print_curl_footer      Print a custom curl example with standard framing (heredoc)
 #   wait_any_exit          Wait for any background process to exit, propagate its code
@@ -39,6 +40,96 @@ fi
 
 EXAMPLE_PROMPT="Who is the tennis GOAT: Federer, Djokovic, or Nadal?"
 EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit city"
+
+# Usage: resolve_sidecar <backend> <command-array>
+resolve_sidecar() {
+    local backend="$1"
+    local -n sidecar_command="$2"
+    local name="dynamo-${backend}-sidecar"
+    local native_binary
+
+    if [[ -v DYNAMO_SIDECAR_BIN ]]; then
+        if [[ "$DYNAMO_SIDECAR_BIN" != /* || ! -f "$DYNAMO_SIDECAR_BIN" || ! -x "$DYNAMO_SIDECAR_BIN" ]]; then
+            echo "ERROR: DYNAMO_SIDECAR_BIN must name an executable file at an absolute path: $DYNAMO_SIDECAR_BIN" >&2
+            return 1
+        fi
+        sidecar_command=("$DYNAMO_SIDECAR_BIN")
+    elif native_binary=$(type -P "$name"); then
+        sidecar_command=("$native_binary")
+    else
+        echo "WARNING: $name not found; falling back to python3 -m dynamo.${backend}.sidecar" >&2
+        sidecar_command=(python3 -m "dynamo.${backend}.sidecar")
+    fi
+}
+
+# Resolve an indexed managed port, retaining a standalone fallback.
+# Usage: dyn_port DYN_SYSTEM_PORT 1 8081
+dyn_port() {
+    local prefix="$1"
+    local index="$2"
+    local fallback="$3"
+    local variable="${prefix}${index}"
+    local value="${!variable:-}"
+    local minimum_port=1
+    local maximum_port=65535
+
+    if [[ "${prefix}" == "DYN_SYSTEM_PORT" ]]; then
+        minimum_port=0
+        maximum_port=32767
+    fi
+
+    local selected="${value:-${fallback}}"
+
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+            echo "Missing or invalid managed port ${variable}: ${value:-<unset>}" >&2
+            return 1
+        fi
+        if (( 10#${value} < minimum_port || 10#${value} > maximum_port )); then
+            echo "Managed port ${variable} is out of range: ${value}" >&2
+            return 1
+        fi
+        printf '%s\n' "${value}"
+        return 0
+    fi
+
+    if [[ -n "${value}" && ! "${value}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid port ${variable}: ${value}" >&2
+        return 1
+    fi
+    if [[ ! "${selected}" =~ ^[0-9]+$ ]] || (( 10#${selected} < minimum_port || 10#${selected} > maximum_port )); then
+        echo "Port ${variable} is out of range: ${selected}" >&2
+        return 1
+    fi
+    printf '%s\n' "${selected}"
+}
+
+# Resolve one worker's indexed managed ports into <name>_<kind>_PORT variables,
+# using a value already set in that variable as the standalone fallback.
+# Usage: dyn_worker_ports VLLM_DECODE1 1 HTTP=8100 GRPC=30001 NIXL_SIDE_CHANNEL=20096 KV_EVENT=20080
+dyn_worker_ports() {
+    local name="$1"
+    local index="$2"
+    shift 2
+    local spec kind prefix variable port
+    for spec in "$@"; do
+        kind="${spec%%=*}"
+        case "${kind}" in
+            HTTP) prefix=DYN_ENGINE_HTTP_PORT ;;
+            GRPC) prefix=DYN_ENGINE_GRPC_PORT ;;
+            KV_EVENT) prefix=DYN_VLLM_KV_EVENT_PORT ;;
+            KV_REPLAY) prefix=DYN_VLLM_KV_REPLAY_PORT ;;
+            NIXL_SIDE_CHANNEL) prefix=DYN_VLLM_NIXL_SIDE_CHANNEL_PORT ;;
+            *)
+                echo "Unknown port kind for ${name}: ${spec}" >&2
+                return 1
+                ;;
+        esac
+        variable="${name}_${kind}_PORT"
+        port=$(dyn_port "${prefix}" "${index}" "${!variable:-${spec#*=}}") || return 1
+        printf -v "${variable}" '%s' "${port}"
+    done
+}
 
 # wait_any_exit
 #

@@ -4,11 +4,12 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
-    backend::{Backend, ExecutionContext},
+    admission_gate::AdmissionEngine,
+    backend::ExecutionContext,
     engines::StreamingEngineAdapter,
     first_token::{FirstTokenNotifier, FirstTokenSource},
     model_type::{ModelInput, ModelType},
-    preprocessor::{BackendOutput, PreprocessedRequest},
+    preprocessor::PreprocessedRequest,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -20,8 +21,8 @@ use crate::{
 
 use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyOut, Operator, ResponseStream,
-    SegmentSource, ServiceBackend, SingleIn, Source, async_trait, network::Ingress,
+    AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyOut, ResponseStream, SingleIn,
+    async_trait, network::Ingress,
 };
 use dynamo_runtime::{DistributedRuntime, protocols::EndpointId};
 use futures::StreamExt;
@@ -112,6 +113,7 @@ pub async fn run(
             mut model,
             is_prefill,
             is_decode,
+            admission_gate,
         } => {
             let (model_type, worker_type, needs) = if is_prefill {
                 (
@@ -140,19 +142,16 @@ pub async fn run(
                 None => engine,
             };
 
-            // Pre-processing is done ingress-side, so it should be already done.
-            let frontend = SegmentSource::<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-            >::new();
-            let backend = Backend::from_mdc(model.card()).into_operator();
-            let engine = ServiceBackend::from_engine(inner_engine);
-            let pipeline = frontend
-                .link(backend.forward_edge())?
-                .link(engine)?
-                .link(backend.backward_edge())?
-                .link_terminal(frontend)?;
-            let ingress = Ingress::for_pipeline(pipeline)?;
+            // The frontend owns tokenization and detokenization. Send raw engine
+            // output so distributed token workers exercise that same path. The
+            // network path admits each request through this worker's gate
+            // first: the config's own, shared with every endpoint serving a
+            // clone of it.
+            let admission_gate = admission_gate.get_or_create(&component);
+            let ingress = Ingress::for_engine(AdmissionEngine::new(
+                Arc::clone(&admission_gate),
+                inner_engine,
+            ))?;
 
             // The disaggregation role is carried by `worker_type`, not
             // `model_type`. Prefill workers register with an empty
@@ -173,6 +172,7 @@ pub async fn run(
                     needs,
                 )
                 .await?;
+            admission_gate.record_model_card(model.card());
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
             Box::pin(fut)

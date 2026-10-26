@@ -34,6 +34,12 @@ High-performance deployment with separated prefill and decode workers.
 - `SGLangPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend (`--disaggregation-transfer-backend nixl`)
 
+### Gateway API Inference Extension
+
+[gaie/agg.yaml](gaie/agg.yaml) uses a native Dynamo EPP and a direct-mode frontend sidecar
+per SGLang worker. For model selection before worker selection, see the
+[Switchyard deployment example](gaie/switchyard/README.md).
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

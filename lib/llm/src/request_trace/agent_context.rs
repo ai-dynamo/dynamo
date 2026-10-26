@@ -635,8 +635,7 @@ mod tests {
                 session_id: "run-finish:agent".to_string(),
                 parent_session_id: None,
                 session_final: None,
-                compaction: None,
-                kv_hints: None,
+                agent_headers: Default::default(),
                 input_trigger: None,
             },
             request_model: "test-model".to_string(),
@@ -678,7 +677,9 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
                 inner: CreateChatCompletionStreamResponse {
@@ -704,7 +705,9 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             }),
         ];
         for response in &responses {
@@ -754,8 +757,7 @@ mod tests {
                 session_id: "run-completion-finish:agent".to_string(),
                 parent_session_id: None,
                 session_final: None,
-                compaction: None,
-                kv_hints: None,
+                agent_headers: Default::default(),
                 input_trigger: None,
             },
             request_model: "test-model".to_string(),

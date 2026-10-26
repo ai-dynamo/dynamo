@@ -5,6 +5,7 @@
 
 import asyncio
 import multiprocessing as mp
+import traceback
 from multiprocessing.synchronize import Event as EventType
 from typing import Any, Callable
 
@@ -76,10 +77,14 @@ def consumer_process(
         # Extract embedding via CUDA IPC - pass list of handles directly (async)
         result = asyncio.run(extract_embeddings_from_handles([handle]))
 
-        # Send result
-        result_queue.put(result[0])
+        # Avoid sending a torch.Tensor through the queue. PyTorch's multiprocessing
+        # reducer would introduce a second shared-memory transfer that is unrelated
+        # to the CUDA IPC behavior under test.
+        tensor = result[0]
+        result_queue.put(("ok", tensor.device.type, tensor.numpy()))
     except Exception as e:
         print(f"Consumer error: {e}")
+        result_queue.put(("error", traceback.format_exc()))
         raise
     finally:
         # Always signal producer to exit
@@ -89,6 +94,7 @@ def consumer_process(
 class TestExtractEmbeddingsFromHandles:
     """Tests for extract_embeddings_from_handles function."""
 
+    @pytest.mark.timeout(60)
     def test_extracts_all_embeddings(self):
         """Test that embeddings are extracted successfully from GPU via CUDA IPC."""
         ctx = mp.get_context("spawn")
@@ -105,17 +111,32 @@ class TestExtractEmbeddingsFromHandles:
             target=consumer_process, args=(handle_queue, result_queue, done_event)
         )
 
-        producer.start()
-        consumer.start()
+        started_processes: list[mp.Process] = []
+        try:
+            producer.start()
+            started_processes.append(producer)
+            consumer.start()
+            started_processes.append(consumer)
 
-        # Get result tensor
-        result = result_queue.get(timeout=30)
+            # Get the CPU result without invoking PyTorch's queue tensor reducer.
+            status, *payload = result_queue.get(timeout=30)
+            if status == "error":
+                pytest.fail(f"CUDA IPC consumer failed:\n{payload[0]}")
+            device_type, result_array = payload
+        finally:
+            done_event.set()
+            for process in reversed(started_processes):
+                process.join(timeout=10)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=10)
+            handle_queue.close()
+            result_queue.close()
 
-        consumer.join(timeout=10)
-        producer.join(timeout=10)
-
-        # Verify against expected tensor
+        # Verify against expected tensor. Build it on the GPU like the producer:
+        # a float16 arange past 2048 rounds differently on CUDA and on the CPU.
+        result = torch.from_numpy(result_array)
         expected = _create_tensor_on_gpu().cpu()
         assert result.shape == expected.shape
-        assert result.device.type == "cpu"
+        assert device_type == "cpu"
         assert torch.equal(result, expected)

@@ -1,0 +1,54 @@
+[
+  {
+    "document": {
+      "version": 1,
+      "sources": []
+    },
+    "canonical": "{\"version\":1,\"sources\":[]}",
+    "revision": "b6e0bb87bd5035885d74e6e0a9345b7baad41e7ecfd1a03f366f11483213bd6e"
+  },
+  {
+    "document": {
+      "version": 1,
+      "sources": [
+        {
+          "namespace": "b"
+        },
+        {
+          "namespace": "a"
+        }
+      ]
+    },
+    "canonical": "{\"version\":1,\"sources\":[{\"namespace\":\"a\"},{\"namespace\":\"b\"}]}",
+    "revision": "2ab89c10c04007ae0b4ca7cecd7734f9d9faaca5d20d4b9f6fe0a40105c7a804"
+  },
+  {
+    "document": {
+      "version": 1,
+      "connectionRevision": "connection",
+      "sources": [
+        {
+          "namespace": "workers-model"
+        }
+      ]
+    },
+    "canonical": "{\"version\":1,\"connectionRevision\":\"connection\",\"sources\":[{\"namespace\":\"workers-model\"}]}",
+    "revision": "e6f2c05816239fae5cf731c32641060f1f386cde18fb773ce4bb56f4ea89f578"
+  },
+  {
+    "document": {
+      "version": 1,
+      "connectionRevision": "\u00e9<>&\u2028\u2029",
+      "sources": [
+        {
+          "namespace": "b"
+        },
+        {
+          "namespace": "a"
+        }
+      ]
+    },
+    "canonical": "{\"version\":1,\"connectionRevision\":\"\u00e9\\u003c\\u003e\\u0026\\u2028\\u2029\",\"sources\":[{\"namespace\":\"a\"},{\"namespace\":\"b\"}]}",
+    "revision": "4ce3e1557cb7ca5fee3c2633a4d4f6ad9171b34a147d8760a095933e22cd3ceb"
+  }
+]

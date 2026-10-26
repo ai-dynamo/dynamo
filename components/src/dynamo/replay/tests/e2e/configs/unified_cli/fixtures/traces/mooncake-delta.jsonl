@@ -1,0 +1,2 @@
+{"request_id":"d1","session_id":"delta-session","timestamp":0,"input_length":16,"output_length":4,"hash_ids":[201]}
+{"request_id":"d2","session_id":"delta-session","timestamp":10,"delay":5,"input_length":8,"output_length":4,"hash_ids":[202]}

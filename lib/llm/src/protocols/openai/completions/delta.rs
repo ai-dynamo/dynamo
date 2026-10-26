@@ -6,7 +6,11 @@ use std::sync::Arc;
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
     protocols::{
-        common::{self, extensions::NvExtProvider, timing::RequestTracker},
+        common::{
+            self,
+            extensions::{NvExtProvider, NvExtResponseInput},
+            timing::RequestTracker,
+        },
         openai::{
             convert_backend_top_logprobs,
             delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
@@ -91,7 +95,22 @@ impl DeltaGenerator {
                 .map(|(((t, tid), lp), top_lps)| {
                     let converted =
                         convert_backend_top_logprobs(top_lps, t, *tid, *lp, return_as_ids);
-                    serde_json::to_value(converted).unwrap()
+                    // Completions uses a token-to-logprob object, unlike chat's
+                    // array of {token, logprob, bytes} records. Keep the selected
+                    // token even when it lies outside the requested top-k.
+                    let mut values: serde_json::Map<String, serde_json::Value> = converted
+                        .into_iter()
+                        .map(|item| (item.token, serde_json::json!(item.logprob)))
+                        .collect();
+                    let selected = if return_as_ids {
+                        format!("token_id:{}", tid)
+                    } else {
+                        t.clone()
+                    };
+                    // Distinct IDs can decode to the same string; the map must
+                    // preserve the chosen token's probability in that case.
+                    values.insert(selected, serde_json::json!(lp));
+                    serde_json::Value::Object(values)
                 })
                 .collect()
         });
@@ -190,6 +209,18 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         &mut self,
         delta: common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateCompletionResponse> {
+        if let Err(error) = self
+            .state
+            .options()
+            .response_fields
+            .validate_metadata_upload_result(
+                delta.finish_reason.as_ref(),
+                delta.engine_data.as_ref(),
+            )
+        {
+            self.state.tracker_ref().record_finish();
+            return Err(error);
+        }
         self.state.update_usage_from_backend_output(&delta);
 
         // Keep token IDs available for optional nvext emission only when requested.
@@ -208,12 +239,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // Backend errors are response errors, not successful OpenAI stop reasons.
         // Keep completions aligned with the chat-completions delta generator.
-        let finish_reason = match delta.finish_reason {
+        let finish_reason = match delta.finish_reason.as_ref() {
             Some(common::FinishReason::Error(err_msg)) => {
                 self.state.tracker_ref().record_finish();
-                return Err(anyhow::anyhow!(err_msg));
+                return Err(anyhow::anyhow!(err_msg.clone()));
             }
-            Some(reason) => Some(reason.into()),
+            Some(reason) => Some(reason.clone().into()),
             None => None,
         };
         let stop_reason = delta.stop_reason.clone();
@@ -232,16 +263,24 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
-        let prompt_logprobs_payload =
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
-        if let Some(nvext_response) = self.state.options().response_fields.build_response_nvext(
-            Some(self.state.tracker_ref()),
-            finish_reason.is_some(),
-            delta.engine_data,
-            stop_reason,
-            completion_token_ids_for_nvext.as_deref(),
-            prompt_logprobs_payload,
-        ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
+        let prompt_logprobs_payload = if self.state.options().response_fields.prompt_logprobs {
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+        } else {
+            None
+        };
+        if let Some(nvext_response) =
+            self.state
+                .options()
+                .response_fields
+                .build_response_nvext(NvExtResponseInput {
+                    tracker: Some(self.state.tracker_ref()),
+                    finish_reason: delta.finish_reason.as_ref(),
+                    engine_data: delta.engine_data,
+                    stop_reason,
+                    completion_token_ids: completion_token_ids_for_nvext.as_deref(),
+                    prompt_logprobs: prompt_logprobs_payload,
+                })
+            && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             response.nvext = Some(nvext_json);
             if let Some(ref info) = nvext_response.worker_id {
@@ -313,6 +352,7 @@ mod tests {
             nvext: None,
             metadata: None,
             return_tokens_as_token_ids: None,
+            no_stop_trim: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -345,6 +385,7 @@ mod tests {
             })),
             encoder_result: None,
             routing_data: None,
+            jailed_text: None,
         }
     }
 
@@ -358,6 +399,46 @@ mod tests {
         assert_eq!(response.inner.id, "cmpl-request-id");
         assert_eq!(response.inner.object, "text_completion");
         assert_eq!(response.inner.model, "test-model");
+    }
+
+    #[test]
+    fn metadata_upload_completion_result_is_opaque_and_required() {
+        let nvext = serde_json::from_value(serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}})).unwrap();
+        let request = make_request_with_nvext(nvext);
+        let mut generator = request.response_generator("artifact-result".into());
+        assert!(generator.tracker().total_time_ms().is_none());
+        assert!(
+            generator
+                .choice_from_postprocessor(final_backend_output())
+                .is_err()
+        );
+        assert!(generator.tracker().total_time_ms().is_some());
+        let mut output = final_backend_output();
+        let result = serde_json::json!({"kind": "generation_artifact", "mode": "inline_base64", "inline": {"encoding": "base64", "data": "AQI="}, "backend_specific": {"a": [1, 2]}});
+        output.engine_data = Some(serde_json::json!({"metadata_upload": result}));
+        let response = generator.choice_from_postprocessor(output).unwrap();
+        assert_eq!(response.nvext.unwrap()["metadata_upload"], result);
+
+        let mut malformed = final_backend_output();
+        malformed.engine_data = Some(
+            serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "mode": {"inline_base64": null}}}),
+        );
+        assert!(
+            request
+                .response_generator("artifact-malformed".into())
+                .choice_from_postprocessor(malformed)
+                .is_err()
+        );
+
+        let mut cancelled = final_backend_output();
+        cancelled.finish_reason = Some(common::FinishReason::Cancelled);
+        cancelled.engine_data = None;
+        let response = request
+            .response_generator("artifact-cancelled".into())
+            .choice_from_postprocessor(cancelled)
+            .expect("cancellation must not require an artifact receipt");
+        let wire = serde_json::to_value(response).unwrap();
+        assert_eq!(wire["choices"][0]["finish_reason"], "stop");
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateCompletionRequest {
@@ -378,6 +459,7 @@ mod tests {
             ),
             metadata: None,
             return_tokens_as_token_ids: None,
+            no_stop_trim: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -403,6 +485,7 @@ mod tests {
                 "prefill_compute_time_ms": 45.6
             })),
             routing_data: None,
+            jailed_text: None,
         }
     }
 
@@ -419,6 +502,27 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_malformed_prompt_logprobs_errors_only_when_requested() {
+        let mut invalid_output = final_backend_output();
+        invalid_output.engine_data = Some(serde_json::json!({"prompt_logprobs": "invalid"}));
+
+        create_test_request()
+            .response_generator("req-prompt-logprobs-unrequested".to_string())
+            .choice_from_postprocessor(invalid_output.clone())
+            .expect("unrequested prompt logprobs are ignored");
+
+        let error = create_test_request_with_extra_fields(vec!["prompt_logprobs".to_string()])
+            .response_generator("req-prompt-logprobs-invalid".to_string())
+            .choice_from_postprocessor(invalid_output)
+            .expect_err("requested malformed prompt logprobs must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid prompt_logprobs payload")
+        );
     }
 
     #[test]
@@ -476,6 +580,26 @@ mod tests {
     }
 
     #[test]
+    fn test_cancelled_detailed_finish_reason_preserves_openai_finish_reason() {
+        let request =
+            create_test_request_with_extra_fields(vec!["detailed_finish_reason".to_string()]);
+        let mut generator = request.response_generator("req-cancelled-nvext".to_string());
+        let mut output = final_backend_output();
+        output.finish_reason = Some(common::FinishReason::Cancelled);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+        let response_json = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(response_json["choices"][0]["finish_reason"], "stop");
+        assert_eq!(
+            response_json["nvext"]["detailed_finish_reason"],
+            "cancelled"
+        );
+    }
+
+    #[test]
     fn test_logprobs_zero_emits_chosen_token_logprob() {
         let mut request = create_test_request();
         request.inner.logprobs = Some(0);
@@ -519,20 +643,95 @@ mod tests {
             .expect("logprobs");
 
         assert_eq!(logprobs.tokens, vec!["token_id:123"]);
-        let top_logprobs = logprobs.top_logprobs[0]
-            .as_array()
-            .expect("top_logprobs array");
-        let other = top_logprobs
-            .iter()
-            .find(|item| item["token"] == "token_id:999")
-            .expect("top token_id formatting");
-        assert_eq!(other["bytes"], serde_json::json!(b"token_id:999"));
-        let selected = top_logprobs
-            .iter()
-            .find(|item| item["token"] == "token_id:123")
-            .expect("selected token fallback");
-        assert_eq!(selected["token"], "token_id:123");
-        assert_eq!(selected["bytes"], serde_json::json!(b"token_id:123"));
+        assert_eq!(
+            logprobs.top_logprobs[0],
+            serde_json::json!({
+                "token_id:999": -1.0, "token_id:123": -0.5
+            })
+        );
+    }
+
+    #[test]
+    fn test_completion_top_logprobs_map_preserves_selected_utf8_collision() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(2);
+        let generator = request.response_generator("req-utf8-map".to_string());
+        let logprobs = generator
+            .create_logprobs(
+                vec![Some("é".to_string())],
+                vec![123],
+                Some(vec![-0.5]),
+                Some(vec![vec![
+                    common::llm_backend::TopLogprob {
+                        rank: 1,
+                        token_id: 123,
+                        token: Some("é".to_string()),
+                        logprob: -0.5,
+                        bytes: None,
+                    },
+                    common::llm_backend::TopLogprob {
+                        rank: 2,
+                        token_id: 999,
+                        token: Some("é".to_string()),
+                        logprob: -1.0,
+                        bytes: None,
+                    },
+                ]]),
+            )
+            .expect("logprobs");
+        assert_eq!(logprobs.top_logprobs[0], serde_json::json!({"é": -0.5}));
+    }
+
+    #[tokio::test]
+    async fn test_completion_top_logprobs_schema_streaming_and_aggregated() {
+        use crate::protocols::{
+            Annotated,
+            openai::{ParsingOptions, completions::aggregator::DeltaAggregator},
+        };
+        use serde_json::json;
+
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(1);
+        let mut generator = request.response_generator("req-logprobs-map".to_string());
+        let mut chunks = Vec::new();
+        for (i, text) in ["A", "é"].into_iter().enumerate() {
+            let mut output = final_backend_output();
+            output.token_ids = vec![i as u32 + 1];
+            output.tokens = vec![Some(text.to_string())];
+            output.text = Some(text.to_string());
+            output.log_probs = Some(vec![-0.5]);
+            // The selected token is outside the backend's top-k.
+            output.top_logprobs = Some(vec![vec![common::llm_backend::TopLogprob {
+                rank: 1,
+                token_id: 999,
+                token: Some("other".to_string()),
+                logprob: -0.25,
+                bytes: None,
+            }]]);
+            output.finish_reason = (i == 1).then_some(common::FinishReason::Stop);
+            let chunk = generator.choice_from_postprocessor(output).expect("chunk");
+            let wire = serde_json::to_value(&chunk).expect("serialized chunk");
+            assert_eq!(
+                wire["choices"][0]["logprobs"]["top_logprobs"],
+                json!([{text: -0.5, "other": -0.25}])
+            );
+            chunks.push(Annotated::from_data(chunk));
+        }
+
+        let response =
+            DeltaAggregator::apply(futures::stream::iter(chunks), ParsingOptions::default())
+                .await
+                .expect("aggregated response");
+        let wire = serde_json::to_value(response).expect("serialized response");
+        let choice = &wire["choices"][0];
+        assert_eq!(choice["text"], "Aé");
+        assert_eq!(choice["finish_reason"], "stop");
+        assert_eq!(choice["logprobs"]["tokens"], json!(["A", "é"]));
+        assert_eq!(choice["logprobs"]["token_logprobs"], json!([-0.5, -0.5]));
+        assert_eq!(
+            choice["logprobs"]["top_logprobs"],
+            json!([{"A": -0.5, "other": -0.25}, {"é": -0.5, "other": -0.25}])
+        );
     }
 
     #[test]
@@ -697,6 +896,7 @@ mod tests {
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
             routing_data: None,
+            jailed_text: None,
         };
 
         let response = generator

@@ -14,6 +14,43 @@ pub struct HttpEndpoint {
 }
 
 impl HttpEndpoint {
+    /// Parse an HTTP endpoint, allowing a path prefix but no credentials, query, or fragment.
+    pub fn parse(raw: &str, argument: &str) -> Result<Self, DynamoError> {
+        let endpoint = raw.trim();
+        if endpoint.is_empty() {
+            return Err(invalid_argument(format!(
+                "`{argument}` is required and must specify an HTTP server address"
+            )));
+        }
+        if endpoint
+            .split_once("://")
+            .is_some_and(|(_, authority)| authority.starts_with('/'))
+        {
+            return Err(invalid_argument(format!(
+                "`{argument}` must include a host"
+            )));
+        }
+        let endpoint = url::Url::parse(endpoint).map_err(|error| {
+            invalid_argument(format!("invalid HTTP endpoint for `{argument}`: {error}"))
+        })?;
+        if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host().is_none() {
+            return Err(invalid_argument(format!(
+                "`{argument}` must use HTTP or HTTPS and include a host"
+            )));
+        }
+        if !endpoint.username().is_empty() || endpoint.password().is_some() {
+            return Err(invalid_argument(format!(
+                "`{argument}` must not include user information"
+            )));
+        }
+        if endpoint.query().is_some() || endpoint.fragment().is_some() {
+            return Err(invalid_argument(format!(
+                "`{argument}` must not include a query or fragment"
+            )));
+        }
+        Ok(Self { endpoint })
+    }
+
     /// Reuse the host from a validated gRPC endpoint with a discovered HTTP port.
     pub fn from_grpc(grpc_endpoint: &GrpcEndpoint, port: u16) -> Result<Self, DynamoError> {
         if port == 0 {
@@ -192,5 +229,32 @@ mod tests {
         let http = HttpEndpoint::from_grpc(&grpc, 30000).unwrap();
         assert_eq!(http.as_str(), "http://[2001:db8::1]:30000/");
         assert!(HttpEndpoint::from_grpc(&grpc, 0).is_err());
+    }
+
+    #[test]
+    fn parses_http_endpoints_with_path_prefixes() {
+        for endpoint in [
+            "http://worker:8120",
+            "https://worker.example.com",
+            "https://worker.example.com/admin/v1",
+        ] {
+            assert!(HttpEndpoint::parse(endpoint, "--http-endpoint").is_ok());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_http_endpoints() {
+        for endpoint in [
+            "",
+            "worker:8120",
+            "grpc://worker:8120",
+            "https:///admin",
+            "HTTP:///admin",
+            "https://user:token@worker.example.com/admin",
+            "https://worker.example.com/admin?token=secret",
+            "https://worker.example.com/admin#fragment",
+        ] {
+            assert!(HttpEndpoint::parse(endpoint, "--http-endpoint").is_err());
+        }
     }
 }

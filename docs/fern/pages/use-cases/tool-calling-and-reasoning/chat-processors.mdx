@@ -32,7 +32,7 @@ New here? Read the [Overview](overview.mdx) first for how the chat processor rel
       - name: Frontend            # defaults to `dynamo` — no chat-processor args needed
         type: frontend
         # ...
-      - name: VllmWorker          # worker selects the Dynamo parsers
+      - name: worker          # worker selects the Dynamo parsers
         type: worker
         # ...
         podTemplate:
@@ -88,7 +88,7 @@ New here? Read the [Overview](overview.mdx) first for how the chat processor rel
               - hermes
               - --reasoning-parser
               - qwen3
-      - name: VllmWorker          # no parser flags on the worker
+      - name: worker          # no parser flags on the worker
         type: worker
         # ...
     ```

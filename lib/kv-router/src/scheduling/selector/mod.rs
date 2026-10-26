@@ -1,41 +1,84 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::{cell::Cell, collections::HashMap};
 
-mod default;
 mod policy;
+#[cfg(any(test, feature = "bench"))]
+mod reference;
 
-pub use default::DefaultWorkerSelector;
+#[cfg(any(test, feature = "bench"))]
+pub use reference::DefaultWorkerSelector;
 
-use default::{DefaultWorkerPicker, DefaultWorkerScorer};
-pub use policy::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::worker_selection::{
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext,
 };
+#[cfg(any(test, feature = "bench"))]
+use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
-use default::{pick_default_worker, selection_weights};
-use policy::{
-    CustomWorkerSelectionState, WorkerSelectionPolicyStateRef, collect_custom_candidates,
+use crate::plugins::worker_selection::{CacheSnapshot, CandidateData, WorkerCacheData};
+use crate::plugins::worker_selection::{
+    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
+pub use policy::WorkerSelectionPolicy;
+use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
+#[cfg(any(test, feature = "bench"))]
+use reference::pick_default_worker;
 
-use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{
+    SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerConfigLike, WorkerId,
+    WorkerSelectionResult, WorkerWithDpRank,
+};
 
 /// Low-level selector used by routing hosts.
 ///
 /// External policies should use [`WorkerSelectionPolicy`].
 pub trait WorkerSelector<C: WorkerConfigLike> {
+    /// Snapshot runtime parameters, when this selector explicitly supports updates.
+    fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        Err(RuntimePolicyError::Unsupported)
+    }
+
+    /// Apply a validated replacement between selections. The scheduler actor serializes calls.
+    fn update_runtime_config(
+        &mut self,
+        _update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        Err(RuntimePolicyError::Unsupported)
+    }
+
     /// Optional worker data required by this selector.
     fn required_worker_inputs(&self) -> WorkerInputs;
+
+    /// Whether an eligible affinity target exclusively constrains worker selection.
+    ///
+    /// The default selector uses exclusive affinity. Custom policies receive affinity as
+    /// advisory context and may choose another eligible worker.
+    fn uses_exclusive_affinity_target(&self) -> bool {
+        false
+    }
 
     fn select_worker(
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+
+    /// Select a worker and, when `trace` is set, also return the per-candidate costs
+    /// the policy scored. The default ignores `trace`; policies that can report their
+    /// candidates override it. Hosts call this instead of [`Self::select_worker`]
+    /// when a selection trace is installed.
+    fn select_worker_traced(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        _trace: Option<SelectionTraceSpec>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select_worker(input).map(|result| (result, None))
+    }
 }
 
 /// Inputs supplied by the selector's host.
@@ -116,44 +159,62 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LogitWeights {
-    overlap_score_credit: f64,
-    overlap_score_credit_decay: f64,
-    prefill_load_scale: f64,
-    shared_cache_multiplier: f64,
-}
-
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
+    // Track the maximum over the eligible ranks row() already visits; no second scan.
+    max_raw_cached_tokens: Cell<Option<usize>>,
+    cache_snapshot: CacheSnapshot<'a>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
-    fn new(request: &'a SchedulingRequest, block_size: u32, weights: LogitWeights) -> Self {
+    fn new(request: &'a SchedulingRequest, block_size: u32) -> Self {
         Self {
             request,
+            cache_snapshot: CacheSnapshot {
+                shared_hits: request.shared_cache_hits.as_ref(),
+                has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
+                    || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
+                    || !request.overlap.tier_overlap_blocks.disk.is_empty(),
+            },
             context: WorkerSelectionContext {
                 request,
-                request_id: request.mode.request_id().unwrap_or("-"),
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
-                weights,
+                pinned_worker: request.pinned_worker,
                 router_temperature_override: request
                     .router_config_override
                     .as_ref()
                     .and_then(|config| config.router_temperature),
             },
+            max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
         }
     }
 
+    fn max_raw_cached_tokens(&self) -> Option<usize> {
+        self.max_raw_cached_tokens.get()
+    }
+
+    /// Count a worker toward the best eligible cached prefix once every policy
+    /// filter has kept it.
+    fn track_kept_candidate(&self, worker: WorkerWithDpRank) {
+        if let Some(current_max) = self.max_raw_cached_tokens.get() {
+            let raw_cached_tokens = self
+                .request
+                .raw_cached_tokens_for(worker, self.context.block_size);
+            self.max_raw_cached_tokens
+                .set(Some(current_max.max(raw_cached_tokens)));
+        }
+    }
+
+    #[inline(always)]
     fn row(
         &self,
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
-    ) -> WorkerCandidate {
+    ) -> CandidateData {
         self.row_with_device_overlap(
             worker,
             preferred_taint_multiplier,
@@ -162,16 +223,15 @@ impl<'a> MaterializedSelectionInput<'a> {
         )
     }
 
+    #[inline(always)]
     fn row_with_device_overlap(
         &self,
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
-    ) -> WorkerCandidate {
-        let cached_tokens = if inputs.contains(WorkerInputs::CACHE)
-            || (inputs.contains(WorkerInputs::LOAD) && self.request.track_prefill_tokens)
-        {
+    ) -> CandidateData {
+        let cached_tokens = if inputs.contains(WorkerInputs::CACHE) {
             self.request.effective_cached_tokens_for(worker)
         } else {
             0
@@ -194,14 +254,9 @@ impl<'a> MaterializedSelectionInput<'a> {
                 .unwrap_or(0.0);
             let device_overlap_blocks =
                 select_device_overlap(effective_overlap_blocks, reported_device_overlap_blocks);
-            let shared_beyond = |device_blocks: f64| {
-                self.request.shared_cache_hits.as_ref().map_or(0, |hits| {
-                    // `hits_beyond` expects the unweighted device prefix depth.
-                    hits.hits_beyond(device_blocks.round().max(0.0) as u32)
-                })
-            };
-            WorkerCacheInput {
+            WorkerCacheData {
                 effective_overlap_blocks,
+                estimated_cached_tokens: cached_tokens,
                 device_overlap_blocks,
                 host_overlap_blocks: self
                     .request
@@ -219,31 +274,15 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .get(&worker)
                     .copied()
                     .unwrap_or(0) as f64,
-                shared_beyond_device_blocks: shared_beyond(device_overlap_blocks),
             }
         } else {
-            WorkerCacheInput::default()
+            WorkerCacheData::default()
         };
         let load = if inputs.contains(WorkerInputs::LOAD) {
-            let raw_prefill_tokens = if self.request.track_prefill_tokens {
-                match worker_load {
-                    Some(load) => {
-                        // Preserve the legacy operation order when overlap exceeds the prompt.
-                        let uncached_tokens = super::prefill_load::effective_prefill_tokens(
-                            self.request.isl_tokens,
-                            cached_tokens,
-                        );
-                        let projected_tokens = load.active_prefill_tokens + uncached_tokens;
-                        projected_tokens.saturating_add(cached_tokens)
-                    }
-                    None => self.request.isl_tokens,
-                }
-            } else {
-                0
-            } as f64;
-            let worker_load = worker_load.unwrap_or_default();
+            let available = worker_load.is_some();
+            let worker_load = worker_load.unwrap_or_else(|| self.request.worker_load_for(worker));
             WorkerLoadInput {
-                raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
+                available,
                 active_prefill_tokens: worker_load.active_prefill_tokens,
                 decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
                 active_requests: worker_load.active_requests,
@@ -252,7 +291,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             WorkerLoadInput::default()
         };
 
-        WorkerCandidate {
+        CandidateData {
             worker,
             inputs,
             cache,
@@ -266,14 +305,94 @@ fn selection_result(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
     block_size: u32,
+    max_raw_cached_tokens: Option<usize>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
         required_blocks: request.request_blocks(block_size),
         effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
         cached_tokens: request.effective_cached_tokens_for(worker),
+        max_raw_cached_tokens,
+        selected_raw_cached_tokens: max_raw_cached_tokens
+            .map(|_| request.raw_cached_tokens_for(worker, block_size)),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
+    }
+}
+
+/// Copy the retained candidate costs out of the policy's scratch rows in one pass.
+///
+/// Keeps every candidate when `spec.top_k` is zero or not below the candidate count;
+/// otherwise the `top_k` lowest-cost rows plus the selected row when it is not among
+/// them. Rows are unordered: this runs on the scheduler actor, so sorting is left to
+/// the trace emitter on the routing task.
+fn build_selection_trace(
+    candidates: &[ScoredWorkerCandidate],
+    selected_row: usize,
+    pinned: bool,
+    spec: SelectionTraceSpec,
+) -> SelectionTrace {
+    let candidate_count = candidates.len();
+    let row_of = |candidate: &ScoredWorkerCandidate| SelectionTraceRow {
+        worker: candidate.worker,
+        cost: candidate.cost,
+    };
+    let rows = if spec.top_k == 0 || spec.top_k >= candidate_count {
+        candidates.iter().map(row_of).collect()
+    } else {
+        let mut rows: Vec<SelectionTraceRow> = Vec::with_capacity(spec.top_k + 1);
+        // Index into `rows` of the costliest retained row.
+        let mut costliest = 0;
+        for candidate in candidates {
+            if rows.len() < spec.top_k {
+                if rows.is_empty() || candidate.cost > rows[costliest].cost {
+                    costliest = rows.len();
+                }
+                rows.push(row_of(candidate));
+            } else if candidate.cost < rows[costliest].cost {
+                rows[costliest] = row_of(candidate);
+                for (index, row) in rows.iter().enumerate() {
+                    if row.cost > rows[costliest].cost {
+                        costliest = index;
+                    }
+                }
+            }
+        }
+        let selected = &candidates[selected_row];
+        if !rows.iter().any(|row| row.worker == selected.worker) {
+            rows.push(row_of(selected));
+        }
+        rows
+    };
+    SelectionTrace {
+        candidate_count,
+        pinned,
+        rows,
+    }
+}
+
+/// Log every scored candidate at TRACE, one row per worker and rank, stamped with
+/// `request_id` and `worker_type` because the scheduler actor task has no request span.
+fn log_scored_candidates(
+    request: &SchedulingRequest,
+    worker_type: &'static str,
+    candidates: &[ScoredWorkerCandidate],
+    selected_row: usize,
+) {
+    if !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    let request_id = request.mode.request_id().unwrap_or("-");
+    for (row, candidate) in candidates.iter().enumerate() {
+        tracing::trace!(
+            request_id,
+            worker_type,
+            worker_id = candidate.worker.worker_id,
+            dp_rank = candidate.worker.dp_rank,
+            cost = candidate.cost,
+            selected = row == selected_row,
+            "Scored worker candidate"
+        );
     }
 }
 
@@ -347,15 +466,14 @@ fn log_selection<C: WorkerConfigLike>(
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
 fn select_worker_with_policy<C: WorkerConfigLike>(
-    kv_router_config: &KvRouterConfig,
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
     block_size: u32,
-) -> Result<WorkerSelectionResult, KvSchedulerError> {
-    assert!(request.isl_tokens > 0);
+    trace: Option<SelectionTraceSpec>,
+) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
     eligibility.validate_pinned_worker_allowed()?;
 
     if let Some(worker) = eligibility.pinned_worker() {
@@ -370,21 +488,23 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
     }
 
-    let weights = selection_weights(kv_router_config, request);
-    let input = MaterializedSelectionInput::new(request, block_size, weights);
+    let mut input = MaterializedSelectionInput::new(request, block_size);
+    input.context.pinned_worker = eligibility.pinned_worker();
     let selected = match state {
-        WorkerSelectionPolicyStateRef::Default(picker) => {
+        #[cfg(any(test, feature = "bench"))]
+        WorkerSelectionPolicyStateRef::Reference(kv_router_config, picker) => {
             let scorer = DefaultWorkerScorer {
                 kv_router_config,
                 worker_type,
             };
             pick_default_worker(&scorer, picker, &input, workers, request, eligibility)
+                .map(|(worker, cost)| (worker, cost, None))
         }
-        WorkerSelectionPolicyStateRef::Custom(state) => {
+        WorkerSelectionPolicyStateRef::Composed(state) => {
             let mut state = state.borrow_mut();
             let has_eligible_worker =
-                collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
-            let CustomWorkerSelectionState {
+                collect_policy_candidates(&mut state, &input, workers, request, eligibility)?;
+            let ComposedPolicyState {
                 picker,
                 picker_inputs,
                 candidates,
@@ -408,9 +528,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 );
                 let picker_input = WorkerInputView {
                     candidates,
-                    cache: picker_inputs
-                        .contains(WorkerInputs::CACHE)
-                        .then_some(cache_inputs.as_slice()),
+                    cache: picker_inputs.contains(WorkerInputs::CACHE).then_some(
+                        WorkerCacheInputs {
+                            rows: cache_inputs,
+                            snapshot: &input.cache_snapshot,
+                        },
+                    ),
                     load: picker_inputs
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
@@ -423,11 +546,20 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
-                Some((candidate.worker, candidate.cost))
+                log_scored_candidates(request, worker_type, candidates, row);
+                let trace = trace.map(|spec| {
+                    build_selection_trace(
+                        candidates,
+                        row,
+                        input.context.pinned_worker.is_some(),
+                        spec,
+                    )
+                });
+                Some((candidate.worker, candidate.cost, trace))
             }
         }
     };
-    let Some((worker, cost)) = selected else {
+    let Some((worker, cost, selection_trace)) = selected else {
         if eligibility.has_eligible_worker_ignoring_overload(
             workers
                 .iter()
@@ -437,7 +569,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let result = selection_result(request, worker, block_size, input.max_raw_cached_tokens());
     log_selection(
         workers,
         request,
@@ -446,12 +578,73 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         cost,
         result.effective_overlap_blocks,
     );
-    Ok(result)
+    Ok((result, selection_trace))
+}
+
+#[cfg(test)]
+mod selection_trace_tests {
+    use super::*;
+
+    fn candidates(costs: &[f64]) -> Vec<ScoredWorkerCandidate> {
+        costs
+            .iter()
+            .enumerate()
+            .map(|(id, cost)| ScoredWorkerCandidate {
+                worker: WorkerWithDpRank::from_worker_id(id as u64),
+                cost: *cost,
+                preferred_taint_multiplier: None,
+            })
+            .collect()
+    }
+
+    fn worker_ids_by_cost(trace: &SelectionTrace) -> Vec<u64> {
+        let mut rows = trace.rows.clone();
+        rows.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        rows.iter().map(|row| row.worker.worker_id).collect()
+    }
+
+    #[test]
+    fn zero_top_k_keeps_every_candidate() {
+        let rows = candidates(&[3.0, 1.0, 2.0]);
+        let trace = build_selection_trace(&rows, 2, false, SelectionTraceSpec { top_k: 0 });
+        assert_eq!(trace.candidate_count, 3);
+        assert_eq!(worker_ids_by_cost(&trace), vec![1, 2, 0]);
+        assert!(!trace.pinned);
+    }
+
+    #[test]
+    fn top_k_keeps_lowest_costs_and_appends_selected_row() {
+        let rows = candidates(&[5.0, 1.0, 4.0, 2.0, 3.0, 0.5]);
+        // Selected row 0 costs 5.0, the worst candidate: it is appended after the three cheapest.
+        let trace = build_selection_trace(&rows, 0, true, SelectionTraceSpec { top_k: 3 });
+        assert_eq!(trace.candidate_count, 6);
+        assert_eq!(worker_ids_by_cost(&trace), vec![5, 1, 3, 0]);
+        assert!(trace.pinned);
+
+        // Selected row already among the cheapest: nothing is appended.
+        let trace = build_selection_trace(&rows, 1, false, SelectionTraceSpec { top_k: 3 });
+        assert_eq!(worker_ids_by_cost(&trace), vec![5, 1, 3]);
+    }
+
+    #[test]
+    fn top_k_at_or_above_candidate_count_keeps_everything() {
+        let rows = candidates(&[2.0, 1.0]);
+        let trace = build_selection_trace(&rows, 0, false, SelectionTraceSpec { top_k: 8 });
+        assert_eq!(worker_ids_by_cost(&trace), vec![1, 0]);
+    }
+
+    #[test]
+    fn top_k_pass_tracks_the_costliest_retained_row() {
+        // Descending costs force a replacement on every candidate after the first k.
+        let rows = candidates(&[9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]);
+        let trace = build_selection_trace(&rows, 6, false, SelectionTraceSpec { top_k: 2 });
+        assert_eq!(worker_ids_by_cost(&trace), vec![6, 5]);
+    }
 }
 
 #[cfg(test)]
 mod test_support {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     use rustc_hash::FxHashMap;
 
@@ -494,11 +687,11 @@ mod test_support {
             isl_tokens,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -508,6 +701,7 @@ mod test_support {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
@@ -531,5 +725,114 @@ mod test_support {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod cache_reuse_tests {
+    use super::test_support::base_request;
+    use super::*;
+    use crate::test_utils::SimpleWorkerConfig;
+
+    #[test]
+    fn tracked_requests_report_raw_cache_reuse() {
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".into(),
+        };
+        let first = WorkerWithDpRank::from_worker_id(1);
+        let second = WorkerWithDpRank::from_worker_id(2);
+        request.overlap.effective_cached_tokens.insert(first, 120);
+        request.overlap.effective_cached_tokens.insert(second, 16);
+        request.overlap.tier_overlap_blocks.device.insert(first, 2);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .host_pinned
+            .insert(first, 1);
+        request.overlap.tier_overlap_blocks.device.insert(second, 4);
+        request.overlap.tier_overlap_blocks.disk.insert(second, 2);
+        let input = MaterializedSelectionInput::new(&request, 16);
+
+        input.track_kept_candidate(first);
+        input.track_kept_candidate(second);
+
+        assert_eq!(input.max_raw_cached_tokens(), Some(96));
+        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens());
+        assert_eq!(result.max_raw_cached_tokens, Some(96));
+        assert_eq!(result.selected_raw_cached_tokens, Some(48));
+        assert_eq!(result.cached_tokens, 120);
+    }
+
+    #[test]
+    fn query_only_requests_skip_cache_reuse_tracking() {
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::QueryOnly { request_id: None };
+        let worker = WorkerWithDpRank::from_worker_id(1);
+        request.overlap.effective_cached_tokens.insert(worker, 96);
+        let input = MaterializedSelectionInput::new(&request, 16);
+
+        input.track_kept_candidate(worker);
+
+        assert_eq!(input.max_raw_cached_tokens(), None);
+        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens());
+        assert_eq!(result.max_raw_cached_tokens, None);
+        assert_eq!(result.selected_raw_cached_tokens, None);
+    }
+
+    #[test]
+    fn raw_overlap_is_specific_to_the_selected_dp_rank() {
+        let mut request = base_request(128);
+        let selected = WorkerWithDpRank::new(1, 0);
+        let other_rank = WorkerWithDpRank::new(1, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(selected, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .host_pinned
+            .insert(selected, 2);
+        request.overlap.tier_overlap_blocks.disk.insert(selected, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(other_rank, 7);
+        request.overlap.effective_cached_tokens.insert(selected, 3);
+        assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
+        assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
+        let result = selection_result(&request, selected, 16, Some(112));
+        assert_eq!(result.selected_raw_cached_tokens, Some(64));
+    }
+
+    #[test]
+    fn cache_reuse_tracking_excludes_out_of_range_dp_rank() {
+        let workers = HashMap::from([(1, SimpleWorkerConfig::default())]);
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".into(),
+        };
+        let invalid_rank = WorkerWithDpRank::new(1, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(invalid_rank, 6);
+        let input = MaterializedSelectionInput::new(&request, 16);
+        let eligibility = request.eligibility();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
+            input.track_kept_candidate(worker);
+        });
+
+        assert!(
+            eligibility
+                .validate_worker_rank(&workers, invalid_rank)
+                .is_err()
+        );
+        assert_eq!(input.max_raw_cached_tokens(), Some(0));
     }
 }

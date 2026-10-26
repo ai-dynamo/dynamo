@@ -207,11 +207,9 @@ class KubernetesCapacityManager(CapacityManager):
         return ""
 
     @staticmethod
-    def _gpu_per_replica(component: dict, service: Service) -> int:
-        """GPUs per replica = main-container GPUs × node count (multinode)."""
-        multinode = component.get("multinode")
-        node_count = 1 if multinode is None else multinode.get("nodeCount", 2)
-        return service.get_gpu_count() * int(node_count)
+    def _gpu_per_replica(deployment: dict, service: Service) -> int:
+        """Return the operator-projected unique GPU cost of one replica."""
+        return service.get_gpu_shape(deployment).gpus_per_replica
 
     @staticmethod
     def _record_pool_component(
@@ -254,12 +252,19 @@ class KubernetesCapacityManager(CapacityManager):
                 V1BETA1_GENERIC_WORKER_COMPONENT_TYPE,
             ):
                 try:
-                    gpu_per_replica = self._gpu_per_replica(component, service)
+                    gpu_per_replica = self._gpu_per_replica(deployment, service)
                 except ValueError:
                     if component_type == "":
                         # An untyped non-worker component is not a pool.
                         continue
                     raise
+                if gpu_per_replica == 0:
+                    if component_type == "":
+                        # Explicit zero marks an observed non-GPU component.
+                        continue
+                    raise ValueError(
+                        f"Planner pool component {component_name!r} has an observed zero-GPU shape"
+                    )
                 pool_key = component_name
             if not pool_key:
                 continue
@@ -269,15 +274,17 @@ class KubernetesCapacityManager(CapacityManager):
                 component_name,
                 connector.parent_dgd_name,
             )
+            if gpu_per_replica is None:
+                gpu_per_replica = self._gpu_per_replica(deployment, service)
+            if gpu_per_replica == 0:
+                raise ValueError(
+                    f"Planner pool component {component_name!r} has an observed zero-GPU shape"
+                )
             pools[pool_key] = PoolSpec(
                 sub_type=pool_key,
                 component_name=component_name,
                 current_replicas=service.number_replicas(),
-                gpu_per_replica=(
-                    gpu_per_replica
-                    if gpu_per_replica is not None
-                    else self._gpu_per_replica(component, service)
-                ),
+                gpu_per_replica=gpu_per_replica,
             )
         return pools
 

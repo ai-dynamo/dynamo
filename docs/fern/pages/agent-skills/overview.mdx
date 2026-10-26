@@ -1,50 +1,51 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Agent Skills
-subtitle: The Dynamo repository ships instructions that AI coding agents pick up automatically.
+subtitle: Repository-native skills that AI coding agents use to develop, deploy, operate, and optimize Dynamo.
 ---
 
-Dynamo ships **agent skills**: repository-native instruction files that AI coding agents such
-as Claude Code, Codex, and Cursor discover and follow on their own. You don't install anything
-or name a skill. Clone the repo, point your agent at it, describe what you want in plain
-language, and the relevant skills activate.
+Dynamo includes agent skills for development, documentation, deployment, operations, and
+performance optimization. Compatible coding agents discover the skills from the repository and
+select them based on your request. Describe the outcome you want; you do not normally need to name
+a skill explicitly.
 
-```text
-"Optimize this Dynamo deployment for my target SLO."
-"Deploy GLM-5.2 on my 4-GPU node and confirm it serves traffic."
-"My time to first token (TTFT) doubled after I raised concurrency. Diagnose it and fix the config."
-```
+The canonical sources live in
+[`.agents/skills/`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills). The `skills/` and
+`.claude/skills/` directories are compatibility symlinks to the same content.
 
-## Deployment skills
+<CardGroup cols={3}>
+  <Card title="Deployment and Operations" icon="screwdriver-wrench" href="deployment.mdx">
+    Deploy a recipe, start a router, validate interconnects, and diagnose unhealthy deployments.
+  </Card>
+  <Card title="Performance Optimization" icon="gauge-high" href="optimization.mdx">
+    Run the evidence-driven loop that benchmarks a baseline and challenges it with candidates.
+  </Card>
+  <Card title="Development and Documentation" icon="code" href="development.mdx">
+    Investigate bugs, file enhancement proposals, review Rust changes, audit CI, and author docs.
+  </Card>
+</CardGroup>
 
-Skills for deploying and diagnosing DynamoGraphDeployments: `deploy-dynamo-recipe`,
-`troubleshoot-dynamo`, `dynamo-router-starter`, and `dynamo-interconnect-check`. Ask your
-agent to deploy a model or investigate a broken deployment and these guide the work. Sources
-live under
-[`.agents/skills/`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills).
+## Example Prompts
 
-## Performance optimization skills
+Clone the repository, point your agent at it, and type a sentence like one of these. The agent
+picks the skill; you state the outcome, the constraints, and the budget.
 
-An end-to-end optimization loop for tuning a Dynamo deployment against a stated goal. The
-agent captures an immutable baseline and workload contract, deploys and smoke-tests it,
-benchmarks with AIPerf, proposes one evidence-backed change at a time, reviews each proposal
-before spending GPU time, and iterates within budgets you set (GPU-hours, wall clock, and failed
-deploys; the agent asks if you don't state them). The final handoff includes the recommended
-configuration, reproduction commands, limitations, and preserved raw evidence.
+- Deploy the Qwen3 32B FP8 recipe on my cluster and smoke-test the endpoint.
+- Optimize this deployment for output tokens per second per user under a 200 ms time-to-first-token
+  Service Level Objective (SLO). Budget 8 GPU-hours and stop after three failed deployments.
+- My prefill pods are restarting after a rolling update. Find out why.
+- CI failed on my pull request. Tell me whether it is a real regression or a flake.
+- Draft a Dynamo Enhancement Proposal for the change I just described, then show it to me before
+  filing.
 
-The workflow spine is documented in
-[`agent-docs/guides/optimization/optimize-loop.md`](https://github.com/ai-dynamo/dynamo/blob/3e522d8ef0b4b96ae75126c1f5e7c71ae6923dcf/agent-docs/guides/optimization/optimize-loop.md),
-with benchmark-validity and evidence rules under
-[`agent-docs/rules/`](https://github.com/ai-dynamo/dynamo/tree/3e522d8ef0b4b96ae75126c1f5e7c71ae6923dcf/agent-docs/rules).
-Harnesses that support isolated sub-agents (Codex) run the loop's roles as separate agents;
-other harnesses run the same roles in one agent.
+## Usage Notes
 
-## Practical notes
-
-- For long unattended runs, the agent will tell you when to enable your harness's goal or
-  budget mode; if you enable it manually, wait until the agent's opening questions are answered.
-- Benchmarking and optimization consume real GPU time. State your budgets; the agent tracks
-  consumption against them and reports it.
-- Never provide secrets to the agent or allow credentials into run artifacts.
-
+- **Invoke by intent.** Ask for the result you need, such as deploying a model, investigating a
+  regression, reviewing a pull request, or optimizing against a Service Level Objective (SLO).
+- **Set budgets for optimization.** State GPU-hour, wall-clock, and failed-deployment limits before
+  starting a long-running optimization loop.
+- **Use goal mode for unattended runs.** Answer the agent's workload questions before enabling the
+  harness's goal or budget mode.
+- **Protect credentials.** Do not provide secrets in prompts or allow credentials into generated run
+  artifacts.

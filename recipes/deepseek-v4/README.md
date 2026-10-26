@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # DeepSeek-V4 Recipes
 
-Dynamo + vLLM serving recipes for **DeepSeek-V4-Pro** and **DeepSeek-V4-Flash**,
+Dynamo + vLLM serving recipes for **DeepSeek-V4-Pro**, **DeepSeek-V4-Pro-0813** and **DeepSeek-V4-Flash**,
 tuned for the **agentic** workload (64k ISL / 400 OSL / 90% KV reuse) at a floor of
 **≥ 50 output tok/s/user**. Each variant is a `DynamoGraphDeployment` (DGD); a single
 shared [`perf/`](perf) Job replays the benchmark traces against any variant.
@@ -14,16 +14,24 @@ shared [`perf/`](perf) Job replays the benchmark traces against any variant.
 
 Each model's README is self-contained — its own **Recipes** (agentic + Day-0), **Performance**,
 and **Quick Start**. The sections below this table (Optimization targets, Per-rank NIC mapping,
-Known limitations) are **shared** and linked from both.
+Known limitations) are **shared** and linked from each.
 
 | Model | Size | Recommended picks | README |
 |---|---|---|---|
 | **DeepSeek-V4-Pro** | 1.6T / 49B active · 1M ctx | B200 → `disagg-b200-agentic` · H200 → `agg-h200-agentic` | [`deepseek-v4-pro/`](deepseek-v4-pro/) |
+| **DeepSeek-V4-Pro-0813** | 1.6T · 1M ctx | GB200 → `agg-gb200-agentic` · H200 → `agg-h200-agentic` | [`deepseek-v4-pro-0813/`](deepseek-v4-pro-0813/) |
 | **DeepSeek-V4-Flash** | 284B / 13B active | B200 → `disagg-b200-agentic` (2P1D) · H200 → `disagg-h200-agentic` (4P3D) | [`deepseek-v4-flash/`](deepseek-v4-flash/) |
 
 B200 variants serve the NVFP4 checkpoints (`nvidia/DeepSeek-V4-*-NVFP4`); H200 variants serve the
 public checkpoints (`deepseek-ai/DeepSeek-V4-*`). H200 Pro is capped at `max_model_len=86,016` (HBM);
-B200 and H200-Flash keep the full 1M window. Modality: text; reasoning + tool calling supported.
+B200 and H200-Flash keep the full 1M window.
+
+**DeepSeek-V4-Pro-0813** is a separate checkpoint, not a revision of DeepSeek-V4-Pro, and the two
+**must not share a model cache**. It ships GB200 and H200 variants (no B200), serves MXFP4 experts
+with FP8 KV from the public `deepseek-ai/DeepSeek-V4-Pro-0813` checkpoint on both, and keeps the
+full 1M window on both — the 86,016 cap above does not apply to it.
+
+Modality: text; reasoning + tool calling supported.
 
 ## Optimization targets
 

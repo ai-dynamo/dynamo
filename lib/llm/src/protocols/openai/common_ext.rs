@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
 
+use crate::protocols::common::GuidedDecodingOptions;
+
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
 /// but are commonly needed across different request types.
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
@@ -72,7 +74,6 @@ pub struct CommonExt {
     /// If specified, the output will follow the whitespace pattern. Can be a string or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    #[allow(unused)] // Not used
     pub guided_whitespace_pattern: Option<String>,
 
     /// Whether to skip special tokens in the decoded output.
@@ -87,6 +88,63 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub prompt_logprobs: Option<u32>,
+
+    /// If true, append the assistant generation prompt after the last message.
+    /// Defaults to true when omitted, matching vLLM 0.27.1 and the Python
+    /// frontend (HuggingFace Transformers defaults this flag to false).
+    /// Incompatible with `continue_final_message`. Chat-only: runtime-rejected
+    /// on `/v1/completions`. Hidden from the shared OpenAPI schema so
+    /// completions does not advertise these fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    #[builder(default, setter(strip_option))]
+    pub add_generation_prompt: Option<bool>,
+
+    /// If true, leave the last message open so the model continues that turn
+    /// instead of starting a new one. Any final message role can be continued.
+    /// Incompatible with omitted or `true` `add_generation_prompt` (vLLM 0.27.1
+    /// finalizes the omitted field to true). Chat-only: runtime-rejected on
+    /// `/v1/completions`. Hidden from the shared OpenAPI schema so completions
+    /// does not advertise these fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    #[builder(default, setter(strip_option))]
+    pub continue_final_message: Option<bool>,
+}
+
+/// Schema-only view of common extensions for the chat endpoint.
+///
+/// The runtime type remains `CommonExt`. Its shared schema omits these two
+/// fields because completions rejects them; the chat request must expose them.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub(crate) struct ChatCommonExt {
+    #[serde(flatten)]
+    common: CommonExt,
+    /// Append the assistant generation prompt after the last message.
+    /// Defaults to true when omitted or null. Incompatible with
+    /// `continue_final_message=true`; set this explicitly to false to continue.
+    #[schema(default = true)]
+    add_generation_prompt: Option<bool>,
+    /// Continue the final message rather than starting a new assistant turn.
+    /// Any final message role can be continued. Requires an explicit
+    /// `add_generation_prompt=false`; omission or null defaults that flag to true.
+    continue_final_message: Option<bool>,
+}
+
+pub(crate) fn extract_guided_decoding_options(
+    request: &impl CommonExtProvider,
+) -> anyhow::Result<Option<GuidedDecodingOptions>> {
+    let guided_whitespace_pattern = request.get_guided_whitespace_pattern();
+    GuidedDecodingOptions::from_optional(
+        request.get_guided_json(),
+        request.get_guided_regex(),
+        request.get_guided_choice(),
+        request.get_guided_grammar(),
+        request.get_guided_decoding_backend(),
+        guided_whitespace_pattern.clone(),
+        None,
+    )
 }
 
 impl CommonExt {
@@ -122,6 +180,12 @@ pub trait CommonExtProvider {
     fn get_prompt_logprobs_count(&self) -> Option<u32> {
         None
     }
+
+    /// Whether to continue the last message instead of starting a new turn.
+    fn get_continue_final_message(&self) -> Option<bool> {
+        self.common_ext()
+            .and_then(|common| common.continue_final_message)
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +212,8 @@ mod tests {
             guided_whitespace_pattern: None,
             skip_special_tokens: None,
             prompt_logprobs: None,
+            add_generation_prompt: None,
+            continue_final_message: None,
         };
         assert!(common_ext.validate().is_ok());
     }

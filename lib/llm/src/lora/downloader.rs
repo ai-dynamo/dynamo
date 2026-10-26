@@ -34,14 +34,22 @@ impl LoRADownloader {
     pub async fn download_if_needed(&self, lora_uri: &str) -> Result<PathBuf> {
         // For local file:// URIs, don't use cache - just validate and return
         if lora_uri.starts_with("file://") {
+            let mut source_error = None;
             for source in &self.sources {
-                // Ignore errors from incompatible sources
-                if let Ok(exists) = source.exists(lora_uri).await
-                    && exists
-                {
-                    // LocalLoRASource.download() returns the original path
-                    return source.download(lora_uri, &PathBuf::new()).await;
+                if !source.supports(lora_uri) {
+                    continue;
                 }
+                match source.exists(lora_uri).await {
+                    Ok(true) => return source.download(lora_uri, &PathBuf::new()).await,
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(uri = lora_uri, error = %error, "LoRA source availability check failed");
+                        source_error = Some(error);
+                    }
+                }
+            }
+            if let Some(error) = source_error {
+                return Err(error);
             }
             anyhow::bail!("Local LoRA not found: {}", lora_uri);
         }
@@ -58,22 +66,33 @@ impl LoRADownloader {
         // Try sources in order
         let dest_path = self.cache.get_cache_path(&cache_key);
 
+        let mut source_error = None;
         for source in &self.sources {
-            if let Ok(exists) = source.exists(lora_uri).await
-                && exists
-            {
-                let downloaded_path = source.download(lora_uri, &dest_path).await?;
-                if LoRACache::validate_path(&downloaded_path)? {
-                    return Ok(downloaded_path);
-                } else {
+            if !source.supports(lora_uri) {
+                continue;
+            }
+            match source.exists(lora_uri).await {
+                Ok(true) => {
+                    let downloaded_path = source.download(lora_uri, &dest_path).await?;
+                    if LoRACache::validate_path(&downloaded_path)? {
+                        return Ok(downloaded_path);
+                    }
                     tracing::warn!(
                         "Downloaded LoRA at {} failed validation",
                         downloaded_path.display()
                     );
                 }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(uri = lora_uri, error = %error, "LoRA source availability check failed");
+                    source_error = Some(error);
+                }
             }
         }
 
+        if let Some(error) = source_error {
+            return Err(error);
+        }
         anyhow::bail!("LoRA {} not found in any source", lora_uri)
     }
 
@@ -93,6 +112,19 @@ mod tests {
 
     struct ExternalSnapshotSource {
         snapshot: PathBuf,
+    }
+
+    struct FailingSource;
+
+    #[async_trait]
+    impl LoRASource for FailingSource {
+        async fn download(&self, _lora_uri: &str, _dest_path: &Path) -> Result<PathBuf> {
+            unreachable!("download must not run after an availability error")
+        }
+
+        async fn exists(&self, _lora_uri: &str) -> Result<bool> {
+            anyhow::bail!("credential chain failed")
+        }
     }
 
     #[async_trait]
@@ -131,6 +163,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, hf_cache.path());
+    }
+
+    #[tokio::test]
+    async fn reports_source_error_when_no_source_succeeds() {
+        let dynamo_cache = TempDir::new().unwrap();
+        let downloader = LoRADownloader::new(
+            vec![Arc::new(FailingSource)],
+            LoRACache::new(dynamo_cache.path().to_path_buf()),
+        );
+
+        let error = downloader
+            .download_if_needed("s3://bucket/adapter")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("credential chain failed"));
     }
 
     #[test]

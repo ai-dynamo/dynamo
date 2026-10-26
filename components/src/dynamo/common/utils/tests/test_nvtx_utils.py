@@ -184,30 +184,47 @@ class TestDisabled:
 
 
 class TestEnabledWithoutPackage:
-    def test_import_raises_with_actionable_message(
-        self, monkeypatch, load_module, nvtx_import_watch
+    """A missing package degrades to no-ops: launch presets set DYN_NVTX for
+    every process, and an image without the package must still serve."""
+
+    def test_missing_package_warns_and_disables(
+        self, monkeypatch, load_module, nvtx_import_watch, caplog
     ):
         monkeypatch.setenv("DYN_NVTX", "1")
         recorder = nvtx_import_watch(block=True)
 
-        with pytest.raises(ImportError) as excinfo:
-            load_module()
+        with caplog.at_level("WARNING"):
+            module = load_module()
 
         assert recorder.attempts == 1
-        message = str(excinfo.value)
-        assert "ai-dynamo[profiling]" in message
-        assert "DYN_NVTX" in message
-        # The original failure is chained, not swallowed.
-        assert isinstance(excinfo.value.__cause__, ModuleNotFoundError)
-        assert excinfo.value.__cause__.name == "nvtx"
+        assert module.ENABLED is False
+        assert "DYN_NVTX" in caplog.text
+        assert "not installed" in caplog.text
+        # The no-op surface is in place, so call sites keep working.
+        assert module.start_range("x") is None
+        module.end_range(None)
+        with module.annotate("x"):
+            pass
 
-    def test_failed_import_leaves_sys_modules_clean(
+    def test_broken_package_is_not_swallowed(
         self, monkeypatch, load_module, nvtx_import_watch
     ):
+        """Only a *missing* nvtx degrades; a broken install stays visible."""
         monkeypatch.setenv("DYN_NVTX", "1")
-        nvtx_import_watch(block=True)
+        broken = types.ModuleType("nvtx")
 
-        with pytest.raises(ImportError):
+        class _Finder(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "nvtx":
+                    raise ModuleNotFoundError("missing dep", name="some_dep")
+                return None
+
+        finder = _Finder()
+        monkeypatch.delitem(sys.modules, "nvtx", raising=False)
+        monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
+        del broken
+
+        with pytest.raises(ModuleNotFoundError, match="missing dep"):
             load_module()
 
         assert MODULE_NAME not in sys.modules

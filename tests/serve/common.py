@@ -6,8 +6,10 @@
 import dataclasses
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -31,7 +33,7 @@ from tests.utils.payload_builder import (
     make_images_health_check,
 )
 from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
-from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 DEFAULT_TIMEOUT = 10
 
@@ -125,8 +127,7 @@ class _PreparedDeployment:
     merged_env: dict
     frontend_port: int
     system_ports: list
-    disagg_bootstrap_port: Optional[int]
-    extra_allocated_ports: list[int]
+    disagg_bootstrap_ports: list[int]
 
 
 def _prepare_deployment(
@@ -187,9 +188,6 @@ def _prepare_deployment(
             logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
             time.sleep(stagger_s)
 
-    # Track additional ports allocated for multi-GPU tests (for cleanup in finally)
-    extra_allocated_ports: list[int] = []
-
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
         dynamic_system_ports = [int(p) for p in ports.system_ports]
@@ -221,21 +219,44 @@ def _prepare_deployment(
                 merged_env[f"DYN_SYSTEM_PORT{idx}"] = str(port)
                 merged_env[f"DYN_SYSTEM_PORT_WORKER{idx}"] = str(port)
 
-        # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
-        if ports.kv_event_port:
-            merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
-            # For multi-worker scripts (xpu_2 router tests), allocate separate
-            # KV event ports for each worker to avoid ZMQ bind collisions.
-            if len(dynamic_system_ports) >= 2:
-                kv_port1 = ports.kv_event_port
-                kv_port2 = allocate_port(ports.kv_event_port + 1)
-                extra_allocated_ports.append(kv_port2)
-                merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
-                merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
+        if len(ports.kv_event_ports) != len(dynamic_system_ports):
+            raise ValueError(
+                "KV-event port count must match system port count: "
+                f"{len(ports.kv_event_ports)} != {len(dynamic_system_ports)}"
+            )
+        for key in list(merged_env):
+            if key == "DYN_VLLM_KV_EVENT_PORT":
+                merged_env.pop(key)
+                continue
+            if key.startswith("DYN_VLLM_KV_EVENT_PORT"):
+                suffix = key.removeprefix("DYN_VLLM_KV_EVENT_PORT")
+                if suffix.isdigit():
+                    merged_env.pop(key)
+        for idx, port in enumerate(ports.kv_event_ports, start=1):
+            merged_env[f"DYN_VLLM_KV_EVENT_PORT{idx}"] = str(port)
 
         # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
+        if len(ports.nixl_side_channel_ports) != len(dynamic_system_ports):
+            raise ValueError(
+                "NIXL side-channel port count must match system port count: "
+                f"{len(ports.nixl_side_channel_ports)} != {len(dynamic_system_ports)}"
+            )
+        for key in list(merged_env):
+            if key.startswith("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT"):
+                suffix = key.removeprefix("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT")
+                if suffix.isdigit():
+                    merged_env.pop(key)
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
+
+        # Per-worker listeners of out-of-process engines (sidecar launches).
+        for prefix, engine_ports in (
+            ("DYN_ENGINE_HTTP_PORT", ports.engine_http_ports),
+            ("DYN_ENGINE_GRPC_PORT", ports.engine_grpc_ports),
+            ("DYN_VLLM_KV_REPLAY_PORT", ports.engine_kv_replay_ports),
+        ):
+            for idx, port in enumerate(engine_ports, start=1):
+                merged_env[f"{prefix}{idx}"] = str(port)
 
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)
@@ -257,27 +278,32 @@ def _prepare_deployment(
 
     config = _with_endpoint_readiness_checks(config, dynamic_frontend_port)
 
-    # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
-    disagg_bootstrap_port: int | None = None
+    if ports is not None:
+        merged_env["DYN_MANAGED_PORTS"] = "1"
+
+    # Disagg scripts need unique bootstrap ports so parallel runs don't collide;
+    # scripts with several prefill workers read one per worker index.
+    disagg_bootstrap_ports: list[int] = []
     if config.script_name and "disagg" in config.script_name:
-        disagg_bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
-        merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
+        disagg_bootstrap_ports = allocate_ports(
+            max(len(dynamic_system_ports), 1), DynamoPortRange.BOOTSTRAP.value
+        )
+        merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_ports[0])
+        for idx, port in enumerate(disagg_bootstrap_ports, start=1):
+            merged_env[f"DYN_DISAGG_BOOTSTRAP_PORT{idx}"] = str(port)
 
     return _PreparedDeployment(
         config=config,
         merged_env=merged_env,
         frontend_port=dynamic_frontend_port,
         system_ports=dynamic_system_ports,
-        disagg_bootstrap_port=disagg_bootstrap_port,
-        extra_allocated_ports=extra_allocated_ports,
+        disagg_bootstrap_ports=disagg_bootstrap_ports,
     )
 
 
 def _cleanup_prepared_deployment(prep: _PreparedDeployment) -> None:
-    if prep.disagg_bootstrap_port is not None:
-        deallocate_port(prep.disagg_bootstrap_port)
-    for port in prep.extra_allocated_ports:
-        deallocate_port(port)
+    if prep.disagg_bootstrap_ports:
+        deallocate_ports(prep.disagg_bootstrap_ports)
 
 
 @contextmanager
@@ -307,32 +333,63 @@ def managed_serve_deployment(
 # is retained without the shipped image carrying it. No-op when the key is unset.
 TEST_ONLY_PIP_ENV_KEY = "DYN_TEST_ONLY_PIP_INSTALL"
 
-# Session-level guard so the same package set is installed at most once even
+# Session-level cache so the same package set is installed at most once even
 # though every parametrized deployment (and each retry) calls the installer.
-_test_only_pip_done: set[str] = set()
+_test_only_pip_targets: dict[str, str] = {}
 
 
-def _install_test_only_packages(config: EngineConfig) -> None:
+def _install_test_only_packages(
+    config: EngineConfig, extra_env: Optional[Dict[str, str]] = None
+) -> dict[str, str]:
     """Install any test-only pip packages a config requested via its env.
 
-    Runs inside the same runtime container/interpreter the server subprocess
-    inherits, so the worker can import the freshly installed module.
+    Install into a process-isolated temporary directory rather than the runtime
+    interpreter's site-packages. CI may run the image as an arbitrary uid, and
+    some framework venvs are intentionally read-only. The returned environment
+    exposes the directory only to subprocesses launched for this deployment.
     """
+    launch_env = dict(extra_env or {})
     spec = config.env.get(TEST_ONLY_PIP_ENV_KEY, "").strip()
-    if not spec or spec in _test_only_pip_done:
-        return
-    packages = spec.split()
-    logging.getLogger(__name__).info(
-        "Installing test-only package(s) into runtime container: %s",
-        " ".join(packages),
+    if not spec:
+        return launch_env
+
+    target = _test_only_pip_targets.get(spec)
+    if target is None:
+        packages = spec.split()
+        target = tempfile.mkdtemp(prefix="dynamo-test-pip-")
+        logging.getLogger(__name__).info(
+            "Installing test-only package(s) into %s: %s",
+            target,
+            " ".join(packages),
+        )
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--target",
+                    target,
+                    "--no-deps",
+                    *packages,
+                ],
+                check=True,
+            )
+        except Exception:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        _test_only_pip_targets[spec] = target
+
+    inherited_pythonpath = launch_env.get(
+        "PYTHONPATH", config.env.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
     )
-    # --break-system-packages: runtime images use an externally-managed system
-    # python (PEP 668); this is the ephemeral test container, not a shipped image.
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--break-system-packages", *packages],
-        check=True,
+    launch_env["PYTHONPATH"] = (
+        target
+        if not inherited_pythonpath
+        else os.pathsep.join((target, inherited_pythonpath))
     )
-    _test_only_pip_done.add(spec)
+    return launch_env
 
 
 def run_serve_deployment(
@@ -363,7 +420,7 @@ def run_serve_deployment(
 
     # Install any decoder a codec-stripped image needs for this test, before the
     # server launches, so the worker can import it. No-op unless the config opts in.
-    _install_test_only_packages(config)
+    extra_env = _install_test_only_packages(config, extra_env)
 
     prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
     config = prep.config
@@ -384,6 +441,8 @@ def run_serve_deployment(
                 # inject model
                 if hasattr(payload, "with_model"):
                     payload = payload.with_model(config.model)
+
+                payload.bind_environment(server_process.env)
 
                 # Default behavior: requests go to the frontend port. Metrics
                 # may target either the frontend or worker system ports; map
@@ -445,14 +504,15 @@ def run_serve_deployment(
                     try:
                         for attempt in range(payload.max_attempts):
                             try:
-                                response = send_request(
+                                payload.before_request()
+                                with send_request(
                                     url=payload.url(),
                                     payload=request_body,
                                     timeout=payload.timeout,
                                     method=payload.method,
                                     stream=payload.http_stream,
-                                )
-                                server_process.check_response(payload, response)
+                                ) as response:
+                                    server_process.check_response(payload, response)
                                 last_err = None
                                 break
                             except ResponseValidationError as e:

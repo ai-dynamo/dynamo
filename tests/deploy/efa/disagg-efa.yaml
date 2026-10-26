@@ -42,7 +42,7 @@ spec:
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:efa
-  - name: VllmPrefillWorker
+  - name: prefill
     replicas: 1
     type: prefill
     podTemplate:
@@ -60,7 +60,7 @@ spec:
           - --disaggregation-mode
           - prefill
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -92,7 +92,7 @@ spec:
             limits:
               nvidia.com/gpu: "1"
               vpc.amazonaws.com/efa: "1"
-  - name: VllmDecodeWorker
+  - name: decode
     replicas: 1
     type: decode
     podTemplate:
@@ -124,7 +124,7 @@ spec:
           - --disaggregation-mode
           - decode
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
           envFrom:
           - secretRef:
               name: hf-token-secret

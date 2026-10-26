@@ -5,11 +5,20 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Any, List, Optional
 
 import sglang as sgl
+import yaml
+from sglang.srt.environ import envs
+from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -30,6 +39,11 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
+from dynamo.sglang._compat import (
+    filter_supported_async_generate_kwargs,
+    sglang_uses_mla_backend,
+    supports_disagg_prefill_cancel_anytime,
+)
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
@@ -39,10 +53,58 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
-from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
+from dynamo.sglang.engine_generate import (
+    DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+    SGLANG_GENERATE_CAPABILITY,
+)
+from dynamo.sglang.gateway import (
+    GATEWAY_ENGINE_ID_KEY,
+    GATEWAY_WORKERS_KEY,
+    effective_gateway_workers,
+    gateway_engine_id,
+)
+from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY = (
+    "tool_call_structural_tag_reasoning_gate"
+)
+
+
+def publish_sglang_structural_tag_reasoning_policy(
+    runtime_config: ModelRuntimeConfig,
+    engine: Optional[sgl.Engine],
+    server_args: ServerArgs,
+) -> None:
+    """Advertise the native gate that consumes reasoning before guided output."""
+    # vLLM also publishes grammar timing through runtime metadata.
+    # SGLang's exclusion additionally depends on require_reasoning per request.
+    parser = getattr(server_args, "reasoning_parser", None)
+    if (
+        engine is None
+        or not parser
+        or getattr(server_args, "skip_tokenizer_init", False)
+    ):
+        return
+    tokenizer = getattr(engine.tokenizer_manager, "tokenizer", None)
+    if (
+        tokenizer is None
+        or "require_reasoning"
+        not in filter_supported_async_generate_kwargs(
+            engine, {"require_reasoning": True}
+        )
+    ):
+        return
+    # Match the scheduler's gate initialization, including disabled gates when
+    # the reasoning terminator cannot be encoded by the initialized tokenizer.
+    reasoner = ReasoningParser(
+        model_type=parser, stream_reasoning=False, tokenizer=tokenizer
+    )
+    if tokenizer.encode(reasoner.detector.think_end_token, add_special_tokens=False):
+        runtime_config.set_engine_specific(
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, json.dumps(True)
+        )
 
 
 def _supports_engine_generate(
@@ -145,14 +207,14 @@ async def _register_model_with_runtime_config(
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
 
-    if dynamo_args.use_sglang_tokenizer:
+    if dynamo_args.use_sglang_tokenizer and not (
+        output_type.supports_embedding() or output_type.supports_rerank()
+    ):
         logging.warning(
             "Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
-        # Only override output_type for chat models, not for embeddings
-        if output_type != ModelType.Embedding:
-            output_type = ModelType.Chat
+        output_type = ModelType.Chat
 
     if runtime_config is not None and _supports_engine_generate(
         input_type, output_type, worker_type
@@ -208,7 +270,8 @@ async def _register_model_with_runtime_config(
             input_type,
             output_type,
             endpoint,
-            _register_model_source_path(engine, server_args),
+            dynamo_args.model_source_uri
+            or _register_model_source_path(engine, server_args),
             server_args.served_model_name,
             kv_cache_block_size=kv_cache_block_size,
             runtime_config=runtime_config,
@@ -243,6 +306,24 @@ def _get_bootstrap_info_for_config(
     return compute_bootstrap_address(engine)
 
 
+def _load_hicache_storage_extra_config_file(path: str) -> Any:
+    """Load an ``@path`` extra config the way SGLang's HiCache does.
+
+    SGLang accepts ``.json``, ``.toml``, ``.yaml`` and ``.yml`` files.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    if ext == ".toml":
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    if ext in (".yaml", ".yml"):
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    raise ValueError(f"unsupported config file {path!r} (format {ext!r})")
+
+
 def _parse_hicache_storage_extra_config(
     raw_extra_config: Optional[Any],
 ) -> dict[str, Any]:
@@ -257,10 +338,13 @@ def _parse_hicache_storage_extra_config(
         if not raw_extra_config:
             return {}
         try:
-            parsed = json.loads(raw_extra_config)
-        except json.JSONDecodeError as e:
+            if raw_extra_config.startswith("@"):
+                parsed = _load_hicache_storage_extra_config_file(raw_extra_config[1:])
+            else:
+                parsed = json.loads(raw_extra_config)
+        except (OSError, ValueError, yaml.YAMLError) as e:
             logging.warning(
-                f"Failed to parse hicache_storage_backend_extra_config JSON: {e}"
+                "Failed to parse hicache_storage_backend_extra_config: %s", e
             )
             return {}
 
@@ -268,7 +352,7 @@ def _parse_hicache_storage_extra_config(
             return parsed
 
         logging.warning(
-            "hicache_storage_backend_extra_config JSON was not an object; ignoring it."
+            "hicache_storage_backend_extra_config was not an object; ignoring it."
         )
         return {}
 
@@ -277,6 +361,45 @@ def _parse_hicache_storage_extra_config(
         type(raw_extra_config).__name__,
     )
     return {}
+
+
+def _mooncake_key_prefix(
+    extra_config: dict[str, Any], served_model_name: Optional[str]
+) -> Optional[str]:
+    """Return the prefix SGLang's MooncakeStore prepends to every stored key.
+
+    Mirrors ``config_prefix`` in SGLang's
+    ``srt/mem_cache/storage/mooncake_store/mooncake_store.py``: the backend tag
+    (when not ``None``) and the served model name with ``/`` replaced by ``-``,
+    joined with ``_``.
+    """
+    parts = []
+    extra_backend_tag = extra_config.get("extra_backend_tag")
+    if extra_backend_tag is not None:
+        parts.append(str(extra_backend_tag))
+    if served_model_name:
+        parts.append("-".join(served_model_name.split("/")))
+    return "_".join(parts) if parts else None
+
+
+def _mooncake_tenant_id(extra_config: dict[str, Any]) -> str:
+    # Older SGLang releases, such as 0.5.11, have no Mooncake tenant support.
+    if not hasattr(envs, "MOONCAKE_TENANT_ID"):
+        return "default"
+    # Match the tenant precedence of SGLang's MooncakeBaseStore._load_config.
+    if (
+        extra_config.get("master_server_address") is not None
+        or extra_config.get("client_server_address") is not None
+    ):
+        tenant = extra_config.get("tenant_id", "default")
+    elif (config_path := os.getenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH")) is not None:
+        with open(config_path, encoding="utf-8") as config_file:
+            tenant = json.load(config_file).get("tenant_id", "default")
+    else:
+        tenant = os.getenv("MOONCAKE_TENANT_ID", "default")
+    if tenant is None:
+        return "default"
+    return str(tenant).strip() or "default"
 
 
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
@@ -291,7 +414,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
 
     try:
-        is_mla_model = bool(server_args.use_mla_backend())
+        is_mla_model = sglang_uses_mla_backend(server_args)
     except Exception as e:
         logging.warning(f"Failed to determine whether model uses MLA backend: {e}")
         is_mla_model = False
@@ -326,6 +449,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
 
     return {
         "backend": "mooncake",
+        "tenant_id": _mooncake_tenant_id(extra_config),
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
         "tp_size": tp_size,
         "pp_size": pp_size,
@@ -334,6 +458,9 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "tp_lcm_size": tp_lcm_size,
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
+        "key_prefix": _mooncake_key_prefix(
+            extra_config, getattr(server_args, "served_model_name", None)
+        ),
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 
@@ -400,13 +527,43 @@ async def get_runtime_config(
     runtime_config = ModelRuntimeConfig()
     runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
+    llm_handler = not dynamo_args.enable_multimodal
+    # Both disaggregated legs implement exact-RID cancellation before output,
+    # including waiting until the scheduler has accepted the request.
+    if (
+        server_args.disaggregation_mode
+        in {
+            "prefill",
+            "decode",
+        }
+        and llm_handler
+        and supports_disagg_prefill_cancel_anytime(engine)
+    ):
+        runtime_config.set_engine_specific(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+            json.dumps(True),
+        )
     # Multimodal encode workers have no tokenizer manager and delegate
     # generation overflow handling to their downstream backend.
     if engine is not None:
         publish_token_budget(runtime_config, _get_token_budget(engine, server_args))
+        # Hash forwarding currently exists on SGLang's aggregated generation
+        # path. Do not advertise exact video routing to disaggregated workers,
+        # whose prefill/decode handlers would otherwise publish incompatible
+        # KV-event placeholder hashes.
+        if dynamo_args.frontend_decoding and server_args.disaggregation_mode in (
+            None,
+            "null",
+        ):
+            publish_sglang_qwen_video_processor_contract(runtime_config, engine)
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    # Multimodal and diffusion handlers do not forward the per-request gate.
+    if llm_handler and not getattr(server_args, "dllm_algorithm", None):
+        publish_sglang_structural_tag_reasoning_policy(
+            runtime_config, engine, server_args
+        )
     if dynamo_args.dyn_default_thinking_mode is not None:
         runtime_config.set_engine_specific(
             "default_thinking_mode",
@@ -415,11 +572,7 @@ async def get_runtime_config(
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
-    runtime_config.set_structural_tag_mode(
-        "on" if dynamo_args.dyn_enable_structural_tag else "off"
-    )
-    runtime_config.set_structural_tag_scope(dynamo_args.dyn_structural_tag_scope)
-    runtime_config.set_structural_tag_schema(dynamo_args.dyn_structural_tag_schema)
+    runtime_config.set_structural_tag(dynamo_args.structural_tag)
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
@@ -454,6 +607,16 @@ async def get_runtime_config(
                 "Failed to attach SGLang worker group metadata to registration: %s",
                 e,
             )
+
+    gateway_engine = gateway_engine_id()
+    if gateway_engine is not None:
+        runtime_config.set_engine_specific(
+            GATEWAY_ENGINE_ID_KEY, json.dumps(gateway_engine)
+        )
+        runtime_config.set_engine_specific(
+            GATEWAY_WORKERS_KEY,
+            json.dumps(effective_gateway_workers(server_args, dynamo_args)),
+        )
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
@@ -513,6 +676,9 @@ async def get_runtime_config(
         return runtime_config
 
     try:
+        # TODO(rank-aware-kv-capacity): scheduler_infos[0] is only a representative rank.
+        # Collect every declared rank before the create-only MDC registration and publish one
+        # atomic rank-capacity snapshot; the card cannot be enriched after registration.
         scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")

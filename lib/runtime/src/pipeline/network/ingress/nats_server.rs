@@ -8,9 +8,9 @@
 //! a unified multiplexed approach consistent with TCP server.
 
 use super::*;
-use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::pipeline::network::ingress::push_endpoint::PushEndpoint;
+use crate::{SystemHealth, protocols::EndpointId};
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -26,14 +26,18 @@ use tokio_util::sync::CancellationToken;
 pub struct NatsMultiplexedServer {
     nats_client: async_nats::Client,
     component_registry: crate::component::Registry,
-    handlers: Arc<DashMap<String, EndpointTask>>,
+    handlers: Arc<DashMap<(EndpointId, u64), EndpointTask>>,
     cancellation_token: CancellationToken,
 }
 
 struct EndpointTask {
     cancel_token: CancellationToken,
     join_handle: tokio::task::JoinHandle<()>,
-    _endpoint_name: String,
+}
+
+/// Subject suffix within a NATS service group; the group supplies the namespace and component.
+fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
+    format!("{endpoint_name}-{instance_id:x}")
 }
 
 impl NatsMultiplexedServer {
@@ -99,10 +103,12 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
         tracing::info!("Successfully retrieved service group");
 
-        // Construct the full NATS subject with instance ID
-        // Format: {endpoint_name}-{instance_id_hex}
-        // This matches Endpoint::name_with_id() and subject_to() format
-        let endpoint_with_id = format!("{}-{:x}", endpoint_name, instance_id);
+        let endpoint_with_id = instance_subject(&endpoint_name, instance_id);
+        let endpoint_id = EndpointId {
+            namespace: namespace.clone(),
+            component: component_name.clone(),
+            name: endpoint_name.clone(),
+        };
 
         // Create NATS service endpoint with the full subject
         let service_endpoint = service_group
@@ -178,21 +184,46 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
         // Store task info for later cleanup
         self.handlers.insert(
-            endpoint_name.clone(),
+            (endpoint_id, instance_id),
             EndpointTask {
                 cancel_token: endpoint_cancel,
                 join_handle,
-                _endpoint_name: endpoint_name,
             },
         );
 
         Ok(())
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        if let Some((_, task)) = self.handlers.remove(endpoint_name) {
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_id = {
+            let mut matches = self.handlers.iter().filter(|entry| {
+                entry.key().0.name == endpoint_name && entry.key().1 == instance_id
+            });
+            let endpoint_id = matches.next().map(|entry| entry.key().0.clone());
+            anyhow::ensure!(
+                matches.next().is_none(),
+                "Ambiguous endpoint {endpoint_name}/{instance_id:x}; use unregister_endpoint_instance"
+            );
+            endpoint_id
+        };
+        if let Some(endpoint_id) = endpoint_id {
+            self.unregister_endpoint_instance(&endpoint_id, instance_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn unregister_endpoint_instance(
+        &self,
+        endpoint_id: &EndpointId,
+        instance_id: u64,
+    ) -> Result<()> {
+        let endpoint_name = &endpoint_id.name;
+        let endpoint_with_id = instance_subject(endpoint_name, instance_id);
+        if let Some((_, task)) = self.handlers.remove(&(endpoint_id.clone(), instance_id)) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
+                endpoint_with_id = %endpoint_with_id,
                 "Unregistering NATS endpoint"
             );
             // Cancel the token to trigger graceful shutdown
@@ -232,5 +263,20 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         // Check if NATS client is connected
         // NATS client doesn't expose connection state directly, assume healthy
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_subject_is_the_client_subject_and_unique_per_instance() {
+        assert_eq!(instance_subject("generate", 0xa), "generate-a");
+        assert_ne!(
+            instance_subject("generate", 0xa),
+            instance_subject("generate", 0xb),
+            "two instances of one endpoint name must not share a subject suffix"
+        );
     }
 }

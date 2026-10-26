@@ -24,7 +24,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
@@ -39,7 +39,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 			name: "CREATE defaults empty spec name from metadata name",
 			ctx:  admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Name: "worker",
 			},
 			want: "worker",
 		},
@@ -47,7 +47,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 			name: "CREATE preserves explicit spec name",
 			ctx:  admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Name: "worker",
 				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 						ComponentName: "custom",
@@ -60,7 +60,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 			name: "UPDATE does not default empty spec name",
 			ctx:  admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Name: "worker",
 			},
 			want: "",
 		},
@@ -68,7 +68,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 			name: "missing admission request fails closed",
 			ctx:  context.Background(),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Name: "worker",
 			},
 			wantErr: true,
 		},
@@ -90,6 +90,34 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 				t.Fatalf("spec.name = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDCDDefaulter_DefaultsMultinodeRoleReplicasOnUpdate(t *testing.T) {
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
+		Name: "worker",
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},
+				Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				},
+			},
+		},
+	}
+
+	defaulter := NewDCDDefaulter()
+	if err := defaulter.Default(admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoComponentDeploymentGVK), dcd); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+
+	roles := dcd.Spec.Roles
+	if got := ptr.Deref(roles[0].Replicas, 0); got != 1 {
+		t.Fatalf("leader replicas = %d, want 1", got)
+	}
+	if got := ptr.Deref(roles[1].Replicas, 0); got != 3 {
+		t.Fatalf("worker replicas = %d, want 3", got)
 	}
 }
 

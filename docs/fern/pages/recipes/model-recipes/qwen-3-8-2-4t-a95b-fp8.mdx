@@ -16,10 +16,10 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">GPU</span>
-<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" defaultChecked />
-<label htmlFor="recipe-sku-gb300">GB300</label>
 <input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
 <label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" defaultChecked />
+<label htmlFor="recipe-sku-gb300">GB300</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
@@ -30,10 +30,10 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Engine</span>
-<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
-<label htmlFor="recipe-engine-vllm">vLLM</label>
 <input type="radio" id="recipe-engine-sglang" name="recipe-engine" value="sglang" />
 <label htmlFor="recipe-engine-sglang">SGLang</label>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
@@ -81,7 +81,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 
 <div data-sku="gb300">
 
-- A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes). See the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes). See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`.
 
@@ -89,7 +89,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 
 <div data-sku="gb200">
 
-- A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated; 48x (12 nodes, 2×4 prefill + 4 decode) for 2P1D disaggregated. See the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated; 48x (12 nodes, 2×4 prefill + 4 decode) for 2P1D disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`.
 - The `model-cache` PVC, populated by the model-download Job (see step 3 below).

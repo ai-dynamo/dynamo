@@ -33,6 +33,14 @@ impl<'de> Deserialize<'de> for RawKvEvent {
 
 struct RawKvEventVisitor;
 
+/// SGLang appends typed metadata where vLLM carries its optional LoRA name.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BlockStoredNamespace {
+    LoraName(String),
+    SglangMetadata { cache_salt: String },
+}
+
 impl<'de> Visitor<'de> for RawKvEventVisitor {
     type Value = RawKvEvent;
 
@@ -56,6 +64,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
         let mut locality: Option<Option<Locality>> = None;
         let mut ownership: Option<Option<String>> = None;
+        let mut session_id: Option<Option<String>> = None;
         let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -105,6 +114,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "ownership" => {
                     ownership = Some(map.next_value()?);
                 }
+                "session_id" => {
+                    session_id = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -143,6 +155,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                     locality: locality.unwrap_or(None),
                     ownership: ownership.unwrap_or(None),
+                    session_id: session_id.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -198,7 +211,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 // Position 5 was lora_id in older formats; consume and discard for compat.
                 let _lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = normalize_medium(seq.next_element()?.unwrap_or(None));
-                let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
+                let namespace: Option<BlockStoredNamespace> = seq.next_element()?.unwrap_or(None);
+                let (lora_name, cache_namespace) = match namespace {
+                    Some(BlockStoredNamespace::LoraName(name)) => (Some(name), None),
+                    Some(BlockStoredNamespace::SglangMetadata { cache_salt }) => {
+                        (None, (!cache_salt.is_empty()).then_some(cache_salt))
+                    }
+                    None => (None, None),
+                };
                 let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
                     seq.next_element()?.unwrap_or(None);
                 let mut trailing = std::array::from_fn(|_| None);
@@ -215,8 +235,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 
                 let parsed = parse_block_stored_trailing::<A::Error>(trailing, trailing_len)?;
 
-                let cache_namespace =
-                    extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref());
+                let cache_namespace = cache_namespace.or_else(|| {
+                    extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
+                });
                 let block_mm_infos = parsed
                     .block_mm_infos
                     .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
@@ -237,6 +258,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_sliding_window: parsed.metadata.kv_cache_spec_sliding_window,
                     locality: parsed.locality,
                     ownership: parsed.ownership,
+                    // vLLM emits session_id in its named-map format. Legacy
+                    // positional layouts have no unambiguous session slot.
+                    session_id: None,
                 })
             }
             "BlockRemoved" => {

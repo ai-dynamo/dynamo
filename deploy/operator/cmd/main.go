@@ -62,10 +62,12 @@ import (
 	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -116,6 +118,8 @@ func initCRDSchemes() {
 
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
 
+	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
+
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
@@ -125,6 +129,8 @@ func initCRDSchemes() {
 	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
 	// operator only consumes them (creates/reads), it does not reconcile them.
 	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
+
+	utilruntime.Must(lpxv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 
@@ -251,7 +257,6 @@ func main() {
 	}
 
 	restrictedNamespace := operatorCfg.Namespace.Restricted
-	isClusterWide := restrictedNamespace == ""
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
@@ -415,7 +420,7 @@ func main() {
 	}
 	setupLog.Info("Secret informer cache synced and ready")
 	_, err = secretInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
+		AddFunc: func(obj any) {
 			secret := obj.(*corev1.Secret)
 			if secret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret creation...")
@@ -427,7 +432,7 @@ func main() {
 				}
 			}
 		},
-		UpdateFunc: func(old, new interface{}) {
+		UpdateFunc: func(old, new any) {
 			newSecret := new.(*corev1.Secret)
 			if newSecret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret update...")
@@ -439,7 +444,7 @@ func main() {
 				}
 			}
 		},
-		DeleteFunc: func(obj interface{}) {
+		DeleteFunc: func(obj any) {
 			secret := obj.(*corev1.Secret)
 			if secret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret deletion...")
@@ -506,31 +511,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
-	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
-	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
 		os.Exit(1)
 	}
-	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if isClusterWide {
-			err = caInjector.InjectAll(mainCtx)
-		} else {
-			err = caInjector.InjectAdmission(mainCtx)
-		}
-		if err != nil {
-			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
-			os.Exit(1)
-		}
-	} else if isClusterWide {
-		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
-		// blocks startup instead of running with unauthenticated conversion.
-		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
-			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
-			os.Exit(1)
-		}
+	if err := caInjector.Inject(mainCtx); err != nil {
+		setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+		os.Exit(1)
 	}
 
 	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
@@ -627,16 +615,6 @@ func registerControllers(
 	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
 		SetupOptions: setupOptions,
 	}); err != nil {
-		return err
-	}
-	// A disabled gate omits the external watch while retaining finalizer cleanup reconciliation.
-	if !runtimeConfig.Gate.Enabled(features.Checkpoint) {
-		setupLog.Info(
-			"Registering DynamoCheckpoint controller without PodSnapshot watch",
-			"reason", "checkpoint feature gate is disabled",
-		)
-	}
-	if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
 		return err
 	}
 	// PodSnapshot/PodSnapshotContent reconciliation is owned by the external

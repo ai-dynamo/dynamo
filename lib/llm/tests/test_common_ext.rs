@@ -71,6 +71,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     };
 
@@ -341,6 +342,7 @@ fn test_serialization_preserves_structure() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     };
 
@@ -395,6 +397,7 @@ fn test_sampling_parameters_extraction() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     };
 
@@ -402,4 +405,38 @@ fn test_sampling_parameters_extraction() {
 
     assert_eq!(sampling_options.top_k, Some(42));
     assert_eq!(sampling_options.repetition_penalty, Some(1.3));
+}
+
+#[test]
+fn test_chat_completions_generation_prompt_fields_from_common() {
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(
+        r#"{
+        "model": "test-model",
+        "messages": [
+            {"role": "user", "content": "Continue this sentence"},
+            {"role": "assistant", "content": "LLM-Native Interaction"}
+        ],
+        "add_generation_prompt": false,
+        "continue_final_message": true
+    }"#,
+    )
+    .unwrap();
+
+    assert_eq!(request.common.add_generation_prompt, Some(false));
+    assert_eq!(request.common.continue_final_message, Some(true));
+    assert_eq!(request.get_continue_final_message(), Some(true));
+}
+
+#[test]
+fn test_generation_prompt_fields_omitted_default_none() {
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(
+        r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}]
+    }"#,
+    )
+    .unwrap();
+
+    assert_eq!(request.common.add_generation_prompt, None);
+    assert_eq!(request.common.continue_final_message, None);
 }

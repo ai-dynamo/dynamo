@@ -8,12 +8,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{FpmPublisher, KvEventPublishers, MockerConfig, OutputSignal};
 use crate::grouped_scheduler::{
-    GroupedSchedulerRankEventSinks, GroupedSchedulers,
-    create_single_rank_scheduler_with_event_sender,
+    GroupedSchedulers, RankOutputSink, RankSinks, create_single_rank_scheduler_with_rank_sink,
 };
-use crate::scheduler::{SchedulerEventSender, SchedulerHandle};
+use crate::scheduler::SchedulerHandle;
 
 pub(crate) struct LiveEngineScheduler {
     pub(crate) handle: Box<dyn SchedulerHandle>,
@@ -26,7 +25,7 @@ pub(crate) struct LiveEngineScheduler {
 /// Returns a boxed [`SchedulerHandle`] that the engine wrapper can use
 /// without knowing which backend is running underneath.
 pub fn create_engine(
-    args: MockEngineArgs,
+    args: MockerConfig,
     dp_rank: u32,
     output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
     kv_event_publishers: KvEventPublishers,
@@ -37,13 +36,15 @@ pub fn create_engine(
         handle,
         actor,
         completion_drain: _,
-    } = create_engine_with_event_sender(
+    } = create_engine_with_rank_sink(
         args,
         dp_rank,
-        output_tx.map(SchedulerEventSender::from),
-        kv_event_publishers,
+        RankSinks {
+            output: output_tx.map(RankOutputSink::Channel).unwrap_or_default(),
+            kv_event_publishers,
+            fpm_publisher,
+        },
         cancellation_token,
-        fpm_publisher,
     )?;
     // Dropping a Tokio JoinHandle detaches the actor. The SchedulerHandle's
     // cancellation guard remains the compatibility API's shutdown owner.
@@ -51,13 +52,11 @@ pub fn create_engine(
     Ok(handle)
 }
 
-pub(crate) fn create_engine_with_event_sender(
-    args: MockEngineArgs,
+pub(crate) fn create_engine_with_rank_sink(
+    args: MockerConfig,
     dp_rank: u32,
-    event_tx: Option<SchedulerEventSender>,
-    kv_event_publishers: KvEventPublishers,
+    rank_sink: RankSinks,
     cancellation_token: Option<CancellationToken>,
-    fpm_publisher: FpmPublisher,
 ) -> anyhow::Result<LiveEngineScheduler> {
     // This compatibility API cannot safely construct attention-DP ranks one at
     // a time: each call would own a different generalized engine and bypass the
@@ -75,16 +74,7 @@ pub(crate) fn create_engine_with_event_sender(
         mut schedulers,
         actor,
         completion_drain,
-    } = create_single_rank_scheduler_with_event_sender(
-        args,
-        dp_rank,
-        GroupedSchedulerRankEventSinks {
-            event_tx,
-            kv_event_publishers,
-            fpm_publisher,
-        },
-        cancellation_token,
-    )?;
+    } = create_single_rank_scheduler_with_rank_sink(args, dp_rank, rank_sink, cancellation_token)?;
     let handle = schedulers
         .pop()
         .context("single-rank generalized Mocker engine returned no scheduler handle")?;
@@ -105,13 +95,10 @@ mod tests {
 
     #[tokio::test]
     async fn compatibility_entrypoint_rejects_attention_dp() {
-        let args = MockEngineArgs {
-            dp_size: 4,
-            ..MockEngineArgs::default()
-        };
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":4})).unwrap();
         let cancel = CancellationToken::new();
 
-        let result = create_engine_with_event_sender(
+        let result = create_engine(
             args,
             3,
             None,

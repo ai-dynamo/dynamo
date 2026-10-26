@@ -5,22 +5,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from functools import lru_cache, partial
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
@@ -30,9 +27,33 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
+from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.frontend.vllm_protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    make_tool_call_id,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
+from .structural_tag_policy import (
+    ToolChoiceKind,
+    effective_tool_strict,
+    should_attempt_structural_tag,
+)
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .utils import legacy_guided_decoding
+
+get_model_structural_tag: Any
+try:
+    from vllm.tool_parsers import structural_tag_registry
+except ImportError:  # Older supported vLLM releases do not expose this registry.
+    get_model_structural_tag = None
+else:
+    get_model_structural_tag = structural_tag_registry.get_model_structural_tag
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 
 class _Renderer(Protocol):
@@ -62,8 +83,33 @@ class PreprocessResult:
     uses_dynamo_json_tool_call_fallback: bool = False
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
+# One executor per live tokenizer. The id-keyed registry stores only a weak
+# reference to the tokenizer, and every lookup verifies object identity. This
+# avoids both id reuse and WeakKeyDictionary's referent-based equality.
+_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[weakref.ReferenceType[TokenizerLike], ThreadPoolExecutor]
+] = {}
+# Fallback for tokenizers that do not support weak references; retains
+# entries for the process lifetime (the previous behavior for all tokenizers).
+# The tokenizer is stored alongside its executor so its id() cannot be
+# recycled by a different tokenizer while the entry lives.
+_STRONG_ASYNC_TOKENIZER_EXECUTORS: dict[
+    int, tuple[TokenizerLike, ThreadPoolExecutor]
+] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
+
+
+def _evict_async_tokenizer_executor(
+    key: int,
+    executor: ThreadPoolExecutor,
+    tokenizer_ref: weakref.ReferenceType[TokenizerLike],
+) -> None:
+    entry = _ASYNC_TOKENIZER_EXECUTORS.get(key)
+    if entry is not None and entry[0] is tokenizer_ref:
+        del _ASYNC_TOKENIZER_EXECUTORS[key]
+    # The tokenizer's last reference may be released by this executor's own
+    # worker, so shutdown must not try to join the current thread.
+    executor.shutdown(wait=False)
 
 
 def _reject_non_finite_json(value: str) -> Any:
@@ -175,21 +221,32 @@ def _should_build_tool_call_guidance(
     # enforced guarantee. sglang_prepost.py has the same gap.
     if tool_choice == "none":
         return False
-    if _is_forced_tool_choice(tool_choice):
-        return True
-    if structural_tag_mode != "on":
-        return False
-    if tool_choice != "auto":
-        return False
-    if structural_tag_scope == "always":
-        return True
     # An explicit single-call request is enough to attempt structural-tag
     # guidance. Forced-choice JSON guidance also bounds its array schema below.
     explicit_single_call = (
         "parallel_tool_calls" in request.model_fields_set
         and request.parallel_tool_calls is False
     )
-    return explicit_single_call or any(_tool_is_strict(tool) for tool in request.tools)
+    tool_choice_kind: ToolChoiceKind = (
+        "required"
+        if tool_choice == "required"
+        else "named"
+        if _is_named_tool_choice(tool_choice)
+        else "auto"
+        if tool_choice == "auto"
+        else "other"
+    )
+    attempt_structural_tag = should_attempt_structural_tag(
+        mode=structural_tag_mode,
+        scope=structural_tag_scope,
+        tool_choice_kind=tool_choice_kind,
+        has_tools=True,
+        any_explicit_strict=any(_tool_is_strict(tool) for tool in request.tools),
+        parallel_tool_calls_explicitly_false=explicit_single_call,
+    )
+    # Forced choices retain the generic JSON fallback when structural tags are
+    # disabled or unavailable.
+    return attempt_structural_tag or _is_forced_tool_choice(tool_choice)
 
 
 def _request_for_vllm_structural_tag(
@@ -197,13 +254,14 @@ def _request_for_vllm_structural_tag(
     *,
     structural_tag_schema: str,
 ) -> ChatCompletionRequest:
-    strict_schema = structural_tag_schema == "strict"
     tools = [
         tool.model_copy(
             update={
                 "function": tool.function.model_copy(
                     update={
-                        "strict": True if strict_schema else tool.function.strict,
+                        "strict": effective_tool_strict(
+                            tool.function.strict, structural_tag_schema
+                        ),
                     }
                 )
             }
@@ -221,8 +279,15 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    starts_in_reasoning: bool = False,
 ) -> dict[str, Any] | None:
-    """Build tool-call guidance through vLLM's configured tool parser."""
+    """Build tool-call guidance through vLLM's configured tool parser.
+
+    ``starts_in_reasoning`` is true when generation begins inside a reasoning
+    block the prompt opened and the engine does not hold the grammar back until
+    that block ends. The structural tag must then accept the reasoning text and
+    its end marker before the tool-call section.
+    """
     if not _should_build_tool_call_guidance(
         request,
         structural_tag_mode=structural_tag_mode,
@@ -235,7 +300,43 @@ def build_tool_call_guided_decoding(
             request,
             structural_tag_schema=structural_tag_schema,
         )
-        structural_tag = tool_parser.get_structural_tag(request_for_tag)
+        try:
+            structural_tag_model = getattr(tool_parser, "structural_tag_model", None)
+            structural_tag_kwargs = {}
+            if structural_tag_model == "hy_v4" and get_model_structural_tag is not None:
+                # HYV4's parser detects checkpoint-specific tokens at construction.
+                # Keep its suffix while Dynamo owns activation of the registry path.
+                structural_tag_kwargs["token_suffix"] = getattr(
+                    tool_parser, "_extractor"
+                ).token_suffix
+            structural_tag = (
+                get_model_structural_tag(
+                    model=structural_tag_model,
+                    tools=request_for_tag.tools,
+                    tool_choice=request_for_tag.tool_choice,
+                    reasoning=starts_in_reasoning,
+                    **structural_tag_kwargs,
+                )
+                if structural_tag_model is not None
+                and get_model_structural_tag is not None
+                # Older parser hooks may not take ``reasoning``; keep their
+                # call unchanged unless the reasoning prefix is needed.
+                else tool_parser.get_structural_tag(request_for_tag, reasoning=True)
+                if starts_in_reasoning
+                else tool_parser.get_structural_tag(request_for_tag)
+            )
+        except (
+            AttributeError,
+            KeyError,
+            NotImplementedError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            # Parser implementations are third-party capability providers. A
+            # failed structural-tag build must preserve the pre-existing JSON
+            # or unconstrained compatibility path for the request.
+            structural_tag = None
         if structural_tag is not None:
             tag_value = (
                 structural_tag.model_dump()
@@ -262,8 +363,13 @@ def build_tool_call_guided_decoding(
         # _validate_chat_completion_request.
         json_schema = get_json_schema_from_tools(tool_choice, request.tools)
         if json_schema is not None:
+            if _is_named_tool_choice(tool_choice) and admits_only_empty_object(
+                json_schema
+            ):
+                return {"regex": r"\{\}"}
             if (
                 request.parallel_tool_calls is False
+                and tool_choice == "required"
                 and json_schema.get("type") == "array"
             ):
                 json_schema["maxItems"] = 1
@@ -308,50 +414,42 @@ def _build_assistant_guided_decoding(
     )
 
     request_extra = request.model_extra or {}
-    # Pick a single legacy guided_* constraint by precedence rather than merging
-    # several keys into one dict, because guided_decoding carries exactly one
-    # constraint and the elif chain above already honors that for
-    # structured_outputs.
-    #
-    # TODO: first-match-wins silently discards the other constraints the caller
-    # explicitly set, with no error and no annotation.
-    # GuidedDecodingOptions::validate in protocols/common.rs rejects the same
-    # request outright, so `guided_json` + `guided_regex` is a 400 through the Rust
-    # frontend and a silent single-constraint request here. Rejecting is the
-    # correct behavior; it is left as-is only to avoid adding a second new 400 to
-    # this change. Note that validate() also counts whitespace_pattern toward its
-    # exclusivity limit, so the {"json": ..., "whitespace_pattern": ...} pair built
-    # below is accepted here and rejected there -- whitespace_pattern modifies a
-    # grammar rather than being one, so that counter is the side that is wrong.
-    legacy_guidance: dict[str, Any] = {}
-    for key, value in (
-        ("json", request_extra.get("guided_json")),
-        ("regex", request_extra.get("guided_regex")),
-        ("grammar", request_extra.get("guided_grammar")),
-        ("choice", request_extra.get("guided_choice") or None),
-    ):
-        if value is not None:
-            legacy_guidance = {key: value}
-            break
+    # Match GuidedDecodingOptions::validate: modifiers are allowed alongside one
+    # constraint, but multiple legacy constraints must not be silently discarded.
+    legacy_guidance = legacy_guided_decoding(request_extra)
     if legacy_guidance:
         # Legacy guided_* takes precedence over structured_outputs (prior
         # behavior), but as a single constraint.
+        # legacy_guided_decoding already carried whitespace_pattern across.
         guided_decoding = legacy_guidance
-        whitespace_pattern = request_extra.get("guided_whitespace_pattern")
-        if whitespace_pattern is not None:
-            guided_decoding["whitespace_pattern"] = whitespace_pattern
     return guided_decoding
 
 
 def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
-    key = id(tokenizer)
-    async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
-    if async_tokenizer is None:
-        async_tokenizer = make_async(
-            tokenizer, executor=ThreadPoolExecutor(max_workers=1)
-        )
-        _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
-    return async_tokenizer
+    try:
+        tokenizer_ref = weakref.ref(tokenizer)
+    except TypeError:
+        # Tokenizer does not support weak references.
+        key = id(tokenizer)
+        entry = _STRONG_ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            _STRONG_ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer, executor)
+        else:
+            executor = entry[1]
+    else:
+        key = id(tokenizer)
+        entry = _ASYNC_TOKENIZER_EXECUTORS.get(key)
+        if entry is None or entry[0]() is not tokenizer:
+            executor = ThreadPoolExecutor(max_workers=1)
+            tokenizer_ref = weakref.ref(
+                tokenizer,
+                partial(_evict_async_tokenizer_executor, key, executor),
+            )
+            _ASYNC_TOKENIZER_EXECUTORS[key] = (tokenizer_ref, executor)
+        else:
+            executor = entry[1]
+    return make_async(tokenizer, executor=executor)
 
 
 def _materialize_assistant_tool_calls(
@@ -414,16 +512,79 @@ def _validate_chat_completion_request(
     return validated_request
 
 
+def _reasoning_parser_enabled(
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+) -> TypeGuard[type[ReasoningParser]]:
+    """Whether a reasoning parser runs for this request.
+
+    Single-sourced because three call sites must agree: _prepare_request (which
+    lets the parser adjust the sampling request), preprocess_chat_request (which
+    must know whether that parser could have rewritten the request's guidance),
+    and StreamingPostProcessor (which builds the parser that consumes the result).
+    If they drift, the sampling params get adjusted for a parser that then does not
+    exist and the model's control markers reach the client as visible text.
+
+    See https://github.com/ai-dynamo/dynamo/issues/8636 for the enable_thinking
+    half: when the chat template runs with enable_thinking=False the reasoning
+    tags live in the prompt and the generated output carries none.
+    """
+    return reasoning_parser_class is not None and (
+        chat_template_kwargs.get("enable_thinking") is not False
+    )
+
+
+# Enough trailing prompt tokens to contain any reasoning opener.
+_REASONING_START_TAIL_TOKENS = 16
+
+
+def _prompt_leaves_reasoning_open(
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+) -> bool:
+    """Whether the rendered prompt ends with an opened reasoning block.
+
+    Mirrors ``prompt_injected_reasoning_start`` in the Rust preprocessor: the
+    prompt (trailing whitespace ignored) must end with the reasoning parser's
+    opening marker. A prompt without that marker, e.g. for models that emit
+    their own opener, does not start in reasoning.
+    """
+    if not prompt_token_ids or not _reasoning_parser_enabled(
+        reasoning_parser_class, chat_template_kwargs
+    ):
+        return False
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    start = getattr(parser, "reasoning_start_str", None)
+    if not isinstance(start, str) or not start:
+        return False
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    )
+    return tail.rstrip().endswith(start)
+
+
 def _prepare_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
     tokenizer: TokenizerLike,
     tool_parser_class: type[ToolParser] | None,
+    reasoning_parser_class: type[ReasoningParser] | None = None,
+    model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     validated_request: ChatCompletionRequest | None = None,
+    guidance_snapshots: dict[str, Any] | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -495,6 +656,50 @@ def _prepare_request(
         ),
     )
 
+    # Let the reasoning parser adjust the sampling request, mirroring the tool-parser
+    # path above. Parsers that split thinking from the answer on text markers need
+    # `skip_special_tokens=False` so those markers survive detokenisation, and they
+    # declare that through adjust_request(). Without this call the reasoning channel
+    # only works when the *client* happens to send skip_special_tokens=false.
+    #
+    # Gated identically to StreamingPostProcessor's own parser construction below: if
+    # the sampling params were adjusted for a parser that then does not exist, the
+    # markers reach the client as visible text.
+    #
+    # ReasoningParser.adjust_request is `return request` by default, so this is a no-op
+    # for parsers that do not need it.
+    if _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs):
+        # Both parsers rewrite the same request, tool first and reasoning here, so a
+        # single before/after diff cannot say which one moved the guidance. Splitting
+        # it here is the only reason the caller can apply one precedence rule to a
+        # reasoning rewrite and a different one to a tool rewrite.
+        #
+        # Taken inside this gate, not above it: it is read only behind the same
+        # _reasoning_parser_enabled() test in the caller, so on the tool-only and
+        # no-parser paths it was pure cost. No copy either -- adjust_request()
+        # REPLACES request.structured_outputs with a fresh object rather than
+        # mutating the one this names, so the plain reference still denotes the
+        # pre-adjustment value afterwards. That also makes the caller's `!=` O(1)
+        # by identity in the common unchanged case instead of a deep structural walk.
+        if guidance_snapshots is not None:
+            # Same accessor as adjusted_structured_guidance in the caller,
+            # deliberately: this value is only ever compared against that one, and
+            # extract_structured_outputs() is a different view.
+            guidance_snapshots[
+                "after_tool_parser"
+            ] = _guided_decoding_from_structured_outputs(
+                request_for_sampling.structured_outputs
+            )
+        # model_config is required, not decorative: the Cohere parsers gate their
+        # response_format -> structural_tag rewrite on _model_config.architecture and
+        # return the request untouched without it, which made this whole call a no-op
+        # for the only shipped parser that overrides adjust_request.
+        request_for_sampling = reasoning_parser_class(
+            tokenizer,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=model_config,
+        ).adjust_request(request_for_sampling)
+
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
         tokenizer.__class__.__name__ == "MistralTokenizer"
@@ -536,6 +741,8 @@ async def preprocess_chat_request(
     tokenizer: TokenizerLike,
     renderer: _Renderer,
     tool_parser_class: type[ToolParser] | None,
+    reasoning_parser_class: type[ReasoningParser] | None = None,
+    model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -543,6 +750,7 @@ async def preprocess_chat_request(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    structural_tag_excludes_reasoning: bool = False,
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
@@ -557,6 +765,7 @@ async def preprocess_chat_request(
     # structured_outputs itself. Reading it afterwards would treat a
     # parser-generated constraint as one the caller sent and reject the request.
     has_explicit_output_constraint = _has_explicit_output_constraint(validated_request)
+    guidance_snapshots: dict[str, Any] = {}
     (
         request_for_sampling,
         tool_parser,
@@ -567,22 +776,49 @@ async def preprocess_chat_request(
         request,
         tokenizer=tokenizer,
         tool_parser_class=tool_parser_class,
+        reasoning_parser_class=reasoning_parser_class,
+        model_config=model_config,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
         default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
         validated_request=validated_request,
+        guidance_snapshots=guidance_snapshots,
     )
 
     adjusted_structured_guidance = _guided_decoding_from_structured_outputs(
         request_for_sampling.structured_outputs
     )
+    # Either parser's adjust_request() may rewrite the caller's constraint into the
+    # form the model actually speaks -- a reasoning parser converting
+    # response_format into a structural tag, say. Gating this recompute on
+    # tool_parser alone dropped a reasoning parser's rewrite on the floor: the
+    # request carried the adjusted constraint but the pre-adjustment copy was
+    # forwarded to the engine.
     parser_guided_decoding = (
         adjusted_structured_guidance
-        if tool_parser is not None
+        if (
+            tool_parser is not None
+            or _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
+        )
         and adjusted_structured_guidance != client_structured_guidance
         else None
     )
+    # Render first: whether generation starts inside a reasoning block depends
+    # on the rendered prompt (e.g. a template that ends the generation prompt
+    # with an open think tag), and the tool-call grammar must match it.
+    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
+
+    if "prompt_token_ids" in engine_prompt:
+        tokens = list(engine_prompt["prompt_token_ids"])
+    else:
+        async_tokenizer = _get_async_tokenizer(tokenizer)
+        encoded = await async_tokenizer(
+            engine_prompt["prompt"],
+            add_special_tokens=request_for_sampling.add_special_tokens,
+        )
+        tokens = list(encoded.input_ids)
+
     tool_guided_decoding = build_tool_call_guided_decoding(
         request_for_sampling,
         tool_parser,
@@ -590,6 +826,19 @@ async def preprocess_chat_request(
         structural_tag_mode=structural_tag_mode,
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
+        starts_in_reasoning=(
+            structural_tag_mode == "on"
+            and tool_parser is not None
+            and bool(request_for_sampling.tools)
+            and not structural_tag_excludes_reasoning
+            and _prompt_leaves_reasoning_open(
+                tokens,
+                tokenizer=tokenizer,
+                reasoning_parser_class=reasoning_parser_class,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
+            )
+        ),
     )
     # A forced tool choice already claims the decoder's single grammar slot, so a
     # caller-set guided_*/structured_outputs constraint over the same token stream
@@ -608,11 +857,45 @@ async def preprocess_chat_request(
             "tool_choice forces a tool call and cannot be combined with an "
             "explicit guided_* or structured_outputs constraint."
         )
-    guided_decoding = (
-        assistant_guided_decoding
-        if assistant_guided_decoding is not None and not is_forced_tool_choice
-        else tool_guided_decoding
+    # Which parser moved the guidance, measured rather than inferred. Both run
+    # inside _prepare_request against the same request -- tool first, reasoning
+    # second -- so the snapshot taken between them turns one ambiguous diff into
+    # two attributable ones:
+    #
+    #     client -> after_tool_parser   changed by the tool parser
+    #     after_tool_parser -> final    changed by the reasoning parser
+    #
+    # This matters because the two rewrites carry different precedence. A tool
+    # parser's rewrite loses to the caller's explicit constraint -- deliberate,
+    # pinned by test_assistant_guidance_takes_precedence_over_auto_tool_guidance
+    # and the response-format-precedence row of TOOL_GUIDANCE_PARITY_CASES. A
+    # reasoning parser's rewrite has to win, or the request carries the parser's
+    # structural tag while the engine is handed the pre-adjustment copy, which is
+    # the bug this change exists to fix.
+    #
+    # When both rewrote it there is nothing to arbitrate: the reasoning parser ran
+    # last, on the already-tool-adjusted request, so the final value IS the
+    # composition. Forwarding it is just forwarding what the request holds.
+    # Absent only when no tool parser ran, in which case nothing has touched the
+    # request yet and the caller's own constraint is the correct baseline.
+    # Absent whenever no reasoning parser ran, because _prepare_request only takes
+    # the snapshot when it is about to run one. The default is then a don't-care:
+    # the comparison below sits behind the same _reasoning_parser_enabled() test and
+    # short-circuits before reading it.
+    guidance_after_tool_parser = guidance_snapshots.get(
+        "after_tool_parser", client_structured_guidance
     )
+    reasoning_rewrote_guidance = (
+        _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
+        and adjusted_structured_guidance != guidance_after_tool_parser
+    )
+    guided_decoding: dict[str, Any] | None
+    if reasoning_rewrote_guidance and not is_forced_tool_choice:
+        guided_decoding = adjusted_structured_guidance
+    elif assistant_guided_decoding is not None and not is_forced_tool_choice:
+        guided_decoding = assistant_guided_decoding
+    else:
+        guided_decoding = tool_guided_decoding
     # build_tool_call_guided_decoding falls back to Dynamo's generic JSON schema
     # when a forced tool choice has no parser-provided grammar.  That can happen
     # both without a parser and with parsers (for example Hermes) whose
@@ -624,20 +907,8 @@ async def preprocess_chat_request(
         and parser_guided_decoding is None
         and guided_decoding is tool_guided_decoding
         and isinstance(tool_guided_decoding, dict)
-        and "json" in tool_guided_decoding
+        and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
     )
-
-    _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
-
-    if "prompt_token_ids" in engine_prompt:
-        tokens = list(engine_prompt["prompt_token_ids"])
-    else:
-        async_tokenizer = _get_async_tokenizer(tokenizer)
-        encoded = await async_tokenizer(
-            engine_prompt["prompt"],
-            add_special_tokens=request_for_sampling.add_special_tokens,
-        )
-        tokens = list(encoded.input_ids)
 
     return PreprocessResult(
         request_for_sampling=request_for_sampling,
@@ -648,6 +919,22 @@ async def preprocess_chat_request(
         guided_decoding=guided_decoding,
         uses_dynamo_json_tool_call_fallback=uses_dynamo_json_tool_call_fallback,
     )
+
+
+@lru_cache(maxsize=64)
+def _compile_marker_strip_re(strippable: tuple[str, ...]) -> "re.Pattern[str] | None":
+    """Alternation over the literals to remove, or None if there are none.
+
+    Memoised: the set is a property of (tokenizer, active parser), so a server
+    sees a handful of distinct values, but a StreamingPostProcessor is built per
+    request and re.compile over ~15 escaped literals is ~12 us -- worth paying
+    once per process rather than once per request.
+    """
+    if not strippable:
+        return None
+    # Longest-first so a marker that prefixes another cannot win.
+    ordered = sorted(strippable, key=len, reverse=True)
+    return re.compile("|".join(re.escape(m) for m in ordered))
 
 
 class StreamingPostProcessor:
@@ -661,6 +948,7 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        model_config: ModelConfig | None = None,
         response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
@@ -681,14 +969,13 @@ class StreamingPostProcessor:
         # `enable_thinking` is the convention adopted across the modern
         # reasoning-capable model families that vLLM supports; templates
         # that don't honor it simply leave it unset (no effect here).
-        thinking_disabled = chat_template_kwargs.get("enable_thinking") is False
         self.reasoning_parser = (
             reasoning_parser_class(
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
             )
-            if reasoning_parser_class
-            and not thinking_disabled
+            if _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
             and response_reasoning_ended is not True
             else None
         )
@@ -714,9 +1001,43 @@ class StreamingPostProcessor:
         self._reasoning_parser_streaming_started = False
         self._tool_parser_streaming_started = False
 
+        # Every ORIGINAL generated token id for this choice, in order (NVBug
+        # 6678449b). The count is delegated to the pinned vLLM parser's own
+        # `count_reasoning_tokens`, so it is never re-derived from parser output.
+        # Deriving it was wrong three ways: the response projections drop or
+        # defer it (`_suppress_reasoning_output`, and the non-streaming tool
+        # path's terminal-delta buffering); a per-chunk classifier over-counts a
+        # chunk carrying both kinds; and re-encoding decoded text drifts from the
+        # original ids, because detokenisation is not injective -- one generated
+        # id can re-encode to several.
+        self._reasoning_token_ids: list[int] = []
+
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
         )
+
+        # Markers that may be removed from user-visible content: the tokenizer's
+        # actual special tokens, minus any the active parser owns. Membership in
+        # all_special_tokens is the test -- a literal that merely looks like a
+        # control token (`<|not_a_real_special_token|>`) is ordinary generated
+        # text and must survive. Built once: it cannot change for the lifetime of
+        # this postprocessor, and compiled once per process (see the memo above).
+        #
+        # Gate on the CONFIGURED parser, not on `self.reasoning_parser`. What forces
+        # skip_special_tokens=false is the deployment's parser NAME --
+        # preprocessor.rs::parser_requires_special_tokens (PRE.1) matches static
+        # names only, and vLLM's ParserEngine.adjust_request likewise -- so neither
+        # sees this request's enable_thinking or response_reasoning_ended. Those are
+        # exactly what null self.reasoning_parser just above, so an instance-keyed
+        # gate is a no-op precisely on the requests that still receive raw markers.
+        self._marker_strip_re: re.Pattern[str] | None = None
+        if reasoning_parser_class is not None or self.tool_parser is not None:
+            # A tool parser's own markers are its wire format, consumed
+            # downstream; removing them here would blind the tool-start scan.
+            owned = set(self._tool_start_markers()) | set(self._tool_end_markers())
+            self._marker_strip_re = _compile_marker_strip_re(
+                tuple(m for m in self._control_markers if m not in owned)
+            )
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
@@ -732,6 +1053,13 @@ class StreamingPostProcessor:
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
+
+    @property
+    def reasoning_token_total(self) -> int:
+        """Reasoning tokens for this choice, per the parser's own counter."""
+        if self.reasoning_parser is None:
+            return 0
+        return self.reasoning_parser.count_reasoning_tokens(self._reasoning_token_ids)
 
     def _decode_dynamo_json_fallback_tool_calls(
         self, text: str
@@ -915,6 +1243,27 @@ class StreamingPostProcessor:
             )
         )
 
+    # A text-grammar reasoning parser can only split the stream if the model's
+    # content-kind control markers survive detokenisation, which is why
+    # ParserEngine.adjust_request forces `skip_special_tokens = False`. But nothing
+    # then removes the markers the parser did NOT consume, so terminal ones leak
+    # into user-visible content, e.g.:
+    #     content = "<|end_message|>408<|end_message|>"
+    # As shipped the two settings are mutually exclusive: the default strips the
+    # markers before the parser can split (reasoning is silently dropped), and
+    # False leaks them into the answer. Keep the markers for the parser, then strip
+    # the residue afterwards.
+    #
+    # Scope is deliberately narrow: only when a parser is actually active (the only
+    # case where skip_special_tokens was forced off), and only over literals that
+    # are genuinely in `tokenizer.all_special_tokens`. `reasoning` is left untouched
+    # -- it is already clean, and rewriting it would risk mangling legitimate text
+    # the model quoted.
+    def _strip_control_markers(self, text: str | None) -> str | None:
+        if not text or self._marker_strip_re is None:
+            return text
+        return self._marker_strip_re.sub("", text)
+
     @staticmethod
     def _compose_delta_message(
         reasoning: str | None, content: str | None
@@ -1045,6 +1394,16 @@ class StreamingPostProcessor:
     def _build_choice(self, output: Any, delta: dict[str, Any]) -> dict[str, Any]:
         if delta.get("tool_calls"):
             self._tool_call_choices_emitted.add(output.index)
+        # The single strip point. Every choice this class emits passes through here,
+        # so the invariant "no unconsumed control marker reaches the client" is
+        # enforced once at the funnel rather than at each producer -- stripping at
+        # the producers as well only re-scans text that is about to be scanned.
+        if isinstance(delta.get("content"), str):
+            stripped = self._strip_control_markers(delta["content"])
+            if stripped:
+                delta["content"] = stripped
+            else:
+                delta.pop("content", None)
         return {
             "index": output.index,
             "delta": delta,
@@ -1097,6 +1456,10 @@ class StreamingPostProcessor:
         return self._build_choice(output, delta)
 
     def process_output(self, output: Any) -> dict[str, Any] | None:
+        # BEFORE any branch below: every path must feed the ledger, including
+        # the ones that emit nothing for this chunk.
+        if self.reasoning_parser is not None:
+            self._reasoning_token_ids.extend(output.token_ids or [])
         if self._uses_dynamo_json_tool_call_fallback:
             return self._process_dynamo_json_fallback_tool_calls(output)
         if self._should_buffer_for_non_streaming_tool_parse():
@@ -1134,13 +1497,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            buffer_complete = (
-                any(
-                    marker in self._tool_text_buffer
-                    for marker in self._tool_end_markers()
-                )
-            ) or output.finish_reason
-            if buffer_complete:
+            # Parse once at the end: with multi-token steps (e.g. MTP) a chunk
+            # can close one call and open the next, and splitting the response
+            # between this parse and the streaming parser drops or re-indexes
+            # the later calls.
+            if output.finish_reason:
                 buffered_text = self._tool_text_buffer
                 self._tool_text_buffer = None
                 delta_message = self._extract_tool_calls_from_text(buffered_text)
@@ -1163,9 +1524,10 @@ class StreamingPostProcessor:
 
             # When reasoning ends in this chunk, reset accumulated state.
             # If there is post-reasoning content (e.g. <tool_call> markup),
-            # buffer it for non-streaming extraction rather than feeding it
-            # to the streaming tool parser which cannot handle the combined
-            # reasoning-end + tool-start in a single chunk.
+            # an engine-based tool parser streams it; otherwise buffer it for
+            # non-streaming extraction rather than feeding it to a streaming
+            # tool parser that cannot handle the combined reasoning-end +
+            # tool-start in a single chunk.
             if self.reasoning_parser.engine_based_streaming:
                 reasoning_ended = (
                     self.reasoning_parser.has_engine_confirmed_reasoning_end()
@@ -1191,7 +1553,30 @@ class StreamingPostProcessor:
                 current_token_ids = []
 
                 tool_start_markers = self._tool_start_markers()
-                if post_content and any(
+                if (
+                    post_content
+                    and self._should_parse_tools()
+                    and self.tool_parser is not None
+                    and self.tool_parser.engine_based_streaming
+                ):
+                    # An engine-based tool parser holds back an opener split
+                    # across steps, so the text after the reasoning end goes to
+                    # it with its token IDs. Emitting that text as content here
+                    # leaked a partial opener and lost the tool call.
+                    current_text = post_content
+                    current_token_ids = self.reasoning_parser.extract_content_ids(
+                        delta_token_ids
+                    )
+                    delta_message = self._merge_delta_messages(
+                        self._compose_delta_message(saved_reasoning, None),
+                        self._extract_tool_calls_streaming(
+                            current_text=current_text,
+                            delta_text=current_text,
+                            current_token_ids=current_token_ids,
+                            delta_token_ids=current_token_ids,
+                        ),
+                    )
+                elif post_content and any(
                     marker in post_content for marker in tool_start_markers
                 ):
                     # Tool call markup present — buffer for non-streaming
@@ -1294,10 +1679,8 @@ class StreamingPostProcessor:
                 if len(delta) > 1:
                     choice = self._build_choice(output, delta)
             elif delta_message.tool_calls:
-                if output.finish_reason and self.in_progress_tool_calls:
-                    # Tool calls and finish_reason arrived in the same chunk.
-                    # Emit now — there will be no subsequent process_output call
-                    # to drain the buffer.
+                if self.in_progress_tool_calls:
+                    # Emit each parser delta instead of waiting for a quiet chunk.
                     choice = self._emit_tool_calls_choice(output)
             elif self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)

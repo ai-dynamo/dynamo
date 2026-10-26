@@ -1,11 +1,11 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-# Usage: `python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B`
-# Now supports vLLM-style individual arguments for MockEngineArgs
+# Offline virtual-clock replay lives in AISimulate.
 
 import argparse
 import asyncio
+import functools
 import logging
 import os
 import signal
@@ -43,22 +43,36 @@ async def graceful_shutdown(runtimes: list):
     logger.info("DistributedRuntime shutdown complete")
 
 
-async def prefetch_model(model_path: str) -> None:
-    """Pre-fetch model from HuggingFace to avoid rate limiting with many workers."""
+async def prefetch_model(model_path: str) -> str:
+    """Resolve ``model_path`` to a local directory, fetching config/tokenizer if needed.
+
+    ``fetch_model`` returns the cached snapshot directory without contacting the
+    hub when config.json and the tokenizer files are already present, and downloads
+    only those files otherwise. Resolving once here means neither the workers nor
+    the KV-bytes estimate below resolve a hub ID over the network. Returns the
+    original path on failure so callers degrade to their previous behavior.
+    """
 
     if Path(model_path).exists():
         logger.info(f"Using local model path: {model_path}")
-        return
+        return model_path
 
     logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
     try:
         local_path = await fetch_model(model_path, ignore_weights=True)
         logger.info(f"Model cached at: {local_path}")
+        return str(local_path)
     except Exception as e:
+        # The binding raises the base ``Exception`` for every Rust-side failure
+        # (``to_pyerr``), so there is nothing narrower to catch. Falling back is
+        # deliberate: the workers, and the transformers branch of the KV-bytes
+        # estimate, still resolve the hub ID themselves.
         logger.warning(
-            f"Failed to pre-fetch model: {e}. "
-            "Workers will attempt individual downloads (may cause rate limiting)."
+            "Failed to pre-fetch model: %s. "
+            "Workers will attempt individual downloads (may cause rate limiting).",
+            e,
         )
+        return model_path
 
 
 async def worker():
@@ -73,22 +87,27 @@ async def worker():
     args.planner_profile_data = profile_data_result.npz_path
 
     try:
-        # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
-        if args.num_workers > 1 and args.model_path:
-            await prefetch_model(args.model_path)
-
-        engine_args = load_mocker_engine_args(args)
-        logger.info(
-            "Loaded MockEngineArgs from JSON file"
-            if args.extra_engine_args
-            else "Created MockEngineArgs from CLI arguments"
-        )
+        # Only when something needs the local files: many workers (rate limiting)
+        # or the KV-bytes estimate below (reads config.json).
+        local_model_path = None
+        if args.model_path and (
+            args.num_workers > 1 or args.kv_bytes_per_token is None
+        ):
+            local_model_path = await prefetch_model(args.model_path)
 
         # Auto-compute kv_bytes_per_token from model config if not explicitly set
         if args.kv_bytes_per_token is None and args.model_path:
             args.kv_bytes_per_token = compute_kv_bytes_per_token(
-                args.model_path, args.kv_cache_dtype
+                local_model_path or args.model_path, args.kv_cache_dtype
             )
+
+        engine_args = load_mocker_engine_args(args)
+        logger.info(
+            "Loaded canonical engine config from JSON file"
+            if args.extra_engine_args
+            else "Created canonical engine config from CLI arguments"
+        )
+
         engine_args = apply_worker_engine_args_overrides(
             engine_args, kv_bytes_per_token=args.kv_bytes_per_token
         )
@@ -135,6 +154,19 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     """
     futures = []
     runtimes = []
+    shutdown_requested = False
+
+    def on_worker_done(worker_num: int, future: asyncio.Future) -> None:
+        # Workers serve until shutdown, so one that stops earlier has failed. Report it
+        # here: the gather below waits for every worker and keeps no errors.
+        if shutdown_requested or future.cancelled():
+            return
+        error = future.exception()
+        logger.error(
+            "Mocker worker %d stopped before shutdown: %s",
+            worker_num,
+            error if error is not None else "run_input returned",
+        )
 
     stagger_delay = compute_stagger_delay(args.num_workers, args.stagger_delay)
     batch_size = 32
@@ -155,7 +187,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         args.bootstrap_ports_list
         or args.zmq_kv_events_ports_list
         or args.zmq_replay_ports_list
-        or base_engine_args.aic_nextn is not None
+        or base_engine_args["engine"]["aic_nextn"] is not None
     )
 
     # An advertised router config rides in this worker set's model deployment
@@ -177,6 +209,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             args.discovery_backend,
             args.request_plane,
             args.event_plane,
+            response_plane=args.response_plane,
         )
         runtimes.append(runtime)
 
@@ -198,9 +231,9 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                     if args.zmq_replay_ports_list
                     else None
                 ),
-                aic_mtp_seed=(
-                    (base_engine_args.aic_mtp_seed + worker_id) % (1 << 64)
-                    if base_engine_args.aic_nextn is not None
+                ais_mtp_seed=(
+                    (base_engine_args["engine"]["aic_mtp_seed"] + worker_id) % (1 << 64)
+                    if base_engine_args["engine"]["aic_nextn"] is not None
                     else None
                 ),
             )
@@ -208,6 +241,8 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             worker_engine_args = base_engine_args
 
         kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
+        if args.sglang_generate:
+            runtime_config.set_engine_specific("sglang_generate", "true")
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
@@ -229,6 +264,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
         # run_input returns a Rust Future (not a Python coroutine)
         future = run_input(runtime, args.endpoint, engine_config)
+        future.add_done_callback(functools.partial(on_worker_done, worker_id + 1))
         futures.append(future)
 
         # Stagger worker launches for large deployments
@@ -246,6 +282,12 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
+        nonlocal shutdown_requested
+        # Every worker already stopped on its own: the cleanup below shuts the
+        # runtimes down and exits 1, so this signal is not a shutdown request.
+        if all(future.done() for future in futures):
+            return
+        shutdown_requested = True
         asyncio.create_task(graceful_shutdown(runtimes))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -262,10 +304,10 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         for runtime in runtimes:
             runtime.shutdown()
 
+    if not shutdown_requested:
+        logger.error("Every mocker worker stopped without a shutdown signal")
+        raise SystemExit(1)
+
 
 def main():
     uvloop.run(worker())
-
-
-if __name__ == "__main__":
-    main()

@@ -58,6 +58,7 @@ pub struct Runtime {
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
+    shutdown_started: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
@@ -77,6 +78,7 @@ impl Runtime {
 
         // create endpoint shutdown token as a child of the main token
         let endpoint_shutdown_token = cancellation_token.child_token();
+        let shutdown_started = endpoint_shutdown_token.child_token();
 
         // secondary runtime for background ectd/nats tasks
         let secondary = match secondary {
@@ -100,6 +102,7 @@ impl Runtime {
             secondary,
             cancellation_token,
             endpoint_shutdown_token,
+            shutdown_started,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             compute_pool,
             block_in_place_permits,
@@ -336,8 +339,27 @@ impl Runtime {
         self.compute_pool.as_ref()
     }
 
+    /// Withdraw readiness before application draining without stopping the
+    /// endpoints or transports still needed to complete that drain.
+    pub fn mark_shutting_down(&self) {
+        if !self.shutdown_started.is_cancelled() {
+            tracing::info!("Runtime readiness withdrawn for shutdown");
+            self.shutdown_started.cancel();
+        }
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_started.is_cancelled()
+    }
+
+    /// Observe shutdown from its start, rather than waiting for transport teardown.
+    pub fn shutdown_started_token(&self) -> CancellationToken {
+        self.shutdown_started.child_token()
+    }
+
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
+        self.mark_shutting_down();
         tracing::info!("Runtime shutdown initiated");
 
         // Spawn the shutdown coordination task BEFORE cancelling tokens

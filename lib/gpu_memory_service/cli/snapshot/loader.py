@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -174,15 +175,20 @@ def _list_checkpoint_devices(
 
 
 def main(argv: list[str] | None = None) -> None:
-    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    selector.add_argument("--use-v1", action="store_true")
-    options, remaining = selector.parse_known_args(argv)
-    if options.use_v1:
-        run_per_device("gpu_memory_service.v1.snapshot.loader", remaining)
-        return
+    # python -m passes no argv, and run_per_device forwards argv verbatim to
+    # the per-device helpers, so substitute the real command line first.
+    argv = argv if argv is not None else sys.argv[1:]
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
+        if "-h" in argv or "--help" in argv:
+            return
+        # Stay alive like V0: a restarted container would request a second RW
+        # session, which times out on the restored worker's RO lease.
+        while True:
+            time.sleep(3600)
 
     parser = _build_parser()
-    args = parser.parse_args(remaining)
+    args = parser.parse_args(argv)
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"

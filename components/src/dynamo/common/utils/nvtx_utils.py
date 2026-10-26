@@ -11,8 +11,8 @@ An unrecognized value raises rather than silently disabling.
 The `nvtx` package is an optional dependency (`pip install ai-dynamo[profiling]`,
 already present in the container images). It is imported only when
 DYN_NVTX is on, so call sites below cost nothing and require nothing when
-profiling is off. Enabling it without the package installed raises at import
-rather than silently recording nothing.
+profiling is off. Enabling it without the package installed logs a warning
+and falls back to no-ops, so a launch preset that sets DYN_NVTX still serves.
 
 Usage — same syntax as the bare nvtx module:
 
@@ -42,6 +42,7 @@ or domain cache lookups on the hot path.
 """
 import functools
 import inspect
+import logging
 import os
 
 ENV_VAR = "DYN_NVTX"
@@ -76,20 +77,20 @@ def _parse_enabled(name: str) -> bool:
 ENABLED: bool = _parse_enabled(ENV_VAR)
 
 if ENABLED:
-    # Fail fast and loud. Silently degrading to no-ops would mean discovering at
-    # the end of a profiling run that nothing was recorded; raising at import
-    # tells the user immediately that either the switch is set by mistake or the
-    # profiling extra is missing.
     try:
         import nvtx as _nvtx_lib
-    except ImportError as exc:
-        raise ImportError(
-            f"{ENV_VAR}={os.getenv(ENV_VAR)!r} requires the `nvtx` package, "
-            "which is not installed. Install it with "
-            f"`pip install ai-dynamo[profiling]`, or unset {ENV_VAR} to run "
-            "without NVTX markers."
-        ) from exc
+    except ModuleNotFoundError as exc:
+        # Only a missing nvtx package degrades to the no-op path: profiling presets
+        # set DYN_NVTX for every launch and an image without the package must still
+        # serve. A broken installation stays visible.
+        if exc.name != "nvtx":
+            raise
+        logging.getLogger(__name__).warning(
+            f"{ENV_VAR} is set but the nvtx package is not installed; NVTX markers are disabled"
+        )
+        ENABLED = False
 
+if ENABLED:
     # Named domain + pre-allocated EventAttributes: no per-call object
     # allocation or domain cache lookups on the hot path.
     _domain = _nvtx_lib.get_domain("dynamo")

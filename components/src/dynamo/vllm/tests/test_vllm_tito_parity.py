@@ -216,7 +216,7 @@ class TestLogprobTokenIds:
     OpenAI adapters do, so `SamplingParams.verify()` accepts the pair."""
 
     @staticmethod
-    def _build(output_options, sampling_options=None):
+    def _build(output_options, sampling_options=None, extra_args=None):
         from dynamo.vllm.handlers import build_sampling_params
 
         return build_sampling_params(
@@ -225,6 +225,7 @@ class TestLogprobTokenIds:
                 "sampling_options": sampling_options or {},
                 "stop_conditions": {},
                 "output_options": output_options,
+                "extra_args": extra_args or {},
             },
             {},
         )
@@ -244,6 +245,65 @@ class TestLogprobTokenIds:
     def test_empty_id_list_falls_through_to_top_k(self):
         sp = self._build({"logprobs": 5}, sampling_options={"logprob_token_ids": []})
         assert sp.logprobs == 5
+
+    def test_unsigned_full_vocab_sentinel_restores_vllm_value(self):
+        sp = self._build({"logprobs": 2**32 - 1, "prompt_logprobs": 2**32 - 1})
+        assert sp.logprobs == -1
+        assert sp.prompt_logprobs == -1
+
+    def test_prompt_logprobs_bypass_prefix_cache_by_default(self):
+        sp = self._build({"prompt_logprobs": 1})
+        assert sp.prompt_logprobs == 1
+        assert sp.skip_reading_prefix_cache is True
+
+    def test_explicit_prefix_cache_setting_is_preserved(self):
+        sp = self._build(
+            {"prompt_logprobs": 1},
+            extra_args={"skip_reading_prefix_cache": False},
+        )
+        assert sp.skip_reading_prefix_cache is False
+
+
+class TestVllmXargs:
+    @staticmethod
+    def _build(vllm_xargs, default_extra_args=None):
+        from dynamo.vllm.handlers import build_sampling_params
+
+        defaults = {"extra_args": default_extra_args} if default_extra_args else {}
+        return build_sampling_params(
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_options": {},
+                "stop_conditions": {},
+                "output_options": {},
+                "extra_args": {"sampling_options": {"vllm_xargs": vllm_xargs}},
+            },
+            defaults,
+        )
+
+    def test_xargs_become_extra_args(self):
+        sp = self._build(
+            {"diffusion_seed_canvas": [100, 0], "diffusion_read_only": True}
+        )
+        assert sp.extra_args == {
+            "diffusion_seed_canvas": [100, 0],
+            "diffusion_read_only": True,
+        }
+        assert not hasattr(sp, "vllm_xargs")
+
+    def test_xargs_merge_over_default_extra_args(self):
+        sp = self._build({"b": 2}, default_extra_args={"a": 1, "b": 1})
+        assert sp.extra_args == {"a": 1, "b": 2}
+
+    def test_connector_keys_are_not_forwarded(self):
+        sp = self._build(
+            {
+                "kv_transfer_params": {"do_remote_prefill": True},
+                "ec_transfer_params": {"x": 1},
+                "keep": 1,
+            }
+        )
+        assert sp.extra_args == {"keep": 1}
 
 
 class TestFlattenLogprobs:

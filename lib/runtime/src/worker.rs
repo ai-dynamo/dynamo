@@ -79,6 +79,7 @@ impl Worker {
 
     /// Create a new [`Worker`] instance from a provided [`RuntimeConfig`]
     pub fn from_config(config: RuntimeConfig) -> anyhow::Result<Worker> {
+        RuntimeConfig::validate_parser_environment()?;
         // if the runtime is already initialized, return an error
         if RT.get().is_some() {
             return Err(anyhow::anyhow!("Worker already initialized"));
@@ -123,6 +124,7 @@ impl Worker {
     /// Exists because the pyo3 bridge needs a `&'static tokio::runtime::Runtime`, which
     /// [`Worker::from_config`] cannot provide — it errors when a runtime already exists.
     pub fn ensure_process_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+        RuntimeConfig::validate_parser_environment()?;
         // Fast path — `get_or_try_init` below would also return it, just less cheaply.
         if let Some(rt) = RT.get() {
             return Ok(rt);
@@ -144,6 +146,15 @@ impl Worker {
     /// find out whether it would be the owner.
     pub fn has_existing_runtime() -> bool {
         RT.get().is_some()
+    }
+
+    /// The process-wide runtime, if one was ever created. Never creates one.
+    ///
+    /// Unlike [`Worker::ensure_process_runtime`], this returns `None` rather than building a
+    /// runtime, so a caller running at process exit can ask about the runtime without starting
+    /// worker threads on the way out.
+    pub fn existing_process_runtime() -> Option<&'static tokio::runtime::Runtime> {
+        RT.get()
     }
 
     pub fn tokio_runtime(&self) -> anyhow::Result<&'static tokio::runtime::Runtime> {

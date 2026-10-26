@@ -28,7 +28,7 @@ ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
 # Base and runtime images configuration
 ARG BASE_IMAGE={{ context[framework][device_key].base_image }}
 ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
-{% if framework in ["sglang", "trtllm", "vllm"] -%}
+{% if framework in ["sglang", "trtllm", "vllm", "triton"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
 {%- endif %}
@@ -44,19 +44,17 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 {% endif %}
 
 # Build configuration
-ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
-# Compile the Rust NVTX markers into the bindings wheel. Off by default; the
-# markers still need DYN_NVTX=1 at runtime once compiled in.
-ARG ENABLE_NVTX=false
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
+ARG NATS_COMMIT={{ context.dynamo.nats_commit }}
 ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
+ARG ETCD_COMMIT={{ context.dynamo.etcd_commit }}
 
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
 ARG LIBVPX_REF={{ context.dynamo.libvpx_ref }}
-{% if device == "cuda" -%}
+{% if device in ("cuda", "xpu") -%}
 ARG ENABLE_GPU_MEMORY_SERVICE={{ context[framework].enable_gpu_memory_service }}
 {% endif %}
 
@@ -97,12 +95,18 @@ ARG PLANNER_BUILD_IMAGE={{ context.dynamo.planner_build_image }}
 ARG PLANNER_BUILD_IMAGE_TAG={{ context.dynamo.planner_build_image_tag }}
 ARG PLANNER_RUNTIME_IMAGE={{ context.dynamo.planner_runtime_image }}
 ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
+# Planner-scoped interpreter — see context.yaml `planner_python_version` for
+# why this is not the global PYTHON_VERSION.
+ARG PLANNER_PYTHON_VERSION={{ context.dynamo.planner_python_version }}
 {% endif %}
 
 {% if framework == "vllm" -%}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
-ARG TRANSFORMERS_VERSION={{ context.vllm.transformers_version }}
-ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
+{% if context.vllm[device_key].transformers_version is defined -%}
+ARG TRANSFORMERS_VERSION={{ context.vllm[device_key].transformers_version }}
+ARG TOKENIZERS_VERSION={{ context.vllm[device_key].tokenizers_version }}
+{% endif -%}
+ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
 {% if device == "cuda" -%}
 # If left blank, then we will fallback to vLLM defaults

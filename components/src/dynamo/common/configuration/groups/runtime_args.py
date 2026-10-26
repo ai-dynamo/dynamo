@@ -6,18 +6,53 @@
 import argparse
 import logging
 import os
-from typing import List, Optional
+from importlib.metadata import version as distribution_version
+from typing import List, Literal, Optional
+
+import msgspec
+from packaging.version import Version
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    env_or_default,
+)
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 logger = logging.getLogger(__name__)
+# Canonical variable the backend admission gate reads for its full-request
+# limit; it outranks the legacy DYN_ENGINE_REQUEST_LIMIT alias.
+_ENGINE_REQUEST_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT"
 _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
 _fpm_trace_invalid_warning_emitted = False
+
+
+class StructuralTagConfig(msgspec.Struct, forbid_unknown_fields=True):
+    scope: Literal["auto", "always"] = "always"
+    schema: Literal["auto", "strict"] = "auto"
+    allow_tool_calls_with_structured_output: bool = False
+    exclude_special_tokens: Optional[bool] = None
+    reasoning_boundary: Literal["auto", "structural_tag", "backend"] = "auto"
+    tool_arguments_any_order: bool = False
+
+
+_STRUCTURAL_TAG_CONFIG_DECODER = msgspec.json.Decoder(type=StructuralTagConfig)
+
+
+def _parse_structural_tag(value: str) -> StructuralTagConfig | bool:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return StructuralTagConfig()
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    try:
+        return _STRUCTURAL_TAG_CONFIG_DECODER.decode(value)
+    except msgspec.DecodeError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 class DynamoRuntimeConfig(ConfigBase):
@@ -30,6 +65,7 @@ class DynamoRuntimeConfig(ConfigBase):
     kv_state_endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
+    response_plane: str = "tcp"
     event_plane: Optional[str] = None
     fpm_trace: bool = False
     connector: list[str]
@@ -39,9 +75,11 @@ class DynamoRuntimeConfig(ConfigBase):
     dyn_reasoning_parser: Optional[str] = None
     dyn_default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
-    dyn_enable_structural_tag: bool = False
-    dyn_structural_tag_scope: str = "auto"
-    dyn_structural_tag_schema: str = "auto"
+    dyn_enable_structural_tag: Optional[bool] = None
+    dyn_structural_tag_scope: Optional[Literal["auto", "always"]] = None
+    dyn_structural_tag_schema: Optional[Literal["auto", "strict"]] = None
+    dyn_structural_tag: Optional[StructuralTagConfig | bool] = None
+    structural_tag: Optional[dict[str, object]] = None
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
     dump_config_to: Optional[str] = None
@@ -54,9 +92,11 @@ class DynamoRuntimeConfig(ConfigBase):
     # Honored only by the unified backend's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
-    # Worker-side request admission/rejection knobs. Disabled (None) by
-    # default; when set, these surface env vars that the Rust runtime reads
-    # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
+    # Explicit --engine-request-limit for the backend admission gate, per DP
+    # rank. None leaves the gate on its environment settings and automatic
+    # value; validate() exports a set value, which the gate reads from the
+    # process environment when it is created (see
+    # lib/llm/src/admission_gate.rs).
     engine_request_limit: Optional[int] = None
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
@@ -74,6 +114,7 @@ class DynamoRuntimeConfig(ConfigBase):
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
+        self.structural_tag = resolve_structural_tag_config(self)
 
         # The Rust FPM sink reads this setting from the process environment.
         # Canonicalize the resolved CLI/env value before the runtime or backend
@@ -100,10 +141,16 @@ class DynamoRuntimeConfig(ConfigBase):
 
         self._validate_output_modalities()
 
-        if self.engine_request_limit is not None and self.engine_request_limit <= 0:
-            raise ValueError(
-                f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
-            )
+        if self.engine_request_limit is not None:
+            if self.engine_request_limit <= 0:
+                raise ValueError(
+                    f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+                )
+            # An explicit flag outranks both environment names, so it replaces
+            # the canonical one, which the gate reads ahead of the legacy alias.
+            os.environ[_ENGINE_REQUEST_LIMIT_ENV] = str(self.engine_request_limit)
+
+        os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
         # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
         if self.tcp_tls_cert_path:
@@ -215,6 +262,14 @@ class DynamoRuntimeArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--response-plane",
+            env_var="DYN_RESPONSE_PLANE",
+            default="tcp",
+            help="Select the response transport. Frontend and workers must match.",
+            choices=["tcp", "quic"],
+        )
+        add_argument(
+            g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
@@ -278,37 +333,38 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Exclude tool definitions from the chat template when tool_choice='none'. "
             "Prevents models from generating raw XML tool calls in the content field.",
         )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--dyn-enable-structural-tag",
-            env_var="DYN_ENABLE_STRUCTURAL_TAG",
-            default=False,
-            help="Enable structural tag guided decoding for tool calls. "
-            "Named Kimi K3 tool_choice requests always activate their required "
-            "XTML structural tag even when this flag is off.",
+        g.add_argument(
+            "--dyn-enable-structural-tag",
+            action=argparse.BooleanOptionalAction,
+            default=env_or_default("DYN_ENABLE_STRUCTURAL_TAG", None, value_type=bool),
+            help=argparse.SUPPRESS,
         )
-        add_argument(
-            g,
-            flag_name="--dyn-structural-tag-scope",
-            env_var="DYN_STRUCTURAL_TAG_SCOPE",
-            default="auto",
+        g.add_argument(
+            "--dyn-structural-tag-scope",
+            default=env_or_default("DYN_STRUCTURAL_TAG_SCOPE", None, value_type=str),
             choices=["auto", "always"],
-            help="Controls when structural tags are activated. "
-            "'auto': for required/named tool_choice, and if any tool has strict=true "
-            "or parallel_tool_calls is false. "
-            "'always': also for auto without those conditions. "
-            "tool_choice none is unaffected by auto vs always.",
+            help=argparse.SUPPRESS,
+        )
+        g.add_argument(
+            "--dyn-structural-tag-schema",
+            default=env_or_default("DYN_STRUCTURAL_TAG_SCHEMA", None, value_type=str),
+            choices=["auto", "strict"],
+            help=argparse.SUPPRESS,
         )
         add_argument(
             g,
-            flag_name="--dyn-structural-tag-schema",
-            env_var="DYN_STRUCTURAL_TAG_SCHEMA",
-            default="auto",
-            choices=["auto", "strict"],
-            help="Controls parameter schema strictness inside structural tags. "
-            "'auto': real schema only for tools with strict=true; "
-            "syntactically constrained but schema-unconstrained for all other tools. "
-            "'strict': real parameter schema for all tools.",
+            flag_name="--dyn-structural-tag",
+            env_var="DYN_STRUCTURAL_TAG",
+            default=None,
+            arg_type=_parse_structural_tag,
+            nargs="?",
+            const="true",
+            help="Configure default-on structural tag guided decoding with a JSON object, "
+            "or pass false to disable optional guidance. Rust retains native tags for "
+            "Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang "
+            "respect the opt-out. Schema auto enforces strict omitted or true; schema "
+            "strict enforces every tool, overriding strict=false. Unsupported schema "
+            "constructs can cause backend grammar compilation errors.",
         )
         add_argument(
             g,
@@ -392,21 +448,21 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "default health_check_payload(). Unified backend only.",
         )
 
-        # Worker-side request admission/rejection. Defaults to None (disabled);
-        # when unset the worker behaves exactly as before. Surfaces an env var —
-        # the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT directly. The Dynamo-side
-        # overflow queue is a small fixed burst (default 16, hard cap N+16) and is
-        # not a user-facing knob; advanced users may override it via the
-        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT env var.
-        add_argument(
-            g,
-            flag_name="--engine-request-limit",
-            env_var="DYN_ENGINE_REQUEST_LIMIT",
+        # Backend admission full-request limit. Registered without an
+        # environment default: the gate itself resolves the canonical variable,
+        # then the legacy alias, then its automatic value, so only an explicit
+        # flag is set here, and validate() exports it ahead of both variables.
+        g.add_argument(
+            "--engine-request-limit",
+            dest="engine_request_limit",
+            type=int,
             default=None,
-            arg_type=int,
-            help="Max requests handled concurrently by the engine (worker-pool "
-            "semaphore size). Enables worker-side request rejection when set. "
-            "Disabled by default.",
+            help="Maximum concurrent engine requests admitted by the backend "
+            "admission gate per DP rank, each held from admission until the "
+            "request finishes. Takes precedence over both environment variables.\n"
+            f"env var: {_ENGINE_REQUEST_LIMIT_ENV} (legacy alias: "
+            "DYN_ENGINE_REQUEST_LIMIT) | default: the engine's reported "
+            "max_num_seqs, or 10000 until it is reported",
         )
 
         add_argument(
@@ -515,3 +571,79 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=None,
             help="Path to PEM private key for the NATS client certificate (mTLS).",
         )
+
+
+def _validate_xgrammar_any_order_support() -> None:
+    xgrammar_version = Version(distribution_version("xgrammar"))
+    if xgrammar_version < Version("0.2.3"):
+        raise ValueError(
+            "tool_arguments_any_order requires XGrammar >= 0.2.3; "
+            f"found {xgrammar_version}"
+        )
+
+
+def resolve_structural_tag_config(
+    runtime_config: DynamoRuntimeConfig,
+) -> Optional[dict[str, object]]:
+    """Normalize the public setting and hidden legacy flags."""
+
+    structural_tag_setting = runtime_config.dyn_structural_tag
+    if structural_tag_setting is True:
+        structural_tag_setting = StructuralTagConfig()
+    legacy_enable = runtime_config.dyn_enable_structural_tag
+    legacy_scope = runtime_config.dyn_structural_tag_scope
+    legacy_schema = runtime_config.dyn_structural_tag_schema
+
+    legacy_options = []
+    if legacy_enable is not None:
+        legacy_options.append(
+            "--dyn-enable-structural-tag"
+            if legacy_enable
+            else "--no-dyn-enable-structural-tag"
+        )
+    if legacy_scope is not None:
+        legacy_options.append("--dyn-structural-tag-scope")
+    if legacy_schema is not None:
+        legacy_options.append("--dyn-structural-tag-schema")
+    if legacy_options:
+        logger.warning(
+            "%s deprecated; use --dyn-structural-tag instead",
+            ", ".join(legacy_options),
+        )
+
+    if structural_tag_setting is not None:
+        enabled = structural_tag_setting is not False
+        conflicting_options = []
+        if legacy_enable is not None and legacy_enable != enabled:
+            conflicting_options.append(
+                "--dyn-enable-structural-tag"
+                if legacy_enable
+                else "--no-dyn-enable-structural-tag"
+            )
+        if legacy_scope is not None:
+            conflicting_options.append("--dyn-structural-tag-scope")
+        if legacy_schema is not None:
+            conflicting_options.append("--dyn-structural-tag-schema")
+        if conflicting_options:
+            raise ValueError(
+                "--dyn-structural-tag cannot be combined with legacy option(s): "
+                + ", ".join(conflicting_options)
+            )
+        if not enabled:
+            return None
+        if (
+            isinstance(structural_tag_setting, StructuralTagConfig)
+            and structural_tag_setting.tool_arguments_any_order
+        ):
+            _validate_xgrammar_any_order_support()
+        return msgspec.to_builtins(structural_tag_setting)
+
+    if legacy_enable is False:
+        return None
+
+    return msgspec.to_builtins(
+        StructuralTagConfig(
+            scope=legacy_scope if legacy_scope is not None else "always",
+            schema=legacy_schema if legacy_schema is not None else "auto",
+        )
+    )

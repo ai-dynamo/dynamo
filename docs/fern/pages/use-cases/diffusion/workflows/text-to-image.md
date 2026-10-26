@@ -7,6 +7,9 @@ subtitle: Generate images from text prompts with vLLM-Omni, SGLang, or TensorRT-
 
 Choose a backend for text-to-image generation. See the [Diffusion Overview](../overview.md) for installation and shared configuration.
 
+For image edits and the unsupported `/v1/images/variations` route, see
+[Image API Compatibility](../../../reference/components/frontend-configuration.mdx#image-api-compatibility).
+
 <Tabs>
 <Tab title="vLLM-Omni">
 
@@ -20,6 +23,7 @@ Text-to-image generation runs a vLLM-Omni worker with `--output-modalities image
 |---|---|
 | `Qwen/Qwen-Image` | Default model |
 | `AIDC-AI/Ovis-Image-7B` | |
+| `black-forest-labs/FLUX.2-klein-4B` | Text-to-image and reference-image editing; see [Create a Variation with Image Edits](#create-a-variation-with-image-edits) |
 | `zai-org/GLM-Image` | 2-stage; see [Disaggregated Serving](../../../developer-guide/knowledge-base/modular-components/backends/vllm/vllm-omni-disaggregated-serving.md) |
 
 To run a non-default model, pass `--model` to the launch script:
@@ -39,6 +43,8 @@ bash examples/backends/vllm/launch/agg_omni_image.sh
 ## Generate an Image
 
 Image generation is available on two endpoints: `/v1/chat/completions` returns base64-encoded images inline in `choices[].delta.content[].image_url`, while `/v1/images/generations` returns a URL or base64 depending on `response_format`.
+
+For `/v1/images/generations` and `/v1/images/edits`, Dynamo's vLLM-Omni image handler accepts `output_format` values `png` (default), `jpeg`, and `webp`. It reports the encoded format in `output_format`; use `jpeg` for JPEG output. It reports `size` when every output has the same valid dimensions and returns `null` when dimensions are mixed or unavailable. This handler accepts `response_format` values `url` and `b64_json`; if omitted, the response uses base64. JPEG output composites transparent pixels onto white. This handler does not apply `quality` or `background`; requests that set either field are rejected with HTTP 400 rather than echoing values that were not used.
 
 <Tabs>
 <Tab title="/v1/images/generations">
@@ -70,8 +76,77 @@ curl -s http://localhost:8000/v1/chat/completions \
 </Tab>
 </Tabs>
 
+The response reports image accounting under `nvext.usage` (images returned, reference images
+consumed, and the step count; vLLM-Omni reports the count the request asked for), while the OpenAI
+`usage` field stays `null` because diffusion models report no token counts. See
+[Image Accounting](../../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md#image-accounting).
+
+## Create a Variation with Image Edits
+
+To generate a new image guided by an existing image, send a reference image and a prompt
+to `/v1/images/edits`. Use a model that supports image conditioning; text-to-image support
+alone does not establish editing support. This example uses `black-forest-labs/FLUX.2-klein-4B`
+with vLLM 0.31.0 and vLLM-Omni 0.31.0rc1.
+
+> [!IMPORTANT]
+> Use a Dynamo build containing the [image-reference forwarding fix](https://github.com/ai-dynamo/dynamo/pull/15390).
+> Dynamo 1.5.1 ignores edit references. See [Image API Compatibility](../../../reference/components/frontend-configuration.mdx#image-api-compatibility)
+> for the JSON request contract and the remaining multipart-upload limitation.
+
+Launch the reference-capable model from the repository root:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_image.sh \
+  --model black-forest-labs/FLUX.2-klein-4B \
+  --enforce-eager
+```
+
+In a second terminal, encode a local PNG named `reference.png` into a JSON request. The
+file is read on the client; the server receives a base64 data URL in `input_reference`.
+
+```bash
+python3 - <<'PY' > edit-request.json
+import base64
+import json
+from pathlib import Path
+
+reference = base64.b64encode(Path("reference.png").read_bytes()).decode("ascii")
+print(json.dumps({
+    "model": "black-forest-labs/FLUX.2-klein-4B",
+    "prompt": "Create a watercolor variation of this image, preserving its main subject.",
+    "input_reference": f"data:image/png;base64,{reference}",
+    "size": "512x512",
+    "n": 1,
+    "response_format": "b64_json",
+    "nvext": {"num_inference_steps": 4, "guidance_scale": 1.0, "seed": 42},
+}))
+PY
+
+curl --fail-with-body -sS http://localhost:8000/v1/images/edits \
+  -H 'Content-Type: application/json' \
+  --data-binary @edit-request.json > edit-response.json
+```
+
+Decode the returned PNG:
+
+```bash
+python3 - <<'PY'
+import base64
+import json
+from pathlib import Path
+
+response = json.loads(Path("edit-response.json").read_text())
+Path("edited.png").write_bytes(base64.b64decode(response["data"][0]["b64_json"]))
+PY
+```
+
+To use a hosted reference instead, set `input_reference` to an HTTP(S) image URL that the
+worker can fetch. Do not use `curl -F` or the native vLLM-Omni `image` field through the
+Dynamo frontend; this endpoint currently requires the JSON `input_reference` contract.
+
 ## See Also
 
+- [Cosmos3 Nano example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md) — experimental image and video serving, with explicit guardrail configuration
 - [Text-to-Image with SGLang](text-to-image.md#sglang)
 - [Text-to-Image with TensorRT-LLM](text-to-image.md#tensorrt-llm)
 - [Disaggregated Serving](../../../developer-guide/knowledge-base/modular-components/backends/vllm/vllm-omni-disaggregated-serving.md) — GLM-Image (2-stage text-to-image)

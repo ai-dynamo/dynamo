@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{ffi::OsString, sync::Arc};
+use std::ffi::OsString;
 
 use anyhow::Result;
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, SequencePublisher,
-    protocols::{ActiveSequenceEventBatch, MAX_REPLICA_BATCH_EVENTS},
+use dynamo_kv_router::protocols::{
+    ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_EVENTS,
 };
 use dynamo_runtime::{
     component::Endpoint,
@@ -14,6 +13,7 @@ use dynamo_runtime::{
     discovery::EventTransportKind,
     transports::event_plane::{Codec, uses_direct_zmq},
 };
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -88,10 +88,15 @@ impl DirectZmqSequenceConfig {
     }
 }
 
-pub(super) async fn start<P: SequencePublisher + 'static>(
+/// Direct-ZMQ ingress for active-sequence batches: one source per publisher,
+/// continuity tracked from zero, events forwarded into the partition's inbound
+/// replica channel. A full channel drops the event and counts it. The local
+/// replica's own publisher, if any, is not subscribed.
+pub(super) async fn start(
     endpoint: Endpoint,
-    tracker: Arc<ActiveSequencesMultiWorker<P>>,
+    inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
     rcvhwm: i32,
+    local_publisher_id: Option<u64>,
     cancellation_token: CancellationToken,
 ) -> Result<JoinHandle<()>> {
     let metrics = ActiveSequenceZmqIngressMetrics::from_component(endpoint.component());
@@ -111,13 +116,18 @@ pub(super) async fn start<P: SequencePublisher + 'static>(
                 MAX_REPLICA_BATCH_EVENTS
             );
         }
-        tracker.apply_replica_batch(batch.events);
+        for event in batch.events {
+            if inbound_tx.try_send(event).is_err() {
+                handler_metrics.record_dropped_event();
+            }
+        }
         Ok(())
     };
     let observer =
         move |observation: crate::direct_zmq_fan_in::FanInObservation| match observation.event {
             FanInEvent::SourceStarted => metrics.source_started(),
             FanInEvent::SourceStopped => metrics.source_stopped(),
+            FanInEvent::Disconnected | FanInEvent::DiscoveryReset => {}
             FanInEvent::Reconnect => metrics.record_reconnect(),
             FanInEvent::Replacement => metrics.record_replacement(),
             FanInEvent::EnvelopeDecodeError => metrics.record_envelope_decode_error(),
@@ -131,7 +141,7 @@ pub(super) async fn start<P: SequencePublisher + 'static>(
         endpoint,
         ACTIVE_SEQUENCES_SUBJECT,
         rcvhwm,
-        None,
+        local_publisher_id,
         ContinuityMode::TrackFromZero,
         cancellation_token,
         handler,
@@ -142,12 +152,9 @@ pub(super) async fn start<P: SequencePublisher + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
 
-    use dynamo_kv_router::{
-        NoopSequencePublisher,
-        protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank},
-    };
+    use dynamo_kv_router::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime, distributed::DistributedConfig,
         transports::event_plane::EventPublisher,
@@ -231,28 +238,18 @@ mod tests {
             ))?
             .component("frontend")?
             .endpoint("generate");
-        let tracker = Arc::new(ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            4,
-            HashMap::from([(0, (0, 1))]),
-            true,
-            1,
-            "test",
-        ));
-        let worker = WorkerWithDpRank::new(0, 0);
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(16);
         let cancel = CancellationToken::new();
         let supervisor = start(
             endpoint.clone(),
-            tracker.clone(),
+            inbound_tx,
             DEFAULT_RCVHWM,
+            None,
             cancel.clone(),
         )
         .await?;
 
-        for (index, request_id) in ["before-recreation", "after-recreation"]
-            .into_iter()
-            .enumerate()
-        {
+        for request_id in ["before-recreation", "after-recreation"] {
             let publisher = EventPublisher::for_endpoint_with_transport(
                 &endpoint,
                 ACTIVE_SEQUENCES_SUBJECT,
@@ -267,10 +264,15 @@ mod tests {
                         })
                         .await
                         .unwrap();
-                    if tracker.active_request_counts()[&worker] == index + 1 {
-                        break;
+                    tokio::select! {
+                        received = inbound_rx.recv() => {
+                            // Republished duplicates of the previous id may still be queued.
+                            if received.map(|event| event.request_id).as_deref() == Some(request_id) {
+                                break;
+                            }
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(20)) => {}
                     }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
             .await

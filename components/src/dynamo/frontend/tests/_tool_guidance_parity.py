@@ -45,17 +45,13 @@ TOOL_GUIDANCE_PARITY_CASES = (
         "assistant",
     ),
     # response_format is scoped to the message returned to the user, not to tool
-    # calls, so a forced choice keeps the tool constraint and drops it. SGLang
-    # instead lets response_format win and can return no tool call at all --
-    # see the TODO above `guided_decoding = response_format_guided_decoding or ...`
-    # in sglang_prepost.py.
+    # calls, so a forced choice keeps the tool constraint and drops it.
     ToolGuidanceParityCase(
         "forced-choice-with-response-format",
         "required",
         True,
         True,
         "tool",
-        known_divergent=(("sglang", "assistant"),),
     ),
     ToolGuidanceParityCase(
         "named-choice-with-response-format",
@@ -63,7 +59,6 @@ TOOL_GUIDANCE_PARITY_CASES = (
         True,
         True,
         "tool",
-        known_divergent=(("sglang", "assistant"),),
     ),
 )
 

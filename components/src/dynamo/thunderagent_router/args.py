@@ -9,11 +9,11 @@ import argparse
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.utils import add_argument
+from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.router.args import (
     DynamoRouterArgGroup,
     DynamoRouterConfig,
-    build_aic_perf_config,
+    build_ais_perf_config,
     build_kv_router_config,
 )
 from dynamo.thunderagent_router.router import ThunderAgentConfig
@@ -36,6 +36,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     model_path: Optional[str] = None
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
+    publish_sglang_generate: bool = False
 
     def to_thunderagent_config(self) -> ThunderAgentConfig:
         return ThunderAgentConfig(
@@ -69,6 +70,8 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             raise ValueError("--scheduler-interval-seconds must be > 0")
         if self.resume_timeout_seconds <= 0:
             raise ValueError("--resume-timeout-seconds must be > 0")
+        if self.publish_sglang_generate and not self.model_name:
+            raise ValueError("--publish-sglang-generate requires --model-name")
 
 
 class ThunderAgentArgGroup(ArgGroup):
@@ -76,7 +79,7 @@ class ThunderAgentArgGroup(ArgGroup):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         # Inherit standard router options (--endpoint, --router-block-size, KV
-        # router knobs, AicPerf options).
+        # router knobs, AisPerf options).
         DynamoRouterArgGroup().add_arguments(parser)
 
         g = parser.add_argument_group("ThunderAgent Scheduler Options")
@@ -218,6 +221,15 @@ class ThunderAgentArgGroup(ArgGroup):
             "is set.",
             arg_type=str,
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--publish-sglang-generate",
+            env_var="DYN_THUNDERAGENT_PUBLISH_SGLANG_GENERATE",
+            default=False,
+            help="Advertise SGLang's native /generate API through the "
+            "ThunderAgent router. Enable only when --endpoint targets a "
+            "Dynamo SGLang worker that publishes native generate support.",
+        )
 
 
 def parse_args(argv: Optional[list[str]] = None) -> ThunderAgentRouterConfig:
@@ -236,7 +248,7 @@ def parse_args(argv: Optional[list[str]] = None) -> ThunderAgentRouterConfig:
 __all__ = [
     "ThunderAgentArgGroup",
     "ThunderAgentRouterConfig",
-    "build_aic_perf_config",
+    "build_ais_perf_config",
     "build_kv_router_config",
     "parse_args",
 ]

@@ -14,7 +14,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -40,12 +39,28 @@ type outerJSONCollision struct {
 }
 
 func TestNormalizeJSON_OuterFieldWinsEmbeddedCollision(t *testing.T) {
-	normalized, err := normalizeV1Beta1JSON([]byte(`{"same":{}}`), reflect.TypeOf(outerJSONCollision{}))
+	normalized, err := normalizeV1Beta1JSON([]byte(`{"same":{}}`), reflect.TypeFor[outerJSONCollision]())
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
 	if string(normalized) != "{}" {
 		t.Fatalf("expected outer value-typed field to win collision and be stripped, got %s", string(normalized))
+	}
+}
+
+func TestNormalizeJSON_PreservesLargeInteger(t *testing.T) {
+	const raw = `{"spec":{"components":[{"podTemplate":{"spec":{"terminationGracePeriodSeconds":9007199254740993}}}]}}`
+
+	t.Log("Normalize a DGD containing an int64 value beyond exact float64 precision")
+	normalized, err := normalizeV1Beta1JSON([]byte(raw), reflect.TypeFor[DynamoGraphDeployment]())
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+
+	t.Log("Verify normalization preserves the original integer token")
+	const want = `"terminationGracePeriodSeconds":9007199254740993`
+	if !bytes.Contains(normalized, []byte(want)) {
+		t.Fatalf("normalized JSON does not contain %s: %s", want, normalized)
 	}
 }
 
@@ -57,37 +72,29 @@ func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
 		{
 			name: "DynamoGraphDeployment",
 			obj: &DynamoGraphDeployment{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "nvidia.com/v1beta1",
-					Kind:       "DynamoGraphDeployment",
-				},
+				APIVersion: "nvidia.com/v1beta1",
+				Kind:       "DynamoGraphDeployment",
 			},
 		},
 		{
 			name: "DynamoComponentDeployment",
 			obj: &DynamoComponentDeployment{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "nvidia.com/v1beta1",
-					Kind:       "DynamoComponentDeployment",
-				},
+				APIVersion: "nvidia.com/v1beta1",
+				Kind:       "DynamoComponentDeployment",
 			},
 		},
 		{
 			name: "DynamoGraphDeploymentRequest",
 			obj: &DynamoGraphDeploymentRequest{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "nvidia.com/v1beta1",
-					Kind:       "DynamoGraphDeploymentRequest",
-				},
+				APIVersion: "nvidia.com/v1beta1",
+				Kind:       "DynamoGraphDeploymentRequest",
 			},
 		},
 		{
 			name: "DynamoGraphDeploymentScalingAdapter",
 			obj: &DynamoGraphDeploymentScalingAdapter{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "nvidia.com/v1beta1",
-					Kind:       "DynamoGraphDeploymentScalingAdapter",
-				},
+				APIVersion: "nvidia.com/v1beta1",
+				Kind:       "DynamoGraphDeploymentScalingAdapter",
 			},
 		},
 	}
@@ -117,6 +124,51 @@ func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
 	}
 }
 
+func TestDGDMarshal_PreservesForceScalingGroupPresence(t *testing.T) {
+	tests := []struct {
+		name        string
+		value       *bool
+		wantPresent bool
+		wantValue   bool
+	}{
+		{name: "omitted"},
+		{name: "explicit false", value: new(false), wantPresent: true},
+		{name: "true", value: new(true), wantPresent: true, wantValue: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Marshal a DGD through the v1beta1 wire representation")
+			dgd := &DynamoGraphDeployment{
+				Spec: DynamoGraphDeploymentSpec{
+					Components: []DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "worker",
+						Experimental: &ExperimentalSpec{
+							Grove: &GroveSpec{ForceScalingGroup: tt.value},
+						},
+					}},
+				},
+			}
+			raw, err := json.Marshal(dgd)
+			if err != nil {
+				t.Fatalf("marshal DGD: %v", err)
+			}
+
+			t.Log("Verify explicit false remains distinguishable from an omitted field")
+			root := unmarshalToMap(t, raw)
+			components := root["spec"].(map[string]any)["components"].([]any)
+			grove := components[0].(map[string]any)["experimental"].(map[string]any)["grove"].(map[string]any)
+			got, present := grove["forceScalingGroup"]
+			if present != tt.wantPresent {
+				t.Fatalf("forceScalingGroup presence = %t, want %t; JSON: %s", present, tt.wantPresent, raw)
+			}
+			if present && got != tt.wantValue {
+				t.Fatalf("forceScalingGroup = %v, want %t; JSON: %s", got, tt.wantValue, raw)
+			}
+		})
+	}
+}
+
 // TestDGDMarshal_StripsEmptyPodTemplateMetadata locks in the fix for the
 // kubectl-apply generation-bump regression: when the stored v1alpha1 object
 // has no ExtraPodMetadata, the v1beta1 projection built by buildPodTemplateTo
@@ -127,11 +179,9 @@ func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
 // manifest. After MarshalJSON normalization the key must be absent.
 func TestDGDMarshal_StripsEmptyPodTemplateMetadata(t *testing.T) {
 	dgd := &DynamoGraphDeployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "nvidia.com/v1beta1",
-			Kind:       "DynamoGraphDeployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "sglang-agg", Namespace: "jsm"},
+		APIVersion: "nvidia.com/v1beta1",
+		Kind:       "DynamoGraphDeployment",
+		Name:       "sglang-agg", Namespace: "jsm",
 		Spec: DynamoGraphDeploymentSpec{
 			Components: []DynamoComponentDeploymentSharedSpec{
 				{
@@ -185,9 +235,7 @@ func TestDGDMarshal_PreservesNonEmptyPodTemplateMetadata(t *testing.T) {
 				{
 					ComponentName: "decode",
 					PodTemplate: &corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"k": "v"},
-						},
+						Labels: map[string]string{"k": "v"},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "main", Image: "x"}},
 						},
@@ -297,11 +345,9 @@ func TestDGDMarshal_PreservesNonEmptyContainerResources(t *testing.T) {
 // and therefore the same Go-encoder artefacts.
 func TestDCDMarshal_StripsEmptyPodTemplateMetadata(t *testing.T) {
 	dcd := &DynamoComponentDeployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "nvidia.com/v1beta1",
-			Kind:       "DynamoComponentDeployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "n"},
+		APIVersion: "nvidia.com/v1beta1",
+		Kind:       "DynamoComponentDeployment",
+		Name:       "c", Namespace: "n",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				PodTemplate: &corev1.PodTemplateSpec{
@@ -387,23 +433,21 @@ func TestDGDMarshal_PreservesScalingAdapterSentinel(t *testing.T) {
 // cache-population difference.
 func TestMarshal_RoundTrip(t *testing.T) {
 	orig := &DynamoGraphDeployment{
-		TypeMeta: metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "agg",
-			Namespace: "jsm",
-			Labels:    map[string]string{"app": "dynamo"},
-			Annotations: map[string]string{
-				"kubectl.kubernetes.io/last-applied-configuration": "{}",
-			},
+		APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment",
+		Name:      "agg",
+		Namespace: "jsm",
+		Labels:    map[string]string{"app": "dynamo"},
+		Annotations: map[string]string{
+			"kubectl.kubernetes.io/last-applied-configuration": "{}",
 		},
 		Spec: DynamoGraphDeploymentSpec{
 			Components: []DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "decode",
 					ComponentType: ComponentType("worker"),
-					Replicas:      ptrInt32(2),
+					Replicas:      new(int32(2)),
 					PodTemplate: &corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "decode"}},
+						Labels: map[string]string{"role": "decode"},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{
 								Name:  "main",
@@ -453,8 +497,6 @@ func TestMarshal_RoundTrip(t *testing.T) {
 	}
 }
 
-func ptrInt32(v int32) *int32 { return &v }
-
 // TestDGDListMarshal_StripsArtifactsOnItems proves that the value-receiver
 // MarshalJSON is actually invoked on list items. `encoding/json` encodes
 // slice elements via non-addressable reflect.Values; a pointer-receiver
@@ -465,7 +507,7 @@ func ptrInt32(v int32) *int32 { return &v }
 // declared with a VALUE receiver on DynamoGraphDeployment.
 func TestDGDListMarshal_StripsArtifactsOnItems(t *testing.T) {
 	list := &DynamoGraphDeploymentList{
-		TypeMeta: metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeploymentList"},
+		APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeploymentList",
 		Items: []DynamoGraphDeployment{
 			newDGDWithEmptyPodTemplateMetadata("agg-a"),
 			newDGDWithEmptyPodTemplateMetadata("agg-b"),
@@ -493,8 +535,8 @@ func TestDGDListMarshal_StripsArtifactsOnItems(t *testing.T) {
 // guard, different root type.
 func TestDCDListMarshal_StripsArtifactsOnItems(t *testing.T) {
 	item := DynamoComponentDeployment{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoComponentDeployment"},
-		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "n"},
+		APIVersion: "nvidia.com/v1beta1", Kind: "DynamoComponentDeployment",
+		Name: "c", Namespace: "n",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				PodTemplate: &corev1.PodTemplateSpec{
@@ -504,8 +546,8 @@ func TestDCDListMarshal_StripsArtifactsOnItems(t *testing.T) {
 		},
 	}
 	list := &DynamoComponentDeploymentList{
-		TypeMeta: metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoComponentDeploymentList"},
-		Items:    []DynamoComponentDeployment{item, item},
+		APIVersion: "nvidia.com/v1beta1", Kind: "DynamoComponentDeploymentList",
+		Items: []DynamoComponentDeployment{item, item},
 	}
 	b, err := json.Marshal(list)
 	if err != nil {
@@ -530,13 +572,13 @@ func TestDCDListMarshal_StripsArtifactsOnItems(t *testing.T) {
 // value-receiver contract for the third root kind.
 func TestDGDRListMarshal_NoArtifactsInRootFields(t *testing.T) {
 	item := DynamoGraphDeploymentRequest{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeploymentRequest"},
-		ObjectMeta: metav1.ObjectMeta{Name: "req", Namespace: "ns"},
-		Spec:       DynamoGraphDeploymentRequestSpec{Model: "m"},
+		APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeploymentRequest",
+		Name: "req", Namespace: "ns",
+		Spec: DynamoGraphDeploymentRequestSpec{Model: "m"},
 	}
 	list := &DynamoGraphDeploymentRequestList{
-		TypeMeta: metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeploymentRequestList"},
-		Items:    []DynamoGraphDeploymentRequest{item},
+		APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeploymentRequestList",
+		Items: []DynamoGraphDeploymentRequest{item},
 	}
 	b, err := json.Marshal(list)
 	if err != nil {
@@ -568,8 +610,8 @@ func TestDGDRListMarshal_NoArtifactsInRootFields(t *testing.T) {
 func TestDGDRMarshal_PreservesUnknownFieldsPayload(t *testing.T) {
 	payload := json.RawMessage(`{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment","spec":{"services":{"decode":{"extraPodSpec":{"marker":{}}}}}}`)
 	dgdr := &DynamoGraphDeploymentRequest{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeploymentRequest"},
-		ObjectMeta: metav1.ObjectMeta{Name: "req", Namespace: "ns"},
+		APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeploymentRequest",
+		Name: "req", Namespace: "ns",
 		Spec: DynamoGraphDeploymentRequestSpec{
 			Model: "meta-llama/Llama-3-8B",
 			Overrides: &OverridesSpec{
@@ -604,8 +646,8 @@ func TestDGDRMarshal_PreservesUnknownFieldsPayload(t *testing.T) {
 // as `"metadata": {}`.
 func newDGDWithEmptyPodTemplateMetadata(name string) DynamoGraphDeployment {
 	return DynamoGraphDeployment{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment"},
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "jsm"},
+		APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment",
+		Name: name, Namespace: "jsm",
 		Spec: DynamoGraphDeploymentSpec{
 			Components: []DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "decode",

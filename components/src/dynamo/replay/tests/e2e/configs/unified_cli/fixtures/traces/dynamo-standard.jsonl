@@ -1,0 +1,3 @@
+{"event_type":"request_payload","request_id":"standard-1"}
+{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1010,"request":{"request_id":"standard-1","output_tokens":2,"request_received_ms":1000,"total_time_ms":10,"replay":{"trace_block_size":4,"input_length":4,"input_sequence_hashes":[401]}}}
+{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1030,"request":{"request_id":"standard-2","output_tokens":2,"request_received_ms":1020,"total_time_ms":10,"replay":{"trace_block_size":4,"input_length":4,"input_sequence_hashes":[402]}}}

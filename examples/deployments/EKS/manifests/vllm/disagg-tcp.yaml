@@ -21,7 +21,7 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         affinity:
@@ -35,7 +35,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  nvidia.com/dynamo-component: VllmPrefillWorker
+                  nvidia.com/dynamo-component: prefill
               topologyKey: kubernetes.io/hostname
         containers:
         - command:
@@ -45,7 +45,7 @@ spec:
             exec python3 -m dynamo.vllm \
              --model Qwen/Qwen3-0.6B \
              --disaggregation-mode decode \
-             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -69,7 +69,7 @@ spec:
           operator: Exists
     replicas: 1
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         affinity:
@@ -83,7 +83,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  nvidia.com/dynamo-component: VllmDecodeWorker
+                  nvidia.com/dynamo-component: decode
               topologyKey: kubernetes.io/hostname
         containers:
         - command:
@@ -93,7 +93,7 @@ spec:
             exec python3 -m dynamo.vllm \
              --model Qwen/Qwen3-0.6B \
              --disaggregation-mode prefill \
-             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
           envFrom:
           - secretRef:
               name: hf-token-secret

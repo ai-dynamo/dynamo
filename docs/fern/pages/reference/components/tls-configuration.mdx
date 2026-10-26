@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: TLS
-subtitle: Encrypt the TCP request/response streams and NATS connections
+subtitle: Configure HTTPS, HTTP mutual TLS, and internal TCP/NATS encryption
 ---
 
-Dynamo supports opt-in TLS encryption on the network transports between its
-components: the TCP request and response streams between frontends and workers,
-and connections to NATS. On the TCP transport, both the **request plane**
+NVIDIA Dynamo supports opt-in TLS encryption for the frontend HTTP API, the TCP
+request and response streams between frontends and workers, and connections to
+NATS. On the TCP transport, both the **request plane**
 (frontend → worker inference requests) and the **response stream** (worker →
 frontend inference output) are encrypted using
 [rustls](https://github.com/rustls/rustls) with the `ring` cryptographic
@@ -20,26 +20,52 @@ request and response streams; NATS traffic is encrypted separately via NATS TLS
 when it runs over ZMQ it is **not** encrypted, and when it runs over NATS it is
 encrypted only if NATS TLS is configured.
 
+## HTTP TLS and mTLS
+
+The frontend accepts HTTPS connections from external clients or an API gateway.
+Configure these options on the frontend; they are independent of the internal
+`DYN_TCP_TLS_*` and `NATS_TLS_*` settings.
+
+| Environment variable | Frontend CLI flag | Description |
+| --- | --- | --- |
+| `DYN_TLS_CERT_PATH` | `--tls-cert-path` | PEM server certificate. Set together with the server private key to enable HTTPS. |
+| `DYN_TLS_KEY_PATH` | `--tls-key-path` | PEM private key for the server certificate. |
+| `DYN_TLS_CLIENT_CA_CERT_PATH` | `--tls-client-ca-cert-path` | PEM CA certificates trusted to sign client certificates. Enables HTTP mutual TLS (mTLS). |
+
+HTTP mTLS requires both the server certificate and private key. When a client
+CA is configured, the frontend rejects TLS handshakes from clients that omit a
+certificate or present one that is not trusted by that CA. Without a client CA,
+HTTPS authenticates only the server. The client or API gateway configures its
+own client certificate/key and trust for the frontend's server certificate.
+
+The frontend loads its HTTP TLS configuration at startup. Its server
+certificate and private key hot-reload for subsequent handshakes; changing the
+trusted client CA requires a restart. See [Design notes](#design-notes) for
+rotation behavior and the [frontend configuration reference](frontend-configuration.mdx)
+for the complete frontend argument list.
+
 ## Environment variables
 
-All TLS configuration is driven by environment variables. The Rust runtime
-reads these directly at first connection (lazy initialization).
+The following variables configure internal TCP TLS. Server configuration is
+validated when the server starts; client connectors initialize lazily on the
+first outbound connection.
 
 Both frontends and workers act as TCP server and client depending on the
 stream direction (response streams: worker dials frontend; request streams:
-frontend dials worker). All TLS env vars should be set on every pod.
+frontend dials worker). Set the internal TCP TLS configuration on every
+participating pod. HTTP TLS settings apply only to the frontend HTTP server.
 
 ### Server role (accepting connections)
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `DYN_TCP_TLS_CERT_PATH` | Path to the PEM certificate file. When set together with `DYN_TCP_TLS_KEY_PATH`, TLS is enabled on the TCP server. |
 | `DYN_TCP_TLS_KEY_PATH` | Path to the PEM private key for the server certificate. |
 
 ### Client role (dialing connections)
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `DYN_TCP_TLS_CA_CERT_PATH` | Path to the PEM CA certificate used to verify the peer's server certificate. |
 | `DYN_TCP_TLS_INSECURE` | Set to `1` or `true` to skip certificate verification. For local development only. |
 | `DYN_TCP_TLS_SERVER_NAME` | Override the TLS SNI hostname. Useful when connecting by IP to a server whose certificate has a DNS SAN. |
@@ -120,7 +146,7 @@ spec:
             value: /etc/certs/server/key.pem
           - name: DYN_TCP_TLS_CA_CERT_PATH
             value: /etc/certs/ca/ca.pem
-  - name: VllmWorker
+  - name: worker
     podTemplate:
       spec:
         containers:
@@ -137,10 +163,9 @@ spec:
 Both components need the same TLS env vars because each acts as both TCP
 server and client depending on the stream direction.
 
-> **Note:** A future PR ([#10809](https://github.com/ai-dynamo/dynamo/issues/10809))
-> will add operator-level TLS configuration via `InfrastructureConfiguration`,
-> allowing TLS to be configured once at the platform level and auto-injected
-> into all DGD pods without per-component env var setup.
+For platform-wide TLS that the operator injects into every deployment
+automatically — instead of setting env vars on each component — see
+[Operator TLS](../../kubernetes/installation/tls.md).
 
 ## NATS TLS
 
@@ -149,7 +174,7 @@ request plane is set to NATS (`--request-plane nats`) — inference request
 distribution. TLS is configured separately from TCP:
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `NATS_TLS_CA_CERT_PATH` | CA certificate to verify the NATS server. When set, a custom TLS config is applied. |
 | `NATS_TLS_INSECURE` | Skip NATS server certificate verification (dev only). |
 
@@ -169,6 +194,83 @@ CLI flags (all backends via `DynamoRuntimeArgGroup`):
 
 The frontend (`dynamo.frontend`) also accepts `--nats-tls-ca-cert-path` and
 `--nats-tls-insecure`.
+
+### Enabling TLS on the NATS server
+
+The env vars above configure the **client** side (Dynamo verifying the NATS
+server). For TLS to work, the NATS server itself must also be configured to
+listen on TLS — otherwise a client that sets `NATS_TLS_CA_CERT_PATH` (or the
+operator-level `natsTLSCAPath`) will attempt a TLS handshake against a
+plaintext port and fail.
+
+When deploying Dynamo's platform chart, the bundled NATS subchart exposes this
+via `nats.config.nats.tls`. The certificates are typically delivered by a
+certificate management system such as cert-manager.
+
+**One-way TLS** (server presents a cert, clients verify it):
+
+```yaml
+# NATS server side — platform chart values
+nats:
+  config:
+    nats:
+      tls:
+        enabled: true
+        secretName: nats-server-tls   # Secret with tls.crt / tls.key (e.g. cert-manager)
+```
+
+Or, if the cert files are mounted into the pod by an external system, use the
+`merge` block to point at the on-disk paths directly:
+
+```yaml
+nats:
+  config:
+    nats:
+      tls:
+        enabled: true
+        merge:
+          cert_file: /etc/certs/server/cert.pem
+          key_file:  /etc/certs/server/key.pem
+          timeout:   2
+```
+
+Then point the Dynamo clients at the TLS endpoint and give them the CA.
+These are operator-subchart values, so nest them under `dynamo-operator:` when
+using the platform chart:
+
+```yaml
+dynamo-operator:
+  natsAddr: "tls://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"
+  natsTLSCAPath: /etc/certs/ca/ca.pem   # → NATS_TLS_CA_CERT_PATH
+```
+
+**mTLS** (server also verifies client certs) — add `ca_file` and `verify` to
+the server's `merge` block, and present a client identity from the Dynamo side:
+
+```yaml
+# NATS server side
+nats:
+  config:
+    nats:
+      tls:
+        enabled: true
+        merge:
+          cert_file: /etc/certs/server/cert.pem
+          key_file:  /etc/certs/server/key.pem
+          ca_file:   /etc/certs/client-ca/ca.pem   # verify client certs
+          verify:    true                          # require client certs
+```
+
+```yaml
+# Dynamo client side (operator-level, nested under dynamo-operator:)
+dynamo-operator:
+  natsTLSCAPath:         /etc/certs/ca/ca.pem
+  natsTLSClientCertPath: /etc/certs/client/cert.pem
+  natsTLSClientKeyPath:  /etc/certs/client/key.pem
+```
+
+See the [NATS TLS documentation](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/tls)
+for the full server-side TLS schema.
 
 ## Mutual TLS (mTLS)
 
@@ -194,7 +296,7 @@ required is enforced by the **NATS server** configuration (e.g.
 ### TCP request/response streams
 
 | Variable | Role | Description |
-|---|---|---|
+| --- | --- | --- |
 | `DYN_TCP_TLS_CLIENT_CERT_PATH` | Client | PEM client certificate presented to the server. Set with `DYN_TCP_TLS_CLIENT_KEY_PATH`. |
 | `DYN_TCP_TLS_CLIENT_KEY_PATH` | Client | PEM private key for the client certificate. |
 | `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` | Server | PEM CA used to verify client certificates. When set, clients **must** present a certificate signed by this CA. |
@@ -202,7 +304,7 @@ required is enforced by the **NATS server** configuration (e.g.
 ### NATS
 
 | Variable | Role | Description |
-|---|---|---|
+| --- | --- | --- |
 | `NATS_TLS_CLIENT_CERT_PATH` | Client | PEM client certificate presented to the NATS server. Set with `NATS_TLS_CLIENT_KEY_PATH`. |
 | `NATS_TLS_CLIENT_KEY_PATH` | Client | PEM private key for the NATS client certificate. |
 
@@ -238,7 +340,8 @@ When TLS is configured, the following transports are encrypted (the ZMQ event
 plane is not covered):
 
 | Path | Direction | Data | Transport |
-|---|---|---|---|
+| --- | --- | --- | --- |
+| HTTP API | Client/API gateway → Frontend | API requests and responses | HTTPS; optional client-certificate authentication |
 | Request plane | Frontend → Worker | User prompts, request metadata | `egress/tcp_client` → `ingress/shared_tcp_endpoint` |
 | Response stream | Worker → Frontend | Inference output tokens | `tcp/client` → `tcp/server` |
 | Request stream | Frontend → Worker | Streaming input (bidirectional) | `tcp/client` → `tcp/server` |
@@ -246,6 +349,12 @@ plane is not covered):
 
 ## Design notes
 
+- HTTP server certificates and private keys use the shared hot-reload resolver.
+  A background thread checks for file changes every 30 seconds
+  (sooner after a failed reload). Valid updates apply to subsequent handshakes;
+  existing connections remain open, and a failed reload retains the last valid
+  certificate. The HTTP client CA is loaded at startup and requires a frontend
+  restart after rotation.
 - Server certificates hot-reload: the request-plane and response-stream servers
   serve their leaf cert/key through a resolver that re-reads the files from disk
   when their contents change (detected by a content hash, so rotations done by

@@ -108,3 +108,24 @@ For automated, metrics-driven redistribution between the pools, use the
 [Planner](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md). For a fresh topology search, rerun
 [AIConfigurator](../disaggregated-serving/sizing-with-aiconfigurator.mdx) with workload parameters that match the
 measured traffic.
+
+## Bound frontend host memory growth
+
+The frontend allocates host memory per request for tokenization, routing bookkeeping, and response
+assembly. With the default glibc allocator, freed memory may be retained in allocator arenas instead
+of being returned to the operating system, so frontend resident memory can climb to a high-water
+mark under load and may not drop when the load stops. This retention is allocator behavior rather
+than a leak.
+
+To bound the retained footprint, preload jemalloc with decay enabled on the frontend container. See
+[Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator)
+for the `LD_PRELOAD` and `MALLOC_CONF` values and for which container images ship `libjemalloc2`.
+
+To verify the change, run the same workload and track the frontend container's memory usage
+(`memory.current` on cgroup v2, or `memory.usage_in_bytes` on cgroup v1) across repeated benchmark
+rounds and through an idle window after the load stops.
+
+With glibc the value typically stays at its peak, while with jemalloc and decay it may
+settle toward a floor. Those decay settings do not guarantee that purging occurs during an idle
+window; include an idle period in the benchmark to confirm whether memory actually settles for
+your workload.

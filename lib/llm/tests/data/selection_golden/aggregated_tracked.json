@@ -1,0 +1,37 @@
+[
+  {
+    "worker_id": 1,
+    "dp_rank": 0,
+    "overlap_blocks": 4,
+    "cached_tokens": 8,
+    "potential_decode_blocks": 4
+  },
+  {
+    "worker_id": 2,
+    "dp_rank": 0,
+    "overlap_blocks": 2,
+    "cached_tokens": 4,
+    "potential_decode_blocks": 8
+  },
+  {
+    "worker_id": 1,
+    "dp_rank": 0,
+    "overlap_blocks": 8,
+    "cached_tokens": 16,
+    "potential_decode_blocks": 12
+  },
+  {
+    "worker_id": 1,
+    "dp_rank": 0,
+    "overlap_blocks": 8,
+    "cached_tokens": 16,
+    "potential_decode_blocks": 12
+  },
+  {
+    "worker_id": 2,
+    "dp_rank": 0,
+    "overlap_blocks": 8,
+    "cached_tokens": 16,
+    "potential_decode_blocks": 14
+  }
+]

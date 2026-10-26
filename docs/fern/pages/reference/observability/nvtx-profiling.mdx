@@ -69,19 +69,10 @@ cargo build --profile profiling --features dynamo-runtime/nvtx
 
 ### In a container image
 
-Prebuilt images ship without the feature. To build one that can emit the markers, pass
-`ENABLE_NVTX=true`:
-
-```bash
-docker build --build-arg ENABLE_NVTX=true -f container/rendered.Dockerfile .
-```
-
-The argument appends `nvtx` to the bindings wheel's feature list and defaults to `false`, so it
-changes nothing unless you pass it. `dev` and `local-dev` targets build from source rather than from
-the wheel, so use the `maturin develop` command above inside those images instead.
-
-Markers compiled in this way are still dormant until `DYN_NVTX` is set, so an
-NVTX-enabled image behaves identically to a stock one in production.
+Container images build the bindings wheel with the `nvtx` feature compiled in, so no build argument
+is needed. The markers stay dormant until `DYN_NVTX` is set, so a stock image behaves identically
+until you opt in at runtime. `dev` and `local-dev` targets build from source rather than from the
+wheel, so use the `maturin develop` command above inside those images instead.
 
 ### Run under nsys
 
@@ -112,9 +103,9 @@ DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o worker.nsys-rep \
 ```
 
 <Warning>
-  Setting `DYN_NVTX` without the `nvtx` package installed raises `ImportError` at startup rather
-  than silently recording nothing. This is deliberate: a profiling run that produces an empty
-  timeline is worse than one that fails immediately.
+  Setting `DYN_NVTX` without the `nvtx` package installed logs a warning and disables the Python
+  markers; the process still starts. Check the log for "nvtx package is not installed" if a capture
+  has no Python ranges.
 </Warning>
 
 ## Environment variables
@@ -123,9 +114,9 @@ DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o worker.nsys-rep \
   Enables NVTX annotations in both the Rust runtime and the Python components. Accepts `1`, `true`,
   `on`, or `yes` to enable and `0`, `false`, `off`, or `no` to disable, trimmed and
   case-insensitive; any other value raises rather than silently disabling. The Rust half also
-  requires a build with the `nvtx` Cargo feature, which released builds do not have. The Python half
-  requires the `nvtx` package from the `ai-dynamo[profiling]` extra, and raises at import if it is
-  missing.
+  requires a build with the `nvtx` Cargo feature, which container-image wheels include. The Python
+  half requires the `nvtx` package from the `ai-dynamo[profiling]` extra; without it a warning is
+  logged and the Python markers are disabled.
 </ParamField>
 
 ## Ranges emitted by the Rust runtime

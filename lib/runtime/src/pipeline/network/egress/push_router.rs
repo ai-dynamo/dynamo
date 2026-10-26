@@ -3,6 +3,9 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
+use crate::pipeline::network::egress::route_span::{
+    get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
+};
 use crate::{
     component::{Client, DeviceType, Endpoint, Instance, RoutingInstances},
     discovery::EndpointInstanceId,
@@ -35,7 +38,43 @@ use std::{
 use tokio_stream::StreamExt;
 use tracing::Instrument;
 
+/// The stable reason of a worker's overload refusal.
+///
+/// Across the request plane a refusal keeps its semantic class and reason but
+/// decodes with the legacy type `ResourceExhausted`, which it shares with
+/// pool-wide exhaustion (`capacity.pool_exhausted`), so the reason, not the
+/// legacy type, identifies a worker-scoped overload.
+const WORKER_OVERLOADED_REASON: &str = "capacity.worker_overloaded";
+
+/// A worker's overload refusal, wherever it appears in an error chain.
+///
+/// A worker refusing a request it has no capacity for is backpressure from a
+/// healthy worker. The refusal reaches the router as the cause of a pre-stream
+/// `CannotConnect`, so only a walk of the whole chain finds it.
+fn worker_overload<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a DynamoError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>()
+            && error.class() == ErrorType::CapacityExhausted
+            && error.reason().as_str() == WORKER_OVERLOADED_REASON
+        {
+            return Some(error);
+        }
+        current = error.source();
+    }
+    None
+}
+
+/// Whether a worker's overload appears anywhere in an error chain: see
+/// [`worker_overload`].
+fn is_worker_overloaded(err: &(dyn std::error::Error + 'static)) -> bool {
+    worker_overload(err).is_some()
+}
+
 /// Check if an error chain indicates the worker should be reported as down.
+///
+/// Never for a chain that carries a worker's overload, whatever wraps it: see
+/// [`is_worker_overloaded`].
 fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     const INHIBITED: &[ErrorType] = &[
         ErrorType::CannotConnect,
@@ -47,8 +86,21 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // request. Quarantine it, or a migration retry can reselect the same
         // worker before discovery removal catches up.
         ErrorType::Backend(BackendError::StreamIncomplete),
+        // The addressed server has no handler for this instance: discovery is
+        // stale or the worker is shutting down. Same reasoning as above.
+        ErrorType::WorkerUnavailable,
     ];
-    match_error_chain(err, INHIBITED, &[])
+    // Pre-stream request rejections can carry an outer CannotConnect wrapper.
+    !is_worker_overloaded(err)
+        && match_error_chain(
+            err,
+            INHIBITED,
+            &[
+                ErrorType::InvalidRequest,
+                ErrorType::InvalidArgument,
+                ErrorType::Backend(BackendError::InvalidArgument),
+            ],
+        )
 }
 
 /// Read the backend response inactivity timeout from the environment.
@@ -57,6 +109,16 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
 fn response_inactivity_timeout() -> Option<std::time::Duration> {
     use crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
     std::env::var(DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs)
+}
+
+/// Read the response-stream establish timeout from the environment.
+fn response_stream_establish_timeout() -> Option<std::time::Duration> {
+    use crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
+    std::env::var(DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
@@ -167,6 +229,12 @@ where
     /// Cached response inactivity timeout. Read once at construction from
     /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
     response_timeout: Option<std::time::Duration>,
+
+    /// Cached bound on the wait for a worker's response stream after the worker
+    /// ACKs a unary request. Read once at construction from
+    /// [`environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS`](crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS).
+    /// Applied only when fault detection is enabled.
+    establish_timeout: Option<std::time::Duration>,
 
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
@@ -437,7 +505,9 @@ fn spawn_instance_removal_watcher<T, U>(
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 dispatch.on_instance_added(&eid).await;
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(e)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -528,7 +598,10 @@ fn spawn_multimodal_cache_cleanup_watcher(
                             Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
                                 indexer.remove_worker(eid.instance_id);
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Removed(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(error)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -607,6 +680,7 @@ where
             random_picker,
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
@@ -617,9 +691,9 @@ where
     /// Create a new PushRouter with an optional worker load monitor.
     ///
     /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// overload detection itself is driven by the monitor via `client.set_overloaded_instances(...)`.
-    /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// the routing snapshot reports at least one free instance and the gate never rejects.
+    /// durable overload detection is driven by the monitor through
+    /// `client.set_overloaded_instances(...)`. Worker responses can also create
+    /// bounded request-path overload leases.
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
@@ -676,6 +750,7 @@ where
             random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
@@ -719,6 +794,7 @@ where
             random_picker,
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
+            establish_timeout: response_stream_establish_timeout(),
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
@@ -880,7 +956,7 @@ where
     }
 
     fn ensure_discovered_for_dispatch(&self, instance_id: u64) -> anyhow::Result<()> {
-        if self.client.instance_ids().contains(&instance_id) {
+        if self.client.is_instance_live(instance_id) {
             return Ok(());
         }
         Err(DynamoError::builder()
@@ -1081,11 +1157,7 @@ where
         // Fallback resolution owns the unavailable-target decision. Allowing it
         // to see a worker already absent from discovery preserves Direct's
         // historical standalone fallback; `Deny` remains exact-target behavior.
-        let selected_is_discovered = self
-            .client
-            .instances()
-            .iter()
-            .any(|instance| instance.instance_id == instance_id);
+        let selected_is_discovered = self.client.is_instance_live(instance_id);
         if !selected_is_discovered {
             let fallback_is_available = self
                 .client
@@ -1717,25 +1789,61 @@ where
     {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
+        let route_trace_context = get_route_trace_context(&request);
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
             tracing::Span::none()
         } else {
             tracing::info_span!(
+                target: "request_span",
                 "router.route_request",
+                otel.kind = "client",
                 request_id = %request_id,
-                worker_id = instance_id,
+                worker_id = tracing::field::Empty,
                 router_mode = ?self.router_mode,
+                "request.attempt" = tracing::field::Empty,
+                "request.outcome" = tracing::field::Empty,
+                "migration.is_retry" = tracing::field::Empty,
+                "migration.reason" = tracing::field::Empty,
+                "migration.from_worker_id" = tracing::field::Empty,
+                "migration.tokens_completed" = tracing::field::Empty,
+                "cancellation.signal" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
             )
         };
-
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, fallback)?;
-        if matches!(overload_check, OverloadCheck::Required) {
-            self.check_workers_available(instance_id, &request_id)?;
+        let (instance_id, address, transport_kind, instance) = match self
+            .resolve_transport(instance_id, fallback)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+        if matches!(overload_check, OverloadCheck::Required)
+            && let Err(error) = self.check_workers_available(instance_id, &request_id)
+        {
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
         }
 
-        let metadata = prepare(&mut request, instance_id)?;
-        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
+        let metadata = match prepare(&mut request, instance_id) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        let establish_timeout = self
+            .establish_timeout
+            .filter(|_| self.fault_detection_enabled);
+        let request = request.map(|req| {
+            AddressedRequest::with_instance(req, address, instance)
+                .with_establish_timeout(establish_timeout)
+        });
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1745,9 +1853,9 @@ where
         let stream = self
             .addressed
             .generate(request)
-            .instrument(route_span)
+            .instrument(route_span.clone())
             .await;
-        let stream = self.wrap_with_fault_detection(stream, instance_id)?;
+        let stream = self.wrap_with_fault_detection(stream, instance_id, route_span)?;
         Ok((metadata, stream))
     }
 
@@ -1807,19 +1915,15 @@ where
         use crate::component::TransportType;
 
         let lookup = |id: u64| {
-            self.client
-                .instances()
-                .iter()
-                .find(|i| i.instance_id == id)
-                .map(|instance| {
-                    let (addr, kind) = match &instance.transport {
-                        TransportType::Tcp(tcp_endpoint) => {
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
-                    };
-                    (addr, kind, instance.clone())
-                })
+            self.client.instance_by_id(id).map(|instance| {
+                let (addr, kind) = match &instance.transport {
+                    TransportType::Tcp(tcp_endpoint) => {
+                        (tcp_endpoint.clone(), "transport.tcp.request")
+                    }
+                    TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                };
+                (addr, kind, instance)
+            })
         };
 
         if let Some((addr, kind, inst)) = lookup(instance_id) {
@@ -1863,14 +1967,27 @@ where
                 })?;
                 Ok((id, addr, kind, inst))
             }
-            // TODO(https://github.com/ai-dynamo/dynamo/issues/12383): Distinguish
-            // no discoverable fallback from pool-wide overload and return the
-            // appropriate typed error for each case.
-            None => Err(anyhow::anyhow!(
-                "Instance {} not found and no other instances available for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            )),
+            // The selected instance vanished from discovery and no permitted
+            // fallback is free. Typed rather than a bare `anyhow!` so
+            // `error_type_from_chain` (route spans) and the frontend's status
+            // mapping see a real category instead of `unknown`/500.
+            //
+            // Uniformly `Unavailable`, not a pool-state split: reaching here
+            // means *this request's* worker is gone, which is a discovery fact,
+            // and `transport_resolution_precedes_stale_overload_check` requires
+            // that a vanished instance is never redressed as overload. Nor
+            // `CannotConnect`, which stays the signature of exact dispatch
+            // (`TransportFallback::Deny`) and must remain distinguishable from a
+            // fallback-enabled failure.
+            None => Err(DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message(format!(
+                    "Instance {} not found and no other instances available for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into()),
         }
     }
 
@@ -1882,26 +1999,41 @@ where
         &self,
         stream: anyhow::Result<ManyOut<U>>,
         instance_id: u64,
+        route_span: tracing::Span,
     ) -> anyhow::Result<ManyOut<U>> {
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
+                record_route_error(&route_span, err.as_ref());
                 if self.fault_detection_enabled {
-                    if is_inhibited(err.as_ref()) {
+                    // Overload first: a worker's refusal arrives as the cause
+                    // of a pre-stream `CannotConnect`, which on its own would
+                    // report a healthy worker down.
+                    if let Some(refusal) = worker_overload(err.as_ref()) {
+                        match refusal.error_type() {
+                            // Backpressure from one DP rank. The worker's other
+                            // ranks may still have room, which a lease on the
+                            // whole worker would withhold.
+                            ErrorType::WorkerRankOverloaded(dp_rank) => tracing::debug!(
+                                "Leaving instance {instance_id} routable: its overload is limited to DP rank {dp_rank}: {err}"
+                            ),
+                            // Backpressure: the worker said "my queue is full,
+                            // retry later". A bounded lease prevents an immediate
+                            // retry loop. Fresh monitor data clears the lease early.
+                            // Lease expiry permits a recovery probe when load events
+                            // remain unchanged. This is not a fault quarantine.
+                            _ => {
+                                tracing::debug!(
+                                    "Marking instance {instance_id} overloaded due to backpressure: {err}"
+                                );
+                                self.client.mark_overloaded_immediate(instance_id);
+                            }
+                        }
+                    } else if is_inhibited(err.as_ref()) {
                         tracing::debug!(
                             "Reporting instance {instance_id} down due to error: {err}"
                         );
                         self.client.report_instance_down(instance_id);
-                    } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
-                        // Backpressure: worker said "my queue is full,
-                        // retry later". Mark overloaded so this FE skips it on
-                        // the next selection; the next ActiveLoad event from the
-                        // worker monitor overwrites the overloaded set from fresh
-                        // metrics. This is NOT report_instance_down (fault path).
-                        tracing::debug!(
-                            "Marking instance {instance_id} overloaded due to backpressure: {err}"
-                        );
-                        self.client.mark_overloaded_immediate(instance_id);
                     }
                 }
                 return Err(err);
@@ -1909,7 +2041,7 @@ where
         };
 
         if !self.fault_detection_enabled {
-            return Ok(stream);
+            return Ok(wrap_route_span(stream, route_span));
         }
 
         let engine_ctx = stream.context();
@@ -1962,7 +2094,10 @@ where
                 Box::pin(stream)
             };
 
-        Ok(ResponseStream::new(stream, engine_ctx))
+        Ok(wrap_route_span(
+            ResponseStream::new(stream, engine_ctx),
+            route_span,
+        ))
     }
 }
 
@@ -2004,16 +2139,41 @@ where
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = input.context().id().to_string();
+        let route_trace_context = get_route_trace_context(&input);
         let route_span = tracing::info_span!(
+            target: "request_span",
             "router.route_request_bidirectional",
+            otel.kind = "client",
             request_id = %request_id,
-            worker_id = instance_id,
+            worker_id = tracing::field::Empty,
             router_mode = ?self.router_mode,
+            "request.attempt" = tracing::field::Empty,
+            "request.outcome" = tracing::field::Empty,
+            "migration.is_retry" = tracing::field::Empty,
+            "migration.reason" = tracing::field::Empty,
+            "migration.from_worker_id" = tracing::field::Empty,
+            "migration.tokens_completed" = tracing::field::Empty,
+            "cancellation.signal" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
         );
 
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, TransportFallback::Allow)?;
-        self.check_workers_available(instance_id, &request_id)?;
+        let (instance_id, address, transport_kind, instance) = match self
+            .resolve_transport(instance_id, TransportFallback::Allow)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+        if let Err(error) = self.check_workers_available(instance_id, &request_id) {
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
+        }
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -2023,9 +2183,9 @@ where
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate_bidirectional(instance, address, input)
-            .instrument(route_span)
+            .instrument(route_span.clone())
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
+        self.wrap_with_fault_detection(stream, instance_id, route_span)
     }
 }
 
@@ -2151,6 +2311,7 @@ mod tests {
         pipeline::{
             RequestStream, ResponseStream,
             context::{Context, Controller},
+            network::egress::route_span,
         },
     };
     use serde::{Deserialize, Serialize};
@@ -2190,6 +2351,20 @@ mod tests {
             !match_error_chain(error.as_ref(), &[ErrorType::CannotConnect], &[]),
             "fallback-enabled failure must preserve its existing error semantics: {error}"
         );
+    }
+
+    /// The no-permitted-fallback path must carry a typed `Unavailable`, not a
+    /// bare `anyhow!`. Asserted through `error_type_from_chain` because that is
+    /// what route spans and the frontend's 503 mapping actually call: an
+    /// untyped error classifies as `Unknown` there and is exported as
+    /// `error.type=unknown` / HTTP 500.
+    fn assert_unavailable(error: &anyhow::Error) {
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::Unavailable,
+            "no-permitted-fallback failure must be typed Unavailable, got: {error}"
+        );
+        assert_not_cannot_connect(error);
     }
 
     struct StaticMultimodalCacheIndex {
@@ -2407,6 +2582,208 @@ mod tests {
             !is_inhibited(&cancelled),
             "client cancellation is not a worker fault"
         );
+    }
+
+    #[test]
+    fn worker_unavailable_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build();
+        assert!(is_inhibited(&err));
+    }
+
+    /// A worker's admission refusal as the gate raises it, in process: for
+    /// the whole worker, or for DP rank `dp_rank` alone.
+    fn refusal(dp_rank: Option<u32>) -> DynamoError {
+        DynamoError::builder()
+            .error_type(
+                dp_rank.map_or(ErrorType::WorkerOverloaded, ErrorType::WorkerRankOverloaded),
+            )
+            .message("Server overloaded: worker at capacity")
+            .build()
+    }
+
+    /// The same refusal as the request plane delivers it: carried as JSON in
+    /// the response prologue, then made the cause of a pre-stream
+    /// `CannotConnect`.
+    fn admission_refusal(dp_rank: Option<u32>) -> DynamoError {
+        use crate::pipeline::network::{ResponseStreamPrologue, StreamPrologueError};
+
+        let prologue = ResponseStreamPrologue {
+            error: Some("Server overloaded: worker at capacity".to_string()),
+            typed_error: Some(refusal(dp_rank)),
+        };
+        let delivered: ResponseStreamPrologue =
+            serde_json::from_slice(&serde_json::to_vec(&prologue).unwrap()).unwrap();
+        crate::pipeline::network::egress::addressed_router::pre_stream_failure_error(
+            StreamPrologueError::new(
+                "Server overloaded: worker at capacity",
+                delivered
+                    .typed_error
+                    .expect("the prologue keeps the typed refusal"),
+            ),
+        )
+    }
+
+    /// The overload is found through the `CannotConnect` that wraps it — by
+    /// its reason, since the wire decodes its legacy type as the pool-wide
+    /// `ResourceExhausted` — and it never inhibits the worker, whether it
+    /// applies to the whole worker or names one DP rank, which it keeps.
+    /// Pool-wide exhaustion is not a worker's refusal, and a `CannotConnect`
+    /// without one is still a connection fault.
+    #[test]
+    fn a_wrapped_overload_is_backpressure_not_a_fault() {
+        let delivered = admission_refusal(None);
+        assert_eq!(
+            delivered.error_type(),
+            ErrorType::CannotConnect,
+            "the outer type is unchanged"
+        );
+        let cause = std::error::Error::source(&delivered)
+            .and_then(|source| source.downcast_ref::<DynamoError>())
+            .expect("the worker's refusal is the cause");
+        assert_eq!(cause.error_type(), ErrorType::ResourceExhausted);
+        assert_eq!(cause.reason().as_str(), WORKER_OVERLOADED_REASON);
+        assert!(is_worker_overloaded(&delivered));
+        assert!(!is_inhibited(&delivered));
+
+        let rank = admission_refusal(Some(4));
+        assert_eq!(rank.error_type(), ErrorType::CannotConnect);
+        assert!(!is_inhibited(&rank));
+        assert_eq!(
+            worker_overload(&rank).unwrap().error_type(),
+            ErrorType::WorkerRankOverloaded(4)
+        );
+
+        let local = refusal(None);
+        assert_eq!(local.reason().as_str(), WORKER_OVERLOADED_REASON);
+        assert!(is_worker_overloaded(&local));
+        assert!(!is_inhibited(&local));
+
+        let pool_exhausted = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("All workers are busy, please retry later")
+            .build();
+        assert!(!is_worker_overloaded(&pool_exhausted));
+
+        let connection_failure = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("connection refused")
+            .build();
+        assert!(!is_worker_overloaded(&connection_failure));
+        assert!(is_inhibited(&connection_failure));
+    }
+
+    /// Through the router's own fault detection, on one client: a refusal
+    /// that names one DP rank leaves the worker selectable for its other work,
+    /// while a whole-worker refusal — as an older worker's, which names none,
+    /// also is — marks it overloaded. Time is held still throughout, so no
+    /// lease can lapse between a refusal and the check after it. Neither
+    /// reports the worker down; a real connection failure still does.
+    #[tokio::test]
+    async fn fault_detection_marks_only_a_whole_worker_refusal_overloaded_and_never_down() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_admission_refusal_fault_detection".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        assert!(poll_until(|| client.instance_ids_avail().contains(&instance_id)).await);
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+
+        let refuse = |dp_rank| {
+            let error = router
+                .wrap_with_fault_detection(
+                    Err(admission_refusal(dp_rank).into()),
+                    instance_id,
+                    tracing::Span::none(),
+                )
+                .expect_err("the refusal propagates");
+            assert!(
+                is_worker_overloaded(error.as_ref()),
+                "the overload survives for the frontend to map"
+            );
+        };
+        let overloaded = || {
+            client
+                .overloaded_instance_ids()
+                .is_some_and(|overloaded| overloaded.contains(&instance_id))
+        };
+
+        tokio::time::pause();
+        refuse(Some(4));
+        assert!(!overloaded(), "a refusal for one rank marks nothing");
+        assert!(
+            router
+                .check_workers_available(instance_id, "sibling")
+                .is_ok(),
+            "so the same router still dispatches the worker's other work"
+        );
+        refuse(None);
+        assert!(overloaded(), "a whole-worker refusal marks it overloaded");
+        assert!(
+            router.check_workers_available(instance_id, "next").is_err(),
+            "so the same router holds new work for it back"
+        );
+        tokio::time::resume();
+        assert!(
+            client.instance_ids_avail().contains(&instance_id),
+            "a refusing worker is never reported down"
+        );
+
+        let connection_failure = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("connection refused")
+            .build();
+        let _ = router.wrap_with_fault_detection(
+            Err(connection_failure.into()),
+            instance_id,
+            tracing::Span::none(),
+        );
+        assert!(
+            !client.instance_ids_avail().contains(&instance_id),
+            "a real connection failure still reports the worker down"
+        );
+
+        rt.shutdown();
+    }
+
+    #[test]
+    fn pre_stream_invalid_request_does_not_quarantine_healthy_worker() {
+        use crate::pipeline::network::{
+            StreamPrologueError, egress::addressed_router::pre_stream_failure_error,
+        };
+
+        for (error_type, is_worker_fault) in [
+            (ErrorType::InvalidRequest, false),
+            (ErrorType::InvalidArgument, false),
+            (ErrorType::Backend(BackendError::InvalidArgument), false),
+            (ErrorType::CannotConnect, true),
+            (ErrorType::Unavailable, true),
+        ] {
+            let rejection = DynamoError::builder()
+                .error_type(error_type)
+                .message("native request failed")
+                .build();
+            let error =
+                pre_stream_failure_error(StreamPrologueError::new("Generate Error", rejection));
+            assert_eq!(is_inhibited(&error), is_worker_fault, "{error_type:?}");
+        }
     }
 
     #[test]
@@ -3169,7 +3546,19 @@ mod tests {
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        // Freeze `monitor_instance_source` before staging routing state. That
+        // task reconciles `routable_ids` back to the real discovered set on
+        // every discovery change *and* every `reconcile_interval` (5s by
+        // default), so it silently undoes `override_instance_avail` mid-test.
+        // Cancelling before registration means the only writer left is this
+        // test. Safe because `wait_for_instances` reads `instance_source`
+        // directly rather than the reconciled routing snapshot.
+        let monitor = tokio_util::sync::CancellationToken::new();
+        let client = endpoint
+            .client_with_cancellation(monitor.clone())
+            .await
+            .unwrap();
+        monitor.cancel();
 
         // Register an instance so we can create the router (needs transport setup).
         endpoint.register_endpoint_instance().await.unwrap();
@@ -3190,7 +3579,7 @@ mod tests {
 
         assert!(result.is_err());
         let error = result.unwrap_err();
-        assert_not_cannot_connect(&error);
+        assert_unavailable(&error);
         let msg = error.to_string();
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
@@ -3211,7 +3600,19 @@ mod tests {
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        // Freeze `monitor_instance_source` before staging routing state. That
+        // task reconciles `routable_ids` back to the real discovered set on
+        // every discovery change *and* every `reconcile_interval` (5s by
+        // default), so it silently undoes `override_instance_avail` mid-test.
+        // Cancelling before registration means the only writer left is this
+        // test. Safe because `wait_for_instances` reads `instance_source`
+        // directly rather than the reconciled routing snapshot.
+        let monitor = tokio_util::sync::CancellationToken::new();
+        let client = endpoint
+            .client_with_cancellation(monitor.clone())
+            .await
+            .unwrap();
+        monitor.cancel();
         endpoint.register_endpoint_instance().await.unwrap();
         let instances = client.wait_for_instances().await.unwrap();
         let real_id = instances[0].id();
@@ -3240,7 +3641,7 @@ mod tests {
         let disallowed_error = router
             .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
             .unwrap_err();
-        assert_not_cannot_connect(&disallowed_error);
+        assert_unavailable(&disallowed_error);
 
         let exact_error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
@@ -3259,7 +3660,6 @@ mod tests {
                 .contains("Fallback instance"),
             "expected fallback lookup failure, got: {stale_fallback_error}"
         );
-
         rt.shutdown();
     }
 
@@ -3566,6 +3966,96 @@ mod tests {
         drop(unary);
 
         rt.shutdown();
+    }
+
+    /// Records the establish timeout each unary dispatch carries.
+    #[derive(Default)]
+    struct DeadlineRecordingDispatch {
+        seen: std::sync::Mutex<Vec<Option<std::time::Duration>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingDispatch<u64, TestResponse> for DeadlineRecordingDispatch {
+        async fn generate(
+            &self,
+            request: SingleIn<AddressedRequest<u64>>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(request.content().establish_timeout());
+            Ok(RecordingDispatch::canned_stream())
+        }
+
+        async fn generate_bidirectional(
+            &self,
+            _instance: Instance,
+            _address: String,
+            _input: ManyIn<u64>,
+        ) -> Result<ManyOut<TestResponse>, Error> {
+            Ok(RecordingDispatch::canned_stream())
+        }
+    }
+
+    async fn establish_timeout_seen_by_dispatch(
+        namespace: &str,
+        fault_detection_enabled: bool,
+    ) -> Option<std::time::Duration> {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace(namespace.to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        assert!(
+            poll_until(|| client.instance_ids_avail().contains(&instance_id)).await,
+            "precondition: worker should be available"
+        );
+
+        let dispatch = Arc::new(DeadlineRecordingDispatch::default());
+        let mut router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            dispatch.clone(),
+        )
+        .await
+        .unwrap();
+        router.establish_timeout = Some(std::time::Duration::from_millis(200));
+        router.fault_detection_enabled = fault_detection_enabled;
+
+        let mut stream = router.generate(SingleIn::new(42u64)).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        let seen = dispatch.seen.lock().unwrap().clone();
+        rt.shutdown();
+        assert_eq!(seen.len(), 1, "expected exactly one unary dispatch");
+        seen[0]
+    }
+
+    /// The deadline rides on the addressed request so the transport can start
+    /// it at the worker's ACK rather than around local admission and send.
+    #[tokio::test]
+    async fn establish_timeout_is_passed_to_dispatch() {
+        assert_eq!(
+            establish_timeout_seen_by_dispatch("test_establish_timeout", true).await,
+            Some(std::time::Duration::from_millis(200))
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_timeout_skipped_without_fault_detection() {
+        assert_eq!(
+            establish_timeout_seen_by_dispatch("test_establish_timeout_no_fd", false).await,
+            None,
+            "routers without fault detection must not bound dispatch"
+        );
     }
 
     /// Poll a predicate until it holds or a short deadline elapses; discovery

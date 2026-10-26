@@ -18,19 +18,19 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "ckf-diagnostics")]
 use std::sync::atomic::Ordering;
 
 use dynamo_kv_router::identity::PoolId;
-use dynamo_kv_router::indexer::cuckoo::CkfFailureAction;
-use dynamo_kv_router::protocols::ActiveLoad;
-use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, WorkerId};
+use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfFailureAction};
+use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, SchedulerLoad, WorkerId};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::component::{Client, Instance};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::transports::event_plane::{Codec, EventSubscriber};
 use parking_lot::Mutex;
 use rand::TryRngCore;
 use serde::Serialize;
@@ -40,35 +40,61 @@ use tokio_util::sync::CancellationToken;
 
 use super::actor::{ActorFault, DEFAULT_FAULT_CAPACITY, KvDcRelayHandle, KvDcRelayRecoveryTarget};
 use super::discovery::{
-    DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
-    KvDcRelayDiscoveryConfig, MaterializationConflict, MaterializationConflictSubject,
+    DcMembershipView, EndpointMembership, KvCacheDomainKey, MaterializationConflict,
+    MaterializationConflictSubject,
 };
 use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity, WorkerRole};
 use super::load::PoolLoadSnapshot;
-use super::pool_registry::PoolServingFacts;
+use super::membership_watch::DcMembershipWatch;
+use super::namespace_source::discovery::KvDcRelayDiscoveryConfig;
 use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
 };
+use super::pool_registry::{PoolPublicationConfig, PoolServingFacts};
+use super::publication::PublicationHubConfig;
+use super::publication::{
+    DEFAULT_ACTIVE_POOL_STREAMS, DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY,
+    DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT, MAX_BUCKET_COUNT, RegistryPublicationSource,
+    RelayPublicationSource,
+};
 use super::resolution::stable_dc_id;
+use super::serving_load::ServingLoadAggregator;
 use super::topology::{TopologyPublisher, TopologySnapshot};
+use super::wan::grpc::{GrpcTransport, KvDcRelayGrpcConfig};
 use crate::discovery::{
     KvSourceMembershipCoordinator, KvSourceMembershipView, KvSourceMembershipWatch,
 };
-use crate::kv_router::KV_METRICS_SUBJECT;
+use crate::kv_router::SCHEDULER_LOAD_SUBJECT;
 #[cfg(feature = "ckf-diagnostics")]
 use crate::kv_router::indexer::WorkerQueryHealthSnapshot;
 use crate::kv_router::indexer::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, RecoverySupervisor, TargetFaultDisposition,
     start_target_subscriber,
 };
+use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use dynamo_runtime::transports::event_plane::EventSubscriber;
+use crate::utils::retry::{Backoff, FailureStreak};
 
 pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
 const DEFAULT_PUBLICATION_THRESHOLD: usize = 16;
 const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
+
+fn validate_publication_capacity(expected_unique_blocks: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        expected_unique_blocks != 0,
+        "KV DC Relay expected_unique_blocks must be positive"
+    );
+    let bucket_count = CkfConfig::new(expected_unique_blocks)
+        .bucket_count()
+        .map_err(|error| anyhow::anyhow!("invalid KV DC Relay CKF capacity: {error}"))?;
+    anyhow::ensure!(
+        bucket_count <= MAX_BUCKET_COUNT,
+        "KV DC Relay expected_unique_blocks {expected_unique_blocks} requires {bucket_count} CKF buckets, exceeding the CBI1 maximum {MAX_BUCKET_COUNT}"
+    );
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -114,19 +140,27 @@ impl Default for KvDcRelayProducerConfig {
 }
 
 #[derive(Debug, Clone)]
+pub enum KvDcRelaySources {
+    Discovery(KvDcRelayDiscoveryConfig),
+    File(super::namespace_source::file::KvDcRelaySourcesFile),
+}
+
+#[derive(Debug, Clone)]
 pub struct KvDcRelayConfig {
-    pub discovery: KvDcRelayDiscoveryConfig,
+    pub sources: KvDcRelaySources,
     pub producer: KvDcRelayProducerConfig,
+    pub transport: Option<KvDcRelayGrpcConfig>,
 }
 
 impl Default for KvDcRelayConfig {
     fn default() -> Self {
         Self {
-            discovery: KvDcRelayDiscoveryConfig {
+            sources: KvDcRelaySources::Discovery(KvDcRelayDiscoveryConfig {
                 watch_all: true,
                 ..Default::default()
-            },
+            }),
             producer: KvDcRelayProducerConfig::default(),
+            transport: None,
         }
     }
 }
@@ -264,12 +298,17 @@ pub struct KvDcRelayActorStats {
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayHealth {
+    pub sources: super::namespace_source::KvDcRelaySourcesStatus,
     pub healthy: bool,
     pub shutting_down: bool,
     pub host_last_error: Option<String>,
     pub endpoint_count: usize,
     pub active_endpoint_count: usize,
     pub fenced_endpoint_count: usize,
+    pub wan_enabled: bool,
+    pub wan_serving: bool,
+    pub wan_bound_address: Option<String>,
+    pub wan_last_error: Option<String>,
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -581,7 +620,6 @@ fn is_stronger_source_fault(candidate: CkfFailureAction, current: CkfFailureActi
 pub struct KvDcRelay {
     #[cfg(feature = "ckf-diagnostics")]
     dc_id: Arc<str>,
-    #[cfg(feature = "ckf-diagnostics")]
     relay_identity: DcRelayIdentity,
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
@@ -591,6 +629,10 @@ pub struct KvDcRelay {
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     pools: Arc<PoolRegistry>,
     topology: Arc<TopologyPublisher>,
+    publication_source: Arc<RegistryPublicationSource>,
+    transport: Option<GrpcTransport>,
+    /// Serving-load aggregator feeding the transport; runs only with it.
+    serving_load_aggregator: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl KvDcRelay {
@@ -604,11 +646,10 @@ impl KvDcRelay {
             dc_id.trim() == dc_id,
             "KV DC Relay dc_id must not contain leading or trailing whitespace"
         );
-        config.discovery.validate()?;
-        anyhow::ensure!(
-            config.producer.expected_unique_blocks != 0,
-            "KV DC Relay expected_unique_blocks must be positive"
-        );
+        if let KvDcRelaySources::Discovery(discovery) = &config.sources {
+            discovery.validate()?;
+        }
+        validate_publication_capacity(config.producer.expected_unique_blocks)?;
         anyhow::ensure!(
             config.producer.publication_threshold != 0,
             "KV DC Relay publication_threshold must be positive"
@@ -621,6 +662,10 @@ impl KvDcRelay {
             config.producer.recovery_attempt_timeout_ms != 0,
             "KV DC Relay recovery_attempt_timeout_ms must be positive"
         );
+        let transport_config = config.transport.clone();
+        if let Some(transport) = transport_config.as_ref() {
+            transport.validate()?;
+        }
         let publication = ActorPublicationConfig {
             threshold: config.producer.publication_threshold,
             delay: Duration::from_millis(config.producer.publication_delay_ms),
@@ -628,9 +673,9 @@ impl KvDcRelay {
         let relay_identity =
             DcRelayIdentity::new(component.drt().connection_id(), new_relay_incarnation()?);
         let cancel = component.drt().child_token();
-        let membership = DcMembershipWatch::start(
+        let membership = DcMembershipWatch::start_sources(
             component.drt().discovery(),
-            config.discovery,
+            config.sources,
             cancel.clone(),
         )
         .await?;
@@ -643,11 +688,91 @@ impl KvDcRelay {
             publication_threshold: publication.threshold,
             publication_delay: publication.delay,
         };
-        let pools = Arc::new(PoolRegistry::new(relay_identity, actor_config));
+        let publication_config = PoolPublicationConfig::default();
+        let publication_config =
+            transport_config
+                .as_ref()
+                .map_or(publication_config, |transport| PoolPublicationConfig {
+                    hub: PublicationHubConfig {
+                        queue_capacity: transport.publication_queue_capacity,
+                        queue_bytes: transport.publication_queue_bytes,
+                        max_subscribers: transport.max_subscribers_per_pool,
+                        encoding_permits: Arc::new(Semaphore::new(
+                            transport.publication_encoding_concurrency,
+                        )),
+                        ..PublicationHubConfig::default()
+                    },
+                    max_initialized_pool_hubs: transport.max_initialized_pool_hubs,
+                    #[cfg(test)]
+                    eviction_gate: None,
+                });
+        let pools = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity,
+            actor_config,
+            publication_config,
+        ));
         let topology = {
             let mut initial_view = membership_rx.borrow().clone();
             reject_duplicate_live_pools(&mut initial_view, ckf_dc_id);
             Arc::new(TopologyPublisher::new(initial_view, &pools.catalog()))
+        };
+        let publication_limits = (
+            DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY,
+            DEFAULT_ACTIVE_POOL_STREAMS,
+            DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT,
+        );
+        let (encoding_concurrency, max_active_streams, snapshot_progress_timeout) =
+            transport_config
+                .as_ref()
+                .map_or(publication_limits, |transport| {
+                    (
+                        transport.publication_encoding_concurrency,
+                        transport.max_pool_streams_total,
+                        Duration::from_millis(transport.snapshot_progress_timeout_ms),
+                    )
+                });
+        let publication_source = Arc::new(RegistryPublicationSource::new(
+            pools.clone(),
+            topology.clone(),
+            relay_identity,
+            cancel.child_token(),
+            Arc::new(Semaphore::new(encoding_concurrency)),
+            max_active_streams,
+            snapshot_progress_timeout,
+        ));
+        let (transport, serving_load_aggregator) = if let Some(transport_config) = transport_config
+        {
+            let (serving_load, aggregator) = ServingLoadAggregator::spawn(
+                &component,
+                pools.clone(),
+                topology.clone(),
+                Duration::from_millis(transport_config.load_window_ms),
+                cancel.child_token(),
+            );
+            match GrpcTransport::start(
+                publication_source.clone(),
+                serving_load,
+                cancel.clone(),
+                transport_config,
+            )
+            .await
+            {
+                Ok(transport) => (Some(transport), Some(aggregator)),
+                Err(error) => {
+                    cancel.cancel();
+                    if let Err(error) = aggregator.await
+                        && !error.is_cancelled()
+                    {
+                        tracing::warn!(%error, "KV DC Relay serving-load aggregator failed while its transport failed to start");
+                    }
+                    topology.clear();
+                    membership.shutdown().await;
+                    pools.shutdown().await;
+                    return Err(error);
+                }
+            }
+        } else {
+            (None, None)
         };
         let terminal = Arc::new(HostTerminalState::default());
         let host = tokio::spawn(run_host_supervisor(
@@ -674,7 +799,6 @@ impl KvDcRelay {
         Ok(Self {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id,
-            #[cfg(feature = "ckf-diagnostics")]
             relay_identity,
             cancel,
             membership: Mutex::new(Some(membership)),
@@ -684,6 +808,9 @@ impl KvDcRelay {
             statuses,
             pools,
             topology,
+            publication_source,
+            transport,
+            serving_load_aggregator: Mutex::new(serving_load_aggregator),
         })
     }
 
@@ -693,6 +820,10 @@ impl KvDcRelay {
 
     pub fn watch_pool_catalog(&self) -> watch::Receiver<DcPoolCatalog> {
         self.pools.watch_catalog()
+    }
+
+    pub const fn relay_identity(&self) -> DcRelayIdentity {
+        self.relay_identity
     }
 
     /// Current derived serving topology: per-namespace model readiness with nested
@@ -713,6 +844,11 @@ impl KvDcRelay {
 
     pub fn watch_pool_load(&self) -> watch::Receiver<Vec<PoolLoadSnapshot>> {
         self.pools.watch_load()
+    }
+
+    /// Lets drivers consume Relay publication state without coupling Relay to a transport.
+    pub fn publication_source(&self) -> Arc<dyn RelayPublicationSource> {
+        self.publication_source.clone()
     }
 
     #[cfg(feature = "ckf-diagnostics")]
@@ -804,16 +940,36 @@ impl KvDcRelay {
                 _ => {}
             }
         }
+        let transport_health = self
+            .transport
+            .as_ref()
+            .map(GrpcTransport::health)
+            .unwrap_or_default();
+        let transport_healthy = !transport_health.enabled
+            || (transport_health.serving && transport_health.last_error.is_none());
         let host_last_error = self.terminal.last_error();
         KvDcRelayHealth {
+            sources: self
+                .membership
+                .lock()
+                .as_ref()
+                .map(|m| m.sources_status())
+                .unwrap_or_default(),
             healthy: !self.cancel.is_cancelled()
                 && host_last_error.is_none()
-                && fenced_endpoint_count == 0,
+                && fenced_endpoint_count == 0
+                && transport_healthy,
             shutting_down: self.cancel.is_cancelled(),
             host_last_error,
             endpoint_count: statuses.len(),
             active_endpoint_count,
             fenced_endpoint_count,
+            wan_enabled: transport_health.enabled,
+            wan_serving: transport_health.serving,
+            wan_bound_address: transport_health
+                .bound_address
+                .map(|address| address.to_string()),
+            wan_last_error: transport_health.last_error,
         }
     }
 
@@ -823,6 +979,16 @@ impl KvDcRelay {
 
     pub async fn shutdown(&self) -> Result<(), KvDcRelayError> {
         self.cancel.cancel();
+        if let Some(transport) = &self.transport {
+            transport.shutdown().await;
+        }
+        let aggregator = self.serving_load_aggregator.lock().take();
+        if let Some(aggregator) = aggregator
+            && let Err(error) = aggregator.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "KV DC Relay serving-load aggregator failed during shutdown");
+        }
         let supervisor = self.supervisor.lock().take();
         if let Some(supervisor) = supervisor
             && let Err(error) = supervisor.await
@@ -1979,21 +2145,33 @@ fn start_load_collector(
     tokio::spawn(async move {
         let collector_cancel = cancel.clone();
         let collector_pools = pools.clone();
-        let collector = tokio::spawn(run_load_collector(
-            component,
-            endpoint,
-            pool_id,
-            layout_generation,
-            collector_pools,
-            collector_cancel,
-        ));
+        let collector = tokio::spawn(async move {
+            tokio::join!(
+                run_load_collector(
+                    &component,
+                    &endpoint,
+                    pool_id,
+                    layout_generation,
+                    &collector_pools,
+                    &collector_cancel,
+                ),
+                run_scheduler_load_collector(
+                    &component,
+                    &endpoint,
+                    pool_id,
+                    layout_generation,
+                    &collector_pools,
+                    &collector_cancel,
+                ),
+            );
+        });
         let result = collector.await;
         if cancel.is_cancelled() {
             return;
         }
         let reason = match result {
-            Ok(()) => "ActiveLoad collector stopped unexpectedly".to_string(),
-            Err(error) => format!("ActiveLoad collector task failed: {error}"),
+            Ok(()) => "load collector stopped unexpectedly".to_string(),
+            Err(error) => format!("load collector task failed: {error}"),
         };
         tracing::error!(%pool_id, layout_generation, %reason, "Fencing KV DC Relay pool after load collector failure");
         pools
@@ -2030,119 +2208,131 @@ async fn collect_pending_while<T>(
     }
 }
 
+/// Feeds worker KV occupancy of the endpoint's ranks into the pool registry. The
+/// generation's observations are cleared whenever the subscription fails, since
+/// updates may have been lost.
 async fn run_load_collector(
-    component: Component,
-    endpoint: EndpointId,
+    component: &Component,
+    endpoint: &EndpointId,
     pool_id: PoolId,
     layout_generation: u64,
-    pools: Arc<PoolRegistry>,
-    cancel: CancellationToken,
+    pools: &PoolRegistry,
+    cancel: &CancellationToken,
 ) {
-    let mut retry = LoadRetryBackoff::default();
+    let mut retry = Backoff::new(LOAD_RETRY_INITIAL, LOAD_RETRY_MAX);
+    let mut failures = FailureStreak::default();
     loop {
-        let subscriber =
-            EventSubscriber::for_endpoint_id(component.drt(), &endpoint, KV_METRICS_SUBJECT).await;
-        let mut subscriber = match subscriber {
-            Ok(subscriber) => subscriber.typed::<ActiveLoad>(),
-            Err(error) => {
-                let failure = retry.failed();
-                if failure.first {
-                    tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = failure.delay.as_millis(), "Failed to subscribe to KV DC Relay ActiveLoad stream");
-                } else {
-                    tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad subscription retry failed");
-                }
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(failure.delay) => {}
-                }
-                continue;
-            }
+        let subscriber = tokio::select! {
+            _ = cancel.cancelled() => return,
+            subscriber = KvMetricsSubscriber::for_endpoint_id(component, endpoint) => subscriber,
         };
-        loop {
-            let event = tokio::select! {
-                _ = cancel.cancelled() => return,
-                event = subscriber.next() => event,
-            };
-            match event {
-                Some(Ok((_envelope, load))) => {
-                    retry.succeeded();
-                    if !pools.observe_load(pool_id, layout_generation, load) {
-                        tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");
+        let error = match subscriber {
+            Ok(mut subscriber) => loop {
+                let event = tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    event = subscriber.next() => event,
+                };
+                let load = match event {
+                    Some(Ok(load)) => load,
+                    Some(Err(error)) => break error,
+                    None => break anyhow::anyhow!("stream closed"),
+                };
+                retry.reset();
+                if let Some(failures) = failures.recover() {
+                    tracing::info!(%endpoint, %pool_id, layout_generation, failures, "KV DC Relay ActiveLoad stream recovered");
+                }
+                if !pools.observe_load(pool_id, layout_generation, load) {
+                    tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");
+                }
+            },
+            Err(error) => error,
+        };
+        pools.clear_load_observations(pool_id, layout_generation);
+        let delay = retry.next_delay();
+        if failures.fail() {
+            tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = delay.as_millis(), "KV DC Relay ActiveLoad stream failed; resubscribing");
+        } else {
+            tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failures.failures(), retry_ms = delay.as_millis(), "KV DC Relay ActiveLoad stream failed again; resubscribing");
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+/// Feeds router scheduler views of the endpoint's ranks into the pool registry.
+/// Undecodable reports are skipped. Accepted batches keep their freshness deadline
+/// across resubscription, so a brief disconnect does not erase a recent report.
+async fn run_scheduler_load_collector(
+    component: &Component,
+    endpoint: &EndpointId,
+    pool_id: PoolId,
+    layout_generation: u64,
+    pools: &PoolRegistry,
+    cancel: &CancellationToken,
+) {
+    let mut retry = Backoff::new(LOAD_RETRY_INITIAL, LOAD_RETRY_MAX);
+    let mut failures = FailureStreak::default();
+    let mut decode_failures = FailureStreak::default();
+    loop {
+        let subscriber = tokio::select! {
+            _ = cancel.cancelled() => return,
+            subscriber = EventSubscriber::for_endpoint_id(component.drt(), endpoint, SCHEDULER_LOAD_SUBJECT) => subscriber,
+        };
+        let error = match subscriber {
+            Ok(mut subscriber) => loop {
+                let envelope = tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    envelope = subscriber.next() => envelope,
+                };
+                let envelope = match envelope {
+                    Some(Ok(envelope)) => envelope,
+                    Some(Err(error)) => break error,
+                    None => break anyhow::anyhow!("stream closed"),
+                };
+                retry.reset();
+                if let Some(failures) = failures.recover() {
+                    tracing::info!(%endpoint, %pool_id, layout_generation, failures, "KV DC Relay scheduler-load stream recovered");
+                }
+                match Codec::default().decode_payload::<Vec<SchedulerLoad>>(&envelope.payload) {
+                    Ok(loads) => {
+                        decode_failures.recover();
+                        if !pools.observe_scheduler_load(
+                            pool_id,
+                            layout_generation,
+                            &envelope,
+                            loads,
+                            Instant::now(),
+                        ) {
+                            tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignored scheduler-load data for a retired generation or undeclared ranks");
+                        }
+                    }
+                    Err(error) if decode_failures.fail() => {
+                        tracing::warn!(%endpoint, %pool_id, layout_generation, publisher_id = envelope.publisher_id, %error, "Skipping undecodable KV DC Relay scheduler-load reports");
+                    }
+                    Err(error) => {
+                        tracing::debug!(%endpoint, %pool_id, layout_generation, publisher_id = envelope.publisher_id, %error, "Skipping undecodable KV DC Relay scheduler-load report");
                     }
                 }
-                Some(Err(error)) => {
-                    pools.clear_load_observations(pool_id, layout_generation);
-                    let failure = retry.failed();
-                    if failure.first {
-                        tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream failed; resubscribing");
-                    } else {
-                        tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream failed again; resubscribing");
-                    }
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(failure.delay) => {}
-                    }
-                    break;
-                }
-                None => {
-                    pools.clear_load_observations(pool_id, layout_generation);
-                    let failure = retry.failed();
-                    if failure.first {
-                        tracing::warn!(%endpoint, %pool_id, layout_generation, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream closed; resubscribing");
-                    } else {
-                        tracing::debug!(%endpoint, %pool_id, layout_generation, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream closed again; resubscribing");
-                    }
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        _ = tokio::time::sleep(failure.delay) => {}
-                    }
-                    break;
-                }
-            }
+            },
+            Err(error) => error,
+        };
+        let delay = retry.next_delay();
+        if failures.fail() {
+            tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = delay.as_millis(), "KV DC Relay scheduler-load stream failed; resubscribing");
+        } else {
+            tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failures.failures(), retry_ms = delay.as_millis(), "KV DC Relay scheduler-load stream failed again; resubscribing");
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
         }
     }
 }
 
 const LOAD_RETRY_INITIAL: Duration = Duration::from_millis(100);
 const LOAD_RETRY_MAX: Duration = Duration::from_secs(5);
-
-struct LoadRetryBackoff {
-    failures: u64,
-    next_delay: Duration,
-}
-
-impl Default for LoadRetryBackoff {
-    fn default() -> Self {
-        Self {
-            failures: 0,
-            next_delay: LOAD_RETRY_INITIAL,
-        }
-    }
-}
-
-impl LoadRetryBackoff {
-    fn failed(&mut self) -> LoadRetryFailure {
-        self.failures = self.failures.saturating_add(1);
-        let failure = LoadRetryFailure {
-            count: self.failures,
-            delay: self.next_delay,
-            first: self.failures == 1,
-        };
-        self.next_delay = self.next_delay.saturating_mul(2).min(LOAD_RETRY_MAX);
-        failure
-    }
-
-    fn succeeded(&mut self) {
-        self.failures = 0;
-        self.next_delay = LOAD_RETRY_INITIAL;
-    }
-}
-
-struct LoadRetryFailure {
-    count: u64,
-    delay: Duration,
-    first: bool,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegistrationRefresh {
@@ -2440,6 +2630,15 @@ mod tests {
     use super::*;
     use crate::discovery::{KvEventSource, KvSourceMembership};
 
+    #[test]
+    fn publication_capacity_rejects_ckf_larger_than_cbi1() {
+        let maximum_expected_blocks = MAX_BUCKET_COUNT * 16 / 5;
+        validate_publication_capacity(maximum_expected_blocks).unwrap();
+
+        let error = validate_publication_capacity(maximum_expected_blocks + 1).unwrap_err();
+        assert!(error.to_string().contains("exceeding the CBI1 maximum"));
+    }
+
     fn membership(endpoint: &str, domain: KvCacheDomainKey) -> EndpointMembership {
         let endpoint = EndpointId::from(endpoint);
         let namespace = endpoint.namespace.clone();
@@ -2490,6 +2689,22 @@ mod tests {
                 publication_delay: Duration::from_millis(1),
             },
         )
+    }
+
+    fn publication_source(
+        pools: Arc<PoolRegistry>,
+        topology: Arc<TopologyPublisher>,
+        lifecycle: CancellationToken,
+    ) -> Arc<RegistryPublicationSource> {
+        Arc::new(RegistryPublicationSource::new(
+            pools,
+            topology,
+            DcRelayIdentity::new(11, 7),
+            lifecycle,
+            Arc::new(Semaphore::new(2)),
+            DEFAULT_ACTIVE_POOL_STREAMS,
+            DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT,
+        ))
     }
 
     fn actor_fault(
@@ -2878,11 +3093,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_publication_source_observes_relay_shutdown() {
+        let component = test_component("publication-lifecycle").await;
+        let relay = KvDcRelay::start(component, "test-dc".to_string(), KvDcRelayConfig::default())
+            .await
+            .unwrap();
+        let source = relay.publication_source();
+
+        relay.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), source.wait_for_shutdown())
+            .await
+            .expect("retained publication source must observe Relay shutdown");
+    }
+
+    #[tokio::test]
     async fn unexpected_host_return_cancels_relay_and_records_terminal_error() {
         let cancel = CancellationToken::new();
         let terminal = Arc::new(HostTerminalState::default());
         let pools = Arc::new(registry());
         let topology = test_topology();
+        let publication_source =
+            publication_source(pools.clone(), topology.clone(), cancel.child_token());
         let supervisor_complete = CancellationToken::new();
         let supervisor = spawn_host_task_supervisor(
             tokio::spawn(async { Ok(()) }),
@@ -2896,7 +3127,6 @@ mod tests {
         let relay = KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id: Arc::from("test-dc"),
-            #[cfg(feature = "ckf-diagnostics")]
             relay_identity: DcRelayIdentity::new(11, 7),
             cancel,
             membership: Mutex::new(None),
@@ -2906,6 +3136,9 @@ mod tests {
             statuses: Arc::new(RwLock::new(HashMap::new())),
             pools,
             topology,
+            publication_source,
+            transport: None,
+            serving_load_aggregator: Mutex::new(None),
         };
         tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
             .await
@@ -2974,6 +3207,8 @@ mod tests {
             },
             &DcPoolCatalog::new(DcRelayIdentity::new(0, 1), 0, Vec::new()),
         ));
+        let publication_source =
+            publication_source(pools.clone(), topology.clone(), cancel.child_token());
         let supervisor_complete = CancellationToken::new();
         let supervisor = spawn_host_task_supervisor(
             host,
@@ -2986,7 +3221,6 @@ mod tests {
         let relay = KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id: Arc::from("test-dc"),
-            #[cfg(feature = "ckf-diagnostics")]
             relay_identity: DcRelayIdentity::new(11, 7),
             cancel: cancel.clone(),
             membership: Mutex::new(None),
@@ -2996,6 +3230,9 @@ mod tests {
             statuses: Arc::new(RwLock::new(HashMap::new())),
             pools,
             topology: topology.clone(),
+            publication_source,
+            transport: None,
+            serving_load_aggregator: Mutex::new(None),
         };
 
         cancel.cancel();
@@ -3094,19 +3331,26 @@ mod tests {
                 })
                 .collect(),
         ));
+        let pools = Arc::new(registry());
+        let topology = test_topology();
+        let cancel = CancellationToken::new();
+        let publication_source =
+            publication_source(pools.clone(), topology.clone(), cancel.child_token());
         let relay = KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id: Arc::from("test-dc"),
-            #[cfg(feature = "ckf-diagnostics")]
             relay_identity: DcRelayIdentity::new(11, 7),
-            cancel: CancellationToken::new(),
+            cancel,
             membership: Mutex::new(None),
             supervisor: Mutex::new(None),
             supervisor_complete: CancellationToken::new(),
             terminal: Arc::new(HostTerminalState::default()),
             statuses,
-            pools: Arc::new(registry()),
-            topology: test_topology(),
+            pools,
+            topology,
+            publication_source,
+            transport: None,
+            serving_load_aggregator: Mutex::new(None),
         };
 
         let health = relay.health().await;

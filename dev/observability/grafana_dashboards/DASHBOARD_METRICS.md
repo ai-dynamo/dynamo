@@ -97,7 +97,7 @@ These metrics track request processing across all worker pods (prefill and decod
 - **All workers**: Filter by `dynamo_endpoint="generate"` to exclude maintenance operations like `clear_kv_blocks`
 
 ### Important Labels
-- `pod`: Specific pod name (e.g., `llama3-70b-disagg-sn-0-vllmprefillworker-hrnt5`)
+- `pod`: Specific pod name (e.g., `llama3-70b-disagg-sn-0-prefill-hrnt5`)
 - `namespace`: Kubernetes namespace (e.g., `robert`)
 - `dynamo_component`: Component type (`prefill`, `backend`, `frontend`)
 - `dynamo_endpoint`: Endpoint name (`generate`, `clear_kv_blocks`)
