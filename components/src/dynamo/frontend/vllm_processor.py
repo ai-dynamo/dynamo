@@ -1513,12 +1513,6 @@ class VllmProcessor:
                     envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
-                if not pending_terminals and locally_stopped_requests.issuperset(
-                    registered_request_ids
-                ):
-                    # Every choice stopped locally. Dropping the stream cancels
-                    # the worker instead of reading it to EOS or max_tokens.
-                    break
             else:
                 for terminal in pending_terminals.values():
                     attach_usage(terminal, finished=True)
