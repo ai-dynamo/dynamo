@@ -2018,9 +2018,7 @@ where
                                 "Leaving instance {instance_id} routable: its overload is limited to DP rank {dp_rank}: {err}"
                             ),
                             // In direct mode the caller picked the worker, as the
-                            // EPP does behind an inference gateway, so the refusal
-                            // goes back to it. A lease here would only refuse that
-                            // caller's next requests for the worker.
+                            // EPP does, so the refusal goes back to it unmarked.
                             _ if self.router_mode.is_direct_routing() => tracing::debug!(
                                 "Leaving instance {instance_id} routable in direct mode; its refusal goes back to the caller: {err}"
                             ),
@@ -2685,7 +2683,8 @@ mod tests {
     /// Through the router's own fault detection, on one client: a refusal
     /// that names one DP rank leaves the worker selectable for its other work,
     /// while a whole-worker refusal — as an older worker's, which names none,
-    /// also is — marks it overloaded. Time is held still throughout, so no
+    /// also is — marks it overloaded, except in direct mode, where the caller
+    /// picked the worker. Time is held still throughout, so no
     /// lease can lapse between a refusal and the check after it. Neither
     /// reports the worker down; a real connection failure still does.
     #[tokio::test]
@@ -2712,8 +2711,12 @@ mod tests {
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
+        let direct =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::Direct)
+                .await
+                .unwrap();
 
-        let refuse = |dp_rank| {
+        let refuse = |router: &PushRouter<u64, TestResponse>, dp_rank: Option<u32>| {
             let error = router
                 .wrap_with_fault_detection(
                     Err(admission_refusal(dp_rank).into()),
@@ -2733,7 +2736,9 @@ mod tests {
         };
 
         tokio::time::pause();
-        refuse(Some(4));
+        refuse(&direct, None);
+        assert!(!overloaded(), "a refusal in direct mode marks nothing");
+        refuse(&router, Some(4));
         assert!(!overloaded(), "a refusal for one rank marks nothing");
         assert!(
             router
@@ -2741,7 +2746,7 @@ mod tests {
                 .is_ok(),
             "so the same router still dispatches the worker's other work"
         );
-        refuse(None);
+        refuse(&router, None);
         assert!(overloaded(), "a whole-worker refusal marks it overloaded");
         assert!(
             router.check_workers_available(instance_id, "next").is_err(),
@@ -2767,56 +2772,6 @@ mod tests {
             "a real connection failure still reports the worker down"
         );
 
-        rt.shutdown();
-    }
-
-    /// In direct mode the caller picked the worker, so a whole-worker refusal
-    /// goes back to it and leaves the worker routable for its next request.
-    #[tokio::test]
-    async fn direct_mode_returns_a_refusal_without_marking_the_worker() {
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let endpoint = drt
-            .namespace("test_direct_refusal".to_string())
-            .unwrap()
-            .component("test_component".to_string())
-            .unwrap()
-            .endpoint("test_endpoint".to_string());
-        let client =
-            Client::with_reconcile_interval(endpoint.clone(), std::time::Duration::from_secs(3600))
-                .await
-                .unwrap();
-        endpoint.register_endpoint_instance().await.unwrap();
-        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
-        assert!(poll_until(|| client.instance_ids_avail().contains(&instance_id)).await);
-        let router =
-            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::Direct)
-                .await
-                .unwrap();
-
-        let error = router
-            .wrap_with_fault_detection(
-                Err(admission_refusal(None).into()),
-                instance_id,
-                tracing::Span::none(),
-            )
-            .expect_err("the refusal propagates");
-        assert!(
-            is_worker_overloaded(error.as_ref()),
-            "the caller can still map the refusal"
-        );
-        assert!(
-            client
-                .overloaded_instance_ids()
-                .is_none_or(|overloaded| !overloaded.contains(&instance_id)),
-            "the worker stays unmarked"
-        );
-        assert!(
-            router.check_workers_available(instance_id, "next").is_ok(),
-            "so the next direct request still reaches it"
-        );
         rt.shutdown();
     }
 

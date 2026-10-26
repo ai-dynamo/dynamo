@@ -108,15 +108,6 @@ async fn subscribe_kv_metrics(
     }
 }
 
-/// Resolve once any load threshold is set.
-async fn wait_until_configured(configured: &mut tokio::sync::watch::Receiver<bool>) {
-    let handle_alive = configured.wait_for(|configured| *configured).await.is_ok();
-    if !handle_alive {
-        // No threshold can be set once every handle is gone.
-        std::future::pending::<()>().await;
-    }
-}
-
 /// Configuration for worker load thresholds used in overload detection.
 ///
 /// All thresholds are opt-in. An unset (`None`) field means the corresponding
@@ -176,8 +167,7 @@ pub struct LoadThresholdHandle(Arc<LoadThresholds>);
 
 struct LoadThresholds {
     config: std::sync::RwLock<LoadThresholdConfig>,
-    /// Whether any threshold is set. `update` never clears a threshold, so this
-    /// only ever turns from false to true.
+    /// Whether any threshold is set; it only ever turns from false to true.
     configured: tokio::sync::watch::Sender<bool>,
     /// False for a handle from [`LoadThresholdHandle::disabled`].
     accepts_thresholds: bool,
@@ -188,11 +178,9 @@ impl LoadThresholdHandle {
         Self::with_config(config, true)
     }
 
-    /// A handle that holds no thresholds and ignores updates, for a frontend
-    /// that does not pick workers, such as one in direct routing mode. The
-    /// component that picks workers applies busy-worker thresholds, and a
-    /// monitor with this handle never subscribes to worker load reports.
-    pub fn disabled() -> Self {
+    /// A handle that ignores thresholds, for a frontend in direct routing mode,
+    /// which does not pick workers. Its monitor never subscribes to KV metrics.
+    pub(crate) fn disabled() -> Self {
         Self::with_config(LoadThresholdConfig::default(), false)
     }
 
@@ -206,7 +194,7 @@ impl LoadThresholdHandle {
     }
 
     /// False for a handle from [`Self::disabled`].
-    pub fn accepts_thresholds(&self) -> bool {
+    pub(crate) fn accepts_thresholds(&self) -> bool {
         self.0.accepts_thresholds
     }
 
@@ -231,8 +219,7 @@ impl LoadThresholdHandle {
             }
             current.is_configured()
         };
-        // Only ever set it to true: a concurrent update that read the config
-        // before a threshold was set must not overwrite true with false.
+        // Only ever set to true, so a racing update cannot reset it.
         if configured {
             self.0
                 .configured
@@ -839,11 +826,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             };
 
         // KV metrics feed only threshold-based overload detection, and the
-        // subscription connects to every worker of the endpoint. Open it once a
-        // threshold is set, at startup or later through `/busy_threshold`, so a
-        // frontend without thresholds does not connect to all of them. A frontend
-        // in direct routing mode, such as a sidecar in front of one worker, gets a
-        // handle that ignores thresholds, so it never subscribes.
+        // subscription connects to every worker, so open it once a threshold is
+        // set. A frontend in direct routing mode never takes one.
         let mut thresholds_configured_rx = self.thresholds.watch_configured();
         let kv_metrics_deferred = !*thresholds_configured_rx.borrow_and_update();
         let kv_metrics_rx = if kv_metrics_deferred {
@@ -906,7 +890,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                 tokio::select! {
                     // A threshold was set after startup: open the deferred subscription.
-                    _ = wait_until_configured(&mut thresholds_configured_rx), if kv_metrics_deferred => {
+                    _ = thresholds_configured_rx.changed(), if kv_metrics_deferred => {
                         kv_metrics_deferred = false;
                         tracing::info!(
                             source = ?source,
@@ -1429,7 +1413,7 @@ mod tests {
     }
 
     #[test]
-    fn load_threshold_handle_reports_the_first_configured_threshold_once() {
+    fn load_threshold_handle_reports_whether_a_threshold_is_set() {
         let handle = LoadThresholdHandle::new(LoadThresholdConfig::default());
         let mut configured = handle.watch_configured();
         assert!(!*configured.borrow_and_update());
@@ -1441,33 +1425,12 @@ mod tests {
             active_prefill_tokens_threshold: Some(4096),
             ..Default::default()
         });
-        assert!(configured.has_changed().unwrap());
         assert!(*configured.borrow_and_update());
-
-        handle.update(&LoadThresholdConfig {
-            active_decode_blocks_threshold: Some(0.5),
-            ..Default::default()
-        });
-        assert!(!configured.has_changed().unwrap());
         assert!(
             *LoadThresholdHandle::new(handle.get())
                 .watch_configured()
                 .borrow()
         );
-    }
-
-    #[test]
-    fn disabled_load_threshold_handle_ignores_thresholds() {
-        let handle = LoadThresholdHandle::disabled();
-        let configured = handle.watch_configured();
-        handle.update(&LoadThresholdConfig {
-            active_decode_blocks_threshold: Some(0.5),
-            ..Default::default()
-        });
-        assert!(!handle.accepts_thresholds());
-        assert!(!handle.is_configured());
-        assert_eq!(handle.get(), LoadThresholdConfig::default());
-        assert!(!configured.has_changed().unwrap());
     }
 
     #[test]

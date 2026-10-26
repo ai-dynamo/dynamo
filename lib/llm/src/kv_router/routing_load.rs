@@ -521,31 +521,6 @@ mod tests {
         runtime.shutdown();
     }
 
-    async fn aggregated_load_context(
-        distributed: &DistributedRuntime,
-        namespace: &str,
-        thresholds: LoadThresholdHandle,
-    ) -> Arc<RoutingLoadContext> {
-        let client = distributed
-            .namespace(namespace.to_string())
-            .unwrap()
-            .component("workers".to_string())
-            .unwrap()
-            .endpoint("generate".to_string())
-            .client()
-            .await
-            .unwrap();
-        RoutingLoadContext::start(
-            client,
-            RouterLoadSource::Aggregated,
-            thresholds,
-            &distributed.child_token(),
-            None,
-        )
-        .await
-        .unwrap()
-    }
-
     #[tokio::test]
     async fn kv_metrics_subscription_waits_for_a_load_threshold() {
         let runtime = Runtime::from_current().unwrap();
@@ -553,9 +528,25 @@ mod tests {
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
                 .await
                 .unwrap();
+        let client = distributed
+            .namespace("deferred-kv-metrics".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string())
+            .client()
+            .await
+            .unwrap();
         let thresholds = LoadThresholdHandle::new(Default::default());
-        let load_context =
-            aggregated_load_context(&distributed, "deferred-kv-metrics", thresholds.clone()).await;
+        let load_context = RoutingLoadContext::start(
+            client,
+            RouterLoadSource::Aggregated,
+            thresholds.clone(),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
         let monitor = load_context
             .monitor()
             .expect("an aggregated context monitors sequence load");
@@ -572,31 +563,6 @@ mod tests {
         })
         .await
         .expect("setting a load threshold must open the KV metrics subscription");
-
-        drop(load_context);
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn configured_load_threshold_subscribes_to_kv_metrics_at_start() {
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let thresholds = LoadThresholdHandle::new(crate::discovery::LoadThresholdConfig {
-            active_prefill_tokens_threshold: Some(4096),
-            ..Default::default()
-        });
-        let load_context =
-            aggregated_load_context(&distributed, "configured-kv-metrics", thresholds).await;
-
-        assert!(
-            load_context
-                .monitor()
-                .expect("an aggregated context monitors sequence load")
-                .subscribes_to_kv_metrics()
-        );
 
         drop(load_context);
         runtime.shutdown();

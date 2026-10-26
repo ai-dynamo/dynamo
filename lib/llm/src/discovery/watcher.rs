@@ -1382,9 +1382,8 @@ fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
         && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
 }
 
-/// A frontend in direct routing mode does not pick workers: the component that
-/// does, such as the EPP, applies busy-worker thresholds. Its handle ignores
-/// them, so its load monitor never subscribes to every worker's load reports.
+/// A frontend in direct routing mode does not pick workers, so its handle
+/// ignores busy-worker thresholds: the component that picks workers applies them.
 fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
     if !router_config.router_mode.is_direct_routing() {
         return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
@@ -1516,19 +1515,21 @@ mod tests {
 
     #[test]
     fn direct_routing_gets_a_threshold_handle_that_ignores_thresholds() {
+        let thresholds = crate::discovery::LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.9),
+            ..Default::default()
+        };
         let config = |router_mode| {
             RouterConfig::new(router_mode, dynamo_kv_router::KvRouterConfig::default())
-                .with_load_threshold_config(crate::discovery::LoadThresholdConfig {
-                    active_decode_blocks_threshold: Some(0.9),
-                    ..Default::default()
-                })
+                .with_load_threshold_config(thresholds.clone())
         };
         let direct = load_threshold_handle(&config(RouterMode::Direct));
+        let configured = direct.watch_configured();
+        direct.update(&thresholds);
         assert!(!direct.accepts_thresholds());
         assert!(!direct.is_configured());
-        let kv = load_threshold_handle(&config(RouterMode::KV));
-        assert!(kv.accepts_thresholds());
-        assert!(kv.is_configured());
+        assert!(!configured.has_changed().unwrap());
+        assert!(load_threshold_handle(&config(RouterMode::KV)).is_configured());
     }
 
     #[test]

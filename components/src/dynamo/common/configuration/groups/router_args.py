@@ -109,12 +109,8 @@ class RouterConfigBase(ConfigBase):
                 "--active-prefill-tokens-threshold-frac must be a finite value >= 0"
             )
 
-    def log_rejection_thresholds(self, direct_routing: bool = False) -> None:
-        """Log which independently configured rejection checks are active.
-
-        With direct routing the frontend does not pick workers, so it ignores
-        the thresholds: the component that picks workers applies them.
-        """
+    def log_rejection_thresholds(self) -> None:
+        """Log which independently configured rejection checks are active."""
         configured = [
             f"{flag}={value}"
             for flag, value in (
@@ -133,14 +129,6 @@ class RouterConfigBase(ConfigBase):
             )
             if value is not None
         ]
-        if direct_routing:
-            if configured:
-                logger.warning(
-                    "%s ignored: with --router-mode direct, the component that picks "
-                    "workers, such as the EPP, applies busy-worker rejection",
-                    ", ".join(configured),
-                )
-            return
         if configured:
             logger.info(
                 "busy-worker rejection enabled by %s",

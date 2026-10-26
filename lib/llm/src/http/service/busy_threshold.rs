@@ -164,22 +164,6 @@ async fn busy_threshold_handler(
     let is_setting = requested_config.is_configured();
     let update_config = is_setting.then_some(requested_config);
 
-    // A frontend in direct routing mode does not pick workers, so it has no
-    // busy thresholds to set.
-    if is_setting && manager.accepts_load_thresholds(&request.model) == Some(false) {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!(ErrorResponse {
-                error: format!(
-                    "Model '{}' is served in direct routing mode, where this frontend does not \
-                     pick workers and ignores busy thresholds. Set them where workers are \
-                     picked, such as the EPP.",
-                    request.model
-                ),
-            })),
-        );
-    }
-
     // Get or set the thresholds via the model's worker monitor
     let config = manager.load_threshold_config(&request.model, update_config.as_ref());
 
@@ -190,6 +174,21 @@ async fn busy_threshold_handler(
             Json(serde_json::json!(ErrorResponse {
                 error: format!(
                     "Model '{}' not found. Thresholds can only be set for discovered models.",
+                    request.model
+                ),
+            })),
+        );
+    }
+
+    // A frontend in direct routing mode does not pick workers, so it ignores
+    // busy thresholds.
+    if is_setting && !manager.accepts_load_thresholds(&request.model) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!(ErrorResponse {
+                error: format!(
+                    "Model '{}' is served in direct routing mode, where this frontend ignores \
+                     busy thresholds. Set them where workers are picked, such as the EPP.",
                     request.model
                 ),
             })),

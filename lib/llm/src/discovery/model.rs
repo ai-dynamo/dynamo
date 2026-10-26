@@ -742,17 +742,14 @@ impl Model {
         result
     }
 
-    /// Whether this model takes busy thresholds: `None` when no WorkerSet
-    /// monitors load, `Some(false)` when every one ignores thresholds, as in
-    /// direct routing mode.
-    pub fn accepts_load_thresholds(&self) -> Option<bool> {
-        let worker_sets = self.worker_sets.load();
-        let mut handles = worker_sets
-            .values()
-            .filter_map(|worker_set| worker_set.load_thresholds.as_ref())
-            .peekable();
-        handles.peek()?;
-        Some(handles.any(|handle| handle.accepts_thresholds()))
+    /// Whether any WorkerSet takes busy thresholds; none does in direct routing mode.
+    pub(crate) fn accepts_load_thresholds(&self) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set
+                .load_thresholds
+                .as_ref()
+                .is_some_and(|thresholds| thresholds.accepts_thresholds())
+        })
     }
 
     /// Total worker count across all WorkerSets.
@@ -894,40 +891,6 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         ))
-    }
-
-    #[test]
-    fn accepts_load_thresholds_unless_every_handle_ignores_them() {
-        use crate::discovery::{LoadThresholdConfig, LoadThresholdHandle};
-
-        let worker_set = |namespace: &str, load_thresholds: Option<LoadThresholdHandle>| {
-            let mut worker_set = WorkerSet::new(
-                namespace.to_string(),
-                "abc".to_string(),
-                ModelDeploymentCard::default(),
-            );
-            worker_set.load_thresholds = load_thresholds;
-            Arc::new(worker_set)
-        };
-        let model = Model::new("llama".to_string());
-        model.add_worker_set("ns1".to_string(), worker_set("ns1", None));
-        assert_eq!(model.accepts_load_thresholds(), None);
-
-        // Direct routing mode.
-        model.add_worker_set(
-            "ns2".to_string(),
-            worker_set("ns2", Some(LoadThresholdHandle::disabled())),
-        );
-        assert_eq!(model.accepts_load_thresholds(), Some(false));
-
-        model.add_worker_set(
-            "ns3".to_string(),
-            worker_set(
-                "ns3",
-                Some(LoadThresholdHandle::new(LoadThresholdConfig::default())),
-            ),
-        );
-        assert_eq!(model.accepts_load_thresholds(), Some(true));
     }
 
     fn make_generate_worker_set(

@@ -695,26 +695,6 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
     assert f"{flag}={expected}" in caplog.text
 
 
-def test_direct_mode_ignores_rejection_thresholds(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    _clear_rejection_threshold_env(monkeypatch)
-    caplog.set_level("INFO")
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    config = FrontendConfig.from_cli_args(
-        parser.parse_args(
-            ["--router-mode", "direct", "--active-decode-blocks-threshold", "0.5"]
-        )
-    )
-    config.validate()
-
-    assert "--active-decode-blocks-threshold=0.5 ignored" in caplog.text
-    assert "busy-worker rejection enabled" not in caplog.text
-
-
 @pytest.mark.parametrize(
     ("env_var", "field", "expected"),
     [
