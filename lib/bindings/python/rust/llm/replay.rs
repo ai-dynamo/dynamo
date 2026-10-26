@@ -1794,6 +1794,7 @@ fn build_synthetic_workload(
         },
         seed: 42,
         arrival_seed,
+        images: None,
     })
 }
 

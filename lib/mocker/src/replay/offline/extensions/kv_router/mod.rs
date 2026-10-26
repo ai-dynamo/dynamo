@@ -513,6 +513,7 @@ impl KvRouterPlacement {
             request_id: admission.uuid,
             scheduler_id: admission.worker_idx,
             placement_replica_id: None,
+            kv_hints: None,
             reported_overlap_tokens: admission.overlap_blocks as usize
                 * self.router.block_size as usize,
             cache_sample: Some(PlacementCacheSample {
@@ -1034,6 +1035,14 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
     ) -> Result<PendingRequest> {
         let request = request_view.metadata();
+        anyhow::ensure!(
+            request.kv_hints.is_none(),
+            "Dynamo KV router replay does not support authored KV fetch hints"
+        );
+        anyhow::ensure!(
+            request.images.is_empty(),
+            "Dynamo KV router replay does not support image requests"
+        );
         let input_length = request_view.input_length();
         let uuid = request
             .uuid
@@ -1415,12 +1424,52 @@ mod tests {
             dp_rank: 0,
             preferred_dp_rank: None,
             preferred_prefill_dp_rank: None,
+            kv_hints: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
             policy_class: None,
             replay_context: None,
+            images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn unhandled_request_fields_are_rejected_instead_of_dropped() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let mut request = request(1, 7);
+        request.kv_hints = Some(aisimulate_core::replay::AuthoredKvHints {
+            source_worker: 0,
+            source_dp_rank: 0,
+        });
+        let error = router.on_request_arrival(&request, None, 0.0).unwrap_err();
+        assert!(error.to_string().contains("authored KV fetch hints"));
+        assert_eq!(router.pending_count(), 0);
+        request.kv_hints = None;
+        request.images.push(aisimulate_core::engine::ImageSpec {
+            identity: 1,
+            token_start: 0,
+            token_end: 1,
+            encoder: aisimulate_core::engine::EncoderShape {
+                sequences: 1,
+                patch_tokens: 1,
+                transformer_tokens: 1,
+                output_tokens: 1,
+            },
+            embedding_bytes: 1,
+        });
+        let error = router.on_request_arrival(&request, None, 0.0).unwrap_err();
+        assert!(error.to_string().contains("image requests"));
+        assert_eq!(router.pending_count(), 0);
+        request.images.clear();
+        assert_eq!(
+            router
+                .on_request_arrival(&request, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1
+        );
     }
 
     #[test]

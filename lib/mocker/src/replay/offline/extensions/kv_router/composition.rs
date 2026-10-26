@@ -397,6 +397,7 @@ mod tests {
             max_in_flight: None,
             record_per_request: false,
             sla: Default::default(),
+            encoder: None,
             requests: Vec::new(),
         }
     }
@@ -428,6 +429,7 @@ mod tests {
             &[WorkerTopology {
                 worker_id: 0,
                 scheduler_ids: vec![0],
+                router_hint: false,
             }],
         )
         .unwrap_err();
@@ -571,6 +573,7 @@ mod tests {
             vec![WorkerTopology {
                 worker_id: 0,
                 scheduler_ids: vec![0],
+                router_hint: false,
             }]
         };
         let mut composition = crate::replay::with_kv_event_lag_ms(25.0, || {

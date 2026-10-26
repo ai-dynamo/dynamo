@@ -148,6 +148,7 @@ fn replay_spec(
         max_in_flight,
         record_per_request,
         sla,
+        encoder: None,
         requests: Vec::new(),
     })
 }
