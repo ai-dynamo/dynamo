@@ -23,6 +23,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -66,6 +67,12 @@ func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 			&grovev1alpha1.PodCliqueScalingGroup{},
 			handler.EnqueueRequestsFromMapFunc(s.mapPodCliqueScalingGroupToRequests),
 			builder.WithPredicates(pcsgEventPredicates()),
+		).
+		// A container restart may change no Grove status, so crash loops need their own Pod watch.
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(mapPodToRequests(componentPodDGDName)),
+			builder.WithPredicates(podCrashLoopPredicate(componentPodDGDName)),
 		)
 }
 

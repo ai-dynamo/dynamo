@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/pods"
 	appsv1 "k8s.io/api/apps/v1"
@@ -17,6 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -52,27 +54,58 @@ func deploymentPodDCDName(obj client.Object) (string, bool) {
 	return name, name != ""
 }
 
-func mapDeploymentPodToDCDRequests(_ context.Context, obj client.Object) []ctrl.Request {
-	name, ok := deploymentPodDCDName(obj)
-	if !ok {
-		return nil
-	}
-	return []ctrl.Request{{Namespace: obj.GetNamespace(), Name: name}}
+// componentPodDGDName returns the DGD whose component obj is labeled for.
+func componentPodDGDName(obj client.Object) (string, bool) {
+	labels := obj.GetLabels()
+	name := labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
+	return name, name != "" && labels[commonconsts.KubeLabelDynamoComponent] != ""
 }
 
-// dcdPodCrashLoopPredicate admits Deployment Pod events that change a Pod's
-// crash-loop diagnosis. Deployment status does not change when a container restarts.
-func dcdPodCrashLoopPredicate() predicate.Predicate {
+// findComponentPodCrashLoops returns the crash-loop diagnosis of each component
+// that has a crash-looping container among the Pods labeled for it.
+func findComponentPodCrashLoops(
+	ctx context.Context,
+	reader client.Reader,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (map[string]string, error) {
+	crashLoops := map[string]string{}
+	for i := range components {
+		componentPods, err := listDGDComponentPods(ctx, reader, dgd, components[i].ComponentName)
+		if err != nil {
+			return nil, err
+		}
+		if crashLoop, found := pods.FindCrashLoop(componentPods); found {
+			crashLoops[components[i].ComponentName] = crashLoop.String()
+		}
+	}
+	return crashLoops, nil
+}
+
+// mapPodToRequests enqueues the object that requestName names for a Pod, in the Pod's namespace.
+func mapPodToRequests(requestName func(client.Object) (string, bool)) handler.MapFunc {
+	return func(_ context.Context, obj client.Object) []ctrl.Request {
+		name, ok := requestName(obj)
+		if !ok {
+			return nil
+		}
+		return []ctrl.Request{{Namespace: obj.GetNamespace(), Name: name}}
+	}
+}
+
+// podCrashLoopPredicate admits events that change the crash-loop diagnosis of a
+// Pod that requestName maps. Workload status does not change when a container restarts.
+func podCrashLoopPredicate(requestName func(client.Object) (string, bool)) predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool {
 			return false
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
-			_, ok := deploymentPodDCDName(e.Object)
+			_, ok := requestName(e.Object)
 			return ok
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			if _, ok := deploymentPodDCDName(e.ObjectNew); !ok {
+			if _, ok := requestName(e.ObjectNew); !ok {
 				return false
 			}
 			oldPod, oldOK := e.ObjectOld.(*corev1.Pod)

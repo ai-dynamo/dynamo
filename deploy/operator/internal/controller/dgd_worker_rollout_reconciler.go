@@ -1016,20 +1016,23 @@ func (r *dgdWorkerRolloutReconciler) oldWorkerComponentDrained(
 	if !oldWorkerDCDsAtZero(oldDCDs) {
 		return false, nil
 	}
-	pods, err := r.listDGDComponentPods(ctx, dgd, componentName)
+	pods, err := listDGDComponentPods(ctx, r, dgd, componentName)
 	if err != nil {
 		return false, err
 	}
 	return oldWorkerPodsTerminated(oldDCDs, pods), nil
 }
 
-func (r *dgdWorkerRolloutReconciler) listDGDComponentPods(
+// listDGDComponentPods lists the Pods labeled for componentName of dgd. reader
+// must index Pods by dgdComponentPodIndex.
+func listDGDComponentPods(
 	ctx context.Context,
+	reader client.Reader,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
 ) ([]corev1.Pod, error) {
 	podList := &corev1.PodList{}
-	if err := r.List(
+	if err := reader.List(
 		ctx,
 		podList,
 		client.InNamespace(dgd.Namespace),

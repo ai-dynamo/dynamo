@@ -4203,7 +4203,7 @@ func TestListDGDComponentPodsUsesCompositeIndex(t *testing.T) {
 		),
 	)
 
-	pods, err := reconciler.listDGDComponentPods(context.Background(), dgd, component)
+	pods, err := listDGDComponentPods(context.Background(), reconciler, dgd, component)
 	require.NoError(t, err)
 
 	names := make([]string, 0, len(pods))

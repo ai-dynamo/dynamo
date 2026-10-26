@@ -28,11 +28,13 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type groveProgram struct {
+	reader             client.Reader
 	sharedResources    *dgdSharedResourcesReconciler
 	rollout            *dgdWorkerRolloutReconciler
 	restart            *dgdRestartReconciler
@@ -84,6 +86,7 @@ func (r groveReconcileRequest) DelegatedComponents() []nvidiacomv1beta1.DynamoCo
 func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	return &groveProgram{
+		reader: r.Client,
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
 			r.Recorder,
@@ -237,6 +240,13 @@ func (p *groveProgram) Reconcile(
 			}
 		}
 	}
+
+	// Grove readiness reports a crash-looping component only as not ready.
+	crashLoops, err := findComponentPodCrashLoops(ctx, p.reader, req.DGD, req.ManagedComponents())
+	if err != nil {
+		return programResult, fmt.Errorf("find crash-looping Grove Pods: %w", err)
+	}
+	result = failCrashLoopingComponents(result, crashLoops)
 
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 
