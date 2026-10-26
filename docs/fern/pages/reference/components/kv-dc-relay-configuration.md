@@ -72,6 +72,22 @@ For Kubernetes pod identity and RBAC, see [Deploy the DC KV Relay](../../kuberne
 Relay's CLI does not accept the Frontend's runtime CLI flags; configure the runtime through its
 environment variables.
 
+## Serving-Load Publishers
+
+`SubscribeServingLoad` aggregates load that frontends and routers publish only when
+`DYN_SERVING_LOAD_PUBLISH` is true. It is off by default, so deployments without a Relay run no
+background serving-load publishing. Set it on the processes that feed the Relay, not on the Relay
+itself:
+
+| Process | Publishes |
+| --- | --- |
+| Frontend, including its embedded KV router | Per-model request and token load once per second, and the embedded router's scheduler load |
+| Standalone KV router | Scheduler load of every worker rank once per second |
+
+Set it on all of them. The Relay cannot see a frontend or router that does not publish, so when
+only some do, their load reads as the complete load. Without it anywhere, every serving-load view
+is `UNAVAILABLE`, and after 30 seconds the Relay logs a warning naming the variable.
+
 ## Producer Tuning
 
 These environment-only overrides also work without a WAN listener. All values must be positive
@@ -102,8 +118,8 @@ error. All values must be positive integers; byte limits use bytes, not MiB.
 | `DYN_RELAY_POOL_HEARTBEAT_INTERVAL_MS` | `10000` | Pool-stream heartbeat interval after snapshot bootstrap. |
 | `DYN_RELAY_READINESS_HEARTBEAT_INTERVAL_MS` | `10000` | Interval for repeating the current readiness snapshot. |
 | `DYN_RELAY_SNAPSHOT_PROGRESS_TIMEOUT_MS` | `60000` | Per-frame progress deadline while producing the initial snapshot. |
-| `DYN_RELAY_LOAD_WINDOW_MS` | `1000` | Load publication window. |
-| `DYN_RELAY_LOAD_FANOUT_CAPACITY` | `16` | Buffered load updates for fanout. |
+| `DYN_RELAY_LOAD_WINDOW_MS` | `1000` | Pool-load and serving-load publication window. |
+| `DYN_RELAY_LOAD_FANOUT_CAPACITY` | `16` | Buffered updates per load stream type for fanout. |
 
 ### Universal Publication Resources
 
@@ -124,7 +140,8 @@ These limits belong to the publisher; the Python launcher exposes their override
 | `DYN_RELAY_MAX_POOL_STREAMS_TOTAL` | `64` | Total active pool streams. |
 | `DYN_RELAY_MAX_SUBSCRIBERS_PER_POOL` | `64` | Subscribers attached to one pool. |
 | `DYN_RELAY_MAX_READINESS_SUBSCRIBERS` | `64` | Concurrent readiness streams. |
-| `DYN_RELAY_MAX_LOAD_SUBSCRIBERS` | `64` | Concurrent load streams. |
+| `DYN_RELAY_MAX_LOAD_SUBSCRIBERS` | `64` | Concurrent pool-load streams. |
+| `DYN_RELAY_MAX_SERVING_LOAD_SUBSCRIBERS` | `64` | Concurrent serving-load streams. |
 
 ### Validation Limits
 
