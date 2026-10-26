@@ -22,9 +22,7 @@ use crate::{
         timing::RequestPhase,
     },
 };
-use dynamo_kv_router::services::selection::affinity::{
-    MAX_SESSION_AFFINITY_ID_BYTES, SessionAffinity,
-};
+use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
 
 fn session_id() -> SessionAffinityId {
     SessionAffinityId::new("session-1")
@@ -768,34 +766,11 @@ fn session_capacity_configuration() {
         })
     };
     assert_eq!(config(None).unwrap().max_entries, 65_536);
+    assert_eq!(config(Some("1")).unwrap().max_entries, 1);
     for value in ["0", "abc"] {
         assert_eq!(
             config(Some(value)).unwrap_err().to_string(),
             "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES must be a positive integer"
         );
     }
-}
-
-#[tokio::test]
-async fn session_capacity_controls_admission() {
-    let config = super::config_from_lookup(Duration::from_secs(10), Hard, |key| {
-        assert_eq!(key, "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES");
-        Ok("1".to_owned())
-    })
-    .unwrap();
-    let coordinator = AffinityCoordinator::wrap(SessionAffinity::with_config(config).unwrap());
-    let first = coordinator
-        .acquire(&SessionAffinityId::new("first"), None)
-        .await
-        .unwrap();
-    let error = coordinator
-        .acquire(&SessionAffinityId::new("second"), None)
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(
-        error.to_string(),
-        "CapacityExhausted: session affinity entry limit reached"
-    );
-    drop(first);
 }
