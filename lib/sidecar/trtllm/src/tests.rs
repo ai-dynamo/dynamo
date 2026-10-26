@@ -1,18 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, MultimodalData,
-    MultimodalItemRef, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions,
-    StopReason,
+    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
+    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -30,6 +29,7 @@ use crate::proto as pb;
 use crate::test_fixtures::*;
 
 mod e2e;
+mod kv_routing;
 
 // ---------------------------------------------------------------------------
 // Fake TensorRT-LLM OpenEngine services
@@ -38,6 +38,8 @@ mod e2e;
 #[derive(Clone, Default)]
 struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
+    target_dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
+    affinity_headers: Arc<Mutex<Vec<(String, String)>>>,
     aborts: Arc<Mutex<Vec<String>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     hang: Arc<AtomicBool>,
@@ -50,16 +52,16 @@ struct FakeTrtllm {
     empty_model_info: Arc<AtomicBool>,
     /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
     unavailable_model_info: Arc<AtomicBool>,
-    /// Portable coarse-grained model capability.
-    supports_multimodal: Arc<AtomicBool>,
-    /// TensorRT-LLM's finer-grained modality advertisement.
-    advertises_image: Arc<AtomicBool>,
-    advertises_video: Arc<AtomicBool>,
-    advertises_audio: Arc<AtomicBool>,
-    advertises_input_capabilities: Arc<AtomicBool>,
-    supports_text_input: Arc<AtomicBool>,
-    supports_token_ids_input: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
+    kv_routing: Arc<AtomicBool>,
+    server_info_error: Arc<Mutex<Option<tonic::Code>>>,
+    kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
+    subagent_affinity: Arc<AtomicBool>,
+    disable_events: Arc<AtomicBool>,
+    disable_load: Arc<AtomicBool>,
+    dp_size: Arc<AtomicU32>,
+    hang_load: Arc<AtomicBool>,
+    node_metadata: Arc<Mutex<Option<crate::node::NodeMetadata>>>,
 }
 
 fn prompt_len(request: &pb::GenerateRequest) -> u32 {
@@ -85,14 +87,34 @@ impl pb::inference_server::Inference for FakeTrtllm {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
+        if let Some(parent) = request.metadata().get("x-trtllm-subagent-affinity-id") {
+            let auth = request
+                .metadata()
+                .get("x-trtllm-subagent-affinity-auth")
+                .expect("signed parent affinity")
+                .to_str()
+                .expect("ASCII signature")
+                .to_string();
+            self.affinity_headers
+                .lock()
+                .await
+                .push((parent.to_str().expect("valid parent ID").to_string(), auth));
+        }
         if let Some(peer) = request.remote_addr() {
             self.peers.lock().await.push(peer);
         }
+        self.target_dp_ranks.lock().await.push(
+            request
+                .metadata()
+                .get("openengine-target-dp-rank")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+        );
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
 
         let request_id = request.request_id.clone();
-        let prompt_tokens = prompt_len(&request) + 64 * request.media.len() as u32;
+        let prompt_tokens = prompt_len(&request);
         let wants_logprobs = wants_logprobs(&request);
         let context_only = is_context_only(&request);
         let hang = self.hang.load(Ordering::SeqCst);
@@ -200,20 +222,6 @@ impl pb::control_server::Control for FakeTrtllm {
         if self.unavailable_model_info.load(Ordering::SeqCst) {
             return Err(Status::unavailable("not serving yet"));
         }
-        let supports_multimodal = self.supports_multimodal.load(Ordering::SeqCst);
-        let advertises_input_capabilities =
-            self.advertises_input_capabilities.load(Ordering::SeqCst);
-        let modalities = [
-            (self.advertises_image.load(Ordering::SeqCst), "image"),
-            (self.advertises_video.load(Ordering::SeqCst), "video"),
-            (self.advertises_audio.load(Ordering::SeqCst), "audio"),
-        ]
-        .into_iter()
-        .filter(|(advertised, _)| *advertised)
-        .map(|(_, modality)| prost_types::Value {
-            kind: Some(prost_types::value::Kind::StringValue(modality.to_string())),
-        })
-        .collect();
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
             max_context_length: if self.empty_model_info.load(Ordering::SeqCst) {
@@ -221,21 +229,7 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
-            supports_text_input: advertises_input_capabilities
-                .then(|| self.supports_text_input.load(Ordering::SeqCst)),
-            supports_token_ids_input: advertises_input_capabilities
-                .then(|| self.supports_token_ids_input.load(Ordering::SeqCst)),
-            supports_multimodal: Some(supports_multimodal),
-            extra: Some(prost_types::Struct {
-                fields: std::collections::BTreeMap::from([(
-                    "trtllm_supported_modalities".to_string(),
-                    prost_types::Value {
-                        kind: Some(prost_types::value::Kind::ListValue(
-                            prost_types::ListValue { values: modalities },
-                        )),
-                    },
-                )]),
-            }),
+            supports_multimodal: Some(false),
             ..Default::default()
         }))
     }
@@ -263,14 +257,92 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        Err(Status::unimplemented("GetServerInfo is not used"))
+        if let Some(code) = *self.server_info_error.lock().await {
+            return Err(Status::new(code, "temporary metadata failure"));
+        }
+        if !self.kv_routing.load(Ordering::SeqCst) {
+            return Err(Status::unimplemented("GetServerInfo is not used"));
+        }
+        let mut fields = [
+            (
+                "trtllm_supports_dp_rank_targeting".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::BoolValue(true)),
+                },
+            ),
+            (
+                "kv_event_heartbeat_interval_ms".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::NumberValue(5000.0)),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        if self.subagent_affinity.load(Ordering::SeqCst) {
+            fields.insert(
+                "trtllm_supports_subagent_affinity".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::BoolValue(true)),
+                },
+            );
+        }
+        if let Some(node) = self.node_metadata.lock().await.as_ref() {
+            fields.extend(
+                dynamo_sidecar_common::json_to_struct(json!({"trtllm_node": node}), "test")
+                    .unwrap()
+                    .fields,
+            );
+        }
+        Ok(Response::new(pb::ServerInfo {
+            extra: Some(prost_types::Struct { fields }),
+            parallelism: Some(pb::ParallelismInfo {
+                data_parallel_size: Some(self.dp_size.load(Ordering::SeqCst).max(1)),
+                ..Default::default()
+            }),
+            capacity: Some(pb::DeploymentCapacity {
+                kv_block_size: Some(32),
+                total_kv_blocks: Some(100),
+                max_running_requests: Some(16),
+                max_batched_tokens: Some(2048),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
     }
 
     async fn get_load(
         &self,
         _request: Request<pb::GetLoadRequest>,
     ) -> Result<Response<pb::LoadInfo>, Status> {
-        Err(Status::unimplemented("GetLoad is not used"))
+        if !self.kv_routing.load(Ordering::SeqCst) {
+            return Err(Status::unimplemented("GetLoad is not used"));
+        }
+        if self.disable_load.load(Ordering::SeqCst) {
+            return Ok(Response::new(pb::LoadInfo::default()));
+        }
+        if self.hang_load.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos() as u64;
+        let dp_size = self.dp_size.load(Ordering::SeqCst).max(1);
+        Ok(Response::new(pb::LoadInfo {
+            timestamp_unix_nanos: Some(timestamp),
+            used_kv_blocks: Some(10),
+            total_kv_blocks: Some(100),
+            ranks: (0..dp_size)
+                .map(|rank| pb::RankLoadInfo {
+                    data_parallel_rank: Some(rank),
+                    used_kv_blocks: Some(10 + rank as u64),
+                    total_kv_blocks: Some(100),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }))
     }
 
     async fn health(
@@ -305,7 +377,33 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
-        Err(Status::unimplemented("GetKvEventSources is not used"))
+        if let Some(code) = *self.kv_sources_error.lock().await {
+            return Err(Status::new(code, "temporary metadata failure"));
+        }
+        if !self.kv_routing.load(Ordering::SeqCst) {
+            return Err(Status::unimplemented("GetKvEventSources is not used"));
+        }
+        if self.disable_events.load(Ordering::SeqCst) {
+            return Ok(Response::new(pb::GetKvEventSourcesResponse::default()));
+        }
+        let dp_size = self.dp_size.load(Ordering::SeqCst).max(1);
+        Ok(Response::new(pb::GetKvEventSourcesResponse {
+            sources: (0..dp_size)
+                .map(|rank| pb::KvEventSource {
+                    transport: "zmq".to_string(),
+                    endpoint_addr: Some(pb::KvEndpoint {
+                        host: "127.0.0.1".to_string(),
+                        port: 5557 + rank,
+                        protocol: "tcp".to_string(),
+                    }),
+                    topic: "kv-events".to_string(),
+                    data_parallel_rank: Some(rank),
+                    encoding: "msgpack".to_string(),
+                    schema_version: Some(1),
+                    ..Default::default()
+                })
+                .collect(),
+        }))
     }
 
     type SubscribeKvEventsStream =
@@ -407,8 +505,22 @@ fn engine_with(
         ConfiguredModel {
             source: "model-source".to_string(),
             context_length,
+            ..Default::default()
         },
         mode,
+    )
+}
+
+fn engine_with_kv_routing(endpoint: &str) -> TrtllmSidecarEngine {
+    TrtllmSidecarEngine::new(
+        GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid test endpoint"),
+        transport(1),
+        ConfiguredModel {
+            source: "model-source".to_string(),
+            context_length: Some(4096),
+            ..Default::default()
+        },
+        AGG,
     )
 }
 
@@ -437,9 +549,14 @@ async fn prefill_ready_is_the_terminal_handoff() {
     let mut req = request();
     req.routing = Some(dynamo_backend_common::engine::RoutingHints {
         prefill_dp_rank: Some(0),
+        dp_rank: Some(7),
         ..Default::default()
     });
     let outputs = collect(&engine, req).await;
+    assert_eq!(
+        server.service.target_dp_ranks.lock().await.as_slice(),
+        [None]
+    );
     let terminal = outputs
         .iter()
         .find(|output| output.finish_reason.is_some())
@@ -486,11 +603,20 @@ async fn decode_request_replays_the_prefill_session() {
     let decode = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
     decode.start(0).await.expect("start decode");
     let mut req = agent_request;
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(0),
+        prefill_dp_rank: Some(7),
+        ..Default::default()
+    });
     req.prefill_result = Some(dynamo_backend_common::PrefillResult {
         disaggregated_params: handoff,
         prompt_tokens_details: None,
     });
     let outputs = collect(&decode, req).await;
+    assert_eq!(
+        server.service.target_dp_ranks.lock().await.as_slice(),
+        [None, None]
+    );
     assert!(
         outputs.iter().any(|output| !output.token_ids.is_empty()),
         "the decode worker streams the completion"
@@ -557,129 +683,6 @@ async fn aggregated_generation_streams_delta_then_terminal() {
     match sent.input.as_ref().expect("input") {
         pb::generate_request::Input::TokenIds(tokens) => assert_eq!(tokens.ids, [11, 22, 33]),
         other => panic!("expected token IDs input, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn advertised_image_media_reaches_openengine_and_uses_expanded_usage() {
-    let service = FakeTrtllm::default();
-    service.supports_multimodal.store(true, Ordering::SeqCst);
-    service.advertises_image.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, 1);
-    engine.start(0).await.expect("start");
-
-    let mut req = request();
-    req.stop_conditions.max_tokens = None;
-    add_images(&mut req, ["data:image/png;base64,aW1hZ2U="]);
-    let outputs = collect(&engine, req).await;
-    let usage = outputs
-        .last()
-        .and_then(|output| output.completion_usage.as_ref())
-        .expect("terminal engine usage");
-    assert_eq!(usage.prompt_tokens, 67, "3 text tokens + 64 image tokens");
-
-    let requests = server.service.requests.lock().await;
-    let sent = requests.first().expect("recorded request");
-    assert_eq!(sent.stopping.as_ref().expect("stopping").max_tokens, None);
-    assert_eq!(sent.media.len(), 1);
-    assert_eq!(sent.media[0].modality, pb::Modality::Image as i32);
-    assert!(matches!(
-        sent.media[0].source.as_ref(),
-        Some(pb::media_item::Source::DataUri(value)) if value.starts_with("data:image/png")
-    ));
-}
-
-#[tokio::test]
-async fn advertised_video_media_reaches_openengine() {
-    let service = FakeTrtllm::default();
-    service.supports_multimodal.store(true, Ordering::SeqCst);
-    service.advertises_video.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, 1);
-    engine.start(0).await.expect("start");
-
-    let mut req = request();
-    req.multi_modal_data = Some(HashMap::from([(
-        "video_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "https://example.com/video.mp4".to_string(),
-        )],
-    )]));
-    collect(&engine, req).await;
-
-    let requests = server.service.requests.lock().await;
-    let sent = requests.first().expect("recorded request");
-    assert_eq!(sent.media.len(), 1);
-    assert_eq!(sent.media[0].modality, pb::Modality::Video as i32);
-    assert_eq!(
-        sent.media[0].source,
-        Some(pb::media_item::Source::Url(
-            "https://example.com/video.mp4".to_string()
-        ))
-    );
-}
-
-#[tokio::test]
-async fn advertised_audio_media_reaches_openengine() {
-    let service = FakeTrtllm::default();
-    service.supports_multimodal.store(true, Ordering::SeqCst);
-    service.advertises_audio.store(true, Ordering::SeqCst);
-    service
-        .advertises_input_capabilities
-        .store(true, Ordering::SeqCst);
-    service.supports_text_input.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, 1);
-    engine.start(0).await.expect("start");
-
-    let mut req = request();
-    req.token_ids = Arc::new(Vec::new());
-    let task_prompt = "<|startoftranscript|><|fr|><|translate|><|notimestamps|>";
-    req.extra_args = Some(json!({"formatted_prompt": task_prompt}));
-    req.multi_modal_data = Some(HashMap::from([(
-        "audio_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "data:audio/wav;base64,YXVkaW8=".to_string(),
-        )],
-    )]));
-    collect(&engine, req).await;
-
-    let requests = server.service.requests.lock().await;
-    let sent = requests.first().expect("recorded request");
-    assert_eq!(
-        sent.input,
-        Some(pb::generate_request::Input::Prompt(task_prompt.to_string()))
-    );
-    assert_eq!(sent.media.len(), 1);
-    assert_eq!(sent.media[0].modality, pb::Modality::Audio as i32);
-    assert!(matches!(
-        sent.media[0].source.as_ref(),
-        Some(pb::media_item::Source::DataUri(value)) if value.starts_with("data:audio/wav")
-    ));
-}
-
-#[tokio::test]
-async fn both_multimodal_capability_signals_are_required() {
-    for (coarse, image) in [(true, false), (false, true)] {
-        let service = FakeTrtllm::default();
-        service.supports_multimodal.store(coarse, Ordering::SeqCst);
-        service.advertises_image.store(image, Ordering::SeqCst);
-        let server = FakeServer::start(service).await;
-        let engine = engine(&server.endpoint, 1);
-        engine.start(0).await.expect("start");
-
-        let mut req = request();
-        add_images(&mut req, ["https://example.com/image.png"]);
-        let context = dynamo_backend_common::testing::mock_context();
-        let result = engine
-            .generate(req, GenerateContext::new(context, None))
-            .await;
-        assert!(
-            result.is_err(),
-            "capabilities ({coarse}, {image}) must fail closed"
-        );
-        assert!(server.service.requests.lock().await.is_empty());
     }
 }
 
@@ -904,14 +907,18 @@ async fn pool_uses_each_configured_connection() {
 
     for index in 0..4 {
         let mut stream = client
-            .generate(pb::GenerateRequest {
-                request_id: format!("request-{index}"),
-                model: "model-source".to_string(),
-                input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-                    ids: vec![1, 2],
-                })),
-                ..Default::default()
-            })
+            .generate(
+                pb::GenerateRequest {
+                    request_id: format!("request-{index}"),
+                    model: "model-source".to_string(),
+                    input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+                        ids: vec![1, 2],
+                    })),
+                    ..Default::default()
+                },
+                None,
+                None,
+            )
             .await
             .expect("start stream");
         while stream.message().await.expect("message").is_some() {}
@@ -1058,52 +1065,6 @@ async fn a_configured_context_length_survives_a_server_without_control() {
     assert_eq!(server.service.model_info_calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn media_requests_retry_transient_capability_discovery() {
-    for (key, url, image, video) in [
-        ("image_url", "https://example.com/image.png", true, false),
-        ("video_url", "https://example.com/video.mp4", false, true),
-    ] {
-        let service = FakeTrtllm::default();
-        service.unavailable_model_info.store(true, Ordering::SeqCst);
-        let server = FakeServer::start(service).await;
-        let engine = engine_with(&server.endpoint, transport(1), Some(4096), AGG);
-        engine.start(0).await.expect("start with configured window");
-
-        server
-            .service
-            .unavailable_model_info
-            .store(false, Ordering::SeqCst);
-        server
-            .service
-            .supports_multimodal
-            .store(true, Ordering::SeqCst);
-        server
-            .service
-            .advertises_image
-            .store(image, Ordering::SeqCst);
-        server
-            .service
-            .advertises_video
-            .store(video, Ordering::SeqCst);
-        let mut media_request = request();
-        media_request.multi_modal_data = Some(HashMap::from([(
-            key.to_string(),
-            vec![MultimodalData::RawUrl(url.to_string())],
-        )]));
-
-        let output = collect(&engine, media_request).await;
-        assert_eq!(
-            output.last().unwrap().finish_reason,
-            Some(FinishReason::Stop)
-        );
-        assert_eq!(
-            server.service.model_info_calls.load(Ordering::SeqCst),
-            2,
-            "the {key} request must retry the transient startup failure once"
-        );
-    }
-}
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a
 /// stream waits forever on an engine that will never answer.
 #[tokio::test]

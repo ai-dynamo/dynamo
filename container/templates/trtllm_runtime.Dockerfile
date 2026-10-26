@@ -45,10 +45,9 @@ ARG TRTLLM_SOURCE_COMMIT
 
 COPY tests/utils/trtllm_media_overlay.py /tmp/validate_media_overlay.py
 
-# Optional source overlay for cross-repository CI. Keep the base image's server
-# lifecycle entry points, which are coupled to that release's frontend runtime.
-# capabilities imports model_config; install that helper with the media loader.
-# Keep the base image's other input modules to avoid a partial framework upgrade.
+# Optional source overlay for cross-repository CI. Retain the release-coupled
+# server launcher and framework, installing the pinned media hooks and ownership
+# helpers alongside OpenEngine's worker pools.
 RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
         test -n "${TRTLLM_SOURCE_REPOSITORY}" && \
         source_dir=$(mktemp -d) && \
@@ -57,31 +56,8 @@ RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
             -O "${source_dir}/source.tar.gz" && \
         tar -xzf "${source_dir}/source.tar.gz" -C "${source_dir}" \
             --strip-components=1 && \
-        package_dir=$(/usr/bin/python3 -c \
-            'import importlib.util; print(next(iter(importlib.util.find_spec("tensorrt_llm").submodule_search_locations)))') && \
-        for entry in "${source_dir}/tensorrt_llm/grpc/openengine/"*; do \
-            case "$(basename "${entry}")" in \
-                __init__.py|server.py) continue ;; \
-            esac; \
-            cp -a "${entry}" "${package_dir}/grpc/openengine/"; \
-        done && \
-        sed -i \
-            's/from openengine\.v1 import openengine_pb2_grpc/from .bindings import openengine_pb2_grpc/' \
-            "${package_dir}/grpc/openengine/server.py" && \
-        grep -Fxq 'from .bindings import openengine_pb2_grpc' \
-            "${package_dir}/grpc/openengine/server.py" && \
-        for module in media_io.py model_config.py; do \
-            install -m 0644 "${source_dir}/tensorrt_llm/inputs/${module}" \
-                "${package_dir}/inputs/${module}"; \
-        done && \
-        sed -i \
-            -e '/^[[:space:]]*session = await _get_aiohttp_session()$/d' \
-            -e 's/, session=session)/)/g' \
-            "${package_dir}/inputs/utils.py" && \
-        test -f "${package_dir}/inputs/model_config.py" && \
-        grep -Fq 'from tensorrt_llm.inputs.model_config import resolve_top_level_model_type' \
-            "${package_dir}/grpc/openengine/capabilities.py" && \
-        /usr/bin/python3 /tmp/validate_media_overlay.py --check-signatures-only && \
+        /usr/bin/python3 /tmp/validate_media_overlay.py \
+            --install-source "${source_dir}" --check-signatures-only && \
         rm -rf "${source_dir}"; \
     fi
 
@@ -299,6 +275,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        ca-certificates \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -311,6 +288,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         keyboxd \
         libssl3t64 \
         openssl
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
@@ -727,8 +708,23 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # one, in range, so a surviving old copy beside the new one fails the build.
 # Version-compared rather than glob-matched: a glob range silently stops matching
 # at the end of the series it was written for.
-RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
-    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade pip==26.2.2 "aiohttp>=3.14.4,<4.0" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 4) <= tv(vs[0]) < (4, 0, 0) else 1)'
+
+# Refresh the base image's certifi CA bundle in system site, for the same
+# inventory reason as aiohttp above. certifi has no dependencies, so this moves
+# exactly one distribution. Mirrored by the pre_runtime whiteout below: the
+# upgrade renames the version-stamped dist-info directory.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade certifi==2026.10.23 && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
+
+# Raise the base image's Pillow in system site, for the same inventory reason as
+# aiohttp above; requirements.trtllm.txt only reaches the venv. Pillow has no
+# required dependencies, so this moves exactly one distribution. Mirrored by the
+# pre_runtime whiteout below: the upgrade renames the dist-info directory and the
+# hash-named libraries vendored in pillow.libs.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "pillow>=13.0.0,<14" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
 
 # Pin the upstream developer stack in system site, where the image inventory
 # reads it. The rc29 baseline on both architectures satisfies all transitive
@@ -774,6 +770,9 @@ CMD ["/bin/bash"]
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+# The filesystem overlay does not carry runtime_full's image environment.
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
 # Remove the upstream runtime's Git LFS package without pruning shared dependencies.
 RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 
@@ -843,7 +842,12 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+# Remove old trust-store files and Python metadata before restoring the updated overlay.
 RUN rm -rf /workspace /home/ubuntu \
+    /etc/ssl/certs \
+    /usr/share/ca-certificates \
+    /usr/local/lib/python3.12/dist-packages/pip \
+    /usr/local/lib/python3.12/dist-packages/pip-*.dist-info \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
     /usr/local/bin/etcdutl \
@@ -883,7 +887,12 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/aiohappyeyeballs-* \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
-    /usr/local/lib/python3.12/dist-packages/attrs-* && \
+    /usr/local/lib/python3.12/dist-packages/attrs-* \
+    /usr/local/lib/python3.12/dist-packages/certifi \
+    /usr/local/lib/python3.12/dist-packages/certifi-* \
+    /usr/local/lib/python3.12/dist-packages/PIL \
+    /usr/local/lib/python3.12/dist-packages/pillow-* \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
@@ -891,6 +900,8 @@ COPY --from=runtime_full / /
 # Package trees and shared JupyterLab assets are whiteouted before the overlay.
 # Validate after the overlay so stale base metadata cannot survive the refresh.
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
+RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
+RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
 
 {% if target not in ("dev", "local-dev") %}
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'

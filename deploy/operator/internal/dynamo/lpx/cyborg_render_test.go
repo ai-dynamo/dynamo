@@ -54,7 +54,7 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 			cyborg := namedClique(t, pcs, "cond")
 			cyborg.Name, cyborg.Spec.RoleName = plan.CyborgTemplate, plan.CyborgTemplate
 			cyborg.Spec.Replicas = test.replicas
-			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
+			cyborg.Spec.MinAvailable = new(test.replicas)
 			_, err := RenderNodeLocal(workload, plan, RenderInput{
 				Cyborg: cyborg,
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
@@ -177,7 +177,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			pcs := renderTestPCS(true)
 			cyborg := namedClique(t, pcs, "cond")
 			cyborg.Spec.Replicas = test.replicas
-			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
+			cyborg.Spec.MinAvailable = new(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
 			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
