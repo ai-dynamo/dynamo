@@ -454,7 +454,9 @@ impl
                         return Some((output, state));
                     };
 
-                    let result = decoder.process_token_ids(&data.token_ids).and_then(|mut result| {
+                    // Per-token text is read only with this chunk's logprobs (`create_logprobs`).
+                    let token_text = data.log_probs.is_some();
+                    let result = decoder.process_token_ids_with_token_text(&data.token_ids, token_text).and_then(|mut result| {
                         if result.stop_trigger.is_none() && data.finish_reason.is_some() {
                             let final_step = decoder.finish()?;
                             if let Some(text) = final_step.released_text {
@@ -983,6 +985,17 @@ impl Decoder {
     /// In the future, this method may kick off async cpu/tokio tasks and or async cuda tasks to
     /// handle logits post-processing and/or other tasks.
     pub fn step(&mut self, token_id: TokenIdType) -> Result<StepResult> {
+        self.step_with_token_text(token_id, true)
+    }
+
+    /// Like [`Self::step`], but leaves `StepResult::token` as `None` when `token_text` is
+    /// false. Per-token text is only read alongside logprobs, so the backend skips the
+    /// per-token decode for chunks that carry none.
+    fn step_with_token_text(
+        &mut self,
+        token_id: TokenIdType,
+        token_text: bool,
+    ) -> Result<StepResult> {
         let below_min_tokens = self.generated_tokens < self.min_tokens;
         // increment the generated tokens
         self.generated_tokens += 1;
@@ -1011,6 +1024,7 @@ impl Decoder {
         let selected_token = self
             .tokenizer
             .as_ref()
+            .filter(|_| token_text)
             .and_then(|tokenizer| decode_token_text(tokenizer, token_id, self.skip_special_tokens));
 
         // Decode caller-visible content. Track IDs retained by the incremental decoder so
@@ -1027,7 +1041,8 @@ impl Decoder {
         if let (Some(start), Some(tracker)) = (detokenize_start, &self.tracker) {
             tracker.record_detokenize_latency(start.elapsed());
         }
-        let selected_token = selected_token.or_else(|| decoded_text.clone());
+        let selected_token =
+            selected_token.or_else(|| token_text.then(|| decoded_text.clone()).flatten());
 
         // stop conditions to not apply until the minimum number of tokens have been generated
         if below_min_tokens {
@@ -1279,6 +1294,16 @@ impl Decoder {
     }
 
     pub fn process_token_ids(&mut self, token_ids: &[TokenIdType]) -> Result<SeqResult> {
+        self.process_token_ids_with_token_text(token_ids, true)
+    }
+
+    /// Like [`Self::process_token_ids`], but every `tokens[i]` is `None` when `token_text`
+    /// is false. `tokens` still has one entry per consumed ID.
+    fn process_token_ids_with_token_text(
+        &mut self,
+        token_ids: &[TokenIdType],
+        token_text: bool,
+    ) -> Result<SeqResult> {
         let mut text: Option<String> = None;
         let mut tokens = Vec::with_capacity(token_ids.len());
 
@@ -1287,7 +1312,7 @@ impl Decoder {
                 token,
                 released_text,
                 stop_trigger,
-            } = self.step(*token_id)?;
+            } = self.step_with_token_text(*token_id, token_text)?;
 
             // `text` accumulates the caller-visible content, which can lag behind and later
             // release more than one step's worth at once. `tokens[i]` always reports
@@ -1465,8 +1490,10 @@ mod tests {
                     stop: stop.map(|text| vec![text.to_string()]),
                     ..Default::default()
                 };
+                // Per-token text is only decoded for chunks that carry logprobs.
                 let mut outputs = vec![LLMEngineOutput {
                     token_ids: vec![0],
+                    log_probs: Some(vec![0.0]),
                     ..Default::default()
                 }];
                 match boundary {
@@ -1842,6 +1869,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Per-token text is only read with logprobs, so a chunk without them skips the
+    /// per-token decode; its content text is unaffected.
+    #[tokio::test]
+    async fn test_token_text_only_decoded_for_chunks_with_logprobs() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine {
+                outputs: Some(vec![
+                    LLMEngineOutput {
+                        token_ids: vec![101],
+                        log_probs: Some(vec![-0.1]),
+                        ..Default::default()
+                    },
+                    LLMEngineOutput {
+                        token_ids: vec![103],
+                        ..Default::default()
+                    },
+                ]),
+            });
+        let outputs: Vec<_> = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .unwrap()
+            .filter_map(|item| async move { item.data })
+            .map(|data| (data.text, data.tokens))
+            .collect()
+            .await;
+
+        assert_eq!(
+            outputs,
+            vec![
+                (Some("Okay".to_string()), vec![Some("Okay".to_string())]),
+                (Some("<|user|>".to_string()), vec![None]),
+            ]
+        );
     }
 
     #[tokio::test]
