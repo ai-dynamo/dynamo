@@ -19,15 +19,14 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -165,8 +164,7 @@ func dgdrV1beta2Request(withHardware bool) *nvidiacomv1beta2.DynamoGraphDeployme
 	}
 	request.Spec.Model = &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"}
 	request.Spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{
-		Image:           "example.com/aisimulate:latest",
-		VersionOverride: "0.13.0",
+		InputOverrides: &runtime.RawExtension{Raw: []byte(`{"optimizer":{"max_trials":7}}`)},
 	}
 	if withHardware {
 		sku, budget := "h100_sxm", int32(4)
@@ -179,7 +177,7 @@ func dgdrV1beta2Request(withHardware bool) *nvidiacomv1beta2.DynamoGraphDeployme
 
 func dgdrV1beta2AcceptedCondition(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) metav1.Condition {
 	t.Helper()
-	condition := meta.FindStatusCondition(request.Status.Conditions, DGDRAcceptedConditionV1beta2)
+	condition := meta.FindStatusCondition(request.Status.Conditions, nvidiacomv1beta2.DGDRRequestConditionAccepted)
 	if condition == nil {
 		t.Fatal("no Accepted condition")
 	}
@@ -187,10 +185,11 @@ func dgdrV1beta2AcceptedCondition(t *testing.T, request *nvidiacomv1beta2.Dynamo
 }
 
 func TestV1beta2RequestControllerCreatesTheRunOfTheCurrentGeneration(t *testing.T) {
+	requestInput := dgdrV1beta2Request(true).Spec.NativeSearchInput.DeepCopy()
 	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true))
 	f.reconcile()
 
-	t.Log("One Run exists, owned by the Request, with the resolved and frozen input")
+	t.Log("One Run exists, owned by the Request, with the admitted typed input snapshot")
 	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
 	if err := f.client.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "search-1"}, run); err != nil {
 		t.Fatalf("get run: %v", err)
@@ -198,16 +197,11 @@ func TestV1beta2RequestControllerCreatesTheRunOfTheCurrentGeneration(t *testing.
 	if !metav1.IsControlledBy(run, f.request()) {
 		t.Fatal("run is not controlled by the request")
 	}
-	if got := run.Spec.AISimulate.VersionOverride; got != "0.13.0" {
-		t.Fatalf("run versionOverride = %q, want the resolved 0.13.0", got)
+	if !apiequality.Semantic.DeepEqual(run.Spec.NativeSearchInput, *requestInput) {
+		t.Fatalf("run input = %#v, want the admitted Request snapshot %#v", run.Spec.NativeSearchInput, *requestInput)
 	}
-	parameters, err := aisimulate.DecodeParameters(run.Spec.AISimulate.Parameters)
-	if err != nil {
-		t.Fatalf("input of the run: %v", err)
-	}
-	searchSpace, _ := parameters["search_space"].(map[string]any)
-	if searchSpace["hardware_sku"] != "h100_sxm" || searchSpace["gpu_budget"] != float64(4) {
-		t.Fatalf("frozen search_space = %v, want the hardware of the request", searchSpace)
+	if run.Status.AISimulate != nil {
+		t.Fatalf("status.aisimulate = %#v, want the Run controller to lower and record it", run.Status.AISimulate)
 	}
 
 	t.Log("The status records the accepted generation and the active Run")
@@ -337,19 +331,19 @@ func TestV1beta2RequestControllerCountsAnUnlabeledOwnedRunAsActive(t *testing.T)
 	}
 }
 
-func TestV1beta2RequestControllerCreatesNoRunWithoutHardware(t *testing.T) {
+func TestV1beta2RequestControllerDoesNotRepeatAdmissionValidation(t *testing.T) {
 	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(false))
 	f.reconcile()
-	if names := f.runNames(); len(names) != 0 {
-		t.Fatalf("runs = %v, want none", names)
+	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
+		t.Fatalf("runs = %v, want the admitted Request snapshotted without controller-side validation", names)
 	}
 	request := f.request()
 	condition := dgdrV1beta2AcceptedCondition(t, request)
-	if condition.Status != metav1.ConditionFalse || condition.Reason != dgdrReasonInvalidSpec {
-		t.Fatalf("condition = %v, want False/%s", condition, dgdrReasonInvalidSpec)
+	if condition.Status != metav1.ConditionTrue || condition.Reason != dgdrReasonRunCreated {
+		t.Fatalf("condition = %v, want True/%s", condition, dgdrReasonRunCreated)
 	}
-	if request.Status.ObservedGeneration != 0 {
-		t.Fatalf("observedGeneration = %d, want 0 for a rejected generation", request.Status.ObservedGeneration)
+	if request.Status.ObservedGeneration != 1 {
+		t.Fatalf("observedGeneration = %d, want 1", request.Status.ObservedGeneration)
 	}
 }
 
@@ -405,27 +399,40 @@ func assertRetained(t *testing.T, f *dgdrV1beta2Fixture) {
 	}
 }
 
-func TestV1beta2RequestControllerRetentionIgnoresTheGenerationAnnotation(t *testing.T) {
+func TestV1beta2RequestControllerOrdersRetainedRunsByTheirGenerationAnnotation(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	request.Generation = 8
-	objects := dgdrV1beta2RunFixtures(request, 7)
-	for i, object := range objects[1:] {
-		if i%2 == 0 {
-			delete(object.GetAnnotations(), dgdrV1beta2GenerationAnnotation) // missing
-		} else {
-			object.GetAnnotations()[dgdrV1beta2GenerationAnnotation] = "garbage" // malformed
-		}
+	objects := []client.Object{request}
+	for generation := 1; generation <= 7; generation++ {
+		run := dgdrV1beta2OwnedRun(request, generation, true)
+		run.Name = fmt.Sprintf("arbitrary-%02d", 100-generation) // sorts opposite to the generation
+		objects = append(objects, run)
 	}
 	f := newDGDRV1beta2Fixture(t, objects...)
 	f.reconcile()
 
-	assertRetained(t, f)
+	refs := f.request().Status.RecentRunRefs
+	want := []string{"arbitrary-93", "arbitrary-94", "arbitrary-95", "arbitrary-96", "arbitrary-97"}
+	if len(refs) != len(want) {
+		t.Fatalf("recentRunRefs = %v, want %v", refs, want)
+	}
+	for i := range want {
+		if refs[i].Name != want[i] {
+			t.Fatalf("recentRunRefs = %v, want %v", refs, want)
+		}
+	}
+	for _, name := range f.runNames() {
+		if name == "arbitrary-98" || name == "arbitrary-99" {
+			t.Fatalf("run %q of generation %s was not retired", name, map[string]string{"arbitrary-98": "2", "arbitrary-99": "1"}[name])
+		}
+	}
 }
 
-func TestV1beta2RequestControllerRejectsAControlledRunWithoutAGenerationInItsName(t *testing.T) {
+func TestV1beta2RequestControllerRejectsAControlledRunWithoutAGenerationAnnotation(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	odd := dgdrV1beta2OwnedRun(request, 1, true)
 	odd.Name = "unrelated"
+	delete(odd.Annotations, dgdrV1beta2GenerationAnnotation)
 	f := newDGDRV1beta2Fixture(t, request, odd)
 
 	if err := f.tryReconcile(); err == nil || !strings.Contains(err.Error(), "unrelated") {
@@ -433,6 +440,27 @@ func TestV1beta2RequestControllerRejectsAControlledRunWithoutAGenerationInItsNam
 	}
 	if names := f.runNames(); len(names) != 1 {
 		t.Fatalf("runs = %v, want the odd run left alone and none created", names)
+	}
+}
+
+func TestV1beta2RequestControllerReusesAnOwnedRunWhateverItsName(t *testing.T) {
+	request := dgdrV1beta2Request(true)
+	existing := dgdrV1beta2OwnedRun(request, int(request.Generation), false)
+	existing.Name = "an-arbitrary-valid-name"
+	f := newDGDRV1beta2Fixture(t, request, existing)
+
+	f.reconcile()
+
+	if names := f.runNames(); len(names) != 1 || names[0] != existing.Name {
+		t.Fatalf("runs = %v, want only %q: an owned Run of the current generation is reused", names, existing.Name)
+	}
+	live := f.request()
+	if live.Status.ActiveRunRef == nil || live.Status.ActiveRunRef.Name != existing.Name ||
+		live.Status.ObservedGeneration != request.Generation {
+		t.Fatalf("status = %+v, want %q active for generation %d", live.Status, existing.Name, request.Generation)
+	}
+	if condition := dgdrV1beta2AcceptedCondition(t, live); condition.Status != metav1.ConditionTrue {
+		t.Fatalf("Accepted = %v, want True", condition)
 	}
 }
 
@@ -521,14 +549,6 @@ func TestV1beta2RequestControllerDerivesDistinctValidNamesForOverlengthRequests(
 		t.Fatalf("two different Request names produced the same Run name %q", nameA)
 	}
 
-	t.Log("The name maps back to its generation for its own Request only")
-	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{Name: nameA}}
-	if generation, err := dgdrV1beta2RunGeneration(a.Name, run); err != nil || generation != 1 {
-		t.Fatalf("generation = %d, err = %v, want 1", generation, err)
-	}
-	if _, err := dgdrV1beta2RunGeneration(b.Name, run); err == nil {
-		t.Fatal("a Run name derived from another Request was accepted")
-	}
 }
 
 func TestV1beta2RequestControllerReconcilesAnOverlengthRequestToOneRun(t *testing.T) {
@@ -591,31 +611,24 @@ func TestV1beta2RequestControllerDoesNotAdoptARunOfAnotherOwner(t *testing.T) {
 	}
 }
 
-func TestV1beta2RequestControllerKeepsNullDeletedKeysOutOfTheRunInput(t *testing.T) {
+func TestV1beta2RequestControllerPreservesInputOverridesForRunLowering(t *testing.T) {
 	request := dgdrV1beta2Request(true)
-	// The Request removes a typed value (workload isl) and a derived default (request_count) with null.
-	const spec = `{"model":{"name":"Qwen/Qwen3-0.6B"},"hardware":{"gpu":{"sku":"h100_sxm","budget":4}},` +
-		`"workload":{"static":{"isl":1024}},` +
-		`"aisimulate":{"image":"example.com/aisimulate:latest","versionOverride":"0.13.0",` +
-		`"parameters":{"workload":{"isl":null,"request_count":null}}}}`
-	request.Spec = nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{}
-	if err := json.Unmarshal([]byte(spec), &request.Spec); err != nil {
-		t.Fatalf("decode spec: %v", err)
-	}
+	const overrides = `{"traffic":{"source":{"input_tokens":null}},"optimizer":{"max_trials":null}}`
+	request.Spec.AISimulate.InputOverrides = &runtime.RawExtension{Raw: []byte(overrides)}
 	f := newDGDRV1beta2Fixture(t, request)
 
 	run, err := f.reconciler.buildRun(request)
 	if err != nil {
 		t.Fatalf("build run: %v", err)
 	}
-	input, err := aisimulate.DecodeParameters(run.Spec.AISimulate.Parameters)
-	if err != nil {
-		t.Fatalf("input of the run: %v", err)
+	if run.Spec.AISimulate == nil || run.Spec.AISimulate.InputOverrides == nil {
+		t.Fatal("Run lost spec.aisimulate.inputOverrides")
 	}
-	workload, _ := input["workload"].(map[string]any)
-	for _, key := range []string{"isl", "request_count"} {
-		if value, found := workload[key]; found {
-			t.Errorf("workload.%s = %v in the Run input, want it absent: the deletion must stay", key, value)
-		}
+	if got := string(run.Spec.AISimulate.InputOverrides.Raw); got != overrides {
+		t.Fatalf("Run inputOverrides = %s, want %s", got, overrides)
+	}
+	request.Spec.AISimulate.InputOverrides.Raw[0] = '['
+	if got := string(run.Spec.AISimulate.InputOverrides.Raw); got != overrides {
+		t.Fatalf("Run inputOverrides changed with the Request: %s", got)
 	}
 }

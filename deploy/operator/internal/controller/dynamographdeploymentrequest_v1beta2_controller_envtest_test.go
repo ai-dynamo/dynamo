@@ -25,8 +25,8 @@ import (
 	"time"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
 	. "github.com/onsi/gomega"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,8 +37,8 @@ import (
 // This test runs the controller under a real manager, so only the watch events (a Request edit, a Run
 // status update, a deleted Run) can make it reconcile. It fails if SetupWithManager loses the Owns
 // watch, an event predicate drops Run status updates, or the owner mapping breaks. It also covers the
-// API server and admission side: the Request is created model-only and admission supplies the image
-// and the hardware.
+// API server and admission side: the Request is created model-only and admission persists the
+// structural defaults and discovered hardware before the controller snapshots it.
 func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	g := NewWithT(t)
 	env := sharedEnv.ForTest(t)
@@ -71,7 +71,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 		return live
 	}
 	accepted := func(live *nvidiacomv1beta2.DynamoGraphDeploymentRequest) *metav1.Condition {
-		return meta.FindStatusCondition(live.Status.Conditions, DGDRAcceptedConditionV1beta2)
+		return meta.FindStatusCondition(live.Status.Conditions, nvidiacomv1beta2.DGDRRequestConditionAccepted)
 	}
 	getRun := func(g Gomega, name string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
 		run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
@@ -92,13 +92,11 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
 	first := getRun(g, firstName)
-	g.Expect(metav1.IsControlledBy(first, getRequest(g))).To(BeTrue())
+	live := getRequest(g)
+	g.Expect(metav1.IsControlledBy(first, live)).To(BeTrue())
 	g.Expect(first.Spec.Hardware).NotTo(BeNil())
-	g.Expect(first.Spec.AISimulate.Image).To(Equal(controllerAISimulateImage))
-	g.Expect(first.Spec.AISimulate.VersionOverride).To(Equal("1.2.0"))
-	input, err := aisimulate.DecodeParameters(first.Spec.AISimulate.Parameters)
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(input).To(HaveKey("search_space"))
+	g.Expect(apiequality.Semantic.DeepEqual(first.Spec.NativeSearchInput, live.Spec.NativeSearchInput)).To(BeTrue())
+	g.Expect(first.Status.AISimulate).To(BeNil())
 
 	t.Log("Editing the Request while its Run is active is reported and starts nothing")
 	g.Eventually(func(g Gomega) {

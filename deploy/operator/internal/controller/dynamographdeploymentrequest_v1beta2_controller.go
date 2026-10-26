@@ -21,8 +21,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -31,14 +29,12 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,7 +44,8 @@ import (
 
 const (
 	// dgdrV1beta2GenerationAnnotation records the Request generation a Run was created for. It is
-	// diagnostic only: the generation the controller acts on is the one in the immutable Run name.
+	// the identity of a Run within its Request. metadata.name is only the convention used when a Run is
+	// created, so the controller never reconstructs or validates it for an existing Run.
 	dgdrV1beta2GenerationAnnotation = "nvidia.com/dgdr-request-generation"
 
 	// dgdrRunControllerUIDIndex indexes Runs by the UID of their controller OwnerReference. The
@@ -57,10 +54,6 @@ const (
 
 	// dgdrV1beta2RetainedRuns is how many terminal Runs a Request keeps. Older ones are deleted.
 	dgdrV1beta2RetainedRuns = 5
-
-	// DGDRAcceptedConditionV1beta2 reports whether the current Request generation has been
-	// materialized as an immutable Run. Execution state belongs to the Run, not to this condition.
-	DGDRAcceptedConditionV1beta2 = "Accepted"
 
 	dgdrReasonRunCreated          = "RunCreated"
 	dgdrReasonInvalidSpec         = "InvalidSpec"
@@ -113,21 +106,26 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 	}
 
 	wantName := dgdrV1beta2RunName(request)
-	var current *nvidiacomv1beta2.DynamoGraphDeploymentRun
-	for i := range runs {
-		if runs[i].Name == wantName {
-			current = &runs[i]
-		}
-	}
-
-	active, _, err := dgdrV1beta2SplitRuns(request.Name, runs)
+	entries, err := dgdrV1beta2RunEntries(runs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// The generation annotation identifies the Run of the current generation, whatever its name.
+	var current *nvidiacomv1beta2.DynamoGraphDeploymentRun
+	for i := range entries {
+		if entries[i].generation == request.Generation {
+			current = entries[i].run.DeepCopy()
+		}
+	}
+	active, _ := dgdrV1beta2SplitRuns(entries)
 
 	accepted := current != nil
+	runName := wantName
+	if current != nil {
+		runName = current.Name
+	}
 	condition := dgdrV1beta2Condition(request, metav1.ConditionTrue, dgdrReasonRunCreated,
-		fmt.Sprintf("Run %q exists for generation %d", wantName, request.Generation))
+		fmt.Sprintf("Run %q exists for generation %d", runName, request.Generation))
 	if current == nil {
 		if active != nil {
 			condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonWaitingForActiveRun,
@@ -149,12 +147,12 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 				if getErr := r.Get(ctx, client.ObjectKeyFromObject(run), existing); getErr != nil {
 					return ctrl.Result{}, fmt.Errorf("get existing Run %q: %w", wantName, getErr)
 				}
-				if metav1.IsControlledBy(existing, request) {
+				if metav1.IsControlledBy(existing, request) && dgdrV1beta2RunIsGeneration(existing, request.Generation) {
 					runs = append(runs, *existing)
 					accepted = true
 				} else {
 					condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonRunNameConflict,
-						fmt.Sprintf("Run %q exists and is owned by another object; trying again once it is gone", wantName))
+						fmt.Sprintf("Run %q exists and is not the Run of generation %d of this Request; trying again once it is gone", wantName, request.Generation))
 					result.RequeueAfter = dgdrV1beta2ConflictRetry
 				}
 			default:
@@ -163,10 +161,11 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 		}
 	}
 
-	active, terminal, err := dgdrV1beta2SplitRuns(request.Name, runs)
+	entries, err = dgdrV1beta2RunEntries(runs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	active, terminal := dgdrV1beta2SplitRuns(entries)
 	keep := min(len(terminal), dgdrV1beta2RetainedRuns)
 	retired := terminal[keep:]
 
@@ -199,39 +198,13 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 	return result, nil
 }
 
-// buildRun resolves the optional inputs of the Request into an immutable Run spec. The effective
-// AISimulate input is frozen into aisimulate.parameters: that object is the complete resolved input.
-// Run execution decodes it directly and never lowers the Run again, because the
-// merge-patch deletions (null) that shaped it are not part of the stored result.
+// buildRun snapshots the admitted typed input into an immutable Run. Admission has already
+// persisted Request defaults and discovered hardware. The Run controller lowers this snapshot once,
+// applies inputOverrides last, and records the exact effective input in status.aisimulate.input.
 func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) buildRun(
 	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
 ) (*nvidiacomv1beta2.DynamoGraphDeploymentRun, error) {
-	spec := &request.Spec
-	if spec.AISimulate == nil || spec.AISimulate.Image == "" {
-		return nil, errors.New("spec.aisimulate.image is required")
-	}
-	version, err := aisimulate.ResolveVersion(spec.AISimulate.Image, spec.AISimulate.VersionOverride)
-	if err != nil {
-		return nil, err
-	}
-	input, err := aisimulate.Lower(spec)
-	if err != nil {
-		return nil, err
-	}
-	if !aisimulate.HardwareNamed(input) {
-		return nil, errors.New("the effective AISimulate input names no GPU SKU or budget; set spec.hardware.gpu")
-	}
-	raw, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("encode the effective AISimulate input: %w", err)
-	}
-
-	frozen := spec.NativeSearchInput.DeepCopy()
-	frozen.AISimulate = &nvidiacomv1beta2.AISimulateSpec{
-		Image:           spec.AISimulate.Image,
-		VersionOverride: version,
-		Parameters:      &runtime.RawExtension{Raw: raw},
-	}
+	frozen := request.Spec.NativeSearchInput.DeepCopy()
 	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        dgdrV1beta2RunName(request),
@@ -322,7 +295,7 @@ func dgdrV1beta2Condition(
 	reason, message string,
 ) metav1.Condition {
 	return metav1.Condition{
-		Type:               DGDRAcceptedConditionV1beta2,
+		Type:               nvidiacomv1beta2.DGDRRequestConditionAccepted,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -336,23 +309,26 @@ func dgdrV1beta2IsTerminal(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) bool 
 	return meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
 }
 
-// dgdrV1beta2RunGeneration reads the Request generation from the immutable Run name. The name is
-// accepted only if it is exactly the name this Request derives for that generation; anything else is an
-// error, never generation zero.
-func dgdrV1beta2RunGeneration(requestName string, run *nvidiacomv1beta2.DynamoGraphDeploymentRun) (int64, error) {
-	index := strings.LastIndex(run.Name, "-")
-	if index < 0 {
-		return 0, fmt.Errorf("run %q has no Request generation suffix", run.Name)
+// dgdrV1beta2RunGeneration reads the Request generation a Run was created for from its generation
+// annotation. The annotation, not metadata.name, identifies a Run within its Request: the name is only
+// the convention used when a Run is created, so a later change of the naming scheme never orphans a
+// Run that already exists. A missing or invalid annotation is an error, never generation zero.
+func dgdrV1beta2RunGeneration(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) (int64, error) {
+	value, ok := run.Annotations[dgdrV1beta2GenerationAnnotation]
+	if !ok {
+		return 0, fmt.Errorf("run %q has no Request generation annotation", run.Name)
 	}
-	generation, err := strconv.ParseInt(run.Name[index+1:], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("run %q has no valid Request generation: %w", run.Name, err)
-	}
-	if expected := dgdrV1beta2RunNameFor(requestName, generation); run.Name != expected {
-		return 0, fmt.Errorf("run %q is not the Run name of generation %d of Request %q (expected %q)",
-			run.Name, generation, requestName, expected)
+	generation, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || generation <= 0 {
+		return 0, fmt.Errorf("run %q has invalid Request generation %q", run.Name, value)
 	}
 	return generation, nil
+}
+
+// dgdrV1beta2RunIsGeneration reports whether the Run's annotation names the given generation.
+func dgdrV1beta2RunIsGeneration(run *nvidiacomv1beta2.DynamoGraphDeploymentRun, generation int64) bool {
+	got, err := dgdrV1beta2RunGeneration(run)
+	return err == nil && got == generation
 }
 
 type dgdrV1beta2RunEntry struct {
@@ -371,43 +347,45 @@ func dgdrV1beta2Newer(a, b *dgdrV1beta2RunEntry) bool {
 	return a.run.Name > b.run.Name
 }
 
-// dgdrV1beta2SplitRuns returns the newest non-terminal Run, if any, and the terminal Runs newest first.
-func dgdrV1beta2SplitRuns(
-	requestName string,
-	runs []nvidiacomv1beta2.DynamoGraphDeploymentRun,
-) (*nvidiacomv1beta2.DynamoGraphDeploymentRun, []nvidiacomv1beta2.DynamoGraphDeploymentRun, error) {
+// dgdrV1beta2RunEntries pairs every owned Run with the Request generation its annotation names.
+func dgdrV1beta2RunEntries(runs []nvidiacomv1beta2.DynamoGraphDeploymentRun) ([]dgdrV1beta2RunEntry, error) {
 	entries := make([]dgdrV1beta2RunEntry, 0, len(runs))
 	for i := range runs {
-		generation, err := dgdrV1beta2RunGeneration(requestName, &runs[i])
+		generation, err := dgdrV1beta2RunGeneration(&runs[i])
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		entries = append(entries, dgdrV1beta2RunEntry{run: runs[i], generation: generation})
 	}
-	sort.SliceStable(entries, func(i, j int) bool { return dgdrV1beta2Newer(&entries[i], &entries[j]) })
-	var active *nvidiacomv1beta2.DynamoGraphDeploymentRun
-	var terminal []nvidiacomv1beta2.DynamoGraphDeploymentRun
-	for i := range entries {
-		switch {
-		case !dgdrV1beta2IsTerminal(&entries[i].run):
-			if active == nil {
-				active = &entries[i].run
-			}
-		default:
-			terminal = append(terminal, entries[i].run)
-		}
-	}
-	return active, terminal, nil
+	return entries, nil
 }
 
-// requireDGDRV1beta2API fails when the cluster does not serve the v1beta2 Request, Run and
-// Candidate APIs. Without them either the manager caches cannot sync or a Run's publisher
-// cannot start.
+// dgdrV1beta2SplitRuns returns the newest non-terminal Run, if any, and the terminal Runs newest first.
+func dgdrV1beta2SplitRuns(
+	entries []dgdrV1beta2RunEntry,
+) (*nvidiacomv1beta2.DynamoGraphDeploymentRun, []nvidiacomv1beta2.DynamoGraphDeploymentRun) {
+	sorted := append([]dgdrV1beta2RunEntry(nil), entries...)
+	sort.SliceStable(sorted, func(i, j int) bool { return dgdrV1beta2Newer(&sorted[i], &sorted[j]) })
+	var active *nvidiacomv1beta2.DynamoGraphDeploymentRun
+	var terminal []nvidiacomv1beta2.DynamoGraphDeploymentRun
+	for i := range sorted {
+		switch {
+		case !dgdrV1beta2IsTerminal(&sorted[i].run):
+			if active == nil {
+				active = &sorted[i].run
+			}
+		default:
+			terminal = append(terminal, sorted[i].run)
+		}
+	}
+	return active, terminal
+}
+
+// requireDGDRV1beta2API fails when the cluster does not serve the v1beta2 Request and Run APIs.
+// Without them the controller's caches never sync and the manager would hang at startup.
 func requireDGDRV1beta2API(mgr ctrl.Manager) error {
 	group, version := nvidiacomv1beta2.GroupVersion.Group, nvidiacomv1beta2.GroupVersion.Version
-	for _, kind := range []string{
-		"DynamoGraphDeploymentRequest", "DynamoGraphDeploymentRun", "DynamoGraphDeploymentCandidate",
-	} {
+	for _, kind := range []string{"DynamoGraphDeploymentRequest", "DynamoGraphDeploymentRun"} {
 		_, err := mgr.GetRESTMapper().RESTMapping(schema.GroupKind{Group: group, Kind: kind}, version)
 		if meta.IsNoMatchError(err) {
 			return fmt.Errorf("--dgdr-v1beta2-enabled is set but the cluster does not serve %s/%s %s; "+
