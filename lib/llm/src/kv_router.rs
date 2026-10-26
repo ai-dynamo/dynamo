@@ -1699,15 +1699,16 @@ impl KvRouter {
         (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
-    pub(crate) async fn add_output_blocks_if_booking(
+    pub(crate) async fn update_output_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
         num_blocks: usize,
         decay_fraction: Option<f64>,
+        progress: Option<dynamo_kv_router::scheduling::decode_progress::DecodeProgressUpdate>,
     ) -> Result<(), KvSchedulerError> {
         self.selection
             .scheduler()
-            .add_output_blocks_if_booking(booking, num_blocks, decay_fraction)
+            .update_output_if_booking(booking, num_blocks, decay_fraction, progress)
             .await
     }
 

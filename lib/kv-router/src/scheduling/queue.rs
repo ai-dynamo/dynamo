@@ -1732,8 +1732,9 @@ impl<
             } else {
                 None
             };
+            let progress = |worker| self.slots.decode_progress_for(worker);
             self.selector
-                .select_worker_traced(
+                .select_worker_with_decode_progress(
                     WorkerSelectionInput::configured(
                         &workers,
                         request,
@@ -1741,6 +1742,7 @@ impl<
                         self.block_size,
                     ),
                     trace,
+                    Some(&progress),
                 )
                 .map(|(selection, selection_trace)| {
                     let non_max_overlap_selection = if request.mode.is_tracked()

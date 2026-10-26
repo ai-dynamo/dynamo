@@ -280,5 +280,153 @@ fn shared_cache(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench, stacked, shared_cache);
+fn progress_group(c: &mut Criterion) {
+    use dynamo_custom_policy_builtin::{default_registry, register};
+    use dynamo_kv_router::protocols::{WorkerAffinityTarget, WorkerConfigLike, WorkerWithDpRank};
+    use dynamo_kv_router::scheduling::{
+        OverlapSignals, SessionContext, decode_progress::DecodeProgressUpdate,
+        queue::SchedulerBookingDescriptor,
+    };
+    use dynamo_kv_router::{
+        ActiveSequencesMultiWorker, NoopSequencePublisher, RoutingPartitionRef, SequenceRequest,
+        WorkerLoadProjection, WorkerSelectionInput, WorkerType,
+    };
+    use std::collections::HashMap;
+
+    struct SingleRankWorker;
+    impl WorkerConfigLike for SingleRankWorker {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+        fn total_kv_blocks(&self) -> Option<u64> {
+            Some(16384)
+        }
+    }
+    let (_, mut request) = support::fixture(2, 16_385);
+    let source = WorkerWithDpRank::from_worker_id(101);
+    let other = WorkerWithDpRank::from_worker_id(103);
+    request.overlap = OverlapSignals::default();
+    request.worker_loads.clear();
+    request.affinity_target = Some(WorkerAffinityTarget::from(source));
+    request.session_context = Some(SessionContext::new(
+        "child".into(),
+        Some("parent".into()),
+        None,
+        None,
+    ));
+    request
+        .overlap
+        .tier_overlap_blocks
+        .device
+        .insert(source, 256);
+    request.overlap.tier_overlap_blocks.device.insert(other, 0);
+    request.worker_loads.insert(
+        source,
+        WorkerLoadProjection {
+            active_requests: 8,
+            ..Default::default()
+        },
+    );
+    request
+        .worker_loads
+        .insert(other, WorkerLoadProjection::default());
+    let workers = HashMap::from([(101, SingleRankWorker), (103, SingleRankWorker)]);
+    let slots = ActiveSequencesMultiWorker::new_without_expiry(
+        NoopSequencePublisher,
+        64,
+        HashMap::from([(101, (0, 1)), (103, (0, 1))]),
+        false,
+        1,
+        "aggregated",
+    );
+    for i in 0..8 {
+        let request_id = format!("progress-bench-{i}");
+        let now = tokio::time::Instant::now();
+        let attempt_id = slots
+            .add_request_if_registered_admitted(
+                SequenceRequest {
+                    request_id: request_id.clone(),
+                    token_sequence: None,
+                    expected_output_tokens: None,
+                    track_prefill_tokens: false,
+                    prefill_load_hint: None,
+                    worker: source,
+                    lora_name: None,
+                },
+                now,
+            )
+            .unwrap();
+        slots.mark_prefill_completed(&request_id, now).unwrap();
+        slots
+            .update_decode_progress_for_benchmark(
+                &SchedulerBookingDescriptor {
+                    request_id,
+                    worker: source,
+                    attempt_id,
+                },
+                DecodeProgressUpdate::observed(128, 8),
+            )
+            .unwrap();
+    }
+    let provider = |worker| slots.decode_progress_for_benchmark(worker);
+    let mut group = c.benchmark_group("progress_group_selection");
+    group
+        .warm_up_time(Duration::from_millis(200))
+        .measurement_time(Duration::from_millis(500))
+        .sample_size(30)
+        .nresamples(1_000);
+    for enabled in [false, true] {
+        let mut yaml = String::from(
+            "worker_selection:\n  aggregated: progress-bench\n  instances:\n    - name: progress-bench\n      type: dynamo-two-tier-cost-fn\n",
+        );
+        // 60s keeps these unchanged CPU-only observations fresh while measuring selection.
+        if enabled {
+            yaml.push_str("      parameters:\n        progress_group:\n          source_active_requests: 8\n          min_prefix_tokens: 16384\n          min_remaining_tokens: 256\n          max_progress_age_ms: 60000\n");
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), yaml).unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            router_track_output_blocks: true,
+            ..Default::default()
+        };
+        let mut registry = default_registry();
+        register(&mut registry).unwrap();
+        let factory = registry.resolve(&config).unwrap().unwrap();
+        let policy = factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("bench", "default"),
+        );
+        let select = || {
+            policy
+                .select_worker_with_decode_progress(
+                    WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 64),
+                    None,
+                    Some(&provider),
+                )
+                .unwrap()
+                .0
+        };
+        assert_eq!(select().worker, if enabled { other } else { source });
+        let allocations = allocations(|| {
+            black_box(select());
+        });
+        eprintln!(
+            "progress-group allocations per 100 selections: enabled={enabled} allocations={allocations}"
+        );
+        group.bench_function(if enabled { "on" } else { "off" }, |b| {
+            b.iter(|| black_box(select()))
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench, stacked, shared_cache, progress_group);
 criterion_main!(benches);

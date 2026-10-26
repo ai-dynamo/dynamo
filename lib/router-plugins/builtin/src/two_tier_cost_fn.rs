@@ -43,6 +43,10 @@ use dynamo_kv_router::plugins::{
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
 
+#[cfg(test)]
+#[path = "progress_group_tests.rs"]
+mod progress_group_tests;
+
 /// Keep these equal to `experimental/sgl-router`'s `cache_aware_zmq` defaults, so an instance
 /// with no `parameters` mapping reproduces that policy exactly.
 const DEFAULT_CACHE_THRESHOLD: f64 = 0.5;
@@ -56,6 +60,8 @@ const DEFAULT_BALANCE_REL_THRESHOLD: f64 = 1.1;
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Parameters {
+    /// Calibrated, opt-in progress/group experiment. No routing change when absent.
+    progress_group: Option<crate::progress_group::ProgressGroupParameters>,
     /// Fraction of the request's blocks that must be device-resident on the best worker before the
     /// cache tier applies. Compared strictly.
     cache_threshold: f64,
@@ -68,6 +74,7 @@ struct Parameters {
 impl Default for Parameters {
     fn default() -> Self {
         Self {
+            progress_group: None,
             cache_threshold: DEFAULT_CACHE_THRESHOLD,
             balance_abs_threshold: DEFAULT_BALANCE_ABS_THRESHOLD,
             balance_rel_threshold: DEFAULT_BALANCE_REL_THRESHOLD,
@@ -77,6 +84,9 @@ impl Default for Parameters {
 
 impl Parameters {
     fn validate(&self) -> Result<(), WorkerSelectionPolicyProviderError> {
+        if let Some(progress) = self.progress_group {
+            progress.validate()?;
+        }
         if !self.cache_threshold.is_finite() || !(0.0..=1.0).contains(&self.cache_threshold) {
             return Err(WorkerSelectionPolicyProviderError::new(
                 "cache_threshold must be a finite number between 0.0 and 1.0",
@@ -140,7 +150,12 @@ struct TwoTierCostFnPicker {
 
 impl WorkerPicker for TwoTierCostFnPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
+        let inputs = WorkerInputs::CACHE | WorkerInputs::LOAD;
+        if self.parameters.progress_group.is_some() {
+            inputs | WorkerInputs::DECODE_PROGRESS
+        } else {
+            inputs
+        }
     }
 
     fn pick(
@@ -154,6 +169,11 @@ impl WorkerPicker for TwoTierCostFnPicker {
         let load = input
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+        if let Some(parameters) = self.parameters.progress_group
+            && let Some(row) = crate::progress_group::select(parameters, context, input)
+        {
+            return Ok(row);
+        }
         select_row(&self.parameters, cache, load, context.request_blocks())
             .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
     }
@@ -167,6 +187,12 @@ fn provider(
 
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
+            let mut parameters = parameters;
+            if !matches!(worker_type, dynamo_kv_router::WorkerType::Aggregated)
+                || !config.router_track_output_blocks
+            {
+                parameters.progress_group = None;
+            }
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),

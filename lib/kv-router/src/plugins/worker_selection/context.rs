@@ -9,6 +9,7 @@ use crate::scheduling::SchedulingRequest;
 
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
+    pub(crate) decode_progress: Option<&'a super::DecodeProgressSnapshot>,
     pub(crate) request: &'a SchedulingRequest,
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
@@ -18,6 +19,17 @@ pub struct WorkerSelectionContext<'a> {
 }
 
 impl WorkerSelectionContext<'_> {
+    /// Frontend-local active-attempt observations captured immediately before this picker.
+    /// Available only in a picker declaring `WorkerInputs::DECODE_PROGRESS`, when the
+    /// aggregated frontend enables native output tracking and raw collection. The owning
+    /// native scheduler supplies only complete, supported worker summaries. Missing or
+    /// invalid worker summaries are absent. Facts are unweighted, borrowed for this
+    /// callback, and carry their oldest observation age at capture. LOAD/progress reads
+    /// remain advisory and separate; remaining budgets do not predict GPU completion.
+    pub fn decode_progress(&self) -> Option<&super::DecodeProgressSnapshot> {
+        self.decode_progress
+    }
+
     /// The exact worker/rank imposed by the host for this selection, if any.
     /// Includes explicit pins and eligible exclusive-affinity targets. This is
     /// read-only routing metadata, not permission to change eligibility.
