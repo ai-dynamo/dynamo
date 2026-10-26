@@ -8,7 +8,7 @@ subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and env
 `DynamoRuntimeConfig` holds the configuration that is **common to every Dynamo process** — the frontend, the standalone router, and all three backend workers (vLLM, SGLang, TRT-LLM) parse this same argument group. Most fields, types, defaults, and choices on this page come from the [`DynamoRuntimeArgGroup` and `DynamoRuntimeConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/runtime_args.py) definitions. The page also catalogs runtime environment-only controls implemented below the Python argument layer.
 
 <Note>
-  These are the **shared** Dynamo runtime flags. Each backend also has its own backend-specific flags: [vLLM Configuration](../backends/vllm-configuration.mdx), [SGLang Configuration](../backends/sglang-configuration.mdx), and [TensorRT-LLM Configuration](../backends/tensorrt-llm-configuration.mdx). This page covers neither native engine arguments nor backend-specific `DYN_*` prefixed flags — only the flags from `DynamoRuntimeArgGroup`.
+  These are the **shared** Dynamo runtime flags and environment-only controls. For backend-specific configuration, see [vLLM Configuration](../backends/vllm-configuration.mdx), [SGLang Configuration](../backends/sglang-configuration.mdx), and [TensorRT-LLM Configuration](../backends/tensorrt-llm-configuration.mdx).
 </Note>
 
 ## How the config is loaded
@@ -332,6 +332,20 @@ address.
 
   Environment variable: `DYN_MEDIA_OUTPUT_HTTP_URL`
 </ParamField>
+
+### Media Input Limits
+
+Environment-only limits used by Dynamo's media loaders. Values are in MiB
+(1 MiB = 1048576 bytes). Invalid or nonpositive values fall back to the defaults
+with a warning.
+
+| Variable | Default (MiB) | Set on | Scope |
+|---|---:|---|---|
+| `DYN_MM_MAX_DATA_URL_MB` | 16 | Frontend and workers that load data URLs | Each complete encoded data URL, including its prefix and base64 payload. Image-edit references are checked on the worker. |
+| `DYN_MM_MAX_FILE_SIZE_MB` | 64 | Workers using Dynamo's media loaders | Each remote image, audio, or video download. The image limit also applies to shared-cache hits. |
+
+For image edits, these limits apply alongside the
+[upload and pixel budgets](../api/image-edits.mdx#image-edit-limits).
 
 ## Fault tolerance
 

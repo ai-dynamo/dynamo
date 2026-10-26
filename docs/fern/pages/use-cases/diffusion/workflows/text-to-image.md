@@ -89,9 +89,12 @@ alone does not establish editing support. This example uses `black-forest-labs/F
 with vLLM 0.31.0 and vLLM-Omni 0.31.0rc1.
 
 > [!IMPORTANT]
-> Use a Dynamo build containing the [image-reference forwarding fix](https://github.com/ai-dynamo/dynamo/pull/15390).
-> Dynamo 1.5.1 ignores edit references. See [Image API Compatibility](../../../reference/components/frontend-configuration.mdx#image-api-compatibility)
-> for the upload and JSON request contracts and their version requirements.
+> Image-edit uploads and multiple references are **unreleased**. Use frontend and
+> Omni worker builds containing [multipart image-edit support](https://github.com/ai-dynamo/dynamo/pull/16455);
+> Dynamo v1.6.0 and earlier do not include it. The single-reference JSON example
+> requires the [image-reference forwarding fix](https://github.com/ai-dynamo/dynamo/pull/15390),
+> which is also absent from v1.5.1 and v1.6.0. Those releases ignore image-edit references.
+> See the [Image Edits API](../../../reference/api/image-edits.mdx) for the request contract.
 
 Launch the reference-capable model from the repository root:
 
@@ -141,8 +144,7 @@ PY
 ```
 
 To use a hosted reference instead, set `input_reference` to an HTTP(S) image URL that the
-worker can fetch. To upload the same file directly with a frontend and Omni worker
-that implement multi-image edits, use multipart:
+worker can fetch. To upload the same file directly, use multipart:
 
 ```bash
 curl --fail-with-body -sS http://localhost:8000/v1/images/edits \
@@ -158,7 +160,7 @@ curl --fail-with-body -sS http://localhost:8000/v1/images/edits \
 For multiple references, repeat `-F 'image[]=@reference.png'` with each file in
 its intended order. Do not mix `image` and `image[]`. The JSON equivalent sets
 `input_reference` to an ordered array of URLs or data URLs. See
-[Image Edit Limits](../../../reference/components/frontend-configuration.mdx#image-edit-limits)
+[Image Edit Limits](../../../reference/api/image-edits.mdx#image-edit-limits)
 before increasing input count or image size.
 
 ## See Also

@@ -440,6 +440,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "1",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, expected) in [
+                (json!("auto"), GuidedToolConstraint::None),
+                (json!("none"), GuidedToolConstraint::None),
+                (json!("required"), GuidedToolConstraint::GuidedJsonRequired),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "get_weather".to_string(),
+                    },
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(Default::default()),
+                    ..Default::default()
+                };
+                let result =
+                    apply_request_tool_call_parsing_options(options, &request(choice)).unwrap();
+                assert_eq!(result.guided_tool_constraint, expected, "{parser}");
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, parallel, expected) in [
+                (
+                    json!("required"),
+                    None,
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(true),
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(false),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!("auto"),
+                    Some(true),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    None,
+                    GuidedToolConstraint::StructuralTag,
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(crate::local_model::runtime_config::StructuralTagConfig {
+                        scope: crate::local_model::runtime_config::StructuralTagScope::Always,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut request = request(choice);
+                request.inner.parallel_tool_calls = parallel;
+                let result = apply_request_tool_call_parsing_options(options, &request).unwrap();
+                assert_eq!(
+                    result.guided_tool_constraint, expected,
+                    "{parser} {parallel:?}"
+                );
+            }
+        }
+    }
+
     // The low-level ParsingOptions default remains conservative. Regular
     // workers explicitly publish the deployment-facing On/Always policy;
     // native sidecars without an operator configuration retain optional tags OFF.
