@@ -255,6 +255,7 @@ impl FromStr for ClusterId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PoolId {
     indexer_domain: IndexerDomainId,
+    #[serde(alias = "dc_id")]
     cluster_id: ClusterId,
 }
 
@@ -727,7 +728,20 @@ mod tests {
         let json = serde_json::to_value(pool).unwrap();
         assert_eq!(json["cluster_id"], 7);
         assert!(json.get("dc_id").is_none());
-        assert_eq!(serde_json::from_value::<PoolId>(json).unwrap(), pool);
+        assert_eq!(
+            serde_json::from_value::<PoolId>(json.clone()).unwrap(),
+            pool
+        );
+
+        // Version-3 frozen benchmark corpora may still contain the old key.
+        let mut old_json = json;
+        let old_cluster_id = old_json
+            .as_object_mut()
+            .unwrap()
+            .remove("cluster_id")
+            .unwrap();
+        old_json["dc_id"] = old_cluster_id;
+        assert_eq!(serde_json::from_value::<PoolId>(old_json).unwrap(), pool);
     }
 
     #[test]
