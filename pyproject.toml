@@ -254,6 +254,10 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
+    # kr8s 0.20.13 predates Kubernetes 1.36; keep its version warning visible
+    # without aborting deploy tests. Remove when the pinned release supports 1.36.
+    # Upstream coverage: https://github.com/kr8s-org/kr8s/pull/744
+    'default:^Kubernetes version v1\.36\.\d+ is not supported\. Supported versions for kr8s 0\.20\.13 are 1\.28 to 1\.34\.$:UserWarning:kr8s\._api$',
     # DGDR still uses AISimulate's supported legacy sweep API until its
     # migration to the new Sweeper API is implemented.
     'ignore:`aisimulate\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is a deprecated sweep API:DeprecationWarning',
