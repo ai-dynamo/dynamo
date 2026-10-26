@@ -176,8 +176,13 @@ spec:
 
 Get `nsight_operator.py` from the
 [NGC resources](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/devtools/resources/nsight-operator-resources) of the
-same release as the operator. Deploy the DGD after the profile config, wait until every selected pod is ready, and
-start your load. Then run:
+same release as the operator. It needs Python 3.12 or newer. Install its dependencies from the unpacked bundle:
+
+```bash
+pip install -r requirements.txt
+```
+
+Deploy the DGD after the profile config, wait until every selected pod is ready, and start your load. Then run:
 
 ```bash
 NS=my-namespace
@@ -187,15 +192,17 @@ python3 nsight_operator.py --tag $T status                # one collection agent
 python3 nsight_operator.py --tag $T session-begin --title $T
 python3 nsight_operator.py --tag $T profiler-start --delay 120 --duration 60
 python3 nsight_operator.py --tag $T ls                    # repeat until every pod has a report
-python3 nsight_operator.py --tag $T session-end
 python3 nsight_operator.py --tag $T download -o ./reports
+python3 nsight_operator.py --tag $T session-end
 ```
 
 `--delay` gives the load time to warm up. The coordinator starts and stops the window itself, so the CLI does not need
-to stay connected. Reports appear after the delay, the window, and the upload; a 30-second window on one GPU worker
-produced a report of about 100 MB. Each file name carries the tag, the process, and the pod name. An `otlp-converter`
-entry in `status` or `ls` comes from Nsight's OpenTelemetry converter, not from a Dynamo pod. Open the reports with an
-Nsight Systems version at least as new as the `nsys` that the operator injects.
+to stay connected. Download before `session-end`: without `--session <UUID>`, `ls` and `download` use the tag's active
+session. To download later, pass the session ID that `session-begin` printed. Reports appear after the delay, the
+window, and the upload; a 30-second window on one GPU worker produced a report of about 100 MB. Each file name carries
+the tag, the process, and the pod name. An `otlp-converter` entry in `status` or `ls` comes from Nsight's OpenTelemetry
+converter, not from a Dynamo pod. Open the reports with an Nsight Systems version at least as new as the `nsys` that the
+operator injects.
 
 <Note>
 `autoconfigure` copies the gateway's storage key into `~/.nsight-cloud.conf` on the machine that runs the CLI. To keep
@@ -210,8 +217,9 @@ the key off that machine:
 ## Profile One Pod with kubectl exec
 
 To profile a single pod, you can also run `nsys` inside it with `kubectl exec`, without `nsight_operator.py`. The pod
-must already be injected, which means a profile config selected it when the pod was created. On x86_64 nodes the
-injected `nsys` is at `/mnt/nv/bin/nsight-systems/target-linux-x64/nsys`, and Dynamo's container is named `main`:
+must already be injected, which means a profile config selected it when the pod was created. The injected `nsys` is
+at `/mnt/nv/bin/nsight-systems/target-linux-x64/nsys` on x86_64 nodes and
+`/mnt/nv/bin/nsight-systems/target-linux-sbsa-armv8/nsys` on Arm nodes. Dynamo's container is named `main`:
 
 ```bash
 POD=my-dgd-0-worker-abcde
