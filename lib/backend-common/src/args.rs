@@ -10,6 +10,8 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use dynamo_llm::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
+use dynamo_runtime::config::parse_bool_opt;
 
 use crate::disagg::DisaggregationMode;
 
@@ -76,6 +78,16 @@ pub struct CommonArgs {
     )]
     pub exclude_tools_when_tool_choice_none: bool,
 
+    /// Structural-tag guided decoding for tool calls: `true`, `false`, or a JSON object.
+    #[arg(
+        long = "dyn-structural-tag",
+        env = "DYN_STRUCTURAL_TAG",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_structural_tag
+    )]
+    pub dyn_structural_tag: Option<StructuralTagFlag>,
+
     /// Disaggregation role: `agg` (default), `prefill`, `decode`, or `encode`.
     /// Prefill workers register with `ModelType::empty()` and
     /// `WorkerType::Prefill` regardless of `endpoint_types`; decode and encode
@@ -105,6 +117,27 @@ pub struct CommonArgs {
     pub enable_rl: bool,
 }
 
+/// An explicit `--dyn-structural-tag` value; `StructuralTagFlag(None)` is `false`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructuralTagFlag(pub Option<StructuralTagConfig>);
+
+impl CommonArgs {
+    /// The flag's value, or the always-on policy when unset and `on_by_default`.
+    pub fn structural_tag(&self, on_by_default: bool) -> Option<StructuralTagConfig> {
+        match &self.dyn_structural_tag {
+            Some(StructuralTagFlag(config)) => config.clone(),
+            None => on_by_default.then(always_on),
+        }
+    }
+}
+
+fn always_on() -> StructuralTagConfig {
+    StructuralTagConfig {
+        scope: StructuralTagScope::Always,
+        ..Default::default()
+    }
+}
+
 fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
     let Ok(suffix) = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX") else {
         return Ok(namespace.to_owned());
@@ -117,6 +150,22 @@ fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infal
         return Ok(namespace.to_owned());
     }
     Ok(format!("{namespace}{suffix}"))
+}
+
+fn parse_structural_tag(value: &str) -> Result<StructuralTagFlag, String> {
+    if let Some(enabled) = parse_bool_opt(value) {
+        return Ok(StructuralTagFlag(enabled.then(always_on)));
+    }
+    let mut config: serde_json::Value =
+        serde_json::from_str(value).map_err(|error| error.to_string())?;
+    let Some(fields) = config.as_object_mut() else {
+        return Err("expected true, false, or a JSON object".to_string());
+    };
+    // Unlike the wire type, the flag defaults scope to `always`.
+    fields.entry("scope").or_insert_with(|| "always".into());
+    StructuralTagConfig::from_value_strict(config)
+        .map(|config| StructuralTagFlag(Some(config)))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

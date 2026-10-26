@@ -18,8 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
@@ -46,7 +46,7 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	if err != nil {
 		return nil, err
 	}
-	if workload.Pipeline() == PipelineLPX {
+	if workload.Pipeline() == PipelineHybrid {
 		input.Cyborg = pcs.Spec.Template.Cliques[0]
 	}
 	templates, err := RenderNodeLocal(workload, plan, input)
@@ -69,7 +69,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	tests := []struct {
 		name       string
 		pipeline   Pipeline
-		snapshot   *BuildSnapshot
+		snapshot   *Build
 		configPath string
 	}{
 		{
@@ -89,7 +89,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			snapshot: hxSnapshot, configPath: "/custom",
 		},
 		{
-			name: "HX hybrid storage", pipeline: PipelineLPX,
+			name: "HX hybrid storage", pipeline: PipelineHybrid,
 			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "/configs",
 		},
 	}
@@ -98,18 +98,18 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			t.Log("Seed conflicting runtime annotations and a nondefault mount")
 			projection := projectRenderFixture(t, test.pipeline, test.snapshot)
 			require.NotEqual(t, projection.Digest().String(), projection.CompilerSnapshotDigest())
-			pcs := renderTestPCS(test.pipeline == PipelineLPX)
+			pcs := renderTestPCS(test.pipeline == PipelineHybrid)
 			for _, clique := range pcs.Spec.Template.Cliques {
 				clique.Annotations = map[string]string{
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
 				}
 			}
 			template := corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				Annotations: map[string]string{
 					"user":                         "kept",
 					lpxv1alpha1.PodModelAnnotation: "spoofed",
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
-				}},
+				},
 				Spec: renderTestPodSpec(),
 			}
 			template.Spec.Tolerations = []corev1.Toleration{
@@ -119,9 +119,9 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			if test.configPath != "" {
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
 					Name: lpuConfigVolumeName,
-					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "authored-config"}, DefaultMode: ptr.To[int32](0440),
-					}},
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						Name: "authored-config", DefaultMode: ptr.To[int32](0440),
+					},
 				})
 			}
 			template.Spec.Containers[0].VolumeMounts = slices.DeleteFunc(template.Spec.Containers[0].VolumeMounts,
@@ -130,7 +130,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
 					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: test.configPath})
 			}
-			if test.pipeline == PipelineLPX {
+			if test.pipeline == PipelineHybrid {
 				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
 				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = "/model-cache"
 			}
@@ -162,7 +162,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.Subset(t, agent.Spec.PodSpec.Volumes, template.Spec.Volumes)
 
 			t.Log("Resolve runtime mounts using the authored storage path")
-			if test.pipeline != PipelineLPX {
+			if test.pipeline != PipelineHybrid {
 				conductor := namedClique(t, rendered, "cond")
 				require.Equal(t, "kept", conductor.Annotations["user"])
 				require.Subset(t, conductor.Spec.PodSpec.Volumes, template.Spec.Volumes)
@@ -249,7 +249,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	draft := testLPXComponent(runtimeModelDraft, "draft-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
-	draft.Replicas = ptr.To(int32(2))
+	draft.Replicas = new(int32(2))
 	target := testLPXComponent(testTargetStageName, "target-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
@@ -268,13 +268,12 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 				}},
 			})
 			spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "conductor", Image: "setup"})
-			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "resources", VolumeSource: corev1.VolumeSource{
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "resources",
 				DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{
 					Path: "main-memory", ResourceFieldRef: &corev1.ResourceFieldSelector{
 						ContainerName: "main", Resource: "limits.memory",
 					},
-				}}},
-			}})
+				}}}})
 		}
 	}
 
@@ -315,7 +314,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
-	selected, err := ResolveWorkload(t.Context(), source, singleGroupComponents(t, source), staticBuildSnapshotSource{
+	selected, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), source, singleGroupComponents(t, source), staticModelRegistry{
 		"draft-build": draftSnapshot, "target-build": targetSnapshot,
 	})
 	require.NoError(t, err)
@@ -391,11 +390,11 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	}
 }
 
-func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *BuildSnapshot) *ModelProjection {
+func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *Build) *ModelProjection {
 	t.Helper()
 	intent := ModelProjectionInput{
 		Pipeline: pipeline,
-		Models:   []string{"default"}, RuntimeBuildRef: "model-build", BuildSnapshot: normalizeTestSnapshot(t, snapshot),
+		Models:   []string{"default"}, RuntimeBuildRef: "model-build", Build: snapshot,
 	}
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
@@ -418,7 +417,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 			PodSpec: corev1.PodSpec{
 				SchedulerName: corev1.DefaultSchedulerName,
 				Volumes: []corev1.Volume{
-					{Name: "model-storage", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}},
+					{Name: "model-storage", PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}},
 				},
 				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
 					{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
@@ -428,7 +427,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
 					Name:                      "candidate",
-					ResourceClaimTemplateName: ptr.To("candidate"),
+					ResourceClaimTemplateName: new("candidate"),
 				}},
 			},
 		},
@@ -440,14 +439,14 @@ func renderTestPodSpec() corev1.PodSpec {
 	return corev1.PodSpec{
 		Volumes: []corev1.Volume{{
 			Name: "model-storage",
-			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: "model-storage",
-			}},
+			},
 		},
-			{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			{Name: "ssh-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
-			{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
-			{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
+			{Name: "single-v2-ssh-key", EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			{Name: "ssh-secret", Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}},
+			{Name: "host-dev", HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}},
+			{Name: "host-sys", HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}},
 		},
 		Containers: []corev1.Container{{
 			Name: "main", Image: "runtime",

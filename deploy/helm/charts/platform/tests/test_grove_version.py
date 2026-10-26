@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(shutil.which("helm"), "requires Helm CLI")
 class GroveVersionTest(unittest.TestCase):
     def helm(self, *args):
         result = subprocess.run(
