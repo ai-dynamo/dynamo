@@ -87,6 +87,7 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
+  - lib/sidecar/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -99,6 +100,8 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
+  - lib/mocker/servers/trtllm/
+  - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
@@ -106,6 +109,8 @@ areas:
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
+  - lib/mocker/servers/sglang/
+  - lib/sidecar/sglang/
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:
@@ -113,15 +118,7 @@ areas:
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
 - label: sidecar
   github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
-  path_globs:
-  - components/src/dynamo/sglang/sidecar.py
-  - components/src/dynamo/trtllm/sidecar.py
-  - components/src/dynamo/vllm/sidecar.py
-  - docs/fern/**/*sidecar*
-  - lib/bindings/python/tests/test_sidecar_startup.py
-  - lib/mocker/servers/
-  - lib/sidecar/
-  - tests/serve/test_sidecar.py
+  path_globs: []
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -261,6 +258,10 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
+  - lib/sidecar/dynamo-sidecar
+  - lib/sidecar/README.md
+  - lib/sidecar/common/
+  - lib/sidecar/testkit/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -1097,14 +1098,90 @@ shared:
   owners:
   - frontend
   - diffusion
+- glob: lib/mocker/servers/sglang/
+  owners:
+  - performance
+  - backend-sglang
+  - sidecar
+- glob: lib/mocker/servers/trtllm/
+  owners:
+  - performance
+  - backend-trtllm
+  - sidecar
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
   - performance
+- glob: lib/sidecar/testkit/tests/support/vllm.rs
+  owners:
+  - runtime
+  - backend-vllm
+  - sidecar
+- glob: lib/sidecar/testkit/tests/support/sglang.rs
+  owners:
+  - runtime
+  - backend-sglang
+  - sidecar
+- glob: components/src/dynamo/sglang/sidecar.py
+  owners:
+  - backend-sglang
+  - sidecar
+- glob: components/src/dynamo/trtllm/sidecar.py
+  owners:
+  - backend-trtllm
+  - sidecar
+- glob: components/src/dynamo/vllm/sidecar.py
+  owners:
+  - backend-vllm
+  - sidecar
+- glob: docs/fern/**/*sidecar*
+  owners:
+  - docs
+  - sidecar
+- glob: lib/bindings/python/tests/test_sidecar_startup.py
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/mocker/servers/
+  owners:
+  - performance
+  - sidecar
 - glob: lib/sidecar/Dockerfile
   owners:
-  - sidecar
   - ops
+  - sidecar
+- glob: lib/sidecar/README.md
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/common/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/dynamo-sidecar
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/sglang/
+  owners:
+  - backend-sglang
+  - sidecar
+- glob: lib/sidecar/testkit/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/trtllm/
+  owners:
+  - backend-trtllm
+  - sidecar
+- glob: lib/sidecar/vllm/
+  owners:
+  - backend-vllm
+  - sidecar
+- glob: tests/serve/test_sidecar.py
+  owners:
+  - runtime
+  - sidecar
 - glob: tests/deploy/
   owners:
   - ops
