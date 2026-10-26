@@ -34,7 +34,11 @@ Async orchestrator calls (``bootstrap_from_fpms`` / ``tick``)
 run inside a single replay-scoped event loop so callers don't change.
 
 Supports both aggregated and disaggregated topologies. No I/O, no
-runtime dependencies. Fully deterministic with offline replay.
+runtime dependencies. The ``VirtualClock`` engine runs every pipeline tick
+to completion, without the live wall-clock deadlines, so host speed does not
+change the scaling decisions. What still reads the host clock does so by
+design: a retune sweep's ``timeout_seconds`` and ``decision_latency_seconds:
+measured``, and the call timeout of a remote gRPC plugin.
 """
 
 from __future__ import annotations

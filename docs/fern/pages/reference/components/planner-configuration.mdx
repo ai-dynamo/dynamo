@@ -494,7 +494,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether it fires. When unset, computed as the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`. Must be greater than 0 and evenly divide both adjustment intervals.
   </ParamField>
   <ParamField path="tick_max_duration_seconds" type="number" default="30.0">
-    Outer deadline wrapping the full 4-stage pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Must be greater than 0.
+    Outer wall-clock deadline wrapping the full 4-stage pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Replay does not apply it: a replayed tick runs to completion, however long it takes on the host. Must be greater than 0.
   </ParamField>
   <ParamField path="external_plugins" type="[]ExternalPluginEntry" default="[]">
     Static external-plugin registrations applied at startup. Per-entry failures are logged but do not crash the Planner. See [ExternalPluginEntry](#externalpluginentry).
@@ -541,7 +541,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
       Allow plaintext `grpc://` plugin endpoints. Required to use any `grpc://` endpoint; mTLS support is not yet shipped.
     </ParamField>
     <ParamField path="request_timeout_seconds" type="number" default="5.0">
-      Per-RPC timeout applied to every plugin call. Must be greater than 0.
+      Per-RPC timeout applied to every plugin call. Replay does not apply it to in-process plugins: a replayed tick runs to completion, however long it takes on the host. Must be greater than 0.
     </ParamField>
     <ParamField path="keepalive_time_ms" type="integer" default="30000">
       gRPC keepalive time, in milliseconds.
@@ -619,7 +619,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     Scoring ITL SLA. Must be greater than 0. `null` uses the Planner's `itl_ms`; in `aisimulate predict`, `null` takes `evaluation.sla.itl_ms` when it is set (see [Requirements](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#requirements)).
   </ParamField>
   <ParamField path="min_improvement_percentage" type="number" default="3.0">
-    Apply the best candidate only if its score exceeds the current point's score on the same window by more than this percentage. Must be in [0, 100). Candidate replays share one random seed, so a candidate that changes no routing or scaling decision scores exactly the current point and is kept. To choose a value, see [Measure the Gain](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#measure-the-gain).
+    Apply the best candidate only if its score exceeds the current point's score on the same window by more than this percentage. Must be in [0, 100). Candidate replays share one random seed, so a candidate that changes no routing or scaling decision scores exactly the current point and is kept. With the pinned AISimulate release, an inner Planner with `optimization_target: sla` is not guaranteed to be bitwise reproducible, so such a candidate can miss an exact tie; see [Candidates and the Sweep](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#candidates-and-the-sweep). To choose a value, see [Measure the Gain](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#measure-the-gain).
   </ParamField>
   <ParamField path="max_candidates" type="integer" default="512">
     Upper bound on the expanded grid size (the product of all domain sizes), on the values of each knob, and separately on the number of load-predictor candidates. Must be at least 1. A grid that exceeds it is rejected with the size of each dimension. For the candidate set a sweep replays, see [Candidates and the Sweep](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#candidates-and-the-sweep).

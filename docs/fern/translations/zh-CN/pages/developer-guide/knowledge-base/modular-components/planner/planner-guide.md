@@ -222,8 +222,8 @@ Planner 默认通过内置 plugin pipeline 运行。基础 pipeline cadence 位�
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
 | `scheduling.scale_interval_seconds` | float | 已启用 builtin interval 的最大公约数 | 基础 pipeline cadence。Pipeline 每个 interval 唤醒一次；每个 plugin 的 `execution_interval_seconds` 决定该 plugin 是否在当前 tick 执行。默认值是 `load_adjustment_interval_seconds` 和启用 throughput scaling 时 `throughput_adjustment_interval_seconds` 的最大公约数，以保留现有配置的 fire time。 |
-| `scheduling.tick_max_duration_seconds` | float | `30.0` | 包住完整 plugin pipeline 的外层 deadline。超时会中止当前 tick；下一次 tick 从干净状态继续。 |
-| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | 单个 plugin RPC timeout。Plugin 超时会触发 `PluginTimeoutError`；该 stage 会继续处理剩余 plugin。 |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | 包住完整 plugin pipeline 的外层 wall-clock deadline。超时会中止当前 tick；下一次 tick 从干净状态继续。replay 不应用此 deadline。 |
+| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | 单个 plugin RPC timeout。Plugin 超时会触发 `PluginTimeoutError`；该 stage 会继续处理剩余 plugin。replay 不对 in-process plugin 应用此 timeout。 |
 
 现有 planner 字段仍然驱动内置 plugin：
 

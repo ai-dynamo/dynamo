@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -276,6 +279,177 @@ def test_candidate_replays_share_common_random_numbers(tmp_path):
     # routing decision: it ties the baseline, and the controller keeps it.
     assert evaluate({"shared_cache_multiplier": 0.5}) == baseline
     assert evaluate({"router_temperature": 0.0})[0] != baseline[0]
+
+
+# Report fields measured on the wall clock, not on the simulated one.
+_WALL_CLOCK_FIELDS = (
+    "wall_time_ms",
+    "processed_tokens_per_s",
+    "processed_output_tokens_per_s",
+)
+
+
+def _simulated_record(report) -> dict:
+    """The report as a dict, without its wall-clock fields."""
+
+    record = report.to_dict()
+    for name in _WALL_CLOCK_FIELDS:
+        del record["summary"][name]
+    return record
+
+
+def _canonical(record: dict) -> str:
+    """Canonical JSON with one field per line, so a failed comparison shows
+    the fields that differ."""
+
+    return json.dumps(record, sort_keys=True, indent=1)
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(60)
+def test_planner_replay_does_not_depend_on_the_tick_deadline(tmp_path):
+    # The live tick deadline (scheduling.tick_max_duration_seconds) is wall
+    # time, and a replayed tick takes no simulated time, so replay runs every
+    # tick to completion. Under the deadline, a tick that outlived it (on a
+    # slow or loaded host; here a 1 ns deadline) became skip_tick_timeout and
+    # changed the scaling path. The static-threshold load planner
+    # (optimization_target throughput) leaves AISimulate's forward-pass
+    # performance model out.
+    traces = _write_workload(tmp_path, blocks=16, output_tokens=128)
+
+    def replay(**scheduling) -> dict:
+        planner_config = {
+            "mode": "agg",
+            "optimization_target": "throughput",
+            "max_gpu_budget": 8,
+            "report_interval_hours": None,
+            "live_dashboard_port": 0,
+        }
+        if scheduling:
+            planner_config["scheduling"] = scheduling
+        report = run_trace_replay(
+            traces,
+            trace_format="dynamo",
+            num_workers=1,
+            # 256 blocks of 64 tokens: the dense head fills the KV cache, so
+            # the planner scales up, and down again in the tail.
+            extra_engine_args=_engine(max_num_seqs=4, num_gpu_blocks=256),
+            planner_config=planner_config,
+            _deterministic=True,
+        )
+        record = _simulated_record(report)
+        # Digest of the input config, which differs by the deadline itself.
+        del record["planner"]["metadata"]["planner_config_digest"]
+        return record
+
+    default = replay()
+    assert default["planner"]["scaling_events"], "no scaling for the deadline to change"
+    assert _canonical(replay(tick_max_duration_seconds=1e-9)) == _canonical(default)
+
+
+def _planner_candidate_report(traces: list[str]) -> tuple[int, str]:
+    """Replay ``traces`` as a sweep candidate with an inner load planner.
+
+    Returns this process's id and the canonical report without its
+    wall-clock fields. Module level: the test runs it in spawned processes,
+    as the sweep runs its candidates.
+    """
+
+    report = run_trace_replay(
+        traces,
+        trace_format="dynamo",
+        router_mode="kv_router",
+        num_workers=4,
+        extra_engine_args=_engine(max_num_seqs=16),
+        planner_config={
+            "mode": "agg",
+            "optimization_target": "sla",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": False,
+            "ttft_ms": 500.0,
+            "itl_ms": 30.0,
+            "min_endpoint": 1,
+            "max_gpu_budget": 8,
+            # A small FPM store fills within a few ticks, so the planner's
+            # AIS regression evicts samples and refits for most of the run.
+            "max_num_fpm_samples": 8,
+            "report_interval_hours": None,
+            "live_dashboard_port": 0,
+        },
+        _deterministic=True,
+        sla_ttft_ms=500.0,
+        sla_itl_ms=30.0,
+        capture_planner_details=True,
+    )
+    return os.getpid(), _canonical(_simulated_record(report))
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(120)
+@pytest.mark.xfail(
+    strict=True,
+    # Only the report comparison may fail as expected; a crash, a timeout or
+    # a failed precondition below is a real failure.
+    raises=AssertionError,
+    reason=(
+        "the pinned aisimulate keeps the planner's FPM samples in a std "
+        "HashMap (BucketedSamples), so a per-process hasher seed orders every "
+        "regression refit and breaks eviction ties; remove this marker once "
+        "the pin orders the buckets"
+    ),
+)
+def test_planner_candidate_replay_is_identical_across_processes(tmp_path):
+    # Each sweep candidate replays in its own spawned worker, so common random
+    # numbers need the whole report, inner planner included, to be a function
+    # of the inputs alone. Six 30 s phases of different rates and shapes move
+    # the planner's forward-pass samples across the regression's bucket grid;
+    # with hashed buckets, 16 replays in fresh processes gave 16 different
+    # reports, and with ordered buckets one.
+    traces, start_ms = [], _BASE_MS
+    for phase, (count, gap_ms, blocks, output_tokens) in enumerate(
+        (
+            (750, 40, 16, 128),
+            (2_500, 12, 32, 256),
+            (500, 60, 8, 64),
+            (1_500, 20, 48, 512),
+            (1_000, 30, 4, 32),
+            (3_000, 10, 24, 128),
+        )
+    ):
+        trace = _write_trace(
+            tmp_path / f"phase{phase}.jsonl",
+            count=count,
+            gap_ms=gap_ms,
+            blocks=blocks,
+            output_tokens=output_tokens,
+            start_ms=start_ms,
+            prefix=f"phase{phase}",
+        )
+        traces.append(str(trace))
+        start_ms += count * gap_ms
+
+    with ProcessPoolExecutor(
+        max_workers=2,
+        mp_context=multiprocessing.get_context("spawn"),
+        max_tasks_per_child=1,
+    ) as pool:
+        (first_pid, first), (second_pid, second) = pool.map(
+            _planner_candidate_report, [traces, traces]
+        )
+
+    # Preconditions: pytest.fail is not an AssertionError, so the xfail
+    # marker cannot absorb them.
+    if first_pid == second_pid:
+        pytest.fail("both replays ran in one process")
+    planner = json.loads(first)["planner"]
+    if not planner["scaling_events"]:
+        pytest.fail("the inner planner never scaled")
+    if all(
+        tick["effects"]["diagnostics"]["estimated_itl_ms"] is None
+        for tick in planner["ticks"]
+    ):
+        pytest.fail("the planner's performance model never estimated ITL")
+    assert first == second
 
 
 def _guard_config() -> dict:

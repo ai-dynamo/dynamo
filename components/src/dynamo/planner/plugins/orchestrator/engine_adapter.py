@@ -242,6 +242,16 @@ class OrchestratorEngineAdapter:
         # knobs (``tick_max_duration_seconds`` etc).
         cb = CircuitBreaker(self._clock)
         transport_config = config.plugin_registration.transport
+        # Live ticks run under wall-clock budgets: the whole-tick deadline
+        # and the per-call timeout of in-process plugins. Under a
+        # ``VirtualClock`` (replay) a tick takes no simulated time, so it runs
+        # to completion: a wall-clock budget would make the simulated
+        # decisions depend on host speed and load. No looser replay guard
+        # replaces them, since a loaded host can outlast any bound; a retune
+        # sweep still kills its candidate replays at its own timeout. gRPC
+        # plugins keep their call timeout; they are remote services, outside
+        # the simulation.
+        wall_clock_budgets = not isinstance(self._clock, VirtualClock)
 
         def _factory(plugin_id, endpoint, *, in_process_instance=None):
             return make_transport_for_endpoint(
@@ -249,6 +259,7 @@ class OrchestratorEngineAdapter:
                 endpoint,
                 transport_config,
                 in_process_instance=in_process_instance,
+                in_process_timeout=wall_clock_budgets,
             )
 
         # Build the auth validator from config when ``trusted_sources`` is
@@ -294,7 +305,11 @@ class OrchestratorEngineAdapter:
             scheduler=scheduler,
             circuit_breaker=cb,
             clock=self._clock,
-            tick_max_duration_seconds=config.scheduling.tick_max_duration_seconds,
+            tick_max_duration_seconds=(
+                config.scheduling.tick_max_duration_seconds
+                if wall_clock_budgets
+                else None
+            ),
             capabilities=capabilities,
             metrics=self._plugin_framework_metrics,
         )

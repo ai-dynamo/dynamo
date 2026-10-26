@@ -292,8 +292,8 @@ plugin registration, transport, and auth settings live under
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scheduling.scale_interval_seconds` | float | gcd of enabled builtin intervals | Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether that plugin fires on the tick. By default, the cadence is the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`, preserving existing config fire times. |
-| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. |
-| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer wall-clock deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Replay does not apply it. |
+| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. Replay does not apply it to in-process plugins. |
 
 Existing planner fields still drive the builtin plugins:
 
@@ -363,8 +363,11 @@ apply, with outcome `advisory`; the router and Planner parameters keep their sta
 A sweep takes time, so the decision lands at least one Planner tick after the sweep launches, and
 later when `decision_latency_seconds` models the sweep's duration. The old parameters serve traffic
 until then. Each candidate is replayed once, and all candidates of a window share one random seed,
-so a candidate that changes no routing or scaling decision ties the current point and is kept. A
-candidate that changes decisions is judged on one replay of one window, so
+so a candidate that changes no routing or scaling decision ties the current point and is kept (with
+the pinned AISimulate release, an inner Planner with `optimization_target: sla` is not guaranteed to
+be bitwise reproducible; see
+[Candidates and the Sweep](planner-design.md#candidates-and-the-sweep)).
+A candidate that changes decisions is judged on one replay of one window, so
 `min_improvement_percentage` sets the margin it must clear; see
 [Measure the Gain](aisimulate-planner-replay.mdx#measure-the-gain).
 

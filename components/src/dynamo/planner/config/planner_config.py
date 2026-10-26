@@ -386,7 +386,11 @@ class SchedulingConfig(BaseModel):
     tick_max_duration_seconds: float = Field(
         default=30.0,
         gt=0,
-        description=("Outermost deadline wrapping the entire 4-stage plugin pipeline."),
+        description=(
+            "Outermost wall-clock deadline wrapping the entire 4-stage plugin "
+            "pipeline. Replay does not apply it: a replay tick runs to "
+            "completion, so its decisions do not depend on host speed."
+        ),
     )
     external_plugins: list[ExternalPluginEntry] = Field(
         default_factory=list,

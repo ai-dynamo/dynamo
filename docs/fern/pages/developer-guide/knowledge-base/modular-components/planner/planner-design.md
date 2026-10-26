@@ -306,8 +306,8 @@ run it. This section describes the mechanics.
 
 Retune lives in the Planner engine (`OrchestratorEngineAdapter`), not in a plugin, for two reasons:
 
-- A sweep runs for minutes to hours. A plugin must answer within the pipeline's deadlines: 5 seconds
-  per call (`request_timeout_seconds` of the plugin transport) and 30 seconds per tick
+- A sweep runs for minutes to hours. A live plugin must answer within the pipeline's deadlines:
+  5 seconds per call (`request_timeout_seconds` of the plugin transport) and 30 seconds per tick
   (`scheduling.tick_max_duration_seconds`). The engine instead launches the sweep in one tick and
   collects the result in a later tick, outside those deadlines.
 - Retune's timing must behave the same in replay and live. In replay the sweep runs while virtual
@@ -393,11 +393,16 @@ task at a time over its own pipe:
    the swap's warmup observations, as the host will (see [Predictor Swap](#predictor-swap)). It is
    queued ahead of the candidate replays, so a long ARIMA or Prophet fit overlaps them.
 
-Every candidate replay, the current point's included, is deterministic: it runs with the canonical
-router seed and ordinal request ids, so all candidates of a window see common random numbers. A
+Every candidate replay, the current point's included, runs with the canonical router seed and
+ordinal request ids, so all candidates of a window see common random numbers. Its result does not
+depend on host speed: a replayed Planner tick runs to completion, without the live tick deadline. A
 candidate that changes no routing or scaling decision scores exactly the current point; a candidate
-that changes decisions is still compared on one sample path of the window. The outer replay keeps
-its default, non-deterministic routing.
+that changes decisions is still compared on one sample path of the window. With the pinned
+AISimulate release, a candidate replay whose inner Planner uses `optimization_target: sla` is not
+guaranteed to be bitwise reproducible across processes: AISimulate's forward-pass performance model
+iterates its samples in a per-process hash order, so its refits can differ in the last bits and flip
+a scaling decision. Such a candidate can score differently from the current point even when its
+parameters change nothing. The outer replay keeps its default, non-deterministic routing.
 
 Without scaling, a candidate replay keeps the replica counts fixed. With scaling, it runs an inner
 Planner: the current configuration with the candidate's Planner fields, retune disabled, no

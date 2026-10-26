@@ -757,10 +757,14 @@ replica counts fixed; see [Replay in Advisory Mode](#replay-in-advisory-mode).
 Each candidate is replayed once. All candidate replays of a window, the current point's included,
 use the same router seed and request ids, so a candidate that changes no routing or scaling
 decision scores exactly the current point and is kept. A candidate that changes decisions is still
-judged on one sample path of one window. The outer replay keeps its default, unseeded routing, so
-two runs of the same config can differ in the outer replay's results and, with autoscaling, in the
-replica counts a window starts from. Set `min_improvement_percentage` (3 by default) to the smallest
-gain worth a switch, and check a decision across windows or runs before trusting a small margin.
+judged on one sample path of one window. With the pinned AISimulate release, an inner Planner with
+`optimization_target: sla` can still decide differently in two replays of the same candidate, so
+such a candidate can miss an exact tie; see
+[Candidates and the Sweep](planner-design.md#candidates-and-the-sweep).
+The outer replay keeps its default, unseeded routing, so two runs of the same config can differ in
+the outer replay's results and, with autoscaling, in the replica counts a window starts from. Set
+`min_improvement_percentage` (3 by default) to the smallest gain worth a switch, and check a
+decision across windows or runs before trusting a small margin.
 
 ### Run Retune from Python
 

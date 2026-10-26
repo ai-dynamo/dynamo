@@ -272,9 +272,14 @@ def evaluate_candidate(
     With it, an inner planner runs from ``base_planner`` with
     ``params.planner`` applied and retune disabled (Scenario 2); its load
     predictor is warmed with the observations in ``warmup_path``, when set.
-    The replay is deterministic (canonical router seed, ordinal request ids),
-    so the baseline and every candidate see common random numbers: a candidate
-    that changes no routing or scaling decision scores exactly the baseline.
+    The replay uses the canonical router seed and ordinal request ids, so the
+    baseline and every candidate see common random numbers, and it does not
+    depend on host speed: a candidate that changes no routing or scaling
+    decision scores exactly the baseline. With the pinned AISimulate, an inner
+    planner in SLA mode is not guaranteed to be bitwise reproducible across
+    processes: AISimulate's forward-pass performance model iterates its
+    samples in a per-process hash order, so its refits can differ in the last
+    bits and flip a scaling decision.
     Raises when the replay fails or its summary lacks the score inputs.
     """
 
