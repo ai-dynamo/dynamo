@@ -1579,7 +1579,9 @@ impl ResponseState {
             if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
                 return Ok(None);
             }
-            // A frontend stop string ends the stream before vLLM's terminal.
+            // Send prompt logprobs with the first token chunk, not the terminal: once
+            // the frontend matches a stop string it cancels the stream, and vLLM's
+            // terminal response never arrives.
             self.attach_prompt_data(&mut mapped);
             return Ok(Some(mapped));
         };
