@@ -44,8 +44,8 @@ pub use queue_admission::WorkerPlacement;
 pub use request_classifier::RequestLifecycle;
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::{
-    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, RequestClassificationContext,
-    RequestClassifier, RequestClassifierConfig, RequestClassifierContext, RequestClassifierFactory,
+    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    RequestClassifierConfig, RequestClassifierContext, RequestClassifierFactory,
     RequestClassifierParameters, RequestClassifierProvider, RequestClassifierProviderError,
     RequestClassifierRegistryError, RequestProgress, RequestProgressUpdater,
 };

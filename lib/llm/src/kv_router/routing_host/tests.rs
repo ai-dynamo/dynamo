@@ -16,8 +16,7 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     protocols::RoutingConstraints,
     scheduling::{
-        ClassifierError, ClassifyEvent, ClassifyFuture, RequestClassificationContext,
-        RequestClassifier,
+        ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
     },
 };
 use dynamo_runtime::{
@@ -1802,7 +1801,7 @@ struct RecordingClassifier {
 impl RequestClassifier for RecordingClassifier {
     fn classify(
         &mut self,
-        request: RequestClassificationContext,
+        request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -1839,7 +1838,7 @@ struct RejectingClassifier {
 impl RequestClassifier for RejectingClassifier {
     fn classify(
         &mut self,
-        _request: RequestClassificationContext,
+        _request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -1913,7 +1912,7 @@ struct TypedRejectingClassifier {
 impl RequestClassifier for TypedRejectingClassifier {
     fn classify(
         &mut self,
-        _request: RequestClassificationContext,
+        _request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -2116,7 +2115,7 @@ struct PausingClassifier {
 impl RequestClassifier for PausingClassifier {
     fn classify(
         &mut self,
-        request: RequestClassificationContext,
+        request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         let entered = Arc::clone(&self.entered);
@@ -2235,7 +2234,7 @@ struct TokenContractClassifier {
 impl RequestClassifier for TokenContractClassifier {
     fn classify(
         &mut self,
-        request: RequestClassificationContext,
+        request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.classified

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, RequestClassificationContext, RequestClassifier,
+    ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
@@ -15,7 +15,7 @@ struct PassThrough;
 impl RequestClassifier for PassThrough {
     fn classify(
         &mut self,
-        request: RequestClassificationContext,
+        request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         Box::pin(async move { Ok(request) })

@@ -13,10 +13,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyEvent, ClassifyFuture, RequestClassificationContext,
-    RequestClassifier, RequestClassifierContext, RequestClassifierFactory,
-    RequestClassifierParameters, RequestClassifierProviderError, RequestClassifierRegistryError,
-    RequestProgress,
+    ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
+    RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress,
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use parking_lot::Mutex;
@@ -287,7 +286,7 @@ impl ThunderAgentClassifier {
 impl RequestClassifier for ThunderAgentClassifier {
     fn classify(
         &mut self,
-        request: RequestClassificationContext,
+        request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         let Some(session) = request.session_context() else {

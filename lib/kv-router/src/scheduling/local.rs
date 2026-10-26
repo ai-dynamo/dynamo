@@ -29,7 +29,7 @@ use super::types::{
     ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
     WorkerAvailabilityProvider,
 };
-use crate::plugins::request_classifier::{RequestClassificationContext, RequestClassifier};
+use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
 use crate::plugins::worker_selection::WorkerCapacity;
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{
@@ -427,7 +427,7 @@ where
         &self,
         request: &mut SchedulingRequest,
         ingress_at: Instant,
-    ) -> Result<Option<RequestClassificationContext>, KvSchedulerError> {
+    ) -> Result<Option<ClassifyRequest>, KvSchedulerError> {
         let Some(classifier) = self.request_classifier.get() else {
             return Ok(None);
         };
@@ -1379,7 +1379,7 @@ mod tests {
     impl RequestClassifier for CountingClassifier {
         fn classify(
             &mut self,
-            request: RequestClassificationContext,
+            request: ClassifyRequest,
             workers: WorkerCandidates<'_>,
         ) -> ClassifyFuture {
             self.calls.fetch_add(1, Ordering::Relaxed);
@@ -1473,7 +1473,7 @@ mod tests {
         impl RequestClassifier for DeadlineClassifier {
             fn classify(
                 &mut self,
-                mut request: RequestClassificationContext,
+                mut request: ClassifyRequest,
                 _workers: WorkerCandidates<'_>,
             ) -> ClassifyFuture {
                 assert_eq!(request.ingress_at(), self.0);
@@ -1522,7 +1522,7 @@ mod tests {
 
             fn classify(
                 &mut self,
-                request: RequestClassificationContext,
+                request: ClassifyRequest,
                 workers: WorkerCandidates<'_>,
             ) -> ClassifyFuture {
                 // The queue's capacity check, run on the classifier's own rows.

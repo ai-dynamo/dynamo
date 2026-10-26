@@ -76,7 +76,7 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 use std::time::Duration;
 
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyFuture, RequestClassificationContext, RequestClassifier,
+    ClassifierError, ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::error::{DynamoError, ErrorClass};
@@ -87,7 +87,7 @@ struct QueueBudget {
 }
 
 impl RequestClassifier for QueueBudget {
-    fn classify(&mut self, mut request: RequestClassificationContext, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
+    fn classify(&mut self, mut request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
         let deadline = request.ingress_at() + self.budget;
         Box::pin(async move {
             if Instant::now() >= deadline {
@@ -202,7 +202,7 @@ The policy class enables queueing when every eligible worker's active prefill to
 
 ### Request Inputs
 
-`classify` receives a `RequestClassificationContext` with these accessors:
+`classify` receives a `ClassifyRequest` with these accessors:
 
 | Accessor | Meaning |
 |---|---|
@@ -241,7 +241,7 @@ A classifier can read the per-worker cache and load data that [worker-selection 
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, RequestClassificationContext, RequestClassifier,
+    ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
 use dynamo_kv_router::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
 
@@ -254,7 +254,7 @@ impl RequestClassifier for LoadAwareClass {
         WorkerInputs::LOAD
     }
 
-    fn classify(&mut self, mut request: RequestClassificationContext, workers: WorkerCandidates<'_>) -> ClassifyFuture {
+    fn classify(&mut self, mut request: ClassifyRequest, workers: WorkerCandidates<'_>) -> ClassifyFuture {
         // Count only observed loads, and require at least one.
         let mut loads = workers
             .iter()

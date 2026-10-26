@@ -8,9 +8,7 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::plugins::{RouterPluginRegistry, request_classifier, worker_selection};
-use dynamo_kv_router::scheduling::{
-    ClassifyFuture, RequestClassificationContext, RequestClassifier,
-};
+use dynamo_kv_router::scheduling::{ClassifyFuture, ClassifyRequest, RequestClassifier};
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerCandidates, WorkerFilter,
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
@@ -78,7 +76,7 @@ struct LegacyClassifier;
 impl RequestClassifier for LegacyClassifier {
     fn classify(
         &mut self,
-        request: RequestClassificationContext,
+        request: ClassifyRequest,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         let _: Option<&str> = request.request_id();

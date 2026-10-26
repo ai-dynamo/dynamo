@@ -26,7 +26,7 @@ impl WorkerSelectionContext<'_> {
     }
 
     /// Input sequence length in tokens, the same value classifiers read as
-    /// `RequestClassificationContext::isl_tokens`. No rounding or cache weighting is applied.
+    /// `ClassifyRequest::isl_tokens`. No rounding or cache weighting is applied.
     /// Zero when the request carries no prompt token IDs, such as embeddings-only input.
     pub fn isl_tokens(&self) -> usize {
         self.request.isl_tokens
