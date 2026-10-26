@@ -34,6 +34,8 @@ These were functional checks, not performance benchmarks; changing infrastructur
     {"id": "local-trtllm-agg-video-diffusion-sh", "target": "local:trtllm", "label": "agg_video_diffusion.sh", "description": "Text-to-Video Generation"},
     {"id": "local-vllm-agg-omni-i2v-sh", "target": "local:vllm", "label": "agg_omni_i2v.sh", "description": "Image-to-Video Generation"},
     {"id": "local-vllm-agg-omni-video-sh", "target": "local:vllm", "label": "agg_omni_video.sh", "description": "Text-to-Video Generation"},
+    {"id": "local-vllm-agg-omni-cosmos3-video-sh", "target": "local:vllm", "label": "agg_omni_cosmos3_video.sh", "description": "Cosmos3 Nano Text-to-Video (experimental)"},
+    {"id": "local-vllm-agg-omni-cosmos3-i2v-sh", "target": "local:vllm", "label": "agg_omni_cosmos3_i2v.sh", "description": "Cosmos3 Nano Image-to-Video (experimental)"},
     {"id": "local-vllm-agg-omni-minimax-h3-sh", "target": "local:vllm", "label": "agg_omni_minimax_h3.sh", "description": "MiniMax-H3 Text-to-Video with Audio"}
   ]}
 >
@@ -109,6 +111,52 @@ and decoding, not general image fidelity or model quality.
 [Source: `agg_omni_video.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_video.sh)
 
 <Code src="../../../../../examples/backends/vllm/launch/agg_omni_video.sh" title="agg_omni_video.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-cosmos3-video-sh">
+
+**Prerequisites:** [Cosmos3 README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md)
+
+**Experimental.** Requires vLLM `0.31.0`, vLLM-Omni `0.31.0rc1`, and the pinned Cosmos3 Nano
+checkpoint. Qualified on one GH200 GPU with `--no-guardrails` and 33-frame, 24 fps, 1280×720
+requests; these are short clips, not Cosmos's native 189-frame default. The wrapper starts the
+shared launcher in video mode.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_cosmos3_video.sh --no-guardrails)
+```
+
+[Source: `agg_omni_cosmos3_video.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3_video.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3_video.sh" title="agg_omni_cosmos3_video.sh" language="bash" maxLines={0} />
+
+[Source: `agg_omni_cosmos3.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3.sh" title="agg_omni_cosmos3.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-cosmos3-i2v-sh">
+
+**Prerequisites:** [Cosmos3 README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md#animate-a-reference-image)
+
+**Experimental.** Starts the same Cosmos3 Nano video worker as `agg_omni_cosmos3_video.sh`; a
+request's `input_reference` selects image-to-video. Send a client-local image as a data URI:
+worker-local paths and `file://` URLs are rejected. Qualified on one GH200 GPU with
+`--no-guardrails`.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_cosmos3_i2v.sh --no-guardrails)
+```
+
+[Source: `agg_omni_cosmos3_i2v.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3_i2v.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3_i2v.sh" title="agg_omni_cosmos3_i2v.sh" language="bash" maxLines={0} />
+
+[Source: `agg_omni_cosmos3.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3.sh" title="agg_omni_cosmos3.sh" language="bash" maxLines={0} />
 
 </div>
 
