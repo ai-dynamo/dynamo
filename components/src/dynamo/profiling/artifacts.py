@@ -11,10 +11,20 @@ from pathlib import Path
 from .models import Config
 from .nsys import validate_reports
 
+RANK_PATTERNS = {
+    # <prefix>_<rank>.<stamp>.pt.trace.json[.gz]
+    "vllm": r"_(.+)\.\d+\.pt\.trace\.json(?:\.gz)?",
+    # <prefix>-<profile id>-TP-<n>[-DP-<n>][-PP-<n>][-EP-<n>][-<stage>].trace.json.gz
+    "sglang": r"-[^-]+-(TP-\d+(?:-DP-\d+)?(?:-PP-\d+)?(?:-EP-\d+)?)(?:-[a-z]+)?"
+    r"\.trace\.json(?:\.gz)?",
+}
 
-def rank_files(location: str, prefix: str) -> list[tuple[str, Path]]:
+
+def rank_files(
+    location: str, prefix: str, layout: str = "vllm"
+) -> list[tuple[str, Path]]:
     """Kineto rank traces written under this session's unique prefix."""
-    pattern = re.compile(rf"{re.escape(prefix)}_(.+)\.\d+\.pt\.trace\.json(?:\.gz)?")
+    pattern = re.compile(re.escape(prefix) + RANK_PATTERNS[layout])
     return sorted(
         (match.group(1), path)
         for path in Path(location).iterdir()
@@ -74,6 +84,25 @@ def present(path: Path) -> tuple[int, str | None]:
     return size, None
 
 
+def perf_artifact(evidence: dict) -> dict:
+    """The frontend perf recording, kept for the archive though nothing parses it."""
+    if not evidence.get("artifact"):
+        return {"status": "unverified", "coverage": "unknown", "reason": "no_artifact"}
+    path = Path(evidence["artifact"])
+    try:
+        size = path.stat().st_size if path.is_file() else 0
+    except OSError as exc:
+        return {"status": "invalid", "coverage": "partial", "error": str(exc)}
+    if size <= 0:
+        return {"status": "invalid", "coverage": "partial", "error": "empty or missing"}
+    return {
+        "status": "present",
+        "coverage": "present",
+        "artifacts": [{"location": str(path), "bytes": size, "validation": "present"}],
+        "inspection": "not_supported",
+    }
+
+
 class SharedFilesystemValidator:
     async def validate(self, evidence: dict, config: Config) -> dict:
         if evidence.get("collector") == "nsys":
@@ -81,9 +110,17 @@ class SharedFilesystemValidator:
         return await asyncio.to_thread(self._validate, evidence, config)
 
     def _validate(self, evidence: dict, config: Config) -> dict:
+        if evidence.get("collector") == "linux_perf":
+            return perf_artifact(evidence)
         location = evidence.get("artifact_location")
         prefix = evidence.get("artifact_prefix")
-        if evidence.get("collector") != "torch_profiler" or not location or not prefix:
+        layout = evidence.get("artifact_layout", "vllm")
+        if (
+            evidence.get("collector") != "torch_profiler"
+            or not location
+            or not prefix
+            or layout not in RANK_PATTERNS
+        ):
             return {
                 "status": "unverified",
                 "coverage": "unknown",
@@ -99,7 +136,8 @@ class SharedFilesystemValidator:
         expected = evidence.get("expected_rank_ids", [])
         try:
             adopted = []
-            if expected and "start_requested_at_ns" in evidence:
+            # Only vLLM keeps a worker's first trace name; SGLang names each start.
+            if layout == "vllm" and expected and "start_requested_at_ns" in evidence:
                 prefixed = {rank for rank, _ in rank_files(location, prefix)}
                 adopted = adopt_session_traces(
                     location,
@@ -111,7 +149,7 @@ class SharedFilesystemValidator:
                         + STAMP_ALLOWANCE_NS,
                     ),
                 )
-            found = rank_files(location, prefix)
+            found = rank_files(location, prefix, layout)
             artifacts = []
             for rank, path in found:
                 size, problem = present(path)

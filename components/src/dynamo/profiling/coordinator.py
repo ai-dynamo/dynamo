@@ -11,8 +11,10 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import aiohttp
 import msgspec
 
+from . import nsys
 from .adapters import REGISTRY, Collector, Factory
 from .artifacts import SharedFilesystemValidator
 from .clock import WorkerClockSampler
@@ -90,6 +92,8 @@ class Coordinator:
         self.active: Session | None = None
         self.closed = False
         self.cleanup_uncertain = False
+        self.uncertain_reasons: list[str] = []
+        self.evicted_requests: set[str] = set()
 
     def targets(self) -> list[dict]:
         return [
@@ -164,6 +168,8 @@ class Coordinator:
                 raise Unsupported("Nsight output prefixes must be absolute")
             if frontend and self.runtime.frontend_pid != os.getpid():
                 raise Unsupported("NVTX frontend capture requires an embedded host")
+            if frontend and nsys.nvtx is None:
+                raise Unsupported("Install ai-dynamo[profiling] for NVTX capture")
             prefixes.append(prefix)
         if len(set(prefixes)) != len(prefixes):
             raise BadRequest(
@@ -184,22 +190,21 @@ class Coordinator:
             if previous.plan != plan:
                 raise Conflict("client_request_id already has a different plan")
             return previous
+        if plan.client_request_id in self.evicted_requests:
+            raise Conflict("client_request_id belongs to an evicted session")
         if self.closed:
             raise Unavailable("Profiling coordinator is shutting down")
         self.validate(plan)
         if self.cleanup_uncertain:
             raise Conflict(
-                "Collector cleanup is uncertain; reconcile worker state before restarting the coordinator"
+                "Collector cleanup is uncertain; check the workers, then POST reconcile"
             )
         if self.active is not None:
             raise Conflict("A profiling session is already active or finalizing")
         if len(self.sessions) >= self.config.max_sessions:
-            raise Unavailable(
-                "Profiling session retention limit reached; restart coordinator"
-            )
+            self.evict_oldest()
         session_id = uuid.uuid4().hex
         directory = Path(self.config.output_dir) / session_id
-        directory.mkdir(parents=True, mode=0o700)
         runtime = msgspec.structs.replace(
             self.runtime, workers=list(self.workers.values())
         )
@@ -207,12 +212,37 @@ class Coordinator:
         session.deadline_monotonic = (
             asyncio.get_running_loop().time() + plan.duration_ms / 1000
         )
-        self.persist(session)
+        try:
+            directory.mkdir(parents=True, mode=0o700)
+            self.persist(session)
+        except OSError as exc:
+            raise Unavailable(f"Cannot create the session directory: {exc}") from exc
         self.active = session
         self.sessions[session_id] = session
         self.requests[plan.client_request_id] = session
         session.task = asyncio.create_task(self.capture(session))
+        session.task.add_done_callback(self.report_crash)
         return session
+
+    def evict_oldest(self) -> None:
+        """Forget the oldest finished session; its manifest stays on disk."""
+        oldest = next(iter(self.sessions.values()))
+        del self.sessions[oldest.session_id]
+        del self.requests[oldest.plan.client_request_id]
+        self.evicted_requests.add(oldest.plan.client_request_id)
+
+    @staticmethod
+    def report_crash(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Profiling capture crashed", exc_info=task.exception())
+
+    def reconcile(self) -> list[str]:
+        """Admit captures again after the operator checked the workers."""
+        if self.active is not None:
+            raise Conflict("A profiling session is active or finalizing")
+        reasons, self.uncertain_reasons = self.uncertain_reasons, []
+        self.cleanup_uncertain = False
+        return reasons
 
     def build_manifest(self, session: Session) -> dict:
         statuses = {item["status"] for item in session.artifact_validation}
@@ -350,7 +380,7 @@ class Coordinator:
                 if clock and clock["start"].get("identity_verification") == verified:
                     collector.evidence["identity_verification"] = verified
             failures = await asyncio.wait_for(
-                errors_of(c.start() for c in session.collectors), budget
+                errors_of(self.start_collector(c) for c in session.collectors), budget
             )
             if failures:
                 raise CollectionError("; ".join(failures))
@@ -379,18 +409,24 @@ class Coordinator:
                 await self.persist_progress(session)
                 # Stop all collectors concurrently: slow worker trace serialization
                 # must not keep other targets recording beyond their lease.
-                stop_errors = await errors_of(
-                    self.stop_collector(c) for c in session.collectors
+                stops = await asyncio.gather(
+                    *(self.stop_collector(c) for c in session.collectors)
                 )
-                session.errors.extend(stop_errors)
-                self.cleanup_uncertain |= bool(stop_errors)
-                session.errors.extend(
-                    await errors_of(
-                        self.measure_end(session, workers[target_id])
-                        for target_id in session.clocks
-                        if workers[target_id].verify_runtime
+                for collector, error in zip(session.collectors, stops):
+                    if error is None:
+                        continue
+                    session.errors.append(error)
+                    # A start the worker rejected leaves nothing running to stop.
+                    if collector.evidence.get("start_outcome") != "rejected":
+                        self.mark_uncertain(collector, f"stop failed: {error}")
+                if not self.closed:
+                    session.errors.extend(
+                        await errors_of(
+                            self.measure_end(session, workers[target_id])
+                            for target_id in session.clocks
+                            if workers[target_id].verify_runtime
+                        )
                     )
-                )
                 validations = await asyncio.gather(
                     *(
                         self.validate_artifacts(collector)
@@ -404,10 +440,11 @@ class Coordinator:
                         if (
                             evidence.get("collector") == "nsys"
                             and "start_requested_at_ns" in evidence
+                            and validation["status"] == "partial"
                         ):
-                            # An unfinished export could be misassociated with the
-                            # next window; require reconciliation before admitting it.
-                            self.cleanup_uncertain = True
+                            # An export that has not arrived could be misassociated
+                            # with the next window; require reconciliation first.
+                            self.mark_uncertain(collector, "Nsight export missing")
                         session.errors.append(
                             f"{validation['target_id']}: artifacts {validation['status']}"
                         )
@@ -449,6 +486,24 @@ class Coordinator:
             validation = {"status": "invalid", "coverage": "partial", "error": str(exc)}
         return target | validation
 
+    def mark_uncertain(self, collector: Collector, reason: str) -> None:
+        self.cleanup_uncertain = True
+        self.uncertain_reasons.append(
+            f"{collector.evidence.get('target_id')}: {reason}"
+        )
+
+    async def start_collector(self, collector: Collector) -> None:
+        # Stop failures only matter when the start may have taken effect.
+        try:
+            await collector.start()
+        except (CollectionError, aiohttp.ClientConnectorError):
+            collector.evidence["start_outcome"] = "rejected"
+            raise
+        except BaseException:
+            collector.evidence["start_outcome"] = "uncertain"
+            raise
+        collector.evidence["start_outcome"] = "acknowledged"
+
     async def stop_collector(self, collector: Collector) -> str | None:
         try:
             await asyncio.wait_for(collector.stop(), self.config.finalize_timeout_s)
@@ -474,4 +529,5 @@ class Coordinator:
         if self.active is not None:
             self.active.stop_requested.set()
             if self.active.task is not None:
-                await self.active.task
+                # Shield: cancelling shutdown must not abandon in-flight stops.
+                await asyncio.shield(self.active.task)

@@ -51,6 +51,10 @@ def application(coordinator: Coordinator) -> web.Application:
             | {"directory": str(session.directory), "otel": manifest["lifecycle_otel"]}
         )
 
+    async def reconcile(request: web.Request) -> web.Response:
+        """Admit captures again once the operator has checked the workers."""
+        return web.json_response({"cleared": coordinator.reconcile()})
+
     async def stop(request: web.Request) -> web.Response:
         session = coordinator.stop(request.match_info["session_id"])
         return web.json_response(coordinator.build_manifest(session), status=202)
@@ -64,6 +68,7 @@ def application(coordinator: Coordinator) -> web.Application:
             web.get(prefix + "/sessions/{session_id}", status),
             web.post(prefix + "/sessions/{session_id}/stop", stop),
             web.get(prefix + "/sessions/{session_id}/artifacts", artifacts),
+            web.post(prefix + "/reconcile", reconcile),
         ]
     )
     return app

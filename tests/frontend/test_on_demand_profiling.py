@@ -19,6 +19,7 @@ import textwrap
 import threading
 import time
 import zlib
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -318,6 +319,8 @@ async def test_worker_only_plan_still_profiles_frontend_and_targets_run_concurre
     finally:
         finish_export.set()
         await session.task
+    # Sequential startup would have timed out the spinning start.
+    assert session.errors == []
 
 
 @pytest.mark.asyncio
@@ -575,7 +578,7 @@ async def test_worker_capture_identity_clock_and_rank_validation(
         "process_epoch",
         lambda pid: "new-epoch" if case == "stale_epoch" else "epoch",
     )
-    worker_agent = agent.ProfilingAgent("vllm")
+    worker_agent = agent.ProfilingAgent("vllm", 4242)
     calls = []
     unselected_calls = []
     options = {}
@@ -658,6 +661,7 @@ async def test_worker_capture_identity_clock_and_rank_validation(
     clocks = manifest["clock"]["workers"]["decode"]
     assert clocks["start"]["alignment"] == clocks["end"]["alignment"] == "estimated"
     assert clocks["start"]["uncertainty_ns"] >= 0
+    assert clocks["start"]["worker_instance_id"] == 4242
     assert set(manifest["clock"]["workers"]) == {"decode"}
     assert [item["target_id"] for item in manifest["profiles"]] == ["decode"]
     assert manifest["profiles"][0]["identity_verification"] == "control_process_epoch"
@@ -883,7 +887,7 @@ async def test_close_stops_collectors_without_waiting_for_artifacts(
 
 @pytest.mark.asyncio
 async def test_unstarted_nsight_capture_does_not_block_the_next(tmp_path, monkeypatch):
-    monkeypatch.setattr(nsys, "nvtx", None)  # start fails before preparing reports
+    monkeypatch.setattr(nsys, "nvtx", None)
     controller = Coordinator(
         Config(
             "unused",
@@ -892,15 +896,11 @@ async def test_unstarted_nsight_capture_does_not_block_the_next(tmp_path, monkey
         ),
         RuntimeSnapshot(os.getpid(), "epoch", "host"),
     )
-    session = controller.submit(nsys_plan("first"))
-    await asyncio.wait_for(session.task, 5)
-    assert session.state == "failed"
-    assert "ai-dynamo[profiling]" in session.errors[0]
-    assert session.artifact_validation[0]["status"] == "invalid"
-    # Nothing was recorded, so no export can be misassociated with a later window.
+    # The plan is refused before anything starts, so nothing can be left behind.
+    with pytest.raises(errors.Unsupported, match=r"ai-dynamo\[profiling\]"):
+        controller.submit(nsys_plan("first"))
+    assert not controller.sessions
     assert controller.cleanup_uncertain is False
-    controller.submit(nsys_plan("second"))
-    await controller.close()
 
 
 @pytest.mark.asyncio
@@ -970,9 +970,12 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
 
         async def export():
             await asyncio.sleep(0.02)
-            nsys_report(tmp_path / f"frontend.{len(handles)}.nsys-rep")
+            # Nsight exports from its own process. Writing on the loop would block
+            # it on the SQLite lock while the validator reads the same file.
+            report = tmp_path / f"frontend.{len(handles)}.nsys-rep"
+            await asyncio.to_thread(nsys_report, report)
             if len(handles) == 1:
-                nsys_report(tmp_path / "frontend-other.1.nsys-rep")
+                await asyncio.to_thread(nsys_report, tmp_path / "frontend-other.1.nsys-rep")
 
         # Range transitions run in a worker thread; schedule on the loop.
         loop.call_soon_threadsafe(lambda: pending.append(asyncio.create_task(export())))
@@ -991,7 +994,8 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
             str(tmp_path / "sessions"),
             frontend_perf_enabled=False,
             nsys_frontend_output_prefix=prefix,
-            artifact_validation_timeout_s=2,
+            # Generous for slow runner filesystems; validation returns on arrival.
+            artifact_validation_timeout_s=10,
         ),
         RuntimeSnapshot(os.getpid(), "epoch", "host"),
     )
@@ -1257,6 +1261,9 @@ async def test_host_replaces_stale_socket_but_not_a_live_one(
         with pytest.raises(ValueError, match="running host"):
             async with host(controller):
                 pass
+        # The refused host must leave the live socket in place.
+        with socket.socket(socket.AF_UNIX) as client:
+            client.connect(str(path))
     assert not path.exists()
 
 
@@ -1636,3 +1643,199 @@ async def test_slow_frontend_range_end_does_not_delay_worker_stop(
     await asyncio.wait_for(session.task, 5)
     assert session.state == "completed", session.errors
     assert stopped and ended and stopped[0] < ended[0]
+
+
+@pytest.mark.asyncio
+async def test_rejected_start_does_not_latch_and_reconcile_clears(
+    controller, collector
+):
+    controller.config = msgspec.structs.replace(
+        controller.config, finalize_timeout_s=0.01
+    )
+    # The start was refused, so a failed stop leaves nothing running.
+    collector.start.side_effect = CollectionError("not ready")
+    collector.stop.side_effect = CollectionError("not profiling")
+    session = controller.submit(plan())
+    await session.task
+    assert collector.evidence["start_outcome"] == "rejected"
+    assert controller.cleanup_uncertain is False
+    # After an acknowledged start, a failed stop latches until reconciled.
+    collector.start.side_effect = None
+    await controller.submit(plan("second")).task
+    assert controller.cleanup_uncertain is True
+    with pytest.raises(errors.Conflict, match="POST reconcile"):
+        controller.submit(plan("third"))
+    assert controller.reconcile() == ["frontend: stop failed: not profiling"]
+    await controller.submit(plan("third")).task
+
+
+@pytest.mark.asyncio
+async def test_finished_sessions_are_evicted_not_refused(controller):
+    controller.config = msgspec.structs.replace(controller.config, max_sessions=2)
+    sessions = []
+    for number in range(3):
+        session = controller.submit(plan(f"request-{number}"))
+        await session.task
+        sessions.append(session)
+    assert list(controller.sessions) == [s.session_id for s in sessions[1:]]
+    with pytest.raises(errors.NotFound):
+        controller.lookup(sessions[0].session_id)
+    assert (sessions[0].directory / "manifest.json").is_file()
+    with pytest.raises(errors.Conflict, match="evicted"):
+        controller.submit(plan("request-0"))
+
+
+@pytest.mark.asyncio
+async def test_empty_profiling_config_disables_profiling():
+    async with profiling_coordinator("") as coordinator:
+        assert coordinator is None
+
+
+@pytest.mark.asyncio
+async def test_one_noisy_clock_sample_is_discarded(monkeypatch, tmp_path):
+    from dynamo.profiling import clock
+
+    monkeypatch.setattr(agent, "process_epoch", lambda pid: "epoch")
+    worker_agent = agent.ProfilingAgent("vllm", 4242)
+    real, calls = clock.estimate_offset, []
+
+    def flaky(*args):
+        calls.append(None)
+        if len(calls) == 1:
+            raise CollectionError("Clock changed during sampling")
+        return real(*args)
+
+    monkeypatch.setattr(clock, "estimate_offset", flaky)
+
+    async def info(request):
+        return web.json_response(await worker_agent.info(await request.json()))
+
+    app = web.Application()
+    app.router.add_post("/engine/control/profiling_info", info)
+    async with TestServer(app) as server:
+        worker = Worker(
+            "decode", "epoch", "vllm", str(server.make_url("/")), verify_runtime=True
+        )
+        config = Config("unused", str(tmp_path), clock_probe_samples=2)
+        sample = await clock.WorkerClockSampler().measure(worker, config)
+    assert len(calls) == 2
+    assert sample["alignment"] == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_sglang_torch_traces_use_the_session_prefix(tmp_path):
+    outputs = tmp_path / "native"
+    outputs.mkdir()
+    worker = Worker(
+        "decode",
+        "epoch",
+        "sglang",
+        "http://w",
+        artifact_location=str(outputs),
+        expected_rank_ids=["TP-0", "TP-1"],
+    )
+    config = Config("unused", str(tmp_path), frontend_perf_enabled=False)
+    runtime = RuntimeSnapshot(123, "frontend", "host", [worker])
+    (selected,) = adapters.torch_collectors(
+        config, runtime, Plan("id", [Target("decode", "epoch")], 50), tmp_path / "s1"
+    )
+    prefix = selected.worker.start_options["profile_prefix"]
+    assert prefix == selected.evidence["artifact_prefix"] == "dynamo-s1"
+    # SGLang names <prefix>-<profile id>-TP-<n>; another session's file never counts.
+    for name in ("1761.5-TP-0", "1761.5-TP-1"):
+        trace(outputs / f"{prefix}-{name}.trace.json.gz")
+    trace(outputs / "dynamo-s0-1760.1-TP-0.trace.json.gz")
+    result = await SharedFilesystemValidator().validate(selected.evidence, config)
+    assert result["status"] == "present"
+    assert result["observed_rank_ids"] == ["TP-0", "TP-1"]
+
+
+@pytest.mark.asyncio
+async def test_frontend_perf_recording_is_listed_for_the_archive(tmp_path):
+    data = tmp_path / "frontend.perf.data"
+    data.write_bytes(b"PERFILE2")
+    evidence = {"collector": "linux_perf", "artifact": str(data)}
+    result = await SharedFilesystemValidator().validate(
+        evidence, Config("unused", str(tmp_path))
+    )
+    assert result["status"] == "present"
+    assert result["artifacts"] == [
+        {"location": str(data), "bytes": 8, "validation": "present"}
+    ]
+
+
+def test_router_targets_join_on_worker_instance_id():
+    # Two pods with one PID: only the runtime connection ID tells them apart.
+    clocks = {
+        "decode-0": {"start": {"pid": 42, "worker_instance_id": 7001}},
+        "decode-1": {"start": {"pid": 42, "worker_instance_id": 7002}},
+    }
+    spans = {}
+    for worker in ("7001", "7002", "7003"):
+        for span in (
+            otel_span("t", worker, "", "handle_payload", instance_id=worker),
+            otel_span(
+                "t",
+                worker + "o",
+                worker,
+                "worker.operation.decode",
+                **{"dynamo.process.epoch": "42:x"},
+            ),
+        ):
+            spans[span["spanId"]] = span
+    traces = {"t": spans}
+    mapping = bundle.router_targets({"clock": {"workers": clocks}}, traces)
+    assert mapping == {"7001": "decode-0", "7002": "decode-1"}
+    # Without instance IDs the shared PID stays unmapped rather than guessed.
+    legacy = {target: {"start": {"pid": 42}} for target in clocks}
+    assert bundle.router_targets({"clock": {"workers": legacy}}, traces) == {}
+
+
+def test_nsight_bounds_are_optional_without_system_clock(tmp_path):
+    path = tmp_path / "report.sqlite"
+    with closing(sqlite3.connect(path)) as db:
+        db.execute(
+            "CREATE TABLE TARGET_INFO_SESSION_START_TIME"
+            " (utcEpochNs INT, utcTime TEXT, localTime TEXT)"
+        )
+        db.execute("INSERT INTO TARGET_INFO_SESSION_START_TIME VALUES (1, 'u', 'l')")
+        db.execute("CREATE TABLE ANALYSIS_DETAILS (startTime INT, stopTime INT)")
+        db.execute("INSERT INTO ANALYSIS_DETAILS VALUES (5, 9)")
+        db.commit()
+        tables = {"ANALYSIS_DETAILS", "TARGET_INFO_SESSION_START_TIME"}
+        assert nsys.report_bounds(db, tables) == {"status": "unknown"}
+    assert nvtxt.report_clock(path) == (1, 5, 9)
+
+
+def test_bundle_refuses_an_unrelated_output_directory(tmp_path):
+    session = write_session(tmp_path, {})
+    otel = write_otel(tmp_path / "otel.jsonl", [])
+    out = tmp_path / "results"
+    out.mkdir()
+    (out / "keep.txt").write_text("unrelated")
+    with pytest.raises(SystemExit, match="not an earlier bundle"):
+        bundle.build(session, [otel], out)
+    assert (out / "keep.txt").exists()
+
+
+def test_archive_skips_raw_files_gone_since_capture(tmp_path):
+    out = tmp_path / "bundle"
+    out.mkdir()
+    (out / "bundle.json").write_text("{}")
+    kept = tmp_path / "frontend.perf.data"
+    kept.write_bytes(b"perf")
+    summary = {
+        "native_profiles": [
+            {"target_id": "frontend", "location": str(kept), "archived": True},
+            {
+                "target_id": "decode-0",
+                "location": str(tmp_path / "gone"),
+                "archived": False,
+            },
+        ]
+    }
+    path, _ = bundle.archive(out, summary)
+    with tarfile.open(path) as tar:
+        names = tar.getnames()
+    assert "bundle/profiles/frontend/frontend.perf.data" in names
+    assert not any(name.endswith("/gone") for name in names)

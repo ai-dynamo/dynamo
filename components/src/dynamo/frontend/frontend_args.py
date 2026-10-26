@@ -289,6 +289,13 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        # An empty DYN_PROFILING_CONFIG disables profiling; a bad file fails here,
+        # before the runtime and engine are built.
+        self.profiling_config = self.profiling_config or None
+        if self.profiling_config is not None:
+            from .profiling.hosting import load_config
+
+            load_config(self.profiling_config)
         if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
             raise ValueError(
                 "--ais-perf-config requires --router-prefill-load-model=ais"

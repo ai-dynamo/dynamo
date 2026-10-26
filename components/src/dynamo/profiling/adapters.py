@@ -31,10 +31,10 @@ Factory = Callable[[Config, RuntimeSnapshot, Plan, Path], list[Collector]]
 def torch_collectors(
     config: Config, runtime: RuntimeSnapshot, plan: Plan, directory: Path
 ) -> list[Collector]:
-    # vLLM incorporates this prefix in every engine-rank filename. An
+    # vLLM and SGLang incorporate this prefix in every engine-rank filename. An
     # immutable session-specific prefix prevents stale files from counting.
     workers = selected_workers(
-        runtime, plan, "vllm", profile_prefix=f"dynamo-{directory.name}"
+        runtime, plan, {"vllm", "sglang"}, profile_prefix=f"dynamo-{directory.name}"
     )
     return (
         [PerfCollector(runtime.frontend_pid, runtime.frontend_epoch, directory)]

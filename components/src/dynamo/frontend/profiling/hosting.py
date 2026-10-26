@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import socket
 from collections.abc import AsyncIterator
@@ -43,30 +44,47 @@ async def host(coordinator: Coordinator) -> AsyncIterator[Coordinator]:
     endpoint = Path(coordinator.config.socket_path)
     private_directory(endpoint.parent)
     private_directory(Path(coordinator.config.output_dir))
-    if endpoint.exists() or endpoint.is_symlink():
-        if not endpoint.is_socket():
-            raise ValueError("Profiling socket path exists and is not a socket")
-        # A crashed host leaves its socket behind; only a live listener owns it.
-        with socket.socket(socket.AF_UNIX) as probe:
-            try:
-                probe.connect(str(endpoint))
-            except ConnectionRefusedError:
-                endpoint.unlink()
-            else:
-                raise ValueError("Profiling socket is owned by a running host")
-    runner = web.AppRunner(application(coordinator))
-    await runner.setup()
+    # The lock, held for the host's lifetime, decides ownership: binding
+    # replaces any socket at the path, so probing alone races another host.
+    lock = open(f"{endpoint}.lock", "a")  # noqa: SIM115 - held until exit
     try:
-        await web.UnixSite(runner, str(endpoint)).start()
-        endpoint.chmod(0o600)
-        yield coordinator
-    finally:
-        # Stop accepting leases first, then finish any owned profiler exports.
-        await runner.cleanup()
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        raise ValueError("Profiling socket is owned by a running host") from None
+    bound = None
+    try:
+        if endpoint.exists() or endpoint.is_symlink():
+            if not endpoint.is_socket():
+                raise ValueError("Profiling socket path exists and is not a socket")
+            # A crashed host leaves its socket behind; only a live listener owns it.
+            with socket.socket(socket.AF_UNIX) as probe:
+                try:
+                    probe.connect(str(endpoint))
+                except ConnectionRefusedError:
+                    endpoint.unlink()
+                else:
+                    raise ValueError("Profiling socket is owned by a running host")
+        runner = web.AppRunner(application(coordinator))
+        await runner.setup()
         try:
-            await coordinator.close()
+            await web.UnixSite(runner, str(endpoint)).start()
+            endpoint.chmod(0o600)
+            stat = endpoint.stat()
+            bound = (stat.st_dev, stat.st_ino)
+            yield coordinator
         finally:
-            endpoint.unlink(missing_ok=True)
+            # Stop accepting leases first, then finish any owned profiler exports.
+            await runner.cleanup()
+            await coordinator.close()
+    finally:
+        try:
+            stat = endpoint.stat()
+            if bound == (stat.st_dev, stat.st_ino):
+                endpoint.unlink()
+        except FileNotFoundError:
+            pass
+        lock.close()
 
 
 @asynccontextmanager
@@ -74,7 +92,7 @@ async def profiling_coordinator(
     config_path: str | None, *, runtime_context: dict | None = None
 ) -> AsyncIterator[Coordinator | None]:
     """Frontend gathers its runtime snapshot and calls the reusable module."""
-    if config_path is None:
+    if not config_path:
         yield None
         return
     from dynamo.profiling import Coordinator

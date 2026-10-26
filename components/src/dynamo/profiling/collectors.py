@@ -30,14 +30,14 @@ def process_epoch(pid: int) -> str:
 
 
 def selected_workers(
-    runtime: RuntimeSnapshot, plan: Plan, backend: str, **options
+    runtime: RuntimeSnapshot, plan: Plan, backends: set[str], **options
 ) -> list[Worker | None]:
-    """Plan targets' workers (None for the frontend); `backend` gets `options`."""
+    """Plan targets' workers (None for the frontend); `backends` get `options`."""
     workers = {
         worker.target_id: msgspec.structs.replace(
             worker, start_options={**worker.start_options, **options}
         )
-        if worker.backend == backend
+        if worker.backend in backends
         else worker
         for worker in runtime.workers
     }
@@ -159,9 +159,8 @@ class TorchCollector:
             # The coordinator can verify the separate control-process agent;
             # native start/stop hooks do not attest each engine-rank epoch.
             "identity_verification": "operator_config_only",
-            "artifact_prefix": worker.start_options.get("profile_prefix")
-            if worker.backend == "vllm"
-            else None,
+            "artifact_prefix": worker.start_options.get("profile_prefix"),
+            "artifact_layout": worker.backend,
             "expected_rank_ids": worker.expected_rank_ids,
             "timestamp_scope": "control_responses_not_native_recording_bounds",
         }

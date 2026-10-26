@@ -107,7 +107,7 @@ class NsysWorkerCollector(TorchCollector):
 def nsys_collectors(
     config: Config, runtime: RuntimeSnapshot, plan: Plan, directory: Path
 ) -> list:
-    workers = selected_workers(runtime, plan, "sglang", activities=["CUDA_PROFILER"])
+    workers = selected_workers(runtime, plan, {"sglang"}, activities=["CUDA_PROFILER"])
     return [
         NsysFrontendCollector(runtime, config.nsys_frontend_output_prefix)
         if worker is None
@@ -121,6 +121,12 @@ def report_bounds(conn, tables: set) -> dict:
     unknown = {"status": "unknown"}
     if not {"ANALYSIS_DETAILS", "TARGET_INFO_SESSION_START_TIME"} <= tables:
         return unknown
+    columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(TARGET_INFO_SESSION_START_TIME)")
+    }
+    if not {"utcEpochNs", "systemClockNs"} <= columns:
+        return unknown  # older exports; the bundle derives bounds offline
     capture = conn.execute(
         "SELECT startTime, stopTime FROM ANALYSIS_DETAILS"
     ).fetchall()

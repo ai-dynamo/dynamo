@@ -64,14 +64,24 @@ def read_only(path: Path):
 def report_clock(sqlite_path: Path) -> tuple[int, int, int | None]:
     """(Unix ns, report-clock ns) of the session start, and its report-clock end."""
     with read_only(sqlite_path) as (db, tables):
-        utc, clock = db.execute(
-            "SELECT utcEpochNs, systemClockNs FROM TARGET_INFO_SESSION_START_TIME"
+        (utc,) = db.execute(
+            "SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME"
         ).fetchone()
-        stop = None
+        clock = stop = None
+        columns = {
+            row[1]
+            for row in db.execute("PRAGMA table_info(TARGET_INFO_SESSION_START_TIME)")
+        }
+        if "systemClockNs" in columns:
+            (clock,) = db.execute(
+                "SELECT systemClockNs FROM TARGET_INFO_SESSION_START_TIME"
+            ).fetchone()
         if "ANALYSIS_DETAILS" in tables:
             clock, stop = db.execute(
                 "SELECT startTime, stopTime FROM ANALYSIS_DETAILS"
             ).fetchone()
+    if clock is None:
+        raise ValueError(f"{sqlite_path.name}: no session clock anchor")
     return utc, clock, stop
 
 

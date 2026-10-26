@@ -77,12 +77,20 @@ class WorkerClockSampler:
                 if any(type(result.get(key)) is not int for key in fields):
                     raise CollectionError("Invalid worker clock timestamps")
                 t2, t3, remote_elapsed = (result[key] for key in fields)
-                sample = estimate_offset(t1, t2, t3, t4, elapsed, remote_elapsed)
+                try:
+                    sample = estimate_offset(t1, t2, t3, t4, elapsed, remote_elapsed)
+                except CollectionError as exc:
+                    # One preempted read must not fail the capture; keep trying.
+                    rejected = exc
+                    continue
                 sample.update(
                     hostname=result.get("hostname"),
                     pid=result.get("pid"),
+                    worker_instance_id=result.get("worker_instance_id"),
                     process_epoch=result["process_epoch"],
                     identity_verification="control_process_epoch",
                 )
                 samples.append(sample)
+        if not samples:
+            raise rejected
         return min(samples, key=lambda sample: sample["round_trip_ns"])

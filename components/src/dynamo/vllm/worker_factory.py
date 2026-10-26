@@ -2899,7 +2899,8 @@ class WorkerFactory:
         """
         register_model_taint_route(runtime, generate_endpoint)
         runtime.register_engine_route(
-            "control/profiling_info", ProfilingAgent("vllm").info
+            "control/profiling_info",
+            ProfilingAgent("vllm", generate_endpoint.connection_id()).info,
         )
         runtime.register_engine_route("control/start_profile", handler.start_profile)
         runtime.register_engine_route("control/stop_profile", handler.stop_profile)

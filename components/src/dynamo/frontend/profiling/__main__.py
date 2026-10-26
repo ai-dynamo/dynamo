@@ -14,6 +14,8 @@ from dynamo.profiling.collectors import process_epoch
 
 from .hosting import host, load_config
 
+logger = logging.getLogger(__name__)
+
 
 async def serve(config: Config, pid: int, epoch: str) -> None:
     runtime = RuntimeSnapshot(pid, epoch, socket.gethostname(), config.workers)
@@ -26,9 +28,11 @@ async def serve(config: Config, pid: int, epoch: str) -> None:
     async def watch_parent() -> None:
         while not shutdown.is_set():
             try:
-                if process_epoch(pid) != epoch:
-                    shutdown.set()
+                alive = process_epoch(pid) == epoch
             except (OSError, IndexError):
+                alive = False
+            if not alive:
+                logger.info("Frontend %s exited; stopping the profiling host", pid)
                 shutdown.set()
             try:
                 await asyncio.wait_for(shutdown.wait(), 0.5)
@@ -51,6 +55,15 @@ def main() -> None:
     parser.add_argument("--frontend-epoch", required=True)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    try:
+        current = process_epoch(args.frontend_pid)
+    except (OSError, IndexError):
+        current = None
+    if current != args.frontend_epoch:
+        # The epoch is `<boot_id>:<pid>:<start ticks>`; see the README.
+        raise SystemExit(
+            f"--frontend-epoch does not match process {args.frontend_pid} ({current})"
+        )
     asyncio.run(serve(load_config(args.config), args.frontend_pid, args.frontend_epoch))
 
 

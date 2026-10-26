@@ -11,8 +11,10 @@ from .collectors import process_epoch
 
 
 class ProfilingAgent:
-    def __init__(self, backend: str):
+    def __init__(self, backend: str, worker_instance_id: int | None = None):
         self.backend = backend
+        # The runtime connection ID, which the router records as the worker ID.
+        self.worker_instance_id = worker_instance_id
         self.pid = os.getpid()
         self.epoch: str | None = None
         self.hostname = socket.gethostname()
@@ -30,6 +32,7 @@ class ProfilingAgent:
             "pid": self.pid,
             "hostname": self.hostname,
             "process_epoch": self.epoch,
+            "worker_instance_id": self.worker_instance_id,
             "scope": "control_process",
             "received_at_ns": received_ns,
             "sent_at_ns": time.time_ns(),

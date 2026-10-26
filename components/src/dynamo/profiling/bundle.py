@@ -23,7 +23,8 @@ A request is selected when its `worker.operation.<phase>` span ran on a captured
 target during that target's recording interval, or when the plan named its
 trace ID. Worker spans are assigned through router decisions
 (`kv_router.route_request` worker_id = `handle_payload` instance_id) and joined
-to captured processes by the PID in `dynamo.process.epoch`. The overall
+to captured targets by the worker instance ID their `profiling_info` reported
+(older manifests: the PID in `dynamo.process.epoch`). The overall
 timeline draws every selected request's lifecycle span tree and each captured
 worker's native events over its recording window; per-request timelines keep
 only the native events overlapping that request's operation spans. The frontend
@@ -171,16 +172,22 @@ def recording_intervals(items: list[dict]) -> dict[str, tuple[int, int]]:
 
 
 def router_targets(manifest: dict, traces: dict) -> dict[str, str]:
-    """Map router worker IDs to captured targets through the worker PID.
+    """Map router worker IDs to captured targets.
 
-    Worker spans under `handle_payload` carry `<pid>:<uuid>` process epochs, and
-    the coordinator recorded each target's control-process PID. Span host
-    attributes are not host identities, so a PID shared by targets stays unmapped.
+    Workers report their runtime connection ID, which the router records as the
+    worker ID (`handle_payload` instance_id), so the join holds across hosts.
+    Manifests without it fall back to the PID in the `<pid>:<uuid>` process
+    epochs of worker spans; PIDs repeat across hosts, so a PID shared by targets
+    stays unmapped.
     """
+    by_instance: dict[str, str] = {}
     targets_by_pid: dict[str, set[str]] = defaultdict(set)
     for target, clock in manifest["clock"]["workers"].items():
-        if clock.get("start", {}).get("pid"):
-            targets_by_pid[str(clock["start"]["pid"])].add(target)
+        start = clock.get("start", {})
+        if start.get("worker_instance_id") is not None:
+            by_instance[str(start["worker_instance_id"])] = target
+        elif start.get("pid"):
+            targets_by_pid[str(start["pid"])].add(target)
     mapping: dict[str, set[str]] = defaultdict(set)
     for spans in traces.values():
         payloads = {
@@ -188,12 +195,14 @@ def router_targets(manifest: dict, traces: dict) -> dict[str, str]:
             for s in spans.values()
             if s["name"] == "handle_payload"
         }
+        for worker in payloads.values():
+            if str(worker) in by_instance:
+                mapping[worker].add(by_instance[str(worker)])
         for span in spans.values():
-            if span.get("parentSpanId") in payloads:
+            worker = payloads.get(span.get("parentSpanId"))
+            if worker is not None and str(worker) not in by_instance:
                 pid = str(attrs(span).get("dynamo.process.epoch", "")).split(":")[0]
-                mapping[payloads[span["parentSpanId"]]] |= targets_by_pid.get(
-                    pid, set()
-                )
+                mapping[worker] |= targets_by_pid.get(pid, set())
     return {worker: min(t) for worker, t in mapping.items() if len(t) == 1}
 
 
@@ -592,7 +601,10 @@ def build(
     if any(path.resolve().is_relative_to(output.resolve()) for path in inputs):
         raise SystemExit(f"Output {output} contains the session or its inputs")
     if output.exists():
-        shutil.rmtree(output)
+        if (output / "bundle.json").is_file():
+            shutil.rmtree(output)
+        elif not output.is_dir() or any(output.iterdir()):
+            raise SystemExit(f"Output {output} exists and is not an earlier bundle")
     # Full verification happens here, off the capture path; its results give
     # the native recording bounds (Kineto bounds need a full trace parse).
     verification = verify_native(manifest)
@@ -813,7 +825,12 @@ def build(
             if p.is_file() and p.name != "bundle.json"
         },
         "native_profiles": [
-            {k: a[k] for k in fields if k in a} | {"target_id": item["target_id"]}
+            {k: a[k] for k in fields if k in a}
+            | {
+                "target_id": item["target_id"],
+                # A file gone since capture fails its target, not the archive.
+                "archived": Path(a["location"]).is_file(),
+            }
             for item in checked
             for a in item.get("artifacts", [])
         ],
@@ -847,6 +864,8 @@ def archive(output: Path, summary: dict) -> tuple[Path, str]:
     with ParallelGzip(path) as stream, tarfile.open(fileobj=stream, mode="w|") as tar:
         tar.add(output, arcname=output.name)
         for profile in summary["native_profiles"]:
+            if not profile.get("archived", True):
+                continue
             source = Path(profile["location"])
             tar.add(
                 source,

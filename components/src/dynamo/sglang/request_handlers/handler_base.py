@@ -923,7 +923,12 @@ class BaseWorkerHandler(
             self.config.dynamo_args.engine_routes,
         )
         built_in_routes = {
-            "control/profiling_info": ProfilingAgent("sglang").info,
+            "control/profiling_info": ProfilingAgent(
+                "sglang",
+                self.generate_endpoint.connection_id()
+                if self.generate_endpoint is not None
+                else None,
+            ).info,
             "control/start_profile": self.start_profile,
             "control/stop_profile": self.stop_profile,
             "control/update_weights_from_disk": self.update_weights_from_disk,

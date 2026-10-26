@@ -41,10 +41,14 @@ and can control workers, but cannot emit frontend NVTX.
 Worker endpoints, paths and rank membership are operator-owned; clients cannot
 supply commands, PIDs or output paths. Fields and defaults are in
 [models.py](../../profiling/models.py). POST `{}` to a worker's
-`/engine/control/profiling_info` for its startup epoch (boot ID, PID, start tick);
-with `verify_runtime`, a failed probe or changed epoch prevents start. For Torch
-capture, launch vLLM with `--profiler-config '{"profiler":"torch","torch_profiler_dir":...}'`;
-SGLang uses its own start/stop controls and `start_options`.
+`/engine/control/profiling_info` for its startup epoch (boot ID, PID, start tick)
+and `worker_instance_id` (its runtime connection ID, which the router records as
+the worker ID and the bundle uses for request attribution); with `verify_runtime`,
+a failed probe or changed epoch prevents start. For Torch capture, launch vLLM
+with `--profiler-config '{"profiler":"torch","torch_profiler_dir":...}'`; SGLang
+uses its own start/stop controls and `start_options` (`output_dir` = the
+`artifact_location`). Both get the session prefix; vLLM rank IDs look like
+`dp0_pp0_tp0_dcp0_ep0_rank0`, SGLang's like `TP-0` or `TP-0-DP-1`.
 
 ## Admin API
 
@@ -58,6 +62,7 @@ Use `curl --unix-socket <socket_path> http://localhost/admin/profiling/v1/...`.
 | GET | `/sessions/{id}` | State, errors, evidence and manifest |
 | POST | `/sessions/{id}/stop` | HTTP 202; idempotent early stop |
 | GET | `/sessions/{id}/artifacts` | Artifact view for retrieval: state, session directory, files per target with status, OTel references |
+| POST | `/reconcile` | Clears uncertain cleanup (see below) and returns its reasons; 409 while a capture is active |
 
 - **Single lease.** One capture is active through finalization; a concurrent or
   conflicting plan gets 409. Selected targets are started and stopped concurrently.
@@ -65,12 +70,19 @@ Use `curl --unix-socket <socket_path> http://localhost/admin/profiling/v1/...`.
   return the same session and deadline.
 - **Best-effort duration.** The lease counts from acceptance, including probes and
   startup; there is no synchronized start. Early stop shortens it.
-- **Cleanup.** Uncertain starts are still stopped; failed or timed-out cleanup (or
-  a failed Nsight export) blocks new captures until the operator reconciles.
+- **Cleanup.** Uncertain starts are still stopped. A failed stop after a start
+  that may have taken effect, or an Nsight export that never arrived, blocks new
+  captures (409) until the operator checks the workers and POSTs `/reconcile`.
+  A start the worker refused does not block.
+- **Retention.** At most `max_sessions` sessions are kept in memory; the oldest
+  finished one is dropped (its manifest stays on disk, its ID returns 404, and a
+  retry of its `client_request_id` gets 409).
 - **Shutdown.** On frontend shutdown the active capture's workers are still
   stopped, but the capture-path artifact check is skipped.
 - **Frontend perf.** `torch_profile` adds frontend Linux perf unless
-  `frontend_perf_enabled` is false (the omission is recorded).
+  `frontend_perf_enabled` is false (the omission is recorded). Its
+  `frontend.perf.data` is listed as an artifact and packed into the bundle
+  archive, though the bundle does not draw it.
 
 Each session writes `manifest.json` atomically. The capture path only checks that
 artifacts are **present**: Kineto rank files under the session's unique prefix
