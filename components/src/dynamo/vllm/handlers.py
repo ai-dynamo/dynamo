@@ -36,6 +36,7 @@ import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -948,15 +949,22 @@ def build_sampling_params(
     # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
     # directly from the request output_options (lib/llm/src/backend.rs).
 
-    # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
-    if model_max_len is not None and provided_max_tokens is None:
-        # Ensure at least 1 token generation by default when possible
-        dynamic_default = max(1, model_max_len - input_length)
-        configured_default = default_sampling_params.get("max_tokens", dynamic_default)
-        sampling_params.max_tokens = min(configured_default, dynamic_default)
+    if model_max_len is not None:
+        # vLLM caps prompt + output but rejects output alone above the model length.
+        if provided_max_tokens is not None and provided_max_tokens > model_max_len:
+            raise InvalidArgument(
+                f"max_tokens={provided_max_tokens} cannot be greater than "
+                f"max_model_len={model_max_len}. Please request fewer output tokens."
+            )
+        sampling_params.max_tokens = get_max_tokens(
+            max_model_len=model_max_len,
+            max_tokens=provided_max_tokens,
+            input_length=input_length,
+            default_sampling_params=default_sampling_params,
+        )
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend

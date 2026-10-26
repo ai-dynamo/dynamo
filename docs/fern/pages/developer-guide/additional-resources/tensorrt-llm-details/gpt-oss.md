@@ -178,7 +178,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
 
 Poll the `/health` endpoint to verify that both the prefill and decode worker endpoints have started:
 ```
-curl http://localhost:8000/health
+curl 'http://localhost:8000/health?instances=true'
 ```
 
 Make sure that both of the endpoints are available before sending an inference request:
@@ -188,6 +188,7 @@ Make sure that both of the endpoints are available before sending an inference r
     "dyn://dynamo.backend.generate",
     "dyn://dynamo.prefill.generate"
   ],
+  "stage": "ready",
   "status": "healthy"
 }
 ```
