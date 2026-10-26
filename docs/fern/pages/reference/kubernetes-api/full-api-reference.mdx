@@ -13,7 +13,7 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 Dynamo publishes 4 Kubernetes API packages with 211 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">71 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
 <Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">35 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
@@ -38,6 +38,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 <Card title="DynamoGraphDeploymentRequest" href="#dynamographdeploymentrequest" />
 <Card title="DynamoGraphDeploymentScalingAdapter" href="#dynamographdeploymentscalingadapter" />
 <Card title="DynamoModel" href="#dynamomodel" />
+<Card title="DynamoPoolRelay" href="#dynamopoolrelay" />
 </CardGroup>
 
 <Accordion id="autoscaling" title="Autoscaling">
@@ -1291,6 +1292,96 @@ TotalEndpoints is the total count of endpoints
 
 <ParamField path="conditions" type="Condition array">
 Conditions represents the latest available observations of the model's state
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelay" title="DynamoPoolRelay">
+DynamoPoolRelay deploys active-active Relay Pods for one DGD.
+The resource name matches its DGD; the Service name adds the -pool-relay suffix.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1alpha1`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoPoolRelay`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoPoolRelaySpec">
+See [DynamoPoolRelaySpec](#dynamopoolrelayspec).
+</ParamField>
+
+<ParamField path="status" type="DynamoPoolRelayStatus">
+See [DynamoPoolRelayStatus](#dynamopoolrelaystatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelayspec" title="DynamoPoolRelaySpec">
+DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
+
+<ParamField path="clusterId" type="string">
+ClusterID is the Relay's stable logical cluster ID across restarts.
+**Validation:** MaxLength: 128  MinLength: 1
+</ParamField>
+
+<ParamField path="image" type="string">
+Image must contain dynamo.pool_relay with file-source support.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="imagePullSecrets" type="LocalObjectReference array">
+ImagePullSecrets authenticate pulls of the Relay image from a private registry.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="replicas" type="integer" default="2">
+Replicas sets the number of active Relay Pods. Each watches the DGD.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="env" type="EnvVar array">
+Env sets transport and Relay tuning variables on each Pod. The operator reserves identity and source settings.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamopoolrelaystatus" title="DynamoPoolRelayStatus">
+DynamoPoolRelayStatus reports listener availability. It does not report KV or model readiness.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoPoolRelay](#dynamopoolrelay)
+
+<ParamField path="observedGeneration" type="integer">
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="endpoint" type="string">
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="availableReplicas" type="integer">
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

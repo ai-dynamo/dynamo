@@ -319,6 +319,7 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - dynamopoolrelays/status
   - lpxgraphdeployments/status
   verbs:
   - get
@@ -336,6 +337,14 @@ rules:
   - get
   - list
   - patch
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamopoolrelays
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - nvidia.com

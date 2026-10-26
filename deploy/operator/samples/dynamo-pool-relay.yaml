@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Match an existing DGD's name and Kubernetes namespace. Use Kubernetes pod-mode
+# discovery and a name without dots. The image must include dynamo.pool_relay.
+# Match the DGD's transport settings. To report serving load, set
+# DYN_SERVING_LOAD_PUBLISH=1 on its frontend Pods.
+# Ready reports listener availability, not model or KV readiness. The Service
+# is cluster-local.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoPoolRelay
+metadata:
+  name: green
+  namespace: inference
+spec:
+  # Keep this logical cluster ID stable across Relay restarts.
+  clusterId: example-cluster
+  image: REPLACE_WITH_RELAY_IMAGE
+  replicas: 2
+  env:
+    - name: DYN_REQUEST_PLANE
+      value: tcp
+    - name: DYN_EVENT_PLANE
+      value: zmq

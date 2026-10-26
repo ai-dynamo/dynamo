@@ -31,6 +31,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
 - [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
 - [DynamoModel](#dynamomodel)
+- [DynamoPoolRelay](#dynamopoolrelay)
 
 
 
@@ -750,6 +751,65 @@ _Appears in:_
 | `loraFallbackCoveredEndpoints` _integer_ | LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints<br />covered by a capable prefill during a rolling upgrade. These endpoints are<br />excluded from ReadyEndpoints because they cannot serve the adapter directly. |  | Optional: \{\} <br /> |
 | `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  | Optional: \{\} <br /> |
+
+
+#### DynamoPoolRelay
+
+
+
+DynamoPoolRelay deploys active-active Relay Pods for one DGD.
+The resource name matches its DGD; the Service name adds the -pool-relay suffix.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoPoolRelay` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoPoolRelaySpec](#dynamopoolrelayspec)_ |  |  |  |
+| `status` _[DynamoPoolRelayStatus](#dynamopoolrelaystatus)_ |  |  | Optional: \{\} <br /> |
+
+
+#### DynamoPoolRelaySpec
+
+
+
+DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
+
+
+
+_Appears in:_
+- [DynamoPoolRelay](#dynamopoolrelay)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `clusterId` _string_ | ClusterID is the Relay's stable logical cluster ID across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br /> |
+| `image` _string_ | Image must contain dynamo.pool_relay with file-source support. |  | MinLength: 1 <br /> |
+| `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core) array_ | ImagePullSecrets authenticate pulls of the Relay image from a private registry. |  | Optional: \{\} <br /> |
+| `replicas` _integer_ | Replicas sets the number of active Relay Pods. Each watches the DGD. | 2 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Env sets transport and Relay tuning variables on each Pod.<br />The operator reserves identity and source settings. |  | Optional: \{\} <br /> |
+
+
+#### DynamoPoolRelayStatus
+
+
+
+DynamoPoolRelayStatus reports listener availability. It does not report KV or model readiness.
+
+
+
+_Appears in:_
+- [DynamoPoolRelay](#dynamopoolrelay)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ |  |  | Optional: \{\} <br /> |
+| `endpoint` _string_ |  |  | Optional: \{\} <br /> |
+| `availableReplicas` _integer_ |  |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ |  |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig
