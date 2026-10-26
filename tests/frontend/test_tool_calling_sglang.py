@@ -202,10 +202,18 @@ class ToolCallingFrontendProcess(ManagedProcess):
     side.
     """
 
-    def __init__(self, request, *, frontend_port: int, topology: str):
+    def __init__(
+        self,
+        request,
+        *,
+        frontend_port: int,
+        topology: str,
+        extra_env: dict[str, str] | None = None,
+    ):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
         env.pop("DYN_SYSTEM_PORT", None)
+        env.update(extra_env or {})
 
         command = [
             "python3",
@@ -268,8 +276,13 @@ def runtime_services(request) -> Generator[None, None, None]:
 
 
 @pytest.fixture(scope="module", params=TOPOLOGIES)
+def tool_calling_topology(request) -> str:
+    return request.param
+
+
+@pytest.fixture(scope="module")
 def tool_calling_services(
-    request, runtime_services, predownload_models
+    request, runtime_services, predownload_models, tool_calling_topology
 ) -> Generator[int, None, None]:
     """Start the SGLang worker + frontend for the selected topology.
 
@@ -279,7 +292,7 @@ def tool_calling_services(
 
     Yields the frontend HTTP port.
     """
-    topology: str = request.param
+    topology: str = tool_calling_topology
     # Allocate from the disjoint bases in tests/utils/constants.py so this
     # module cannot land on the window another suite allocates from.
     allocated_ports: list[int] = []
@@ -678,6 +691,51 @@ def assistant_tool_message_from_result(result: StreamResult) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Protocol / contract tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.pre_merge
+@pytest.mark.usefixtures("tool_calling_services")
+def test_strict_schema_compatibility_completes(request, tool_calling_topology: str):
+    # The startup policy needs a separate frontend; the real worker can be reused.
+    frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
+    try:
+        with ToolCallingFrontendProcess(
+            request,
+            frontend_port=frontend_port,
+            topology=tool_calling_topology,
+            extra_env={"DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION": "1"},
+        ):
+            with OpenAI(
+                api_key="EMPTY",
+                base_url=f"http://localhost:{frontend_port}/v1",
+                timeout=60,
+                max_retries=0,
+            ) as compat_client:
+                response = compat_client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[
+                        {"role": "user", "content": "What's the weather in Paris?"}
+                    ],
+                    # The legacy schema leaves unit optional even with strict=true.
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                **TOOLS_WEATHER[0]["function"],
+                                "strict": True,
+                            },
+                        }
+                    ],
+                    tool_choice="auto",
+                    stream=False,
+                    max_tokens=64,
+                    temperature=0,
+                )
+                assert len(response.choices) == 1
+                assert response.usage is not None
+                assert response.usage.completion_tokens > 0
+    finally:
+        deallocate_ports([frontend_port])
 
 
 class TestToolCallingProtocol:
