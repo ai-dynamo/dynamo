@@ -229,6 +229,8 @@ navigation:
         contents:
           - page: Observability
             path: pages/kubernetes/operations/observability.mdx
+          - page: Nsight Systems Timelines
+            path: pages/kubernetes/operations/nsight-systems-timelines.mdx
           - page: Benchmarking with AIPerf
             path: pages/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning

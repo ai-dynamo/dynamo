@@ -326,6 +326,24 @@ The operator maintains observed state under `status`.
   Replica status for this component: desired, ready, and available counts. Shares the shape documented on the [DGD Reference](dynamo-graph-deployment.mdx#componentreplicastatus).
 </ParamField>
 
+## Pod Labels
+
+The operator sets these labels on every pod it creates for a component of a DGD. Use them to select a component's pods, for example in a `PodMonitor`, a `NetworkPolicy`, or a profiler's pod selector. The operator applies the first four after it merges `podTemplate.metadata.labels`, so a pod template cannot override them.
+
+| Label | Value |
+|---|---|
+| `nvidia.com/dynamo-graph-deployment-name` | Name of the parent DGD. |
+| `nvidia.com/dynamo-component` | The component `name`, with its case kept, for example `Frontend`. |
+| `nvidia.com/dynamo-component-type` | The component `type`, always lowercase: `frontend`, `worker`, `prefill`, `decode`, `planner`, `epp`, or `lpx`. Set only when the component has a `type`; a component without one, such as a standalone router, has no type label. |
+| `nvidia.com/dynamo-namespace` | The component's Dynamo namespace. |
+| `nvidia.com/dynamo-sub-component-type` | `prefill` or `decode`, on prefill and decode worker pods. A worker generation that already served alpha-era selectors before an operator upgrade keeps type `worker`, so on those pods only this label tells prefill and decode apart. |
+
+List the labels of a graph's pods:
+
+```bash
+kubectl get pods -n $NAMESPACE -l nvidia.com/dynamo-graph-deployment-name=my-graph --show-labels
+```
+
 ## Additional Types
 
 Nested struct types referenced by the fields above, broken out here to keep the field lists shallow. Types prefixed `core/v1.`, `metav1.`, `resource.`, or `runtime.` are standard Kubernetes types and link to their Go package documentation instead of being expanded.
