@@ -17,12 +17,13 @@ pub(crate) struct RoutersResponse {
 }
 
 /// `POST /pools` reply: the service's timing for registrations. Register again
-/// after `heartbeat_interval`; without one, the registration lapses after
-/// `lease_duration`. A missing body, a zero interval, or an interval not below
-/// the lease does not parse, so a bad reply cannot make a PoolRelay register in
-/// a tight loop.
+/// after `heartbeat_interval`. If `lease_duration` passes with no successful
+/// registration, the pool drops out of `GET /pools`. A missing body, a zero
+/// interval, or an interval not below the lease does not parse, so a bad reply
+/// cannot make a PoolRelay register in a tight loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "LeaseBody")]
+#[must_use = "wait `heartbeat_interval` before the next `register_pool` call"]
 pub struct Lease {
     pub heartbeat_interval: Duration,
     pub lease_duration: Duration,
