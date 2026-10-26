@@ -44,7 +44,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -2163,8 +2163,8 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		}
 
 		// Resolve the frontend image independently of the component runtime.
-		var resolvedRuntimeVersion *runtimeversion.Version
-		if version, err := runtimeversion.ParseImageVersion(podSpec.Containers[i].Image); err == nil {
+		var resolvedRuntimeVersion *versionoverride.Version
+		if version, err := versionoverride.ParseImageVersion(podSpec.Containers[i].Image); err == nil {
 			resolvedRuntimeVersion = &version
 		}
 
@@ -2256,8 +2256,8 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		workerHashSuffix = workerHash
 	}
 
-	var resolvedRuntimeVersion *runtimeversion.Version
-	if version, err := runtimeversion.Resolve(runtimeImage, component.RuntimeVersionOverride); err == nil {
+	var resolvedRuntimeVersion *versionoverride.Version
+	if version, err := versionoverride.Resolve(runtimeImage, component.RuntimeVersionOverride); err == nil {
 		resolvedRuntimeVersion = &version
 	} else if component.RuntimeVersionOverride != "" {
 		return ComponentContext{}, fmt.Errorf("resolve runtime version override: %w", err)

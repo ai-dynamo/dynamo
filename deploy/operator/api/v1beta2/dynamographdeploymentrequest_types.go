@@ -70,6 +70,7 @@ type HardwareSpec struct {
 // +kubebuilder:validation:MaxItems=2
 // +kubebuilder:validation:items:Minimum=0
 // +kubebuilder:validation:items:Maximum=1
+// +kubebuilder:validation:XValidation:rule="size(self) != 2 || self[0] < self[1]",message="a range needs min < max"
 type KVLoadRatio []float64
 
 // StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
@@ -110,11 +111,10 @@ type StaticWorkloadSpec struct {
 
 // WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
 type WorkloadSpec struct {
-	// Static defines one of AISimulate's synthetic workload shapes. When omitted,
-	// it searches the full KV-load ratio range at ISL 4000 and OSL 1000.
-	// An explicit empty object opts out of this underlay.
+	// Static defines one of AISimulate's synthetic workload shapes. Its fields are not
+	// defaulted individually: the default belongs to spec.workload as a whole, so an
+	// explicit workload object keeps exactly the fields it names.
 	// +optional
-	// +kubebuilder:default={isl: 4000, osl: 1000, kvLoadRatio: {0.0, 1.0}}
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
 
@@ -161,11 +161,10 @@ type ObjectiveSLASpec struct {
 type ObjectiveSpec struct {
 	// Mode selects scalar optimization or a Pareto search.
 	// +optional
-	// +kubebuilder:default=Optimize
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
 	// Metric is the scalar target when mode is Optimize.
-	// When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
+	// When omitted in Optimize mode, admission defaults it to Throughput.
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
@@ -176,24 +175,33 @@ type ObjectiveSpec struct {
 	// +listType=set
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
-	// SLA defines per-request latency bounds used to calculate goodput.
+	// SLA defines per-request latency bounds used to calculate goodput. When omitted, no
+	// bounds apply. spec.aisimulate.parameters.goal.sla overrides the bounds it names.
 	// +optional
-	// +kubebuilder:default={ttftMs: 2000, itlMs: 30}
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }
 
 // AISimulateSpec selects the AISimulate execution artifact and supplies native input.
 type AISimulateSpec struct {
 	// Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-	// and execution defaults are resolved outside this API.
+	// persists the operator's configured AISimulate image, or the Dynamo planner image of
+	// the operator's release, together with the AISimulate version it bundles.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image,omitempty"`
 
-	// VersionOverride declares the AISimulate compatibility version when it
-	// cannot be inferred from the effective image.
+	// VersionOverride declares the AISimulate version the image bundles as three numeric parts
+
+	// (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix.
+
+	// When omitted, the version is the one the operator maps to the Dynamo release in the
+
+	// image tag. It is required when the tag is not a Dynamo release the operator maps (a
+
+	// nightly or custom image), and it wins over the mapping.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	VersionOverride string `json:"versionOverride,omitempty"`
 
 	// Parameters contains native AISimulate input. Field names and nesting use
@@ -210,7 +218,6 @@ type RecommendationSpec struct {
 	// candidates are ordered best first; Pareto candidates have no scalar rank.
 	// This field does not limit internal trials.
 	// +optional
-	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
@@ -226,6 +233,7 @@ type NativeSearchInput struct {
 	// Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
+	// +listType=set
 	Backends []Backend `json:"backends,omitempty"`
 
 	// Hardware bounds the accelerator configurations evaluated by the search.
@@ -234,12 +242,19 @@ type NativeSearchInput struct {
 	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
 	// Workload defines the synthetic traffic model used for every candidate evaluation.
+	// When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;
+	// an explicit empty workload receives the same shape from admission. An explicit
+	// workload.static: {} opts out of that shape, leaving the workload to
+	// spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the
+	// fields it names.
+	// The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a
+	// KV-load ratio search.
 	// +optional
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
 	// Objective defines scalar optimization or a multi-objective Pareto search.
-	// When omitted, the schema supplies the default Optimize mode and SLA;
-	// admission supplies the conditional scalar metric.
+	// When omitted, admission supplies the object. Its mode defaults to Optimize, and admission
+	// supplies the conditional scalar metric.
 	// +optional
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
