@@ -1,5 +1,5 @@
 {
-  "description": "Bodies that the Rust type and the generated Python model must both accept or both reject. A request is accepted when it parses and passes the frontend's validation. Not a case here: `speed: null`, which the frontend reads as 1.0 and forwards as a number, so a worker never receives it.",
+  "description": "Bodies that the Rust type and the generated Python model must both accept or both reject. A request is accepted when it parses and passes the frontend's validation. A case marked `frontend_only` is rejected by the frontend alone and accepted by the generated model: an unknown value of a request enum, which a worker must accept from a newer frontend. Not a case here: `speed: null`, which the frontend reads as 1.0 and forwards as a number, so a worker never receives it.",
   "cases": [
     {"name": "minimal", "type": "request", "valid": true, "body": {"input": "hi"}},
     {"name": "speed-as-json-integer", "type": "request", "valid": true, "body": {"input": "hi", "speed": 2}},
@@ -15,7 +15,7 @@
     {"name": "speed-as-bool", "type": "request", "valid": false, "body": {"input": "hi", "speed": true}},
     {"name": "speed-below-range", "type": "request", "valid": false, "body": {"input": "hi", "speed": 0.1}},
     {"name": "speed-above-range", "type": "request", "valid": false, "body": {"input": "hi", "speed": 5.0}},
-    {"name": "data-source-unknown", "type": "request", "valid": false, "body": {"input": "hi", "data_source": "ftp"}},
+    {"name": "data-source-unknown", "type": "request", "valid": false, "frontend_only": true, "body": {"input": "hi", "data_source": "ftp"}},
     {"name": "max-new-tokens-as-string", "type": "request", "valid": false, "body": {"input": "hi", "max_new_tokens": "2048"}},
     {"name": "max-new-tokens-as-float", "type": "request", "valid": false, "body": {"input": "hi", "max_new_tokens": 2048.0}},
     {"name": "voice-as-number", "type": "request", "valid": false, "body": {"input": "hi", "voice": 1}},

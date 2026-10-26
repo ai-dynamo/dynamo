@@ -21,11 +21,15 @@
 //! states is checked against the Rust type, so the generated model never
 //! rejects a value the frontend forwards.
 //!
-//! What the generated model mirrors is what the schema states: the type of
-//! each field, its bounds, its enum values, and its default. The shared cases
-//! in `media_fixtures/` ([`super::media_fixtures`]) hold both sides to that
-//! for accepted and rejected input. A Rust rule the schema does not state,
-//! such as an integer width, is checked by the frontend alone.
+//! What the generated model mirrors is what the schema states, less the
+//! values of a request enum: the type of each field, its bounds, its
+//! default, and the values of a response enum. A request enum generates as
+//! a plain string, so a worker accepts what a newer frontend forwards for a
+//! field it does not read; `scripts/generate_media_protocols.py` says why.
+//! The shared cases in `media_fixtures/` ([`super::media_fixtures`]) hold
+//! both sides to that for accepted and rejected input. A Rust rule the
+//! schema does not state, such as an integer width, is checked by the
+//! frontend alone.
 
 use std::path::Path;
 

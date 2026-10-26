@@ -10,11 +10,14 @@
 //!   generated model reads what the frontend writes, and the frontend reads
 //!   what a worker writes.
 //! - `<module>_cases.json`: bodies that both sides must accept, and bodies
-//!   that both sides must reject: a wrong type, a value outside a bound, an
-//!   unknown enum value, a missing required field. A request is accepted
-//!   when it parses and passes the frontend's validation, as at the HTTP
-//!   boundary. This is the test of the claim that a worker rejects what the
-//!   frontend rejects, for everything the schema states.
+//!   that both sides must reject: a wrong type, a value outside a bound, a
+//!   missing required field, an unknown value of a response enum. A request
+//!   is accepted when it parses and passes the frontend's validation, as at
+//!   the HTTP boundary. A case marked `frontend_only` is rejected here and
+//!   accepted by the generated model: an unknown value of a request enum,
+//!   which a worker must accept from a newer frontend, or a rule the schema
+//!   cannot state. This is the test of the claim that a worker rejects what
+//!   the frontend rejects, for everything the generated model mirrors.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -97,6 +100,9 @@ struct Case {
     #[serde(rename = "type")]
     kind: String,
     valid: bool,
+    /// The frontend rejects the body and the generated model accepts it.
+    #[serde(default)]
+    frontend_only: bool,
     body: Value,
 }
 
@@ -135,6 +141,12 @@ where
         assert!(
             seen.insert((case.kind.clone(), case.name.clone())),
             "{file}: two {} cases named {}",
+            case.kind,
+            case.name
+        );
+        assert!(
+            !(case.frontend_only && case.valid),
+            "{file}: {} {}: the frontend rejects a frontend_only case, so valid must be false",
             case.kind,
             case.name
         );

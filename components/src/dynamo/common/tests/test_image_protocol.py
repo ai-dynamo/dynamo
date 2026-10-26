@@ -92,10 +92,17 @@ def test_images_response_rejects_usage_without_input_token_details():
         )
 
 
-def test_image_request_rejects_a_value_outside_the_enum():
-    # The frontend rejects the value too. The model matches the frontend.
+def test_image_request_accepts_a_value_outside_the_enum():
+    # The frontend rejects the value. A worker accepts what a newer frontend
+    # forwards for a field it does not read, so the request model takes any
+    # string here.
+    assert NvCreateImageRequest(prompt="a cat", quality="ultra").quality == "ultra"
+
+
+def test_image_response_rejects_a_value_outside_the_enum():
+    # A worker builds the response, so the response model keeps the enum.
     with pytest.raises(ValidationError):
-        NvCreateImageRequest(prompt="a cat", quality="ultra")
+        NvImagesResponse(created=0, data=[], quality="ultra")
 
 
 @pytest.mark.parametrize("n", [0, 11])

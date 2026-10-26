@@ -147,11 +147,9 @@ class NvCreateImageRequest(BaseModel):
     The frontend rejects a value outside the range, so a worker never
     sees one and needs no range check of its own.
     """
-    quality: Literal['standard', 'hd', 'high', 'medium', 'low', 'xhigh', 'max', 'auto'] | None = (
-        None
-    )
-    response_format: Literal['url', 'b64_json'] | None = None
-    output_format: Literal['png', 'jpeg', 'webp'] | None = None
+    quality: StrictStr | None = None
+    response_format: StrictStr | None = None
+    output_format: StrictStr | None = None
     output_compression: Annotated[StrictInt | None, Field(ge=0, le=100)] = None
     """
     Compression level of jpeg and webp output, 0 to 100 percent as the
@@ -169,9 +167,9 @@ class NvCreateImageRequest(BaseModel):
     """
     Image size in WxH format, or "auto"
     """
-    moderation: Literal['auto', 'low'] | None = None
-    background: Literal['auto', 'transparent', 'opaque'] | None = None
-    style: Literal['vivid', 'natural'] | None = None
+    moderation: StrictStr | None = None
+    background: StrictStr | None = None
+    style: StrictStr | None = None
     user: StrictStr | None = None
     input_reference: StrictStr | None = None
     """

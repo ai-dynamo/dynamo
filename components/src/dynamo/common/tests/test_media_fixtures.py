@@ -9,9 +9,13 @@ hold the Rust types to the same files.
   Both sides parse it and dump it back unchanged, so the generated model reads
   what the frontend writes, and the frontend reads what a worker writes.
 - `<module>_cases.json`: bodies that both sides must accept, and bodies that
-  both sides must reject: a wrong type, a value outside a bound, an unknown
-  enum value, a missing required field. This is the test of the claim that a
-  worker rejects what the frontend rejects, for everything the schema states.
+  both sides must reject: a wrong type, a value outside a bound, a missing
+  required field, an unknown value of a response enum. A case marked
+  `frontend_only` is rejected by the frontend alone and accepted here: an
+  unknown value of a request enum, which a worker must accept from a newer
+  frontend, or a rule the schema cannot state. This is the test of the claim
+  that a worker rejects what the frontend rejects, for everything the
+  generated model mirrors.
 """
 
 import json
@@ -76,16 +80,20 @@ def _cases():
         module = file.split("_")[0]
         for case in json.loads((FIXTURES / file).read_text())["cases"]:
             model = {"request": request_model, "response": response_model}[case["type"]]
+            frontend_only = case.get("frontend_only", False)
+            assert not (frontend_only and case["valid"]), f"{file}: {case['name']}"
             yield pytest.param(
                 model,
                 case["body"],
-                case["valid"],
+                case["valid"] or frontend_only,
                 id=f"{module}-{case['type']}-{case['name']}",
             )
 
 
-@pytest.mark.parametrize(("model", "body", "valid"), list(_cases()))
-def test_media_case_is_accepted_or_rejected_as_by_the_rust_type(model, body, valid):
+@pytest.mark.parametrize(("model", "body", "accepted_by_a_worker"), list(_cases()))
+def test_media_case_is_accepted_or_rejected_as_the_case_says(
+    model, body, accepted_by_a_worker
+):
     # A worker parses the request as a dict, as the handlers do.
     try:
         model.model_validate(body)
@@ -93,4 +101,4 @@ def test_media_case_is_accepted_or_rejected_as_by_the_rust_type(model, body, val
     except ValidationError:
         accepted = False
 
-    assert accepted == valid
+    assert accepted == accepted_by_a_worker

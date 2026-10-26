@@ -1,5 +1,5 @@
 {
-  "description": "Bodies that the Rust type and the generated Python model must both accept or both reject. A request is accepted when it parses and passes the frontend's validation.",
+  "description": "Bodies that the Rust type and the generated Python model must both accept or both reject. A request is accepted when it parses and passes the frontend's validation. A case marked `frontend_only` is rejected by the frontend alone and accepted by the generated model: an unknown value of a request enum, which a worker must accept from a newer frontend.",
   "cases": [
     {"name": "minimal", "type": "request", "valid": true, "body": {"prompt": "cat", "model": "wan"}},
     {"name": "counts-at-lower-bound", "type": "request", "valid": true, "body": {"prompt": "cat", "model": "wan", "seconds": 1, "nvext": {"fps": 1, "num_frames": 1, "num_inference_steps": 1}}},
@@ -22,7 +22,7 @@
     {"name": "boundary-ratio-as-string", "type": "request", "valid": false, "body": {"prompt": "cat", "model": "wan", "nvext": {"boundary_ratio": "0.5"}}},
     {"name": "annotations-as-string", "type": "request", "valid": false, "body": {"prompt": "cat", "model": "wan", "nvext": {"annotations": "request_id"}}},
     {"name": "nvext-as-string", "type": "request", "valid": false, "body": {"prompt": "cat", "model": "wan", "nvext": "fast"}},
-    {"name": "response-format-unknown", "type": "request", "valid": false, "body": {"prompt": "cat", "model": "wan", "response_format": "ftp"}},
+    {"name": "response-format-unknown", "type": "request", "valid": false, "frontend_only": true, "body": {"prompt": "cat", "model": "wan", "response_format": "ftp"}},
     {"name": "stream-as-string", "type": "request", "valid": false, "body": {"prompt": "cat", "model": "wan", "stream": "true"}},
     {"name": "size-as-number", "type": "request", "valid": false, "body": {"prompt": "cat", "model": "wan", "size": 832}},
     {"name": "minimal-with-defaults", "type": "response", "valid": true, "body": {"id": "v1", "model": "wan", "created": 0}},
