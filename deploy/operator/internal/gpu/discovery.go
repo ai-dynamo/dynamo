@@ -167,8 +167,9 @@ var gpuRules = []gpuRule{
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
 	NodeName         string                      // Name of the node with this GPU configuration
-	GPUsPerNode      int                         // Maximum GPUs per node found in the cluster
-	NodesWithGPUs    int                         // Number of nodes that have GPUs
+	GPUsPerNode      int                         // Maximum GPUs per node with the selected SKU
+	NodesWithGPUs    int                         // Number of discovered nodes with the selected SKU
+	TotalGPUs        int                         // Sum of GPUs across discovered nodes with the selected SKU, before any budget cap
 	Model            string                      // GPU product name (e.g., "H100-SXM5-80GB")
 	VRAMPerGPU       int                         // VRAM in MiB per GPU
 	System           nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
@@ -259,7 +260,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //
 // When filterSKU is non-empty, only nodes whose inferred SKU matches are
 // considered. When empty, the best node is selected first (highest GPU count,
-// then VRAM) and then only nodes with the same SKU are counted.
+// then VRAM). Each node with the selected SKU contributes once to NodesWithGPUs,
+// and its GPU count is summed into TotalGPUs.
 //
 // The function performs the following:
 //
@@ -271,8 +273,7 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //  6. Selects the "best" GPU node (filtered by SKU when set) based on:
 //     - Highest GPU count
 //     - Highest VRAM per GPU (tie-breaker)
-//  7. Counts only nodes matching the selected SKU for NodesWithGPUs.
-//  8. Caches the result per SKU for a short duration to avoid repeated scraping.
+//  7. Caches the result per SKU for a short duration to avoid repeated scraping.
 //
 // Behavior Notes:
 //
@@ -280,7 +281,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //     load-balancing ambiguity in multi-node clusters.
 //   - If at least one pod is successfully scraped, partial failures are tolerated.
 //   - If all pods fail to scrape, an aggregated error is returned.
-//   - Assumes DCGM exporter runs as a DaemonSet (one pod per GPU node).
+//   - Multiple exporters on one node use the report with the highest GPU count,
+//     then highest VRAM, for both node selection and aggregation.
 //
 // Returns:
 //   - *GPUInfo for the selected node
@@ -353,6 +355,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 		nodeName string
 	}
 	allNodes := make([]nodeInfo, 0, len(dcgmPods))
+	nodeIndexes := make(map[string]int)
 	var scrapeErrors []error
 
 	for _, pod := range dcgmPods {
@@ -366,7 +369,18 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 			continue
 		}
 
-		allNodes = append(allNodes, nodeInfo{info: info, sku: InferHardwareSystem(info.Model), nodeName: pod.Spec.NodeName})
+		// Running pods have a scheduled node name; keep its strongest report in first-seen node order.
+		n := nodeInfo{info: info, sku: InferHardwareSystem(info.Model), nodeName: pod.Spec.NodeName}
+		if index, seen := nodeIndexes[n.nodeName]; seen {
+			previous := allNodes[index].info
+			if info.GPUsPerNode > previous.GPUsPerNode ||
+				(info.GPUsPerNode == previous.GPUsPerNode && info.VRAMPerGPU > previous.VRAMPerGPU) {
+				allNodes[index] = n
+			}
+			continue
+		}
+		nodeIndexes[n.nodeName] = len(allNodes)
+		allNodes = append(allNodes, n)
 	}
 
 	if len(allNodes) == 0 {
@@ -399,11 +413,12 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 		return nil, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
 	}
 
-	// Count only nodes with the same SKU as the selected best node,
+	// Count nodes and GPUs with the same SKU as the selected best node,
 	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
 	// cluster, this performs one Node read per matching node; that keeps a
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
+	totalGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
@@ -411,6 +426,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 			continue
 		}
 		nodesWithGPUs++
+		totalGPUs += n.info.GPUsPerNode
 		if !rdmaDetected {
 			rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.nodeName)
 			if rdma {
@@ -435,6 +451,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	bestNode.System = bestSKU
 	bestNode.CloudProvider = cloudProvider
 	bestNode.NodesWithGPUs = nodesWithGPUs
+	bestNode.TotalGPUs = totalGPUs
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 
@@ -868,16 +885,18 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
 
-	// Count only nodes with the same SKU as the selected best node,
+	// Count nodes and GPUs with the same SKU as the selected best node,
 	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
 	// cluster, this performs one Node read per matching node; that keeps a
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
+	totalGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
 		if n.sku == bestSKU {
 			nodesWithGPUs++
+			totalGPUs += n.info.GPUsPerNode
 			if !rdmaDetected {
 				rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.info.NodeName)
 				if rdma {
@@ -898,12 +917,13 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 
 	bestNode.System = bestSKU
 	bestNode.NodesWithGPUs = nodesWithGPUs
+	bestNode.TotalGPUs = totalGPUs
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestNode.GPUsPerNode,
 		"nodesWithGPUs", bestNode.NodesWithGPUs,
-		"totalGpus", bestNode.GPUsPerNode*bestNode.NodesWithGPUs,
+		"totalGpus", bestNode.TotalGPUs,
 		"model", bestNode.Model,
 		"vram", bestNode.VRAMPerGPU,
 		"system", bestNode.System,
