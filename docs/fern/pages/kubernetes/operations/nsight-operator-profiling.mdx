@@ -29,7 +29,8 @@ defines three roles. To profile a Dynamo deployment, each role does the followin
 |---|---|---|
 | Cluster admin | Installs the Nsight Operator chart, as in [Install Operator](https://docs.nvidia.com/nsight-operator/GettingStarted/index.html#cluster-admin-install-operator), and [limits its injector webhook to opted-in namespaces](https://docs.nvidia.com/nsight-operator/InstallationGuide/index.html#multi-tenant-configuration) with `clusterWideInjectionFilter` | Once per cluster |
 | Namespace admin | Creates the S3 storage config ([external S3](https://docs.nvidia.com/nsight-operator/UserGuide/index.html#using-external-s3)); without auto-provisioning, also the coordinator and gateway | Once per namespace |
-| Developer or coding agent | Applies a profile config, deploys the DGD, and captures with `nsight_operator.py` | Once per test |
+| Developer or coding agent | Applies a profile config, then deploys the DGD | Once per DGD deployment |
+| Developer or coding agent | Captures with `nsight_operator.py` | Once per profiling session |
 
 Commands and reports take different paths:
 
@@ -133,7 +134,7 @@ spec:
 ```
 
 - **Tags.** Every rule uses the same literal tag, the DGD name, so one window profiles every selected component over
-  the same period. A tag holds one capture session at a time. For separate windows per component, give each rule its
+  the same period. A tag holds one profiling session at a time. For separate windows per component, give each rule its
   own tag.
 - **Names.** Nsight looks up tool configs by name across the whole namespace, so tests that share a namespace need
   their own tool-config names. Do not name the config `dynamo-profile-config`, which Nsight's helper writes and deletes.
