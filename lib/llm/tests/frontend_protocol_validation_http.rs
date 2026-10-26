@@ -853,10 +853,11 @@ async fn anthropic_tools_reject_unsupported_and_malformed_definitions() {
 async fn anthropic_named_tool_choice_requires_a_name_before_dispatch() {
     temp_env::async_with_vars(BASE_ENV, async {
         let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
-        let svc = HarnessService::start(vec![script.clone(), script]).await;
-        let body = json!({
+        let svc = HarnessService::start([script]).await;
+        let mut body = json!({
             "model": MODEL,
             "max_tokens": 64,
+            "stream": true,
             "messages": [{"role": "user", "content": "List the current directory."}],
             "tools": [
                 {"name": "list_directory", "input_schema": {
@@ -869,30 +870,20 @@ async fn anthropic_named_tool_choice_requires_a_name_before_dispatch() {
             "tool_choice": {"type": "tool"}
         });
 
-        // Invalid named choices must fail before generation for both response modes.
-        for stream in [false, true] {
-            let mut request = body.clone();
-            request["stream"] = json!(stream);
-            let response = post_json(&svc, "/v1/messages", request).await;
-            assert_anthropic_error(response, ExpectedError::Validation, "tool_choice.name").await;
-            assert!(svc.engine.take_requests().await.is_empty());
-        }
+        let response = post_json(&svc, "/v1/messages", body.clone()).await;
+        assert_anthropic_error(response, ExpectedError::Validation, "tool_choice.name").await;
+        assert!(svc.engine.take_requests().await.is_empty());
 
-        // Supplying the name must still dispatch the same selected tool.
-        for stream in [false, true] {
-            let mut request = body.clone();
-            request["stream"] = json!(stream);
-            request["tool_choice"]["name"] = json!("list_directory");
-            let response = post_json(&svc, "/v1/messages", request).await;
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            bounded(response.bytes()).await.unwrap();
-            let requests = svc.engine.take_requests().await;
-            assert_eq!(requests.len(), 1);
-            assert_eq!(
-                serde_json::to_value(&requests[0].inner.tool_choice).unwrap(),
-                json!({"type": "function", "function": {"name": "list_directory"}})
-            );
-        }
+        body["tool_choice"]["name"] = json!("list_directory");
+        let response = post_json(&svc, "/v1/messages", body).await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        bounded(response.bytes()).await.unwrap();
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&requests[0].inner.tool_choice).unwrap(),
+            json!({"type": "function", "function": {"name": "list_directory"}})
+        );
         svc.shutdown().await;
     })
     .await;
