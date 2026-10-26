@@ -48,7 +48,6 @@ struct Inner<P: Eq + Hash, V> {
     updates: broadcast::Sender<Frame<P, V>>,
 }
 
-/// Stores a keyed view and fans out snapshots and updates to router channels.
 pub struct GlobalViewBroadcaster<P: Eq + Hash, V> {
     inner: Arc<Inner<P, V>>,
 }
@@ -179,14 +178,17 @@ where
         F: Future<Output = Result<mpsc::Sender<Frame<P, V>>, E>>,
     {
         loop {
-            let mut updates = self.inner.updates.subscribe();
             let Ok(sink) = attach(router.clone()).await else {
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             };
-            let (revision, pools) = {
+            let (mut updates, revision, pools) = {
                 let state = self.inner.state.read();
-                (state.revision, state.pools.clone())
+                (
+                    self.inner.updates.subscribe(),
+                    state.revision,
+                    state.pools.clone(),
+                )
             };
             if sink
                 .send_timeout(Frame::Snapshot { revision, pools }, SEND_TIMEOUT)

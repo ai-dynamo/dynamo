@@ -166,7 +166,9 @@ async fn update_during_connection_is_included_in_the_initial_snapshot() {
         .await
         .unwrap()
         .unwrap();
-    broadcaster.upsert("blue", 11);
+    for view in 11..=110 {
+        broadcaster.upsert("blue", view);
+    }
     resume_tx.send(()).unwrap();
     let mut stream = timeout(Duration::from_secs(2), stream_rx.recv())
         .await
@@ -175,17 +177,22 @@ async fn update_during_connection_is_included_in_the_initial_snapshot() {
     assert_eq!(
         next(&mut stream).await,
         Frame::Snapshot {
-            revision: 2,
-            pools: HashMap::from([("blue", 11)]),
+            revision: 101,
+            pools: HashMap::from([("blue", 110)]),
         }
     );
-    broadcaster.upsert("blue", 12);
+    assert!(
+        timeout(Duration::from_millis(200), stream.recv())
+            .await
+            .is_err()
+    );
+    broadcaster.upsert("blue", 111);
     assert_eq!(
         next(&mut stream).await,
         Frame::Upsert {
-            revision: 3,
+            revision: 102,
             pool: "blue",
-            view: 12,
+            view: 111,
         }
     );
     drop(directory_tx);
