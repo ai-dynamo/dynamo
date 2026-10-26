@@ -1164,11 +1164,6 @@ navigation:
         path: pages/reference/api/README.mdx
         slug: api
 
-      - page: Image Edits API
-        icon: image
-        path: pages/reference/api/image-edits.mdx
-        slug: api/image-edits
-
       - section: Python API
         icon: fa-brands fa-python
         path: pages/reference/api/python/README.mdx
@@ -1234,6 +1229,11 @@ navigation:
             contents:
               - page: API Reference (K8s)
                 path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+
+      - page: Image Edits API
+        icon: image
+        path: pages/reference/api/image-edits.mdx
+        slug: api/image-edits
 
       - section: Components
         icon: sliders
