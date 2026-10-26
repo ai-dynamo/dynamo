@@ -217,20 +217,21 @@ def load_weights(
     *,
     max_workers: int = 16,
     transfer_backend: str = TransferBackendKind.NIXL.value,
-    sharded_ssd_roots: Sequence[str] | None = None,
-    sharded_ssd_queues_per_root: int = 2,
-    posix_backend_params: Mapping[str, str] | None = None,
+    backend_config: Mapping[str, object] | None = None,
 ) -> None:
     """Load exact V1 weight IDs into a fresh server and publish them.
 
     Returns without loading if the server already has committed weights.
+    ``backend_config`` holds the transfer backend's settings, keyed as each
+    backend reads them: ``posix_backend_params`` for the NIXL POSIX backends,
+    ``sharded_ssd_queues_per_root`` for ``sharded-ssd``.
+    ``sharded_ssd_roots`` also lists where the artifact may keep its shards.
     """
     started_at = monotonic()
     if max_workers <= 0:
         raise ValueError("max_workers must be positive")
-    if sharded_ssd_queues_per_root <= 0:
-        raise ValueError("sharded_ssd_queues_per_root must be positive")
-    roots = _normalize_roots(sharded_ssd_roots)
+    backend_config = dict(backend_config or {})
+    roots = _normalize_roots(backend_config.get("sharded_ssd_roots"))
     vmm = get_vmm()
     vmm.ensure_initialized()
     vmm.runtime_set_device(device)
@@ -241,11 +242,7 @@ def load_weights(
         GMSSnapshotConfig(
             device=device,
             max_workers=max_workers,
-            backend_config={
-                "sharded_ssd_roots": list(roots),
-                "sharded_ssd_queues_per_root": sharded_ssd_queues_per_root,
-                "posix_backend_params": posix_backend_params,
-            },
+            backend_config={**backend_config, "sharded_ssd_roots": list(roots)},
         ),
     )
     try:
