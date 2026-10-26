@@ -24,6 +24,7 @@ pub mod pod_discovery;
 pub mod proto;
 pub mod render_client;
 pub mod render_http;
+pub mod response_event;
 mod runner;
 pub mod selector;
 pub mod server;

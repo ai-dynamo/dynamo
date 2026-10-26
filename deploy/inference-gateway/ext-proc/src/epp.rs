@@ -41,7 +41,7 @@ use crate::epp_standalone_config::{session_affinity_ttl, session_affinity_ttl_se
 use crate::gateway_routing::{GatewayRouting, ROUTING_HOST_ENV};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
-    ResponseUsage, resolve_cache_namespace,
+    ResponseEvent, ResponseUsage, resolve_cache_namespace,
 };
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1733,15 +1733,21 @@ impl EndpointPicker for Router {
         }
     }
 
-    fn on_response_body(
-        &self,
-        booking_id: &str,
-        chunk: &[u8],
-        streaming: bool,
-        end_of_stream: bool,
-    ) {
+    fn on_response_headers(&self, booking_id: &str, status: u16) {
         if let Some(gateway) = &self.gateway {
-            gateway.on_response_body(booking_id, chunk, streaming, end_of_stream);
+            gateway.on_response_headers(booking_id, status);
+        }
+    }
+
+    fn on_response_event(&self, booking_id: &str, event: &ResponseEvent) {
+        if let Some(gateway) = &self.gateway {
+            gateway.on_response_event(booking_id, event);
+        }
+    }
+
+    fn on_response_end(&self, booking_id: &str) {
+        if let Some(gateway) = &self.gateway {
+            gateway.on_response_end(booking_id);
         }
     }
 

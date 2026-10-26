@@ -39,14 +39,10 @@ use dynamo_protocols::types::{CompletionUsage, Prompt};
 use dynamo_runtime::pipeline::{AsyncEngine, Context};
 use futures::StreamExt;
 
-use crate::picker::{PickError, PickResult};
+use crate::picker::{PickError, PickResult, ResponseEvent, ResponseUsage};
 
 /// Enables this path for the runtime EPP.
 pub const ROUTING_HOST_ENV: &str = "DYN_EPP_ROUTING_HOST";
-
-/// An SSE line longer than this is not a token delta; drop it rather than
-/// buffer it (the delta it might have carried counts as one token).
-const MAX_PENDING_SSE_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct GatewayRouting {
     host: Arc<RoutingHost>,
@@ -190,43 +186,50 @@ impl GatewayRouting {
         })
     }
 
-    /// Relay response progress Envoy delivered for `booking_id`.
-    pub(crate) fn on_response_body(
-        &self,
-        booking_id: &str,
-        chunk: &[u8],
-        streaming: bool,
-        end_of_stream: bool,
-    ) {
+    /// A non-2xx upstream status marks the response failed.
+    pub(crate) fn on_response_headers(&self, booking_id: &str, status: u16) {
+        if !(200..300).contains(&status)
+            && let Some(mut response) = self.responses.get_mut(booking_id)
+        {
+            response.failed = true;
+        }
+    }
+
+    /// Relay the output progress one response event reports.
+    pub(crate) fn on_response_event(&self, booking_id: &str, event: &ResponseEvent) {
         let Some(mut response) = self.responses.get_mut(booking_id) else {
             return;
         };
-        let progress = if streaming {
-            response.ingest_sse(chunk, end_of_stream)
-        } else if end_of_stream {
-            response.ingest_unary(chunk)
-        } else {
-            Vec::new()
+        let tokens = response.observe(event);
+        drop(response);
+        if tokens > 0 {
+            self.dispatch
+                .progress(booking_id, GatewayProgress::Tokens(tokens));
+        }
+    }
+
+    /// The response finished: relay its finish unless it failed.
+    pub(crate) fn on_response_end(&self, booking_id: &str) {
+        let Some(mut response) = self.responses.get_mut(booking_id) else {
+            return;
         };
+        let progress = response.finish();
         drop(response);
         for progress in progress {
             self.dispatch.progress(booking_id, progress);
         }
     }
 
-    /// The ext_proc stream for `booking_id` ended: complete the host's stream
-    /// when the response finished, and abort it otherwise.
+    /// The ext_proc stream for `booking_id` ended. Complete the host's stream
+    /// for a response that finished cleanly; abort it for one that failed or
+    /// ended early, so the request is recorded as aborted, not completed.
     pub(crate) fn on_request_complete(&self, booking_id: &str) {
         let Some((_, response)) = self.responses.remove(booking_id) else {
             return;
         };
-        if response.finished {
-            self.dispatch.complete(booking_id);
-        } else {
-            self.dispatch.abort(
-                booking_id,
-                "gateway stream ended before the response finished",
-            );
+        match response.outcome() {
+            Ok(()) => self.dispatch.complete(booking_id),
+            Err(reason) => self.dispatch.abort(booking_id, reason),
         }
     }
 }
@@ -267,120 +270,78 @@ fn header_map(headers: &[(String, String)]) -> HeaderMap {
     map
 }
 
-/// Response progress parsed from the gateway's copy of an OpenAI response.
+/// What the response has reported so far for one routed request.
 #[derive(Default)]
 struct ResponseProgress {
-    pending: Vec<u8>,
+    tokens: usize,
     reason: Option<FinishReason>,
-    usage: Option<CompletionUsage>,
+    usage: Option<ResponseUsage>,
+    failed: bool,
     finished: bool,
 }
 
 impl ResponseProgress {
-    /// Count one token per content-bearing choice in each complete SSE event.
-    /// Envoy may split events across chunks, so incomplete lines are held.
-    fn ingest_sse(&mut self, chunk: &[u8], end_of_stream: bool) -> Vec<GatewayProgress> {
-        self.pending.extend_from_slice(chunk);
-        let complete = if end_of_stream {
-            self.pending.len()
-        } else {
-            match self.pending.iter().rposition(|&b| b == b'\n') {
-                Some(index) => index + 1,
-                None => {
-                    if self.pending.len() > MAX_PENDING_SSE_BYTES {
-                        self.pending.clear();
-                        return vec![GatewayProgress::Tokens(1)];
-                    }
-                    return Vec::new();
-                }
-            }
-        };
-        let lines: Vec<u8> = self.pending.drain(..complete).collect();
-
-        let mut tokens = 0;
-        for line in lines.split(|&b| b == b'\n') {
-            let Some(data) = line.trim_ascii().strip_prefix(b"data:") else {
-                continue;
-            };
-            let data = data.trim_ascii();
-            if data == b"[DONE]" {
-                continue;
-            }
-            if let Ok(event) = serde_json::from_slice::<serde_json::Value>(data) {
-                tokens += self.observe_event(&event);
-            }
+    /// Record one event; returns the output tokens it reports.
+    fn observe(&mut self, event: &ResponseEvent) -> usize {
+        self.failed |= event.error;
+        if let Some(reason) = &event.finish_reason {
+            self.reason = Some(finish_reason(reason));
         }
-
-        let mut progress = Vec::new();
-        if tokens > 0 {
-            progress.push(GatewayProgress::Tokens(tokens));
+        if let Some(usage) = &event.usage {
+            self.usage = Some(usage.clone());
         }
-        if end_of_stream {
-            progress.push(self.finish());
-        }
-        progress
+        self.tokens += event.content_deltas;
+        event.content_deltas
     }
 
-    /// A buffered (non-streaming) response reports its output only through
-    /// `usage.completion_tokens`.
-    fn ingest_unary(&mut self, body: &[u8]) -> Vec<GatewayProgress> {
-        let mut progress = Vec::new();
-        if let Ok(response) = serde_json::from_slice::<serde_json::Value>(body) {
-            self.observe_event(&response);
-            let tokens = self
-                .usage
-                .as_ref()
-                .map_or(0, |usage| usage.completion_tokens as usize);
-            if tokens > 0 {
-                progress.push(GatewayProgress::Tokens(tokens));
-            }
+    /// The progress that ends a successful response: output the events did not
+    /// show (all of it for a buffered body, per `usage`), then the finish.
+    /// How the request ends: completed only when the response finished
+    /// without a failure status or error event.
+    fn outcome(&self) -> Result<(), &'static str> {
+        match (self.finished, self.failed) {
+            (_, true) => Err("the upstream response failed"),
+            (false, false) => Err("gateway stream ended before the response finished"),
+            (true, false) => Ok(()),
         }
-        progress.push(self.finish());
-        progress
     }
 
-    /// Record finish reason and usage; return the number of content deltas.
-    fn observe_event(&mut self, event: &serde_json::Value) -> usize {
-        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null())
-            && let Ok(usage) = serde_json::from_value(usage.clone())
-        {
-            self.usage = Some(usage);
-        }
-        let Some(choices) = event.get("choices").and_then(|c| c.as_array()) else {
-            return 0;
-        };
-        let mut tokens = 0;
-        for choice in choices {
-            if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
-                self.reason = Some(finish_reason(reason));
-            }
-            let delta = choice.get("delta");
-            let has_content = ["content", "reasoning_content", "tool_calls"]
-                .iter()
-                .any(|field| delta.and_then(|d| d.get(field)).is_some_and(non_empty))
-                || choice.get("text").is_some_and(non_empty);
-            if has_content {
-                tokens += 1;
-            }
-        }
-        tokens
-    }
-
-    fn finish(&mut self) -> GatewayProgress {
+    fn finish(&mut self) -> Vec<GatewayProgress> {
         self.finished = true;
-        GatewayProgress::Finish {
-            reason: self.reason.take(),
-            usage: self.usage.take(),
+        if self.failed {
+            return Vec::new();
         }
+        let mut progress = Vec::with_capacity(2);
+        let reported = self
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.completion_tokens)
+            .map_or(0, |tokens| usize::try_from(tokens).unwrap_or(usize::MAX));
+        if reported > self.tokens {
+            progress.push(GatewayProgress::Tokens(reported - self.tokens));
+            self.tokens = reported;
+        }
+        progress.push(GatewayProgress::Finish {
+            reason: self.reason.take(),
+            usage: self.usage.as_ref().map(completion_usage),
+        });
+        progress
     }
 }
 
-fn non_empty(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Null => false,
-        serde_json::Value::String(text) => !text.is_empty(),
-        serde_json::Value::Array(items) => !items.is_empty(),
-        _ => true,
+fn completion_usage(usage: &ResponseUsage) -> CompletionUsage {
+    let count = |tokens: Option<u64>| u32::try_from(tokens.unwrap_or(0)).unwrap_or(u32::MAX);
+    let prompt_tokens = count(usage.prompt_tokens);
+    let completion_tokens = count(usage.completion_tokens);
+    CompletionUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: usage
+            .total_tokens
+            .map_or(prompt_tokens.saturating_add(completion_tokens), |total| {
+                count(Some(total))
+            }),
+        ..Default::default()
     }
 }
 

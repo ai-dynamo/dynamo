@@ -7,6 +7,7 @@ use dynamo_llm::protocols::common::extensions::{
 };
 
 use super::*;
+use crate::picker::ResponseEvent;
 
 fn preprocessor() -> Arc<OpenAIPreprocessor> {
     let card = ModelDeploymentCard::load_from_disk(
@@ -124,67 +125,68 @@ async fn prepare_leaves_multi_prompt_batches_to_the_existing_path() {
     );
 }
 
-/// #16587: one token per content delta, across events Envoy split mid-line;
-/// role-only and `[DONE]` events carry no output.
-#[test]
-fn sse_progress_counts_content_deltas_across_split_chunks() {
-    let mut response = ResponseProgress::default();
-    let events = concat!(
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"lo\"}}]}\n\n",
-        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],",
-        "\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n",
-        "data: [DONE]\n\n",
-    )
-    .as_bytes();
-    let split = 70;
-
-    let first = response.ingest_sse(&events[..split], false);
-    let rest = response.ingest_sse(&events[split..], true);
-    let progress = [first, rest].concat();
-
-    let tokens: usize = progress
-        .iter()
-        .map(|progress| match progress {
-            GatewayProgress::Tokens(count) => *count,
-            GatewayProgress::Finish { .. } => 0,
-        })
-        .sum();
-    assert_eq!(tokens, 2);
-    match progress.last() {
-        Some(GatewayProgress::Finish { reason, usage }) => {
-            assert_eq!(reason, &Some(FinishReason::Length));
-            assert_eq!(usage.as_ref().map(|usage| usage.completion_tokens), Some(2));
-        }
-        other => panic!("the stream must end with its finish, got {other:?}"),
-    }
-    assert!(response.finished);
+fn sse(payload: &str) -> ResponseEvent {
+    ResponseEvent::from_sse_data(payload.as_bytes()).expect("the event reports something")
 }
 
+fn finish_of(progress: &[GatewayProgress]) -> (Option<FinishReason>, Option<u32>) {
+    match progress.last() {
+        Some(GatewayProgress::Finish { reason, usage }) => (
+            reason.clone(),
+            usage.as_ref().map(|usage| usage.total_tokens),
+        ),
+        other => panic!("a finished response ends with its finish, got {other:?}"),
+    }
+}
+
+/// #16587: streamed output is reported per event, and output the events did
+/// not show is topped up from `usage` when the response finishes.
 #[test]
-fn unary_progress_reports_completion_tokens() {
+fn streamed_output_is_reported_per_event_and_topped_up_from_usage() {
+    let mut response = ResponseProgress::default();
+    assert_eq!(
+        response.observe(&sse(r#"{"choices":[{"delta":{"content":"a"}}]}"#)),
+        1
+    );
+    assert_eq!(
+        response.observe(&sse(r#"{"choices":[{"delta":{"content":"b"}}]}"#)),
+        1
+    );
+    response.observe(&sse(
+        r#"{"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":4,"completion_tokens":5,"total_tokens":9}}"#,
+    ));
+
+    let progress = response.finish();
+    assert_eq!(progress.first(), Some(&GatewayProgress::Tokens(3)));
+    assert_eq!(finish_of(&progress), (Some(FinishReason::Length), Some(9)));
+    assert_eq!(response.outcome(), Ok(()));
+}
+
+/// A buffered body shows its output only through `usage`.
+#[test]
+fn a_buffered_response_reports_its_usage_as_output() {
     let mut response = ResponseProgress::default();
     let body = br#"{"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":9,"total_tokens":13}}"#;
+    assert_eq!(response.observe(&ResponseEvent::from_body(body)), 0);
 
-    let progress = response.ingest_unary(body);
-
+    let progress = response.finish();
     assert_eq!(progress.first(), Some(&GatewayProgress::Tokens(9)));
-    assert!(matches!(
-        progress.last(),
-        Some(GatewayProgress::Finish {
-            reason: Some(FinishReason::Stop),
-            ..
-        })
-    ));
+    assert_eq!(finish_of(&progress), (Some(FinishReason::Stop), Some(13)));
 }
 
+/// A failed response (an error event here; a non-2xx status sets the same flag)
+/// ends with an abort, not a completion, and reports no finish.
 #[test]
-fn an_unfinished_response_is_not_marked_finished() {
+fn a_failed_response_is_aborted_not_completed() {
     let mut response = ResponseProgress::default();
-    response.ingest_sse(
-        b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
-        false,
+    response.observe(&sse(r#"{"error":{"message":"engine died","code":500}}"#));
+    assert!(response.finish().is_empty());
+    assert!(response.outcome().is_err());
+
+    let mut early = ResponseProgress::default();
+    early.observe(&sse(r#"{"choices":[{"delta":{"content":"a"}}]}"#));
+    assert!(
+        early.outcome().is_err(),
+        "a stream that closes unfinished is aborted"
     );
-    assert!(!response.finished);
 }
