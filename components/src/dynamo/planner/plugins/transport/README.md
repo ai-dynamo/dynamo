@@ -83,6 +83,13 @@ Each transport implements a **per-plugin RPC timeout** at the call site:
   (catches systemic deadlock); per-stage budget is intentionally NOT
   introduced in this version (left as a follow-up)
 
+Replay (an engine on a `VirtualClock`) applies neither the in-process
+timeout nor `tick_max_duration_seconds`: a replay tick takes no simulated
+time, and a wall-clock budget would make the simulated decisions depend on
+host speed. A stuck in-process plugin therefore stalls the replay instead of
+being skipped; a retune sweep still kills its candidate replays at its own
+wall-clock `timeout_seconds`. `GrpcTransport` calls keep their timeout.
+
 Default `request_timeout_seconds = 5.0`, applied uniformly to every
 plugin in PR #1 (a per-plugin override field was prototyped on
 `RegisterRequest` but not plumbed into `make_transport_for_endpoint`,

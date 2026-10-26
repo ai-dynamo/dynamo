@@ -2257,7 +2257,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2286,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-bench"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-builtin"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "async-trait",
  "criterion",
@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-catalog"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-custom-policy-example-disagg-filter-score-pick",
  "dynamo-custom-policy-example-simple-filter-score-pick",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-disagg-filter-score-pick"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2365,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-epp"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "dynamo-custom-policy-example-catalog",
@@ -2376,7 +2376,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-simple-filter-score-pick"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2385,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-simple-stacked-score-pick"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2393,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-soft-pin-repin"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-epp-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2434,7 +2434,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-ext-proc"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2477,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "criterion",
  "derive_builder",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker-backend"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2763,11 +2763,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.24"
+version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a62c4aea442890712dcdb64e493fac636edad8c9b25f793948800507c41bedc"
+checksum = "561fd41706eeccdad858e90702f736a35020d7c3761c5c6e7dbb47a83bf1a59f"
 dependencies = [
  "anyhow",
+ "dynamo-structural-tag",
  "openai-harmony",
  "percent-encoding",
  "regex",
@@ -2817,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "axum 0.8.4",
@@ -2834,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2922,7 +2923,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2945,7 +2946,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2977,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3000,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-testkit"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3030,6 +3031,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-structural-tag"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8d57353db2c855b6d8154bb67b752d95547ee33eda3ee55342c0625211bdaae"
+dependencies = [
+ "anyhow",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
 version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3054,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -3072,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-trtllm-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3095,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-trtllm-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3122,14 +3135,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-vllm-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3156,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-vllm-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3184,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-worker-selection-policy-catalog"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
 ]
@@ -4460,7 +4473,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -5256,7 +5269,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdynamo_llm"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -8011,7 +8024,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -8360,9 +8373,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -10884,9 +10897,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -10897,14 +10910,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
