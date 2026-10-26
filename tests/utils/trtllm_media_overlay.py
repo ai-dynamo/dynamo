@@ -1,16 +1,127 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exercise retained runtime helpers against the overlaid fetch signature."""
+"""Install and validate the pinned OpenEngine media overlay for CI."""
 
+import argparse
 import ast
 import asyncio
 import importlib.util
 import inspect
-import sys
+import shutil
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+
+
+def _replace_definition(destination, source, class_name, names):
+    """Overlay selected Python definitions without upgrading the framework."""
+    original = destination.read_text()
+    updated = source.read_text()
+    original_tree, updated_tree = ast.parse(original), ast.parse(updated)
+
+    def definitions(tree):
+        if class_name is not None:
+            tree = next(
+                node
+                for node in tree.body
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            )
+        return {node.name: node for node in tree.body if hasattr(node, "name")}
+
+    existing, replacements = definitions(original_tree), definitions(updated_tree)
+    lines, source_lines = original.splitlines(keepends=True), updated.splitlines(
+        keepends=True
+    )
+    edits = []
+    for name in names:
+        node = replacements[name]
+        start = min([node.lineno] + [item.lineno for item in node.decorator_list]) - 1
+        replacement = source_lines[start : node.end_lineno]
+        if name in existing:
+            old = existing[name]
+            begin = min([old.lineno] + [item.lineno for item in old.decorator_list]) - 1
+            edits.append((begin, old.end_lineno, replacement))
+        else:
+            owner = next(
+                node
+                for node in original_tree.body
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            )
+            edits.append((owner.end_lineno, owner.end_lineno, ["\n"] + replacement))
+    for start, end, replacement in sorted(edits, reverse=True):
+        lines[start:end] = replacement
+    result = "".join(lines)
+    ast.parse(result)
+    destination.write_text(result)
+
+
+def install_overlay(source):
+    """Install the pinned media implementation into a release runtime."""
+    package = Path(
+        next(iter(importlib.util.find_spec("tensorrt_llm").submodule_search_locations))
+    )
+    source = Path(source) / "tensorrt_llm"
+    for entry in (source / "grpc/openengine").iterdir():
+        if entry.name not in {"__init__.py", "server.py", "__pycache__"}:
+            target = package / "grpc/openengine" / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry, target)
+    for module in ("media_io.py", "model_config.py", "multimodal_data.py"):
+        shutil.copy2(source / "inputs" / module, package / "inputs" / module)
+    shutil.copy2(
+        source / "_torch/shared_tensor/shared_tensor.py",
+        package / "_torch/shared_tensor/shared_tensor.py",
+    )
+    # Retain release-coupled launch_server; use the pinned class's worker pools
+    # and cleanup rather than silently running preprocessing on the default pool.
+    server = package / "grpc/openengine/server.py"
+    _replace_definition(
+        server, source / "grpc/openengine/server.py", None, ["OpenEngineServer"]
+    )
+    server.write_text(
+        server.read_text()
+        .replace(
+            "from typing import Any",
+            "from typing import Any\nfrom concurrent.futures import ThreadPoolExecutor\n"
+            "from .coordinator import FrontendClient",
+        )
+        .replace(
+            "from openengine.v1 import openengine_pb2_grpc",
+            "from .bindings import openengine_pb2_grpc",
+        )
+    )
+    registry = package / "inputs/registry.py"
+    _replace_definition(
+        registry,
+        source / "inputs/registry.py",
+        "BaseMultimodalInputProcessor",
+        ["requires_input_placeholders"],
+    )
+    registry.write_text(
+        registry.read_text().replace(
+            "from .content_format import ContentFormat",
+            "from .content_format import ContentFormat\n"
+            "from .model_config import resolve_top_level_model_type",
+        )
+    )
+    _replace_definition(
+        package / "inputs/multimodal.py",
+        source / "inputs/multimodal.py",
+        "MultimodalParams",
+        ["_apply_tensor_operation", "release_handles"],
+    )
+    utils = package / "inputs/utils.py"
+    utils.write_text(
+        "".join(
+            line
+            for line in utils.read_text().splitlines(keepends=True)
+            if line.strip() != "session = await _get_aiohttp_session()"
+        ).replace(", session=session)", ")")
+    )
+    check_signatures()
 
 
 def check_signatures():
@@ -89,6 +200,12 @@ async def validate():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--install-source", type=Path)
+    parser.add_argument("--check-signatures-only", action="store_true")
+    args, _ = parser.parse_known_args()
+    if args.install_source:
+        install_overlay(args.install_source)
     check_signatures()
-    if "--check-signatures-only" not in sys.argv[1:]:
+    if not args.check_signatures_only:
         asyncio.run(validate())
