@@ -18,9 +18,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::Lease;
 use dynamo_global_discovery_service::backends::kubernetes::{
-    ExportedService, McsImplementation, McsPoolDirectory, McsReplicaDirectory,
+    ExportedService, FrontendService, McsImplementation, McsPoolDirectory, McsReplicaDirectory,
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
+use dynamo_global_discovery_service::backends::registered::RegisteredPoolDirectory;
+use dynamo_global_discovery_service::peers::PeerSync;
 use dynamo_global_discovery_service::pool_discovery::{
     PoolDirectory, PoolRegistrar, ReplicaEndpoint, ReplicaId,
 };
@@ -66,11 +68,11 @@ struct Args {
     /// Where pools and router replicas come from.
     #[arg(long, value_enum, default_value_t = Store::Memory)]
     store: Store,
-    /// Memory store: how often a PoolRelay registers again.
+    /// How often a PoolRelay registers again.
     #[arg(long, default_value_t = 5)]
     heartbeat_interval_secs: u64,
-    /// Memory store: how long a registration lasts. Longer than the
-    /// heartbeat interval, and at most a day.
+    /// How long a registration lasts. Longer than the heartbeat interval, and
+    /// at most a day.
     #[arg(
         long,
         default_value_t = 15,
@@ -90,6 +92,13 @@ struct Args {
         value_parser = clap::builder::NonEmptyStringValueParser::new()
     )]
     pool_service_suffix: String,
+    /// Kubernetes stores: each pool's frontend Service is named
+    /// `<DGD name><suffix>`.
+    #[arg(long, default_value = "-frontend")]
+    frontend_service_suffix: String,
+    /// Kubernetes stores: the frontend Service's named port for HTTP.
+    #[arg(long, default_value = "http")]
+    frontend_port_name: String,
     /// Kubernetes stores: namespace of the Global Router Service.
     #[arg(long)]
     router_namespace: Option<String>,
@@ -99,6 +108,22 @@ struct Args {
     /// Kubernetes stores: the router Service's named port for state streams.
     #[arg(long)]
     router_port_name: Option<String>,
+    /// Kubernetes stores: this service's own Service, exported through MCS.
+    /// With it, the instances in every cluster share their registrations,
+    /// over plain HTTP, so not with `--tls-cert-path` yet. The lease must be
+    /// more than twice the heartbeat interval. Other regions then drop a pool
+    /// whose PoolRelay is more than the lease minus two heartbeat intervals
+    /// late (5 s with the defaults); its own region allows the lease minus
+    /// one.
+    #[arg(long)]
+    peer_service: Option<String>,
+    /// Kubernetes stores: namespace of `--peer-service`. Defaults to
+    /// `--router-namespace`.
+    #[arg(long)]
+    peer_namespace: Option<String>,
+    /// Kubernetes stores: the named HTTP port of `--peer-service`.
+    #[arg(long, default_value = "http")]
+    peer_port_name: String,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -106,10 +131,11 @@ enum Store {
     /// Registrations in this process; router replicas from `--router`. Run
     /// one replica: each keeps only the registrations it receives.
     Memory,
-    /// Imported EndpointSlices, named the Karmada way. No registrations.
+    /// Registrations, joined with the imported EndpointSlices, named the
+    /// Karmada way.
     Karmada,
-    /// Imported EndpointSlices with the standard `multicluster.kubernetes.io`
-    /// labels. No registrations.
+    /// Registrations, joined with the imported EndpointSlices that have the
+    /// standard `multicluster.kubernetes.io` labels.
     Mcs,
 }
 
@@ -131,17 +157,17 @@ fn parse_router(value: &str) -> Result<ReplicaEndpoint, String> {
 async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
     let args = Args::parse();
+    let shutdown = CancellationToken::new();
     let store = match args.store {
         Store::Memory => memory_store(&args)?,
-        Store::Karmada => kubernetes_store(&args, McsImplementation::Karmada).await?,
-        Store::Mcs => kubernetes_store(&args, McsImplementation::Standard).await?,
+        Store::Karmada => kubernetes_store(&args, McsImplementation::Karmada, &shutdown).await?,
+        Store::Mcs => kubernetes_store(&args, McsImplementation::Standard, &shutdown).await?,
     };
     let listener = TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("bind the Global Discovery listener at {}", args.listen))?;
     tracing::info!(address = %args.listen, "Global Discovery Service listening");
 
-    let shutdown = CancellationToken::new();
     cancel_on_signal(shutdown.clone())?;
     let tls = args
         .tls_cert_path
@@ -157,10 +183,16 @@ async fn main() -> Result<()> {
         .context("serve the Global Discovery Service")
 }
 
+fn lease(args: &Args) -> Result<Lease> {
+    Lease::new(args.heartbeat_interval_secs, args.lease_duration_secs)
+        .context("check --heartbeat-interval-secs and --lease-duration-secs")
+}
+
 fn memory_store(args: &Args) -> Result<DiscoveryStore> {
-    let lease = Lease::new(args.heartbeat_interval_secs, args.lease_duration_secs)
-        .context("check --heartbeat-interval-secs and --lease-duration-secs")?;
-    let store = Arc::new(MemoryPoolStore::new(lease));
+    if args.peer_service.is_some() {
+        bail!("--peer-service requires --store karmada or --store mcs");
+    }
+    let store = Arc::new(MemoryPoolStore::new(lease(args)?));
     let mut ids = HashSet::new();
     if let Some(repeated) = args
         .routers
@@ -175,10 +207,18 @@ fn memory_store(args: &Args) -> Result<DiscoveryStore> {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
         registrar: Some(registrar),
+        sharing: None,
     })
 }
 
-async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<DiscoveryStore> {
+/// A pool is listed while MCS imports a Ready PoolRelay endpoint for it and
+/// its PoolRelay has registered within the lease. MCS gives the addresses;
+/// the registration gives the model, capabilities, capacity and location.
+async fn kubernetes_store(
+    args: &Args,
+    mcs: McsImplementation,
+    shutdown: &CancellationToken,
+) -> Result<DiscoveryStore> {
     let (Some(namespace), Some(name), Some(port_name)) = (
         &args.router_namespace,
         &args.router_service,
@@ -188,22 +228,74 @@ async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<Discove
             "the Kubernetes stores need --router-namespace, --router-service and --router-port-name"
         );
     };
+    let lease = lease(args)?;
+    if args.peer_service.is_some() {
+        if args.tls_cert_path.is_some() {
+            bail!(
+                "--peer-service does not work with --tls-cert-path yet: instances ask each other \
+                 over plain HTTP"
+            );
+        }
+        if lease.lease_duration() <= lease.heartbeat_interval() * 2 {
+            bail!(
+                "with --peer-service, --lease-duration-secs must be more than twice \
+                 --heartbeat-interval-secs, so that copies stay alive between refreshes"
+            );
+        }
+    }
+    let registrations = Arc::new(MemoryPoolStore::new(lease));
     let client = kubernetes_client()
         .await
         .context("create the Kubernetes client")?;
+    let imported = McsPoolDirectory::new(
+        client.clone(),
+        mcs,
+        args.pool_service_suffix.clone(),
+        FrontendService {
+            suffix: args.frontend_service_suffix.clone(),
+            port_name: args.frontend_port_name.clone(),
+        },
+    )
+    .context("check --frontend-service-suffix and --pool-service-suffix")?;
+    let pools = RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease);
+    let sharing = match &args.peer_service {
+        Some(peer_service) => {
+            let peers = ExportedService {
+                namespace: args
+                    .peer_namespace
+                    .clone()
+                    .unwrap_or_else(|| namespace.clone()),
+                name: peer_service.clone(),
+                port_name: args.peer_port_name.clone(),
+            };
+            let (sync, sharing) = PeerSync::new(
+                Arc::new(McsReplicaDirectory::new(client.clone(), &peers, mcs)),
+                registrations.clone(),
+                lease.heartbeat_interval(),
+            )
+            .context("create the HTTP client for --peer-service")?;
+            tokio::spawn(sync.run(shutdown.clone()));
+            Some(sharing)
+        }
+        None => {
+            tracing::info!(
+                "no --peer-service: registrations stay in this instance, so only pools that \
+                 register here are listed"
+            );
+            None
+        }
+    };
     let router = ExportedService {
         namespace: namespace.clone(),
         name: name.clone(),
         port_name: port_name.clone(),
     };
+    let registrar: Arc<dyn PoolRegistrar> = registrations;
     Ok(DiscoveryStore {
-        pools: Arc::new(McsPoolDirectory::new(
-            client.clone(),
-            mcs,
-            args.pool_service_suffix.clone(),
-        )),
+        pools: Arc::new(pools),
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
-        registrar: None,
+        registrar: Some(registrar),
+        sharing,
     })
 }
 

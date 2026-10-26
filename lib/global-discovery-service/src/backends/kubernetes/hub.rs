@@ -5,7 +5,7 @@
 //! store.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use crate::pool_discovery::{
     Completeness, Directory, DiscoveryError, PoolEvent, PoolListing, Snapshot, WatchEvent,
@@ -16,6 +16,7 @@ use dynamo_global_common::{PoolKey, PoolLocation, address_identity};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use super::cache::{SliceDirectory, SliceIndex, SliceKey, ready_endpoints};
 use super::mcs::{self, McsImplementation};
@@ -31,24 +32,60 @@ use super::mcs::{self, McsImplementation};
 #[derive(Debug)]
 pub struct McsPoolDirectory(SliceDirectory<PoolIndex>);
 
+/// The Service in front of a pool's frontends, named `<DGD name><suffix>`
+/// and exported like the PoolRelay Service. Its Ready endpoints on the named
+/// port become the pool's `frontends`: addresses that other clusters can
+/// reach, kept current as frontend pods come and go.
+#[derive(Clone, Debug)]
+pub struct FrontendService {
+    pub suffix: String,
+    pub port_name: String,
+}
+
+impl FrontendService {
+    /// A Service name must not match both suffixes, so neither may end with
+    /// the other.
+    pub fn check(&self, pool_service_suffix: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.suffix.is_empty()
+                && !pool_service_suffix.is_empty()
+                && !self.suffix.ends_with(pool_service_suffix)
+                && !pool_service_suffix.ends_with(self.suffix.as_str()),
+            "the frontend Service suffix {:?} and the PoolRelay Service suffix {:?} must differ, \
+             and neither may end with the other",
+            self.suffix,
+            pool_service_suffix,
+        );
+        Ok(())
+    }
+}
+
 impl McsPoolDirectory {
     /// `imports` reaches the cluster where the imported pool slices are: the
     /// hub for standard MCS. For Karmada, the Karmada control plane, which
     /// collects every exported Service's slices, so no per-pool
     /// `ServiceImport` is needed. A member cluster with a `ServiceImport` per
     /// pool also works. Each PoolRelay Service is named
-    /// `<DGD name><pool_service_suffix>`. The client's connect and read
-    /// timeouts should add up to under 90 s, so a server that stops answering
-    /// shows up as failures.
-    pub fn new(imports: Client, mcs: McsImplementation, pool_service_suffix: String) -> Self {
-        Self(SliceDirectory::new(
+    /// `<DGD name><pool_service_suffix>`. A pool's Ready frontends become its
+    /// `frontends`, but they do not make it live without a Ready PoolRelay.
+    /// The client's connect and read timeouts should add up to under 90 s, so
+    /// a server that stops answering shows up as failures.
+    pub fn new(
+        imports: Client,
+        mcs: McsImplementation,
+        pool_service_suffix: String,
+        frontends: FrontendService,
+    ) -> anyhow::Result<Self> {
+        frontends.check(&pool_service_suffix)?;
+        Ok(Self(SliceDirectory::new(
             Api::all(imports),
             mcs::imported_selector(mcs),
             PoolNaming {
                 mcs,
                 pool_service_suffix,
+                frontends,
             },
-        ))
+        )))
     }
 }
 
@@ -70,17 +107,17 @@ impl Directory<PoolListing, PoolKey> for McsPoolDirectory {
 struct PoolNaming {
     mcs: McsImplementation,
     pool_service_suffix: String,
+    frontends: FrontendService,
 }
 
 impl PoolNaming {
     /// Source cluster from [`mcs::source_cluster`]; DGD name from the
-    /// Service name without `pool_service_suffix`. `None` for imports that
-    /// are not pools, and for a pool slice from an unknown cluster, which is
-    /// logged.
-    fn pool_key(&self, slice: &EndpointSlice) -> Option<PoolKey> {
+    /// Service name without `suffix`. `None` for imports of other Services,
+    /// and for a slice from an unknown cluster, which is logged.
+    fn pool_key(&self, slice: &EndpointSlice, suffix: &str) -> Option<PoolKey> {
         let service = mcs::service_name(self.mcs, slice)?;
         let dgd_name = service
-            .strip_suffix(self.pool_service_suffix.as_str())
+            .strip_suffix(suffix)
             .filter(|name| !name.is_empty())?;
         let Some(cluster) = mcs::source_cluster(self.mcs, slice) else {
             mcs::warn_unknown_cluster(slice, service);
@@ -90,10 +127,19 @@ impl PoolNaming {
         PoolKey::new(cluster, namespace, dgd_name).ok()
     }
 
+    /// A PoolRelay slice, or a frontend slice with the named port.
     fn slice(&self, slice: &EndpointSlice) -> Option<SliceEntry> {
+        if let Some(pool) = self.pool_key(slice, &self.pool_service_suffix) {
+            return Some(SliceEntry {
+                pool,
+                ready: ready_addresses(slice),
+                frontend_port: None,
+            });
+        }
         Some(SliceEntry {
-            pool: self.pool_key(slice)?,
-            relays: ready_relays(slice),
+            pool: self.pool_key(slice, &self.frontends.suffix)?,
+            ready: ready_addresses(slice),
+            frontend_port: Some(tcp_port(slice, &self.frontends.port_name)?),
         })
     }
 }
@@ -108,14 +154,10 @@ fn location(cluster: &str) -> PoolLocation {
     }
 }
 
-/// A pool is live while a PoolRelay endpoint is Ready. Ready can be stale
-/// when a cluster loses contact with the MCS implementation, so the runtime
-/// also drops a pool whose Relay connection is gone.
-///
-/// Each Ready address comes with its pod: the endpoint's `targetRef`, or the
-/// address itself when the endpoint has none. A dual-stack pod is in two
-/// slices, one per address family.
-fn ready_relays(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
+/// Each Ready address in a slice, with its pod: the endpoint's `targetRef`,
+/// or the address itself when the endpoint has none. A dual-stack pod is in
+/// two slices, one per address family.
+fn ready_addresses(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
     ready_endpoints(slice)
         .flat_map(|endpoint| {
             let pod = endpoint
@@ -131,9 +173,36 @@ fn ready_relays(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
         .collect()
 }
 
+/// A slice's named TCP port. One slice lists one set of ports for all its
+/// endpoints.
+fn tcp_port(slice: &EndpointSlice, name: &str) -> Option<u16> {
+    slice
+        .ports
+        .iter()
+        .flatten()
+        .find(|port| {
+            port.name.as_deref() == Some(name)
+                && port
+                    .protocol
+                    .as_deref()
+                    .is_none_or(|protocol| protocol == "TCP")
+        })
+        .and_then(|port| port.port)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+}
+
+/// Formatted through `SocketAddr`, so IPv6 gets brackets.
+fn frontend_url(address: IpAddr, port: u16) -> Option<Url> {
+    Url::parse(&format!("http://{}/", SocketAddr::new(address, port))).ok()
+}
+
 struct SliceEntry {
     pool: PoolKey,
-    relays: Vec<(String, IpAddr)>,
+    /// Ready addresses, with their pods.
+    ready: Vec<(String, IpAddr)>,
+    /// `Some` for a frontend slice: the port its endpoints serve HTTP on.
+    frontend_port: Option<u16>,
 }
 
 #[derive(Default)]
@@ -227,15 +296,32 @@ impl PoolIndex {
     fn rebuild(&mut self, key: &PoolKey) -> Option<PoolEvent> {
         let state = self.pools.get(key)?;
         let mut relays: BTreeMap<&str, BTreeSet<IpAddr>> = BTreeMap::new();
+        let mut frontends = Vec::new();
         for entry in state
             .slices
             .iter()
             .filter_map(|slice| self.slices.get(slice))
         {
-            for (pod, address) in &entry.relays {
-                relays.entry(pod).or_default().insert(*address);
+            match entry.frontend_port {
+                None => {
+                    for (pod, address) in &entry.ready {
+                        relays.entry(pod).or_default().insert(*address);
+                    }
+                }
+                Some(port) => frontends.extend(
+                    entry
+                        .ready
+                        .iter()
+                        .filter_map(|(_, address)| frontend_url(*address, port)),
+                ),
             }
         }
+        frontends.sort_unstable();
+        frontends.dedup();
+        // A pool is live while a PoolRelay endpoint is Ready. Ready can be
+        // stale when a cluster loses contact with the MCS implementation, so
+        // the runtime also drops a pool whose Relay connection is gone.
+        //
         // Bind the Ready PoolRelay pod with the lowest address. The choice
         // depends only on the current slices, so every service instance binds
         // the same pod, and routers that ask different instances admit the
@@ -259,7 +345,7 @@ impl PoolIndex {
             location: location(key.site_id()),
             model: None,
             capabilities: Vec::new(),
-            frontends: Vec::new(),
+            frontends,
             capacity: Vec::new(),
             relay_identities,
         };
@@ -280,7 +366,7 @@ mod tests {
     use std::time::Duration;
 
     use k8s_openapi::api::core::v1::ObjectReference;
-    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
+    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
@@ -294,7 +380,30 @@ mod tests {
         PoolNaming {
             mcs: McsImplementation::Karmada,
             pool_service_suffix: SUFFIX.to_owned(),
+            frontends: FrontendService {
+                suffix: "-frontend".to_owned(),
+                port_name: "http".to_owned(),
+            },
         }
+    }
+
+    /// A Karmada-imported slice of `<dgd>-frontend` from `cluster`, serving
+    /// HTTP on the port named `http`.
+    fn frontend_slice(cluster: &str, dgd: &str, endpoints: &[(&str, bool)]) -> EndpointSlice {
+        let service = format!("{dgd}-frontend");
+        let mut slice = slice(cluster, dgd, "f1", endpoints);
+        slice.metadata.name = Some(format!("imported-{cluster}-{service}-f1"));
+        slice.metadata.labels.as_mut().unwrap().insert(
+            KUBERNETES_SERVICE_NAME_LABEL.to_owned(),
+            format!("derived-{service}"),
+        );
+        slice.ports = Some(vec![EndpointPort {
+            name: Some("http".to_owned()),
+            port: Some(8000),
+            protocol: Some("TCP".to_owned()),
+            ..Default::default()
+        }]);
+        slice
     }
 
     /// A Karmada-imported slice of `<dgd>-pool-relay` from `cluster`.
@@ -481,6 +590,80 @@ mod tests {
         );
         let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
         assert_eq!(listing.relay_identities, ["ip:10.43.0.7", "ip:fd00::7"]);
+    }
+
+    #[test]
+    fn frontends_come_from_the_frontend_service() {
+        // A Service name must not match both suffixes.
+        for (frontend, relay) in [
+            ("-frontend", "-frontend"),
+            ("-relay", "-pool-relay"),
+            ("-pool-relay", "-relay"),
+            ("", SUFFIX),
+        ] {
+            let service = FrontendService {
+                suffix: frontend.to_owned(),
+                port_name: "http".to_owned(),
+            };
+            assert!(service.check(relay).is_err(), "{frontend:?} {relay:?}");
+        }
+        assert!(naming().frontends.check(SUFFIX).is_ok());
+
+        let cache = cache();
+        let pool = key("west", "mocker");
+        // Frontends alone do not make a pool live.
+        sync(
+            &cache,
+            vec![frontend_slice(
+                "west",
+                "mocker",
+                &[("10.43.0.2", true), ("10.43.0.3", false)],
+            )],
+        );
+        assert!(listing(&cache, &pool).is_none());
+
+        cache.apply(watcher::Event::Apply(slice(
+            "west",
+            "mocker",
+            "a1b2c",
+            &[("10.43.0.1", true)],
+        )));
+        let first = listing(&cache, &pool).expect("live pool");
+        assert_eq!(
+            first.frontends,
+            [Url::parse("http://10.43.0.2:8000/").unwrap()]
+        );
+
+        // A replaced frontend changes the listing. IPv6 gets brackets.
+        cache.apply(watcher::Event::Apply(frontend_slice(
+            "west",
+            "mocker",
+            &[("fd00::2", true)],
+        )));
+        let second = listing(&cache, &pool).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(
+            second.frontends,
+            [Url::parse("http://[fd00::2]:8000/").unwrap()]
+        );
+
+        // Only the named TCP port counts, and not port 0.
+        for (name, protocol, port) in [
+            ("grpc", "TCP", 8000),
+            ("http", "UDP", 8000),
+            ("http", "TCP", 0),
+        ] {
+            let mut other = frontend_slice("west", "mocker", &[("10.43.0.4", true)]);
+            let named = &mut other.ports.as_mut().unwrap()[0];
+            named.name = Some(name.to_owned());
+            named.protocol = Some(protocol.to_owned());
+            named.port = Some(port);
+            cache.apply(watcher::Event::Apply(other));
+            assert!(
+                listing(&cache, &pool).unwrap().frontends.is_empty(),
+                "{name} {protocol} {port}"
+            );
+        }
     }
 
     #[test]

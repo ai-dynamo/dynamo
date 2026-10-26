@@ -8,6 +8,8 @@
 //!   and each call is also the pool's heartbeat.
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
 //! - `GET /pools`: the pools a Global Router routes to.
+//! - `GET /registrations`: the registrations this instance's PoolRelays
+//!   made, for the other instances ([`crate::peers`]).
 //! - `GET /healthz`: OK while the service can answer from its store. Use it
 //!   for readiness; liveness needs only the TCP port. With mTLS, a probe
 //!   needs a client certificate too, so probe with TCP or a command.
@@ -19,9 +21,12 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::pool_discovery::{
-    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration, ReplicaDirectory,
+    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration,
+    RegistrationExchange, ReplicaDirectory,
 };
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -31,6 +36,7 @@ use axum::{Json, Router};
 use dynamo_global_common::{PoolsResponse, RoutersResponse};
 use dynamo_http_server::lifecycle::ServiceObserver;
 use dynamo_http_server::server::{HttpServer, HttpServerConfig};
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -38,8 +44,23 @@ use tokio_util::sync::CancellationToken;
 pub struct DiscoveryStore {
     pub pools: Arc<PoolDirectory>,
     pub routers: Arc<ReplicaDirectory>,
-    /// `None` for a store that takes no registrations, such as MCS.
+    /// `None` for a store that takes no registrations.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
+    /// `Some` to serve `GET /registrations` to the other instances.
+    pub sharing: Option<Sharing>,
+}
+
+/// The registrations this instance shares, from
+/// [`crate::peers::PeerSync::new`].
+pub struct Sharing {
+    /// Names this process in `GET /registrations`, so it can skip its own
+    /// reply.
+    pub(crate) instance: String,
+    pub(crate) registrations: Arc<dyn RegistrationExchange>,
+    /// Set once this instance has asked every other one. Until then
+    /// `GET /healthz` fails, so a new replica does not answer before it has
+    /// heard from the others.
+    pub(crate) synced: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for DiscoveryStore {
@@ -64,6 +85,7 @@ pub fn routes(store: DiscoveryStore) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
         .route("/routers", get(list_routers))
+        .route("/registrations", get(shared_registrations))
         .route("/healthz", get(healthz))
         .with_state(Arc::new(store))
 }
@@ -133,11 +155,41 @@ async fn list_routers(State(store): State<Arc<DiscoveryStore>>) -> Response {
     }
 }
 
+async fn shared_registrations(State(store): State<Arc<DiscoveryStore>>) -> Response {
+    let Some(sharing) = &store.sharing else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "this instance does not share registrations",
+        )
+            .into_response();
+    };
+    Json(SharedRegistrations {
+        instance: sharing.instance.clone(),
+        registrations: sharing
+            .registrations
+            .local_registrations()
+            .into_iter()
+            .map(|(registration, remaining)| SharedRegistration {
+                registration,
+                expires_in_ms: u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+            })
+            .collect(),
+    })
+    .into_response()
+}
+
 /// Lists what `GET /pools` and `GET /routers` would serve. A Kubernetes store
 /// answers from its cache once that has synced, so an API server outage does
 /// not turn every replica unready at once. The first probe also starts the
-/// store's watch.
+/// store's watch. An instance that shares registrations is ready only once
+/// it has asked the others; an unreachable one later does not make it
+/// unready.
 async fn healthz(State(store): State<Arc<DiscoveryStore>>) -> StatusCode {
+    if let Some(sharing) = &store.sharing
+        && !sharing.synced.load(Ordering::Acquire)
+    {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     let (pools, routers) = tokio::join!(store.pools.list(), store.routers.list());
     match pools.and(routers) {
         Ok(_) => StatusCode::OK,
@@ -155,6 +207,29 @@ fn error_response(error: DiscoveryError) -> Response {
     };
     tracing::warn!(?error, %status, "discovery request failed");
     (status, error.to_string()).into_response()
+}
+
+/// `GET /registrations` reply. Only service instances read it, so it is not
+/// in `dynamo_global_common`.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct SharedRegistrations {
+    /// The instance that answered.
+    pub(crate) instance: String,
+    pub(crate) registrations: Vec<SharedRegistration>,
+}
+
+/// A registration as its PoolRelay sent it, and how long it has left.
+/// Durations, not times, so the instances' clocks need not agree.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct SharedRegistration {
+    registration: PoolRegistration,
+    expires_in_ms: u64,
+}
+
+impl SharedRegistration {
+    pub(crate) fn into_registration(self) -> (PoolRegistration, Duration) {
+        (self.registration, Duration::from_millis(self.expires_in_ms))
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +273,7 @@ mod tests {
             pools: pools.clone(),
             routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
             registrar: Some(pools),
+            sharing: None,
         }
     }
 
@@ -322,6 +398,7 @@ mod tests {
             pools: Arc::new(Down),
             routers: Arc::new(Down),
             registrar: None,
+            sharing: None,
         })
         .await;
         for path in ["/pools", "/routers", "/healthz"] {

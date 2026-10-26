@@ -10,10 +10,12 @@
 //! - [`pool_discovery`]: the store traits the service reads and writes
 //!   through.
 //!
-//! [`backends`] holds the stores behind that contract: in memory, and from
-//! the EndpointSlices that SIG Multicluster (MCS) imports.
+//! [`backends`] holds the stores behind that contract: in memory, and MCS,
+//! which joins registrations with the EndpointSlices that SIG Multicluster
+//! imports. [`peers`] shares registrations between service instances.
 
 pub mod backends;
+pub mod peers;
 pub mod pool_discovery;
 pub mod service;
 
