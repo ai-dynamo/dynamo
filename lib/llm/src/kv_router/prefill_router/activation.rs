@@ -806,7 +806,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match router
-                    .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99)))
+                    .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99, None)))
                     .await
                 {
                     Err(error) => {
