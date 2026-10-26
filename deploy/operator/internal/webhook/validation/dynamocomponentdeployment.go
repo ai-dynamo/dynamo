@@ -59,11 +59,9 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                                ctx,
-			runtimeVersionSource:               runtimeVersionSource,
-			allowMissingRuntimeVersionOverride: true,
-		},
+		ctx:                                ctx,
+		runtimeVersionSource:               runtimeVersionSource,
+		allowMissingRuntimeVersionOverride: true,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd, nil)
@@ -87,12 +85,10 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                                ctx,
-			runtimeVersionSource:               runtimeVersionSource,
-			ratchetRuntimeVersion:              true,
-			allowMissingRuntimeVersionOverride: true,
-		},
+		ctx:                                ctx,
+		runtimeVersionSource:               runtimeVersionSource,
+		ratchetRuntimeVersion:              true,
+		allowMissingRuntimeVersionOverride: true,
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD, oldDCD)
