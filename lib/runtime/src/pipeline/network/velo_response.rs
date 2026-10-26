@@ -69,37 +69,22 @@ pub(crate) enum ResponseTransport {
     Ucx,
 }
 
-/// Keep 32 explicit here, matching Velo's current default. In the earlier
-/// mocker campaign, a larger window filled the shared path from a
-/// worker to the frontend, so a new stream's first token waited behind it.
-/// On the mocker rig with a saturated 24-core frontend, a window of 256
-/// put TTFT p50 at 135 to 355 ms and 32 put it at 88 to 102 ms. Throughput was
-/// within noise, and ITL p99 was no higher.
+/// Per-stream credit. A larger window lets busy streams delay a new stream's
+/// first token on the shared connection.
 const RESPONSE_CREDIT_WINDOW: u32 = 32;
 
-/// TCP lanes to each frontend for response streams.
-///
-/// 4, not velo's default of 1. Each lane is its own TCP connection, read by
-/// its own task on the frontend, and the mux spreads the response streams over
-/// the lanes. One connection is limited by the task that reads it. On the
-/// mocker rig (8 worker processes of 64, concurrency 8,192, ISL 1,024, OSL
-/// 900), 4 lanes against 1 gave 2,406 against 1,359 requests/s, ITL p99 4.9
-/// against 15.0 ms, end-to-end p99 4.5 against 13.5 s, and 20.0 against
-/// 37.4 ms of frontend CPU per request.
+/// TCP lanes to each frontend. The frontend reads each lane on its own task,
+/// so a single lane limits a busy worker's throughput.
 const RESPONSE_TCP_LANES: u16 = 4;
 
-/// A worker forgets a frontend that has had no open response stream for this
-/// long. A restarted frontend comes back with a new instance ID, so without it
-/// a long-lived worker keeps every frontend it ever served.
+/// A restarted frontend returns with a new instance ID, so a worker forgets a
+/// frontend that has had no open stream for this long.
 const PEER_IDLE_TTL: Duration = Duration::from_secs(600);
 const PEER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Heartbeat interval for each response stream, in place of Velo's 5 s.
-///
-/// Velo does not report a closed connection to the streams on it. A frontend
-/// learns that a worker died when that worker's streams miss three to four
-/// heartbeats: 15 to 20 s at Velo's default, 3 to 4 s at this one. Each
-/// heartbeat is one small record per stream.
+/// Per-stream heartbeat, in place of Velo's 5 s. Velo does not report a closed
+/// connection to its streams, so a frontend sees a lost worker only after
+/// three to four missed heartbeats.
 const RESPONSE_HEARTBEAT_MS: u64 = 1_000;
 
 fn response_heartbeat() -> Result<Duration> {
@@ -144,10 +129,8 @@ fn response_mux_config() -> Result<MuxConfig> {
     })
 }
 
-/// Velo has no TLS. A runtime configured for Velo refuses to start, rather
-/// than send responses in plaintext while these settings encrypt the TCP
-/// planes. A TCP worker that builds the service only to report a plane
-/// mismatch does not check.
+/// Velo has no TLS, so refuse to start rather than send responses in
+/// plaintext while TLS is configured for the TCP planes.
 pub(crate) fn reject_tls_settings() -> Result<()> {
     use crate::config::environment_names::tcp_response_stream::tls::*;
 
@@ -210,9 +193,8 @@ struct ResponseAddress<'a> {
     version: u32,
     transport: ResponseTransport,
     peer_id: InstanceId,
-    /// Base64 of the frontend's `WorkerAddress`. A worker decodes it only for a
-    /// frontend it has not prepared yet. Serialized as `PeerInfo`, JSON would
-    /// write the address bytes as an array of numbers.
+    /// Base64 of the frontend's `WorkerAddress`, decoded only for a frontend
+    /// the worker has not prepared.
     peer_address: &'a str,
     anchor: StreamAnchorHandle,
     ticket: StreamOpenTicket,
@@ -234,9 +216,8 @@ impl Registration {
 #[derive(Default)]
 struct Registrations {
     requests: HashMap<Uuid, Registration>,
-    /// Requests still waiting for their prologue, so `cancel_instance_streams`
-    /// finds them without a full scan. As on TCP, a request leaves this index
-    /// when its prologue arrives, and worker removal lets it drain.
+    /// Requests still waiting for their prologue. As on TCP, a request leaves
+    /// this index when its prologue arrives, so worker removal lets it drain.
     instance_requests: HashMap<EndpointInstanceId, HashSet<Uuid>>,
     tombstones: InstanceTombstones,
 }
@@ -273,10 +254,9 @@ impl Registrations {
     }
 }
 
-/// A service built on an owned runtime keeps that runtime alive, so all such
-/// callers share it. A service built on an External runtime holds only a
-/// `Handle`, and its I/O stops when that runtime ends, so only callers on the
-/// same Tokio runtime share it.
+/// A service on an owned runtime keeps that runtime alive, so all owned
+/// runtimes share one. A service on an External runtime stops with it, so only
+/// callers on that Tokio runtime share it.
 fn service_key(runtime: &crate::runtime::RuntimeType) -> Option<tokio::runtime::Id> {
     match runtime {
         crate::runtime::RuntimeType::Shared(_) => None,
@@ -394,9 +374,7 @@ impl RuntimeService {
 /// Stream handles retain the service, but do not count as runtime owners.
 struct SharedService {
     service: Arc<VeloResponseService>,
-    // Retain an owned Tokio runtime without retaining the Dynamo Runtime and
-    // its owner slot. An External runtime is the caller's responsibility, so
-    // its service is shared only on that runtime (see `service_key`).
+    // Keeps an owned Tokio runtime alive without retaining the Dynamo Runtime.
     runtime: crate::runtime::RuntimeType,
 }
 
@@ -503,9 +481,8 @@ impl VeloResponseService {
             #[cfg(not(all(target_os = "linux", feature = "velo-ucx")))]
             bail!("Velo UCX responses require a Linux build with the velo-ucx feature");
         }
-        // Every service also has TCP. A frontend and worker configured for
-        // different transports still share it, so the worker can open the
-        // stream and report the mismatch instead of leaving the frontend to wait.
+        // Every service also has TCP, so a worker configured for another
+        // transport can still open the stream and report the mismatch.
         builder = builder.add_transport(Arc::new(tcp_transport(address)?));
         let velo = builder.build().await?;
         let service = Arc::new(Self {
@@ -596,8 +573,7 @@ impl VeloResponseService {
             !self.closing.load(Ordering::Acquire),
             "Velo response service is shut down"
         );
-        // Item 0 is the JSON prologue and every later item is response data,
-        // both as raw bytes, so neither end runs them through msgpack. The
+        // Item 0 is the JSON prologue; later items are response data. The
         // ticket carries the heartbeat interval to the worker.
         let anchor = self
             .velo
@@ -870,9 +846,8 @@ impl VeloResponseService {
                 .open_anchor_stream::<Bytes>(address.anchor, address.ticket)
                 .await?
         };
-        // Check compatibility only now that the stream is open, so the frontend
-        // gets the mismatch at once instead of waiting for a stream that never
-        // starts. `send_err` does not depend on this protocol's frames.
+        // Check compatibility only once the stream is open, so the frontend
+        // gets the mismatch at once. `send_err` does not use this protocol's frames.
         let mismatch = if address.version != VERSION {
             Some(format!(
                 "Velo response protocol mismatch: frontend version {}, worker version {VERSION}",
