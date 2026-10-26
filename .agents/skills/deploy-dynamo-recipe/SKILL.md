@@ -268,8 +268,7 @@ SERVED_MODEL="<served-model-name>"
 SMOKE_DIR="${DEPLOY_ROOT}/smoke"
 mkdir -p "${SMOKE_DIR}"
 
-PF_LOG="${SMOKE_DIR}/port-forward.log"
-: >"${PF_LOG}"
+PF_LOG="$(mktemp "${SMOKE_DIR}/port-forward.XXXXXX")"
 kubectl --context "${KUBE_CONTEXT}" port-forward svc/<frontend-service> :8000 \
   --address 127.0.0.1 -n "${NAMESPACE}" >"${PF_LOG}" 2>&1 &
 PF_PID=$!
