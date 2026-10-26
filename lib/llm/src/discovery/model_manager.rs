@@ -26,16 +26,15 @@ use super::{
 };
 
 use dynamo_runtime::{
-    component::{Client, Endpoint, build_transport_type},
-    discovery::{Discovery, DiscoverySpec, ModelCardInstanceId},
-    pipeline::network::RequestPlanePayloadCodec,
+    component::{Client, Endpoint},
+    discovery::{Discovery, ModelCardInstanceId},
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
 
 use crate::{
     kv_router::{
-        KvEventSourceRequirement, KvRouter, SelectionPolicySource, router_endpoint_id,
+        KvEventSourceRequirement, KvRouter, SelectionPolicySource,
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{
@@ -141,6 +140,7 @@ struct CommittedDiscoveryGroup {
 struct PendingLoraProjection {
     base_capacities: Vec<u32>,
     adapters: HashMap<String, LoraInfo>,
+    is_registration_required: bool,
 }
 
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
@@ -150,6 +150,12 @@ pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) cards: Vec<ModelDeploymentCard>,
 }
 
+pub(crate) struct CommittedModelView {
+    pub(crate) name: String,
+    pub(crate) is_ready: bool,
+    pub(crate) aliases: Vec<String>,
+}
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -157,6 +163,7 @@ pub(crate) struct RemovedDiscoveryGroup {
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
+    pub(crate) router_policies: super::router_policy::RouterPolicyRegistry,
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
@@ -169,6 +176,8 @@ pub struct ModelManager {
 
     /// Controller-owned committed groups, keyed by the controller's stable GroupKey encoding.
     discovery_groups: DashMap<String, CommittedDiscoveryGroup>,
+
+    worker_inventory: super::worker_inventory::WorkerInventory,
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     ///
@@ -213,12 +222,71 @@ impl Default for ModelManager {
 }
 
 impl ModelManager {
+    pub(crate) fn publish_worker_group_observation(
+        &self,
+        group_id: String,
+        observation: Option<super::worker_inventory::WorkerGroupObservation>,
+    ) {
+        self.worker_inventory.publish(group_id, observation);
+    }
+
+    pub(crate) fn worker_inventory(
+        &self,
+    ) -> Vec<(String, super::worker_inventory::WorkerGroupObservation)> {
+        self.worker_inventory.snapshot()
+    }
+
+    pub(crate) fn worker_group_available_ids(
+        &self,
+        group_id: &str,
+        endpoint: &EndpointId,
+    ) -> HashSet<u64> {
+        let Some((mut available, primary, namespace)) =
+            self.discovery_groups.get(group_id).map(|group| {
+                (
+                    group.worker_set.available_worker_ids().unwrap_or_default(),
+                    group.primary.clone(),
+                    group.namespace.clone(),
+                )
+            })
+        else {
+            return HashSet::new();
+        };
+        // Hop clients have their own local fault inhibition. A worker remains available if
+        // any active consumer can route to it, but must still belong to the admitted group.
+        let mut hops = None::<HashSet<u64>>;
+        for group in self.discovery_groups.iter() {
+            if group.primary != primary || group.namespace != namespace {
+                continue;
+            }
+            let prefill = group
+                .worker_set
+                .prefill_router
+                .as_ref()
+                .and_then(|router| router.available_worker_ids_for(group_id, endpoint));
+            let encode = group
+                .worker_set
+                .encoder_router
+                .as_ref()
+                .and_then(|router| router.available_worker_ids_for(group_id, endpoint));
+            for ids in prefill.into_iter().chain(encode) {
+                hops.get_or_insert_with(HashSet::new).extend(ids);
+            }
+        }
+        if let Some(hops) = hops {
+            available.retain(|worker| hops.contains(worker));
+        }
+        available
+    }
+
     pub fn new() -> Self {
         Self {
+            router_policies: Default::default(),
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
             discovery_groups: DashMap::new(),
+            worker_inventory: Default::default(),
             runtime_configs: DashMap::new(),
             hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
@@ -277,6 +345,9 @@ impl ModelManager {
                 if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
                     worker_projection.base_capacities.push(capacity);
                 }
+                worker_projection.is_registration_required |= card
+                    .runtime_config
+                    .runtime_flag_enabled(crate::lora::LORA_REQUIRES_REGISTRATION);
 
                 for (adapter_key, adapter_card) in &group.adapters {
                     let Ok(adapter_mcid) = ModelCardInstanceId::from_path(adapter_key) else {
@@ -335,8 +406,13 @@ impl ModelManager {
                             .first()
                             .copied()
                             .or_else(|| adapter_capacities.first().copied())
-                            .or_else(|| (!loras.is_empty()).then_some(4))?;
-                        Some((worker, LoraWorkerProjection { capacity, loras }))
+                            .or_else(|| (!loras.is_empty()).then_some(4))
+                            .or_else(|| projection.is_registration_required.then_some(0))?;
+                        Some((worker, LoraWorkerProjection {
+                            capacity,
+                            loras,
+                            is_registration_required: projection.is_registration_required,
+                        }))
                     })
                     .collect();
                 (endpoint_id, workers)
@@ -357,6 +433,7 @@ impl ModelManager {
                     continue;
                 };
                 existing.capacity = existing.capacity.min(projection.capacity);
+                existing.is_registration_required |= projection.is_registration_required;
                 let mut loras = existing
                     .loras
                     .iter()
@@ -432,6 +509,34 @@ impl ModelManager {
 
     pub(crate) fn get_committed_model(&self, model_name: &str) -> Option<Arc<Model>> {
         self.catalog.load().models.get(model_name).cloned()
+    }
+
+    /// Committed primary models with their aliases, sorted by name.
+    pub(crate) fn committed_model_views(&self) -> Vec<CommittedModelView> {
+        let catalog = self.catalog.load();
+        let mut aliases_by_primary = HashMap::<&str, Vec<String>>::new();
+        for (alias, primary) in catalog.aliases.iter() {
+            aliases_by_primary
+                .entry(primary)
+                .or_default()
+                .push(alias.clone());
+        }
+        let mut views = catalog
+            .models
+            .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
+            .map(|(name, model)| {
+                let mut aliases = aliases_by_primary.remove(name.as_str()).unwrap_or_default();
+                aliases.sort_unstable();
+                CommittedModelView {
+                    name: name.clone(),
+                    is_ready: model.is_ready_to_serve(),
+                    aliases,
+                }
+            })
+            .collect::<Vec<_>>();
+        views.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        views
     }
 
     fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
@@ -2198,12 +2303,13 @@ impl ModelManager {
         Ok(crate::kv_router::ManagedKvRouter::new(load_context, router))
     }
 
+    /// Construct and attach all configured plugins before publishing the router.
     #[allow(clippy::too_many_arguments)]
-    pub async fn kv_chooser_for_with_policy_and_client(
+    pub async fn kv_chooser_for_with_plugins_and_client(
         &self,
         client: Client,
         kv_cache_block_size: u32,
-        policy: SelectionPolicySource,
+        plugins: &crate::kv_router::plugins::RouterPluginBuilder,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_role: Option<WorkerType>,
@@ -2213,29 +2319,48 @@ impl ModelManager {
         scheduler_load: crate::kv_router::SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(config) = &kv_router_config {
+            plugins.validate_config(config)?;
+        }
+        let chooser = self
+            .kv_chooser_for_with_policy_and_client(
+                client,
+                kv_cache_block_size,
+                plugins.selection_policy(),
+                kv_router_config,
+                prefill_load_estimator,
+                worker_role,
+                metric_worker_type,
+                model_name,
+                is_eagle,
+                scheduler_load,
+                cancellation_token,
+            )
+            .await?;
+        plugins.install(&chooser)?;
+        Ok(chooser)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn kv_chooser_for_with_policy_and_client(
+        &self,
+        client: Client,
+        kv_cache_block_size: u32,
+        policy: SelectionPolicySource,
+        mut kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        scheduler_load: crate::kv_router::SchedulerLoadSender,
+        cancellation_token: CancellationToken,
+    ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(config) = &mut kv_router_config {
+            config.apply_policy_config().map_err(anyhow::Error::msg)?;
+        }
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
-
-        // Register router via discovery mechanism.
-        let drt = endpoint.component().drt();
-        let instance_id = drt.discovery().instance_id();
-
-        // Build transport for router endpoint based on request plane mode
-        // Use the worker's component name so each target pool gets its own router discovery group
-        let router_endpoint_id =
-            router_endpoint_id(endpoint.id().namespace, endpoint.id().component);
-        let transport = build_transport_type(&endpoint, &router_endpoint_id, instance_id).await?;
-
-        let discovery_spec = DiscoverySpec::Endpoint {
-            namespace: router_endpoint_id.namespace.clone(),
-            component: router_endpoint_id.component.clone(),
-            endpoint: router_endpoint_id.name.clone(),
-            transport,
-            device_type: None,
-            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-        };
-
-        let registration = drt.register_endpoint_lease(discovery_spec).await?;
 
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(&endpoint).await?;
@@ -2275,19 +2400,12 @@ impl ModelManager {
             None
         };
 
-        let kv_event_source_requirement =
-            KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let cache_required = wants_cache
-            || effective_kv_router_config.serve_indexer
-            || effective_kv_router_config.enable_session_prefix_index
-            || matches!(
-                kv_event_source_requirement,
-                KvEventSourceRequirement::ConditionalDisaggDecodeCache
-                    | KvEventSourceRequirement::Unknown
-            );
-        let kv_source_membership = if cache_required
-            && kv_event_source_requirement.should_subscribe(&effective_kv_router_config)
-        {
+        let kv_event_source_requirement = KvEventSourceRequirement::derive(
+            worker_role,
+            &effective_kv_router_config,
+            policy.inputs(),
+        );
+        let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
             Some(
                 self.get_or_create_kv_source_membership_watch(&endpoint)
                     .await?,
@@ -2296,7 +2414,8 @@ impl ModelManager {
             None
         };
 
-        let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
+        let runtime_model_name = model_name.clone();
+        let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -2315,7 +2434,6 @@ impl ModelManager {
             cancellation_token,
         )
         .await?;
-        chooser.set_endpoint_registration(registration);
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH
@@ -2375,6 +2493,14 @@ impl ModelManager {
             }
         }
 
+        if let Some(model) = runtime_model_name {
+            self.router_policies.register(
+                model,
+                endpoint.id(),
+                worker_type,
+                chooser.policy_control(),
+            );
+        }
         Ok(Arc::new(chooser))
     }
 
@@ -2769,7 +2895,7 @@ mod tests {
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
-        discovery::{Discovery, MockDiscovery, SharedMockRegistry},
+        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
         pipeline::RouterMode,
         transports::event_plane::EventScope,
@@ -2789,6 +2915,88 @@ mod tests {
         )
     }
 
+    #[test]
+    fn worker_inventory_availability_follows_active_hops_and_group_admission() {
+        struct Hop {
+            group_id: String,
+            endpoint: EndpointId,
+            ids: Arc<parking_lot::Mutex<HashSet<u64>>>,
+        }
+        impl crate::kv_router::prefill_router::PrefillRouterLifecycle for Hop {
+            fn set_target(&self, _: Option<crate::discovery::WorkerSetTarget>) {}
+
+            fn available_worker_ids_for(
+                &self,
+                group_id: &str,
+                endpoint: &EndpointId,
+            ) -> Option<HashSet<u64>> {
+                (group_id == self.group_id && endpoint == &self.endpoint)
+                    .then(|| self.ids.lock().clone())
+            }
+        }
+        let manager = ModelManager::new();
+        let endpoint = EndpointId::from("ns.prefill.generate");
+        let (tx, rx) = tokio::sync::watch::channel(vec![1, 2]);
+        let mut target = make_worker_set("ns", "target");
+        target.set_instance_watcher(rx);
+        let insert = |key: &str, worker_set: WorkerSet| {
+            manager.discovery_groups.insert(
+                key.to_string(),
+                CommittedDiscoveryGroup {
+                    primary: "model".into(),
+                    namespace: "ns".into(),
+                    worker_set_key: key.into(),
+                    aliases: Vec::new(),
+                    cards: HashMap::new(),
+                    adapters: HashMap::new(),
+                    representative: ModelDeploymentCard::default(),
+                    worker_set: Arc::new(worker_set),
+                },
+            );
+        };
+        insert("target", target);
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([1, 2])
+        );
+        let ids = Arc::new(parking_lot::Mutex::new(HashSet::from([2, 99])));
+        let mut consumer = make_worker_set("ns", "consumer");
+        let (_consumer_tx, consumer_rx) = tokio::sync::watch::channel(vec![3]);
+        consumer.set_instance_watcher(consumer_rx);
+        consumer.prefill_router = Some(Arc::new(Hop {
+            group_id: "target".into(),
+            endpoint: endpoint.clone(),
+            ids: ids.clone(),
+        }));
+        insert("consumer", consumer);
+        assert_eq!(
+            manager.worker_group_available_ids("consumer", &endpoint),
+            HashSet::from([3])
+        );
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([2])
+        );
+        ids.lock().clear();
+        assert!(
+            manager
+                .worker_group_available_ids("target", &endpoint)
+                .is_empty()
+        );
+        ids.lock().extend([1, 2]);
+        tx.send_replace(vec![1]);
+        assert_eq!(
+            manager.worker_group_available_ids("target", &endpoint),
+            HashSet::from([1])
+        );
+        manager.discovery_groups.remove("target");
+        assert!(
+            manager
+                .worker_group_available_ids("target", &endpoint)
+                .is_empty()
+        );
+    }
+
     fn insert_runtime_configs(
         mm: &ModelManager,
         endpoint_id: &EndpointId,
@@ -2796,6 +3004,69 @@ mod tests {
     ) {
         let (_tx, rx) = tokio::sync::watch::channel(configs);
         mm.runtime_configs.insert(endpoint_id.clone(), rx);
+    }
+
+    #[tokio::test]
+    async fn kv_chooser_ignores_stale_presence() {
+        use dynamo_runtime::{component::TransportType, discovery::DiscoveryQuery};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = distributed
+            .namespace("router-presence".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let discovery = distributed.discovery();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: endpoint.id().namespace,
+            component: endpoint.id().component,
+            endpoint: "router-discovery".to_string(),
+        };
+        // Model a prior frontend process with the same discovery identity and an old port.
+        discovery
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint.id().namespace,
+                component: endpoint.id().component,
+                endpoint: "router-discovery".to_string(),
+                transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let before = discovery.list(query.clone()).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        let manager = ModelManager::new();
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_replica_sync: true,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let router = manager
+            .kv_chooser_for(
+                &endpoint,
+                16,
+                Some(config),
+                None,
+                crate::protocols::common::timing::WORKER_TYPE_DECODE,
+                Some("test-model".to_string()),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.list(query).await.unwrap(), before);
+        let registered = manager.router_policies.list(Some("test-model"));
+        assert_eq!(registered.len(), 1);
+        assert!(Arc::ptr_eq(&registered[0].1, router.policy_control()));
+        assert_eq!(registered[0].1.get().await.unwrap().revision(), 0);
+        drop(router);
+        distributed.shutdown();
     }
 
     #[tokio::test]
@@ -3152,6 +3423,65 @@ mod tests {
 
         assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama");
         assert_eq!(mm.resolve_canonical_name("llama"), "llama");
+    }
+
+    #[test]
+    fn committed_model_views_collapse_aliases_onto_the_primary() {
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("a-llama", "llama"));
+        assert!(mm.add_worker_set_arc("a-llama", "ns1", worker_set));
+        let other = Arc::new(make_worker_set("ns1", "def"));
+        assert!(mm.add_worker_set_arc("granite", "ns1", other));
+
+        let views = mm.committed_model_views();
+        let views = views
+            .iter()
+            .map(|view| (view.name.as_str(), view.aliases.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            views,
+            [
+                ("granite", &[][..]),
+                (
+                    "llama",
+                    &["a-llama".to_string(), "llama-alias".to_string()][..]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_requests_publish_frontend_load_under_the_primary_model() {
+        use crate::http::service::metrics::{Endpoint, Metrics};
+
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set));
+
+        // Handlers that do not rewrite the request model track it under the alias.
+        let metric_model = mm.metric_model_for("llama-alias");
+        assert_eq!(metric_model, "llama-alias");
+
+        let metrics = Arc::new(Metrics::new());
+        let _alias =
+            metrics
+                .clone()
+                .create_inflight_guard(metric_model, Endpoint::Embeddings, false, "");
+        let _primary =
+            metrics
+                .clone()
+                .create_inflight_guard("llama", Endpoint::Embeddings, false, "");
+        let frame = metrics.frontend_load(0, true, mm.committed_model_views());
+        assert_eq!(frame.models.len(), 1);
+        assert_eq!(frame.models[0].model, "llama");
+        assert_eq!(frame.models[0].totals.requests_started, 2);
+        assert_eq!(frame.models[0].gauges.requests_awaiting_first_token, 2);
     }
 
     #[test]
@@ -3699,6 +4029,134 @@ mod tests {
         assert!(manager.get_model_cards().is_empty());
         assert!(manager.get_committed_model("adapter").is_none());
         assert!(tracker.is_empty());
+    }
+
+    #[test]
+    fn sidecar_unload_preserves_routing_to_registered_replicas() {
+        use crate::lora::{LORA_REQUIRES_REGISTRATION, LoraAllocationConfig, LoraController};
+
+        let manager = ModelManager::new();
+        let mut base = ModelDeploymentCard::with_name_only("base");
+        base.runtime_config.max_gpu_lora_count = Some(4);
+        base.runtime_config
+            .runtime_data
+            .insert(LORA_REQUIRES_REGISTRATION.into(), true.into());
+        let mut adapter = ModelDeploymentCard::with_name_only("adapter");
+        adapter.lora = Some(LoraInfo {
+            name: "adapter".into(),
+            max_gpu_lora_count: Some(4),
+        });
+        let members: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|id| {
+                (
+                    ModelCardInstanceId {
+                        namespace: "namespace".into(),
+                        component: "worker".into(),
+                        endpoint: "generate".into(),
+                        instance_id: id,
+                        model_suffix: None,
+                    }
+                    .to_path(),
+                    base.clone(),
+                )
+            })
+            .collect();
+        let adapters: Vec<_> = members
+            .iter()
+            .map(|(key, _)| {
+                let mut mcid = ModelCardInstanceId::from_path(key).unwrap();
+                mcid.model_suffix = Some("adapter".into());
+                (mcid.to_path(), adapter.clone())
+            })
+            .collect();
+        manager
+            .commit_discovery_group(
+                "group",
+                "workers",
+                WorkerSet::new("deployment".into(), base.mdcsum().into(), base),
+                members.clone(),
+                adapters.clone(),
+            )
+            .unwrap();
+        let domain = manager.lora_domain(&EndpointId::from("namespace.worker.generate"));
+        let mut controller = LoraController::new(
+            LoraAllocationConfig::default(),
+            domain.routing_table.clone(),
+            domain.state_tracker.clone(),
+            domain.load_estimator.clone(),
+        );
+        controller.recompute_now();
+        let pin = domain
+            .routing_table
+            .get_config("adapter")
+            .unwrap()
+            .replica_set[0]
+            .worker_id;
+        assert_eq!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora(Some("adapter"), &[1, 2]),
+            [pin]
+        );
+
+        let remaining = if pin == 1 { 2 } else { 1 };
+        let retained = adapters
+            .into_iter()
+            .filter(|(key, _)| {
+                ModelCardInstanceId::from_path(key).unwrap().instance_id == remaining
+            })
+            .collect();
+        manager
+            .replace_discovery_group("group", None, members.clone(), retained)
+            .unwrap();
+        controller.recompute_now();
+        assert_eq!(domain.state_tracker.total_lora_slots(), 8);
+        assert_eq!(
+            domain
+                .routing_table
+                .get_config("adapter")
+                .unwrap()
+                .replica_set[0]
+                .worker_id,
+            pin
+        );
+        assert_eq!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora(Some("adapter"), &[1, 2]),
+            [remaining]
+        );
+        assert_eq!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora_with_pin(Some("adapter"), &[1, 2], Some(pin)),
+            [remaining]
+        );
+
+        manager
+            .replace_discovery_group("group", None, members, Vec::new())
+            .unwrap();
+        controller.recompute_now();
+        assert!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora_with_pin(Some("adapter"), &[1, 2], Some(pin))
+                .is_empty()
+        );
+        assert_eq!(
+            domain.filter.filter_worker_ids_for_lora(None, &[1, 2]),
+            [1, 2]
+        );
+        domain
+            .state_tracker
+            .set_worker_capacity(WorkerWithDpRank::new(3, 0), 4);
+        assert_eq!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora_with_pin(Some("adapter"), &[1, 2, 3], Some(3)),
+            [3]
+        );
     }
 
     fn topology_card(role: WorkerType) -> ModelDeploymentCard {

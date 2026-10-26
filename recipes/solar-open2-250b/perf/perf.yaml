@@ -31,9 +31,6 @@ data:
         format: mooncake_trace
         sampling: sequential
 
-        cache_bust:
-          target: warmup_isolation_system
-
         synthesis:
           max_isl: ${MAX_ISL:1048576}
           max_osl: ${CAP_OSL:12000}
@@ -70,7 +67,7 @@ spec:
 
       containers:
         - name: aiperf
-          image: nvcr.io/nvstaging/ai-dynamo/aiperf:0.13.0rc2
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
           imagePullPolicy: IfNotPresent
 
           command: ["/bin/bash", "-lc"]

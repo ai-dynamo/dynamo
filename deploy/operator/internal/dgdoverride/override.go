@@ -306,7 +306,7 @@ func sanitizeMetadata(override *unstructured.Unstructured) ([]Warning, error) {
 		return nil, nil
 	}
 
-	allowed := map[string]interface{}{}
+	allowed := map[string]any{}
 	for _, key := range []string{"annotations", "labels"} {
 		if value, ok := metadata[key]; ok {
 			allowed[key] = value
@@ -316,7 +316,7 @@ func sanitizeMetadata(override *unstructured.Unstructured) ([]Warning, error) {
 	// Cross-version conversion stores round-trip state in reserved annotations.
 	// Letting an override replace it could silently corrupt preserved fields.
 	if value, ok := allowed["annotations"]; ok {
-		if annotations, ok := value.(map[string]interface{}); ok {
+		if annotations, ok := value.(map[string]any); ok {
 			reserved := make([]string, 0)
 			for key := range annotations {
 				if nvidiacomv1alpha1.IsDynamoGraphDeploymentConversionAnnotation(key) {
@@ -360,7 +360,7 @@ func sanitizeMetadata(override *unstructured.Unstructured) ([]Warning, error) {
 	return warnings, nil
 }
 
-func rejectNullValues(value interface{}, path string, openAPISchema *apixv1.JSONSchemaProps) error {
+func rejectNullValues(value any, path string, openAPISchema *apixv1.JSONSchemaProps) error {
 	if value == nil {
 		if isUntypedPreservedSchema(openAPISchema) {
 			return nil
@@ -369,7 +369,7 @@ func rejectNullValues(value interface{}, path string, openAPISchema *apixv1.JSON
 	}
 
 	switch typed := value.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		keys := make([]string, 0, len(typed))
 		for key := range typed {
 			keys = append(keys, key)
@@ -388,7 +388,7 @@ func rejectNullValues(value interface{}, path string, openAPISchema *apixv1.JSON
 				return err
 			}
 		}
-	case []interface{}:
+	case []any:
 		var itemSchema *apixv1.JSONSchemaProps
 		if openAPISchema != nil && openAPISchema.Items != nil {
 			itemSchema = openAPISchema.Items.Schema
@@ -464,7 +464,7 @@ func prepareAlphaServices(
 	}
 
 	// Rebuild the sparse service map with every target matched or translated.
-	resolvedServices := make(map[string]interface{}, len(overrideServices))
+	resolvedServices := make(map[string]any, len(overrideServices))
 	resolvedSources := make(map[string]string, len(overrideServices))
 	warnings := make([]Warning, 0)
 	for _, name := range names {
@@ -504,12 +504,12 @@ func prepareAlphaServices(
 // appendAlphaWorkerArgs preserves the legacy v1alpha1 profiler contract, where
 // worker args extend the generated command line. V1beta1 intentionally follows
 // the CRD's atomic-list semantics and replaces container args instead.
-func appendAlphaWorkerArgs(baseValue, overrideValue interface{}) error {
-	base, ok := baseValue.(map[string]interface{})
+func appendAlphaWorkerArgs(baseValue, overrideValue any) error {
+	base, ok := baseValue.(map[string]any)
 	if !ok {
 		return fmt.Errorf("blueprint service must be an object, got %T", baseValue)
 	}
-	partial, ok := overrideValue.(map[string]interface{})
+	partial, ok := overrideValue.(map[string]any)
 	if !ok {
 		return fmt.Errorf("override service must be an object, got %T", overrideValue)
 	}
@@ -566,10 +566,10 @@ func prepareBetaComponents(
 	}
 
 	// Index generated components once for target resolution and merge preparation.
-	baseByName := make(map[string]map[string]interface{}, len(baseComponents))
+	baseByName := make(map[string]map[string]any, len(baseComponents))
 	baseNames := make(map[string]struct{}, len(baseComponents))
 	for i, value := range baseComponents {
-		component, ok := value.(map[string]interface{})
+		component, ok := value.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("beta blueprint spec.components[%d] must be an object, got %T", i, value)
 		}
@@ -582,11 +582,11 @@ func prepareBetaComponents(
 	}
 
 	// Resolve every sparse component entry before structural merge can consume it.
-	filtered := make([]interface{}, 0, len(overrideComponents))
+	filtered := make([]any, 0, len(overrideComponents))
 	resolvedSources := make(map[string]string, len(overrideComponents))
 	warnings := make([]Warning, 0)
 	for i, value := range overrideComponents {
-		component, ok := value.(map[string]interface{})
+		component, ok := value.(map[string]any)
 		if !ok {
 			return warnings, fmt.Errorf("beta override spec.components[%d] must be an object, got %T", i, value)
 		}
@@ -692,8 +692,8 @@ func deprecatedTargetTranslationWarning(path, oldName, newName string) Warning {
 }
 
 func materializeBetaContainerArgsAppends(
-	component map[string]interface{},
-	baseComponent map[string]interface{},
+	component map[string]any,
+	baseComponent map[string]any,
 	componentIndex int,
 ) error {
 	// Read the override containers that may carry append directives.
@@ -713,7 +713,7 @@ func materializeBetaContainerArgsAppends(
 	modified := false
 	for containerIndex, value := range containers {
 		// Require object-shaped containers before inspecting custom modifiers.
-		container, ok := value.(map[string]interface{})
+		container, ok := value.(map[string]any)
 		if !ok {
 			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d] must be an object, got %T", componentIndex, containerIndex, value)
 		}
@@ -723,7 +723,7 @@ func materializeBetaContainerArgsAppends(
 		}
 
 		// Keep the modifier surface intentionally limited to args append.
-		modifierMap, ok := modifier.(map[string]interface{})
+		modifierMap, ok := modifier.(map[string]any)
 		if !ok || len(modifierMap) != 1 || modifierMap["args"] != "append" {
 			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].$patch only supports args: append", componentIndex, containerIndex)
 		}
@@ -787,10 +787,10 @@ func materializeBetaContainerArgsAppends(
 }
 
 func betaBlueprintContainerByName(
-	component map[string]interface{},
+	component map[string]any,
 	name string,
 	componentIndex int,
-) (map[string]interface{}, error) {
+) (map[string]any, error) {
 	// Append targets must already exist in the generated blueprint.
 	containers, found, err := unstructured.NestedSlice(
 		component,
@@ -807,7 +807,7 @@ func betaBlueprintContainerByName(
 
 	// Match containers by the same name key used by structural merge.
 	for containerIndex, value := range containers {
-		container, ok := value.(map[string]interface{})
+		container, ok := value.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("beta blueprint spec.components[%d].podTemplate.spec.containers[%d] must be an object, got %T", componentIndex, containerIndex, value)
 		}

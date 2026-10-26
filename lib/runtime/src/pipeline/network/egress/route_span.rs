@@ -199,7 +199,7 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::Cancelled => "cancelled",
         ErrorType::ResourceExhausted => "resource_exhausted",
         ErrorType::Unavailable => "unavailable",
-        ErrorType::WorkerOverloaded => "worker_overloaded",
+        ErrorType::WorkerOverloaded | ErrorType::WorkerRankOverloaded(_) => "worker_overloaded",
         ErrorType::WorkerUnavailable => "worker_unavailable",
         ErrorType::Backend(BackendError::Unknown) => "backend_unknown",
         ErrorType::Backend(BackendError::InvalidArgument) => "backend_invalid_argument",
@@ -210,6 +210,7 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::Backend(BackendError::Cancelled) => "backend_cancelled",
         ErrorType::Backend(BackendError::EngineShutdown) => "engine_shutdown",
         ErrorType::Backend(BackendError::StreamIncomplete) => "stream_incomplete",
+        ErrorType::Backend(BackendError::WorkerOverloaded) => "backend_worker_overloaded",
         ErrorType::InvalidRequest => "invalid_request",
         ErrorType::Unauthenticated => "unauthenticated",
         ErrorType::PermissionDenied => "permission_denied",
@@ -249,9 +250,16 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument) => {
             "rejected"
         }
-        ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded => "rejected",
+        ErrorType::ResourceExhausted
+        | ErrorType::WorkerOverloaded
+        | ErrorType::WorkerRankOverloaded(_)
+        | ErrorType::Backend(BackendError::WorkerOverloaded) => "rejected",
         ErrorType::Unavailable | ErrorType::WorkerUnavailable => "unavailable",
-        ErrorType::Cancelled | ErrorType::Backend(BackendError::Cancelled) => "cancelled",
+        // Deadline expiry matches the HTTP metric classification, which labels
+        // deadline-exceeded 429 responses as `cancelled`.
+        ErrorType::DeadlineExceeded
+        | ErrorType::Cancelled
+        | ErrorType::Backend(BackendError::Cancelled) => "cancelled",
         ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown) => "error",
         ErrorType::InvalidRequest
         | ErrorType::Unauthenticated
@@ -262,7 +270,6 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         | ErrorType::UnsupportedMedia
         | ErrorType::RateLimited
         | ErrorType::CapacityExhausted => "rejected",
-        ErrorType::DeadlineExceeded => "timeout",
         ErrorType::BackendProtocol | ErrorType::NotImplemented | ErrorType::Internal => "error",
     }
 }
@@ -408,7 +415,6 @@ mod tests {
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
     use tracing_subscriber::registry::LookupSpan;
-    use tracing_subscriber::util::SubscriberInitExt;
 
     use super::*;
 
@@ -538,12 +544,22 @@ mod tests {
         captured.fields.lock().unwrap().get(name).cloned()
     }
 
+    #[test]
+    fn deadline_exceeded_is_a_cancelled_route_outcome() {
+        assert_eq!(
+            error_type_name(ErrorType::DeadlineExceeded),
+            "deadline_exceeded"
+        );
+        assert_eq!(error_outcome(ErrorType::DeadlineExceeded), "cancelled");
+    }
+
     #[tokio::test]
     async fn route_span_covers_attempt_lifecycle_and_retry_metadata() {
         let captured = Arc::new(Captured::default());
-        let _subscriber = tracing_subscriber::registry()
-            .with(CaptureLayer(captured.clone()))
-            .set_default();
+        // Do not install a global LogTracer: other tests initialize logging.
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(CaptureLayer(captured.clone())),
+        );
 
         let mut request = Context::new(());
         let trace_context = attach_route_trace_context(

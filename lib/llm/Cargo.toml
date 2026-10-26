@@ -77,6 +77,7 @@ harness = false
 required-features = ["media-ffmpeg"]
 
 [dependencies]
+dynamo-custom-policy-builtin = { workspace = true }
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
 dynamo-memory = { workspace = true }
@@ -90,7 +91,7 @@ dynamo-tokens = { workspace = true }
 # workspace
 anyhow = { workspace = true }
 arc-swap = "1.9.1"
-dynamo-protocols = { workspace = true }
+dynamo-protocols = { workspace = true, features = ["protocol-schema"] }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
 async-stream = { workspace = true }
@@ -112,6 +113,7 @@ lru = { workspace = true }
 moka = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
+percent-encoding = "2.3.2"
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
@@ -171,9 +173,11 @@ indicatif = { version = "0.18.0", optional = true }
 
 # http-service
 axum = { workspace = true }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"] }
+tokio-rustls = { workspace = true }
 tower-http = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras"] }
+tower = { workspace = true }
+utoipa = { version = "5.3", features = ["axum_extras", "rc_schema"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 
@@ -212,8 +216,10 @@ reqwest = { workspace = true }
 base64 = { version = "0.22" }
 image = { version = "0.25", features = ["serde"] }
 libloading = "0.8"
-video-rs = { version = "0.11.0", optional = true }
-ffmpeg-next = { version = "8.1.0", optional = true }
+# Track the in-tree FFmpeg major (container/context.yaml ffmpeg_version): these
+# bind the system libraries, and video-rs 0.12 requires ffmpeg-next =9.0.0.
+video-rs = { version = "0.12.0", optional = true }
+ffmpeg-next = { version = "9.0.0", optional = true }
 memfile = { version = "0.3.2", optional = true }
 tokio-rayon = {version = "2" }
 ndarray = { version = "0.16" }
@@ -234,6 +240,9 @@ llm-multimodal = { version = "=1.9.0", optional = true }
 # `ModelRegistry::lookup` for image-placeholder token-id resolution.
 llm-tokenizer = { version = "=1.6.0", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+sysinfo = { workspace = true }
+
 [dev-dependencies]
 dynamo-kv-router = { workspace = true, features = ["testing"] }
 dynamo-runtime = { workspace = true, features = ["testing"] }
@@ -246,6 +255,7 @@ modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 reqwest = { workspace = true, features = ["http2"] }
 rcgen = { workspace = true }
+rustls = { workspace = true }
 rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
@@ -257,6 +267,7 @@ insta = { version = "1.41", features = [
   "redactions",
   "filters",
 ] }
+proptest = "1.5"
 
 lazy_static = "1.4"
 mockito = "1.7.0"

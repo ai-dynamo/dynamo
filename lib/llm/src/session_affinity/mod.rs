@@ -12,7 +12,9 @@ use dynamo_runtime::{component::Client, pipeline::Error};
 pub(crate) use coordinator::to_table;
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
 pub(crate) use coordinator::{affinity_id, from_table, invalid_argument};
-pub(crate) use dynamo_kv_router::services::selection::affinity::Hold;
+pub(crate) use dynamo_kv_router::services::selection::affinity::{
+    Hold, subagent_group_affinity_id,
+};
 pub use dynamo_kv_router::services::selection::affinity::{
     MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode,
 };

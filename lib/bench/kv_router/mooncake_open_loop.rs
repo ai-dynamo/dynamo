@@ -17,11 +17,12 @@ use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent};
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};
 
+pub use dynamo_bench::kv_router_common::issuer::parse_cpu_list;
 use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_current_thread};
 
 use super::mooncake_shared::{MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry};
 
-const RESULT_SCHEMA_VERSION: u32 = 2;
+const RESULT_SCHEMA_VERSION: u32 = 3;
 const EMPTY_OPERATION_ID: u32 = u32::MAX;
 
 #[derive(Clone, Debug)]
@@ -444,7 +445,6 @@ enum QueryLaneFailure {
 struct QueryLaneResult {
     completions: Box<[QueryCompletion]>,
     written: usize,
-    drain_ns: u64,
     failure: QueryLaneFailure,
 }
 
@@ -513,7 +513,6 @@ async fn query_lane_worker<T: SyncIndexer>(
     QueryLaneResult {
         completions,
         written: consumed,
-        drain_ns: elapsed_ns(epoch),
         failure,
     }
 }
@@ -822,6 +821,28 @@ pub struct Distribution {
     pub max_ns: u64,
 }
 
+/// Inputs that determine the prepared corpus and issue schedule, recorded so a
+/// result file can be traced back to its exact command and trace.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RunProvenance {
+    pub argv: Vec<String>,
+    pub binary: Option<String>,
+    pub binary_sha256: Option<String>,
+    pub trace_path: Option<String>,
+    pub trace_sha256: Option<String>,
+    pub trace_block_size: u32,
+    pub num_gpu_blocks: usize,
+    pub num_unique_inference_workers: usize,
+    pub inference_worker_duplication_factor: usize,
+    pub trace_length_factor: usize,
+    pub trace_duplication_factor: usize,
+    pub trace_simulation_duration_ms: Option<u64>,
+    pub seed: u64,
+    pub jump_size: Option<usize>,
+    pub issuer_spin_us: u64,
+    pub issue_lag_diagnostic_threshold_us: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct OpenLoopResult {
     pub schema_version: u32,
@@ -875,6 +896,7 @@ pub struct OpenLoopResult {
     pub kept_up: bool,
     pub failure_reasons: Vec<String>,
     pub backend_timing_report: String,
+    pub provenance: Option<RunProvenance>,
 }
 
 fn partition_dispatch(
@@ -1114,9 +1136,6 @@ pub async fn run_open_loop<T: SyncIndexer>(
 
     let producer_stop_ns = clock.now_ns();
     let drain = observation.close_observed_producers();
-    let issuer_analysis =
-        aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
-
     for lane in &lanes {
         lane.close();
     }
@@ -1131,15 +1150,14 @@ pub async fn run_open_loop<T: SyncIndexer>(
     let (sealed, query_results) = tokio::join!(seal_future, query_future);
     let sealed = sealed?;
     let query_results = query_results?;
-    let query_drain_ns = query_results
-        .iter()
-        .map(|result| result.drain_ns)
-        .max()
-        .unwrap_or(start_ns);
-    let observed_work_end_ns = query_drain_ns.max(sealed.latest_seal_ns());
     let snapshot = sealed.harvest().await?;
     KvIndexerInterface::flush(indexer.as_ref()).await;
-    let end_ns = observed_work_end_ns.max(clock.now_ns());
+    // Timing ends at the last completed operation. Closing lanes, sealing and
+    // harvesting completion buffers, and aggregating issue records are bookkeeping.
+    // A run with no completions (a failed issuer) ends at producer stop.
+    let end_ns = last_completion_ns(&query_results, &snapshot).unwrap_or(producer_stop_ns);
+    let issuer_analysis =
+        aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
     let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
 
     Ok(analyze_result(
@@ -1157,6 +1175,24 @@ pub async fn run_open_loop<T: SyncIndexer>(
         snapshot,
         backend_timing_report,
     ))
+}
+
+fn last_completion_ns(
+    query_results: &[QueryLaneResult],
+    snapshot: &dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
+) -> Option<u64> {
+    let last_query = query_results
+        .iter()
+        .flat_map(|lane| &lane.completions[..lane.written])
+        .map(|completion| completion.finished_ns)
+        .max();
+    let last_event = snapshot
+        .buffers
+        .iter()
+        .flat_map(|buffer| buffer.records())
+        .map(|completion| completion.finished_ns)
+        .max();
+    last_query.max(last_event)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1420,6 +1456,7 @@ fn analyze_result(
         kept_up,
         failure_reasons,
         backend_timing_report,
+        provenance: None,
     }
 }
 
@@ -1568,32 +1605,6 @@ fn thread_cpu_time_ns() -> u64 {
         }
     }
     0
-}
-
-pub fn parse_cpu_list(value: &str) -> anyhow::Result<Vec<usize>> {
-    let mut cpus = Vec::new();
-    for part in value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        let Some((start, end)) = part.split_once('-') else {
-            cpus.push(part.parse()?);
-            continue;
-        };
-        let start: usize = start.parse()?;
-        let end: usize = end.parse()?;
-        if start > end {
-            anyhow::bail!("invalid descending CPU range {part}");
-        }
-        cpus.extend(start..=end);
-    }
-    cpus.sort_unstable();
-    cpus.dedup();
-    if cpus.is_empty() {
-        anyhow::bail!("CPU list must not be empty");
-    }
-    Ok(cpus)
 }
 
 pub fn validate_cpu_partition(

@@ -28,7 +28,7 @@
 //! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "`[DONE]`".
 //!
 
-use axum::response::sse::Event;
+use axum::{http::StatusCode, response::sse::Event};
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::ops::{Deref, DerefMut};
@@ -39,8 +39,9 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::http::service::error::SanitizedError;
+use crate::http::service::error::{ClientErrorAction, SanitizedError, http_action_for_error};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
+use dynamo_runtime::error::{DynamoError, ErrorClass};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
 
@@ -77,9 +78,14 @@ pub struct ConnectionHandle {
 /// protocol event immediately before yielding it. The disconnect monitor reads
 /// only when the source stream ends or its guards are dropped, avoiding
 /// synchronization on successful per-token events.
+struct StreamFailure {
+    error_type: ErrorType,
+    semantic_error: Option<DynamoError>,
+}
+
 #[derive(Default)]
 struct StreamErrorState {
-    error_type: OnceLock<ErrorType>,
+    failure: OnceLock<StreamFailure>,
     terminal_event_emitted: AtomicBool,
 }
 
@@ -88,19 +94,67 @@ pub(super) struct StreamErrorSignal(Arc<StreamErrorState>);
 
 impl StreamErrorSignal {
     pub(super) fn set(&self, error_type: ErrorType) {
-        let _ = self.0.error_type.set(error_type);
+        let _ = self.0.failure.set(StreamFailure {
+            error_type,
+            semantic_error: None,
+        });
+    }
+
+    pub(super) fn set_semantic(&self, error_type: ErrorType, error: &DynamoError) {
+        let _ = self.0.failure.set(StreamFailure {
+            error_type,
+            semantic_error: Some(error.clone()),
+        });
     }
 
     fn get(&self) -> Option<&ErrorType> {
-        self.0.error_type.get()
+        self.0.failure.get().map(|failure| &failure.error_type)
+    }
+
+    pub(super) fn error_type(&self) -> Option<ErrorType> {
+        self.get().cloned()
     }
 
     pub(super) fn mark_terminal_event_emitted(&self) {
         self.0.terminal_event_emitted.store(true, Ordering::Release);
     }
 
-    fn terminal_event_emitted(&self) -> bool {
+    pub(super) fn terminal_event_emitted(&self) -> bool {
         self.0.terminal_event_emitted.load(Ordering::Acquire)
+    }
+
+    pub(super) fn semantic_error(&self) -> Option<&DynamoError> {
+        self.0
+            .failure
+            .get()
+            .and_then(|failure| failure.semantic_error.as_ref())
+    }
+
+    fn record_delivered_failure(&self) {
+        if !self.terminal_event_emitted() {
+            return;
+        }
+        let Some(failure) = self.0.failure.get() else {
+            return;
+        };
+        if let Some(error) = &failure.semantic_error {
+            if error.class() != ErrorClass::Cancelled {
+                crate::http::service::metrics::record_failure(error);
+            }
+            return;
+        }
+
+        let class = match &failure.error_type {
+            ErrorType::Validation => ErrorClass::InvalidRequest,
+            ErrorType::NotFound => ErrorClass::NotFound,
+            ErrorType::Overload => ErrorClass::CapacityExhausted,
+            ErrorType::Unavailable => ErrorClass::Unavailable,
+            ErrorType::Cancelled => return,
+            ErrorType::ResponseTimeout => ErrorClass::DeadlineExceeded,
+            ErrorType::NotImplemented => ErrorClass::NotImplemented,
+            ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
+        };
+        crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
     }
 }
 
@@ -141,10 +195,15 @@ impl DerefMut for SignaledInflightGuard {
 
 impl Drop for SignaledInflightGuard {
     fn drop(&mut self) {
-        if self.guard.error_type() == &ErrorType::Cancelled
-            && let Some(error_type) = self.signaled_error_type()
+        if let Some(error_signal) = &self.error_signal
+            && error_signal.terminal_event_emitted()
         {
-            self.guard.mark_error(error_type);
+            error_signal.record_delivered_failure();
+            if self.guard.error_type() == &ErrorType::Cancelled
+                && let Some(error_type) = self.signaled_error_type()
+            {
+                self.guard.mark_error(error_type);
+            }
         }
     }
 }
@@ -300,10 +359,20 @@ async fn connection_monitor(
 
 type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
 
-#[derive(Default)]
 struct StreamMonitorOptions {
     activity_rx: Option<mpsc::UnboundedReceiver<()>>,
     error_signal: Option<StreamErrorSignal>,
+    emit_done_sentinel: bool,
+}
+
+impl Default for StreamMonitorOptions {
+    fn default() -> Self {
+        Self {
+            activity_rx: None,
+            error_signal: None,
+            emit_done_sentinel: true,
+        }
+    }
 }
 
 fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
@@ -317,6 +386,51 @@ fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType
     })
     .to_string();
     (ErrorType::Internal, body)
+}
+
+fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
+    let (status, message) = match http_action_for_error(error) {
+        ClientErrorAction::Respond {
+            status,
+            public_message,
+        } => (status, public_message),
+        ClientErrorAction::NoDelivery => (
+            StatusCode::from_u16(499).expect("499 is a valid extension status"),
+            "Request cancelled",
+        ),
+    };
+    let message = error.public_message().unwrap_or(message);
+    let error_type = if status == crate::http::service::error::overload_status_code() {
+        "service_unavailable"
+    } else {
+        match status {
+            StatusCode::BAD_REQUEST
+            | StatusCode::CONFLICT
+            | StatusCode::PAYLOAD_TOO_LARGE
+            | StatusCode::UNSUPPORTED_MEDIA_TYPE => "invalid_request_error",
+            StatusCode::UNAUTHORIZED => "authentication_error",
+            StatusCode::FORBIDDEN => "permission_error",
+            StatusCode::NOT_FOUND => "not_found_error",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+            StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
+            StatusCode::GATEWAY_TIMEOUT => "timeout_error",
+            StatusCode::NOT_IMPLEMENTED => "not_implemented_error",
+            _ if status.as_u16() == 499 => "request_cancelled",
+            _ => "internal_server_error",
+        }
+    };
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": status.as_u16(),
+        }
+    })
+    .to_string();
+    (
+        crate::http::service::openai::metric_error_type_for_class(error.class()),
+        body,
+    )
 }
 
 /// This method will consume a stream of SSE events and monitor for disconnects or context cancellation.
@@ -387,6 +501,30 @@ pub(super) fn monitor_for_disconnects_with_error_signal(
     )
 }
 
+/// Responses streams terminate with typed events rather than a [DONE] sentinel.
+/// Preserve error accounting and disconnect monitoring for this route.
+pub(super) fn monitor_for_responses_disconnects(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_signal: StreamErrorSignal,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions {
+            error_signal: Some(error_signal),
+            emit_done_sentinel: false,
+            ..Default::default()
+        },
+    )
+}
+
 pub fn monitor_for_disconnects_with_activity(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
@@ -403,6 +541,29 @@ pub fn monitor_for_disconnects_with_activity(
         openai_stream_error,
         StreamMonitorOptions {
             activity_rx: Some(activity_rx),
+            ..Default::default()
+        },
+    )
+}
+
+pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    activity_rx: mpsc::UnboundedReceiver<()>,
+    error_signal: StreamErrorSignal,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions {
+            activity_rx: Some(activity_rx),
+            error_signal: Some(error_signal),
             ..Default::default()
         },
     )
@@ -441,6 +602,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     let StreamMonitorOptions {
         mut activity_rx,
         error_signal,
+        emit_done_sentinel,
     } = options;
 
     // Default to Cancelled: if the stream is dropped unexpectedly (e.g. client
@@ -448,7 +610,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
     let mut stream_handle = SignaledConnectionHandle::new(stream_handle, error_signal.clone());
-    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal);
+    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal.clone());
 
     async_stream::try_stream! {
         tokio::pin!(stream);
@@ -474,16 +636,61 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                             yield event;
                         }
                         Some(Err(err)) => {
-                            let (error_type, error_body) = error_formatter(&err);
-                            inflight_guard.mark_error(error_type);
+                            let semantic_error = inflight_guard
+                                .error_signal
+                                .as_ref()
+                                .and_then(StreamErrorSignal::semantic_error);
+                            let (fallback_error_type, fallback_error_body) =
+                                error_formatter(&err);
+                            let (error_type, error_body) = match semantic_error {
+                                Some(error) => openai_semantic_stream_error(error),
+                                None => (fallback_error_type, fallback_error_body),
+                            };
+                            let error_type = error_signal
+                                .as_ref()
+                                .and_then(StreamErrorSignal::get)
+                                .cloned()
+                                .unwrap_or(error_type);
+                            inflight_guard.mark_error(error_type.clone());
+                            if let Some(error_signal) = &error_signal {
+                                error_signal.set(error_type.clone());
+                            }
                             // We're terminating the stream intentionally here with a
-                            // structured error + [DONE]; disarm so the stream handle
-                            // doesn't later record this as ClosedUnexpectedly (which
-                            // would mis-attribute the fault as a client disconnect).
+                            // structured error and optional sentinel. Disarm the handle
+                            // to avoid recording this as a client disconnect.
                             stream_handle.disarm();
-                            tracing::error!("Streaming error: {err}");
+                            if let Some(error_signal) = &inflight_guard.error_signal {
+                                error_signal.mark_terminal_event_emitted();
+                                if let Some(error) = error_signal.semantic_error() {
+                                    if matches!(
+                                        error.class(),
+                                        dynamo_runtime::error::ErrorClass::Internal
+                                            | dynamo_runtime::error::ErrorClass::BackendProtocol
+                                    ) {
+                                        tracing::error!(
+                                            class = %error.class(),
+                                            reason = %error.reason(),
+                                            diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str),
+                                            "Semantic streaming failure"
+                                        );
+                                    } else {
+                                        tracing::debug!(
+                                            class = %error.class(),
+                                            reason = %error.reason(),
+                                            diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str),
+                                            "Semantic streaming failure"
+                                        );
+                                    }
+                                } else {
+                                    tracing::error!(%error_type, %err, "Streaming failure");
+                                }
+                            } else {
+                                tracing::error!(%error_type, %err, "Streaming failure");
+                            }
                             yield Event::default().data(error_body);
-                            yield Event::default().data("[DONE]");
+                            if emit_done_sentinel {
+                                yield Event::default().data("[DONE]");
+                            }
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
                         }
@@ -497,7 +704,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 
                             // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
                             // async-openai client will chomp it.
-                            yield Event::default().data("[DONE]");
+                            if emit_done_sentinel {
+                                yield Event::default().data("[DONE]");
+                            }
                             break;
                         }
                     }
@@ -543,6 +752,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                     }
                 } => {
                     inflight_guard.mark_error(ErrorType::ResponseTimeout);
+                    if let Some(error_signal) = &error_signal {
+                        error_signal.set(ErrorType::ResponseTimeout);
+                    }
                     stream_handle.disarm();
                     tracing::warn!(
                         request_id = %inflight_guard.request_id(),
@@ -656,6 +868,131 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn test_responses_terminal_events_have_no_done_sentinel() {
+        for terminal in [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ] {
+            let model = "responses-terminal";
+            let (metrics, _, context, handle) = setup_test(model, terminal);
+            let guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Responses, true, terminal);
+            let signal = StreamErrorSignal::default();
+            if terminal == "response.failed" {
+                signal.set(ErrorType::Internal);
+                signal.mark_terminal_event_emitted();
+            }
+            let data = serde_json::json!({"type": terminal}).to_string();
+            let expected = format!("event: {terminal}\ndata: {data}\n\n");
+            let stream = futures::stream::iter([Ok(Event::default().event(terminal).data(data))]);
+            let body = collect_sse_body(monitor_for_responses_disconnects(
+                stream, context, guard, handle, signal,
+            ))
+            .await;
+            assert_eq!(body, expected, "unexpected trailer after {terminal}");
+            assert_eq!(metrics.get_inflight_count(model), 0);
+            let (status, error) = if terminal == "response.failed" {
+                (Status::Error, ErrorType::Internal)
+            } else {
+                (Status::Success, ErrorType::None)
+            };
+            assert_eq!(
+                metrics.get_request_counter(
+                    model,
+                    &Endpoint::Responses,
+                    &RequestType::Stream,
+                    &status,
+                    &error,
+                ),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn test_responses_stream_error_has_no_done_sentinel() {
+        let model = "responses-stream-error";
+        let (metrics, _, context, handle) = setup_test(model, "req-stream-error");
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::Responses,
+            true,
+            "req-stream-error",
+        );
+        let stream = futures::stream::iter([Err(axum::Error::new(std::io::Error::other(
+            "private backend diagnostic",
+        )))]);
+        let body = collect_sse_body(monitor_for_responses_disconnects(
+            stream,
+            context,
+            guard,
+            handle,
+            StreamErrorSignal::default(),
+        ))
+        .await;
+        let frames: Vec<_> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect();
+        assert_eq!(frames.len(), 1, "unexpected frame after error: {body}");
+        let error: serde_json::Value = serde_json::from_str(frames[0]).unwrap();
+        assert!(error.get("error").is_some());
+        assert!(!body.contains("private backend diagnostic"));
+        assert_eq!(metrics.get_inflight_count(model), 0);
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_and_completions_preserve_done_sentinel() {
+        for endpoint in [Endpoint::ChatCompletions, Endpoint::Completions] {
+            let model = "sentinel-compatibility";
+            let (metrics, _, context, handle) = setup_test(model, "req-sentinel");
+            let guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, endpoint, true, "req-sentinel");
+            let stream = futures::stream::iter([Ok(Event::default().data(r#"{"choices":[]}"#))]);
+            let body = if matches!(endpoint, Endpoint::ChatCompletions) {
+                let (_tx, rx) = mpsc::unbounded_channel();
+                collect_sse_body(monitor_for_disconnects_with_activity_and_error_signal(
+                    stream,
+                    context,
+                    guard,
+                    handle,
+                    rx,
+                    StreamErrorSignal::default(),
+                ))
+                .await
+            } else {
+                collect_sse_body(monitor_for_disconnects_with_error_signal(
+                    stream,
+                    context,
+                    guard,
+                    handle,
+                    StreamErrorSignal::default(),
+                ))
+                .await
+            };
+            assert_eq!(body, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n");
+            assert_eq!(metrics.get_inflight_count(model), 0);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -822,6 +1159,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
     async fn signaled_error_drop_after_terminal_event_is_not_a_cancellation() {
         let model = "drop-after-response-failed";
         let metrics = Arc::new(Metrics::new());
@@ -852,6 +1190,9 @@ mod tests {
         connection_handle.disarm();
         drop(connection_handle);
         let error_signal = StreamErrorSignal::default();
+        let semantic_counter = crate::http::service::metrics::DYNAM_FAILURES_TOTAL
+            .with_label_values(&["Internal", "runtime.internal"]);
+        let semantic_before = semantic_counter.get();
         let producer_error_signal = error_signal.clone();
         let stream = futures::stream::once(async move {
             producer_error_signal.set(ErrorType::Internal);
@@ -864,17 +1205,12 @@ mod tests {
         })
         .chain(futures::stream::pending());
 
-        let mut monitored = Box::pin(monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        let mut monitored = Box::pin(monitor_for_responses_disconnects(
             stream,
             engine_context,
             guard,
             stream_handle,
-            None,
-            openai_stream_error,
-            StreamMonitorOptions {
-                error_signal: Some(error_signal),
-                ..Default::default()
-            },
+            error_signal,
         ));
         assert!(monitored.next().await.is_some());
         drop(monitored);
@@ -911,6 +1247,91 @@ mod tests {
         assert_eq!(metrics.get_cancellation_count(&cancellation_labels), 0);
         assert_eq!(metrics.get_client_disconnect_count(), 0);
         assert!(!context.is_killed());
+        assert_eq!(semantic_counter.get() - semantic_before, 1);
+    }
+
+    #[tokio::test]
+    async fn signaled_semantic_err_is_classified_when_terminal_frame_is_emitted() {
+        let model = "delivered-semantic-error";
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-delivered-semantic-error",
+        );
+        let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::with_kill_tracking());
+        let (stream_tx, _stream_rx) = tokio::sync::oneshot::channel();
+        let stream_handle = ConnectionHandle::create_disabled(stream_tx);
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
+        let stream = futures::stream::once(async move {
+            let error = DynamoError::builder()
+                .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                .reason(
+                    dynamo_runtime::error::ErrorReason::new("request.invalid_argument").unwrap(),
+                )
+                .diagnostic("PRIVATE_STREAM_DIAGNOSTIC")
+                .public_message("CLIENT_SAFE_STREAM_ERROR")
+                .build();
+            producer_error_signal.set_semantic(ErrorType::Validation, &error);
+            Err::<Event, _>(axum::Error::new("semantic stream error"))
+        });
+        let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            stream,
+            context,
+            guard,
+            stream_handle,
+            None,
+            openai_stream_error,
+            StreamMonitorOptions {
+                error_signal: Some(error_signal),
+                ..Default::default()
+            },
+        );
+        let body = collect_sse_body(monitored).await;
+
+        assert!(body.contains("CLIENT_SAFE_STREAM_ERROR"));
+        assert!(body.contains("\"code\":400"));
+        assert!(body.contains("invalid_request_error"));
+        assert!(!body.contains("PRIVATE_STREAM_DIAGNOSTIC"));
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Validation,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn semantic_overload_stream_error_is_retryable() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::CapacityExhausted)
+            .reason(dynamo_runtime::error::ErrorReason::new("capacity.exhausted").unwrap())
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["type"], "service_unavailable");
+        assert_eq!(
+            body["error"]["code"],
+            crate::http::service::error::overload_status_code().as_u16()
+        );
     }
 
     #[tokio::test]
@@ -927,6 +1348,44 @@ mod tests {
             rx.await.expect("stream handle did not report its status"),
             ConnectionStatus::ClosedUnexpectedly
         ));
+    }
+
+    #[test]
+    fn undelivered_signaled_error_preserves_cancellation_classification() {
+        let model = "undelivered-terminal-error";
+        let metrics = Arc::new(Metrics::new());
+        let mut guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::Responses,
+            true,
+            "req-undelivered-terminal-error",
+        );
+        guard.mark_error(ErrorType::Cancelled);
+        let error_signal = StreamErrorSignal::default();
+        error_signal.set(ErrorType::Internal);
+
+        drop(SignaledInflightGuard::new(guard, Some(error_signal)));
+
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            0
+        );
     }
 
     fn generate_cancellation_labels() -> CancellationLabels {
@@ -1234,8 +1693,8 @@ mod tests {
             "[{case}] structured error `type` mismatch. Body:\n{text}"
         );
         assert_eq!(
-            error.get("code").and_then(|v| v.as_i64()),
-            Some(i64::from(expected.status().as_u16())),
+            error.get("code").and_then(serde_json::Value::as_u64),
+            Some(expected.status().as_u16().into()),
             "[{case}] structured error `code` mismatch. Body:\n{text}"
         );
         assert!(
@@ -1271,6 +1730,49 @@ mod tests {
         let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("python_consumer_drop", &body, backend_detail);
+    }
+
+    #[tokio::test]
+    async fn typed_producer_error_overrides_generic_stream_error_classification() {
+        let model = "typed-timeout-model";
+        let (metrics, guard, ctx, handle) = setup_test(model, "req-typed-timeout");
+        let error_signal = StreamErrorSignal::default();
+        error_signal.set(ErrorType::ResponseTimeout);
+        let stream = simulate_mid_stream_error(0, "request-plane response timeout");
+        let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            stream,
+            ctx,
+            guard,
+            handle,
+            None,
+            openai_stream_error,
+            StreamMonitorOptions {
+                error_signal: Some(error_signal),
+                ..Default::default()
+            },
+        );
+
+        let _body = collect_sse_body(monitored).await;
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::ResponseTimeout,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            0
+        );
     }
 
     /// A backend error carrying sensitive internals (file paths, panic text,

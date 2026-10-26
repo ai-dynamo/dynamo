@@ -10,7 +10,7 @@ from typing import Any, cast
 import torch
 import vllm_omni.config as omni_config
 import vllm_omni.entrypoints.utils as omni_entrypoint_utils
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
 from vllm_omni.entrypoints.utils import coerce_param_message_types
@@ -38,11 +38,41 @@ def resolve_stage_configs(
     )
     if hasattr(omni_config, "resolve_omni_config"):
         resolved = omni_config.resolve_omni_config(model, cli_overrides={}, **kwargs)
-        return resolved.config_path, list(resolved.stage_configs)
+        return resolved.config_path, [
+            _dynamo_stage_config(stage) for stage in resolved.stage_configs
+        ]
     path, stages, _ = omni_entrypoint_utils.load_and_resolve_stage_configs(
         model, stage_configs_path=None, kwargs={}, **kwargs
     )
     return path, list(stages)
+
+
+def _dynamo_stage_config(stage: Any) -> Any:
+    if not hasattr(stage, "stage_pipeline_config"):
+        return stage
+
+    from vllm_omni.config.resolver import _convert_dataclasses_to_dict
+    from vllm_omni.config.yaml_util import create_config
+    from vllm_omni.engine.stage_init_utils import _project_omni_stage_engine_args
+
+    return create_config(
+        _convert_dataclasses_to_dict(
+            {
+                "stage_id": stage.stage_id,
+                "stage_type": stage.stage_type.value,
+                "execution_type": stage.stage_pipeline_config.execution_type.value,
+                "engine_args": _project_omni_stage_engine_args(stage),
+                "runtime": stage.runtime_config,
+                "engine_input_source": stage.input_sources,
+                "default_sampling_params": stage.model_config.default_sampling_params,
+                "custom_process_input_func": stage.custom_process_input_func,
+                "requires_multimodal_data": stage.requires_multimodal_data,
+                "final_output": stage.final_output,
+                "final_output_type": stage.final_output_type,
+                "is_comprehension": stage.is_comprehension,
+            }
+        )
+    )
 
 
 def _coerce_dimension(value: Any, name: str) -> int:
@@ -71,6 +101,93 @@ def streaming_sampling_params(
         else engine_client.default_sampling_params_list
     )
     return coerce_param_message_types(list(source or []), is_streaming=True)
+
+
+def audio_output_is_cumulative(sampling_params_list: list[Any] | None) -> bool:
+    """Whether each audio payload repeats the whole waveform decoded so far.
+
+    vLLM-Omni's output processor accumulates a stage's multimodal payload and
+    then branches on the stage's ``output_kind``: under ``DELTA`` it snapshots
+    and then drains the audio key, so consecutive yields carry *disjoint*
+    deltas; under ``CUMULATIVE`` it consolidates the accumulation on every step
+    and drains nothing, so every yield is a snapshot of the whole waveform.
+    ``FINAL_ONLY`` yields once, which either reading handles identically.
+
+    Aggregation therefore has to follow the output kind actually sent to the
+    engine rather than the model's identity: concatenating snapshots multiplies
+    the duration, and de-duplicating deltas drops audio. The audio-producing
+    stage is the last one, so its params decide.
+
+    With the currently pinned vLLM-Omni this always answers False, and that is
+    the correct answer: callers pass the list *after*
+    ``streaming_sampling_params``, whose coercion rewrites every
+    ``SamplingParams`` to ``DELTA``, and the only other member of
+    ``OmniSamplingParams`` is ``OmniDiffusionSamplingParams``, which has no
+    ``output_kind`` field at all. So every audio request is aggregated by
+    concatenation today. The check stays because it ties aggregation to the
+    engine's stated contract instead of re-hardcoding an assumption about that
+    coercion: if a later version stops forcing ``DELTA``, or adds a params type
+    that carries a kind through, aggregation follows without another audio-loss
+    bug. ``AudioAggregateState.cumulative`` and the de-duplicating branch it
+    selects in ``AudioFormatter._append_audio_chunk`` are reachable only through
+    this function.
+    """
+    if not sampling_params_list:
+        return False
+    return (
+        getattr(sampling_params_list[-1], "output_kind", None)
+        == RequestOutputKind.CUMULATIVE
+    )
+
+
+def engine_model_stages(engine_client: Any) -> set[str]:
+    """Collect every ``model_stage`` name the engine exposes.
+
+    Reads the engine's stage list and stage configs, tolerating the several
+    shapes vLLM-Omni versions use (objects or dicts, ``engine_args`` nested or
+    flat).
+    """
+    stages: set[str] = set()
+
+    stage_list = getattr(engine_client, "stage_list", None)
+    if stage_list:
+        for stage in stage_list:
+            ms = getattr(stage, "model_stage", None)
+            if ms:
+                stages.add(ms)
+
+    stage_configs = getattr(engine_client, "stage_configs", None)
+    if stage_configs:
+        for cfg in stage_configs:
+            engine_args = (
+                cfg.get("engine_args", cfg)
+                if isinstance(cfg, dict)
+                else getattr(cfg, "engine_args", cfg)
+            )
+            ms = (
+                engine_args.get("model_stage")
+                if isinstance(engine_args, dict)
+                else getattr(engine_args, "model_stage", None)
+            )
+            if ms:
+                stages.add(ms)
+
+    logging.getLogger(__name__).debug("engine model stages: %s", sorted(stages))
+    return stages
+
+
+def validate_audio_max_new_tokens(max_new_tokens: int | None, config: Any) -> None:
+    """Bound a caller's generation length against the worker's audio limits."""
+    if max_new_tokens is None:
+        return
+    if max_new_tokens < config.tts_max_new_tokens_min:
+        raise ValueError(
+            f"max_new_tokens must be at least {config.tts_max_new_tokens_min}"
+        )
+    if max_new_tokens > config.tts_max_new_tokens_max:
+        raise ValueError(
+            f"max_new_tokens cannot exceed {config.tts_max_new_tokens_max}"
+        )
 
 
 def shm_deserialize(shm_meta: dict) -> Any:
@@ -252,9 +369,13 @@ def build_image_generation_prompt(
 
 def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -> Any:
     """Build the rich prompt dict that processor functions (ar2diffusion etc.) read."""
+    negative_prompt = request.get("negative_prompt")
+    if negative_prompt is None:
+        # /v1/videos has no top-level negative_prompt; it arrives in nvext.
+        negative_prompt = nvext.get("negative_prompt")
     prompt = OmniTextPrompt(
         prompt=request.get("prompt", ""),
-        negative_prompt=request.get("negative_prompt", None),
+        negative_prompt=negative_prompt,
     )
     if request.get("multi_modal_data"):
         prompt["multi_modal_data"] = request["multi_modal_data"]
@@ -312,8 +433,13 @@ async def parse_omni_request(
                 fps=nvext.get("fps"),
                 default_fps=default_video_fps,
             )
-            engine_inputs = OmniTextPrompt(prompt=request.get("prompt", ""))
             original_prompt = build_original_prompt(request, nvext, height, width)
+            engine_inputs = OmniTextPrompt(prompt=request.get("prompt", ""))
+            # A diffusion stage 0 reads the negative prompt from its engine
+            # prompt; original_prompt only reaches the stages after it.
+            negative_prompt = original_prompt.get("negative_prompt")
+            if negative_prompt is not None:
+                engine_inputs["negative_prompt"] = negative_prompt
         else:
             engine_inputs = build_image_generation_prompt(
                 request.get("prompt", ""),

@@ -121,7 +121,7 @@ The SGLang wrapper selects a worker role from these flags and the native `--disa
 ## Multimodal decoding
 
 <ParamField path="--frontend-decoding" type="boolean" default="false">
-  Decode multimodal images in the Rust frontend and transfer the pre-decoded pixels to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode. Incompatible with the dedicated encoder topology (`--disaggregation-mode=encode` or `--dedicated-mm-encoder`); use it on a native worker instead.
+  Decode multimodal images and supported videos in the Rust frontend and transfer the pre-decoded pixels to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode. Use it on an aggregated or native worker, or on the frontend-facing `--disaggregation-mode=encode` worker. Do not set it on internal workers selected by `--dedicated-mm-encoder`.
 
   Environment variable: `DYN_SGL_FRONTEND_DECODING`
 </ParamField>
@@ -151,7 +151,7 @@ This flag is retained for backward compatibility and will be removed in a future
 - `--disagg-config` and `--disagg-config-key` must both be set, or both unset.
 - `--dedicated-mm-encoder` requires `--enable-multimodal`.
 - `--dedicated-mm-encoder` is valid only with `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`; do not combine it with `--disaggregation-mode=encode`.
-- `--frontend-decoding` cannot be combined with the dedicated encoder topology (`--disaggregation-mode=encode` or `--dedicated-mm-encoder`).
+- `--frontend-decoding` cannot be combined with internal EPD workers selected by `--dedicated-mm-encoder`; in an EPD deployment, set it only on the frontend-facing `--disaggregation-mode=encode` worker.
 
 ## Related pages
 

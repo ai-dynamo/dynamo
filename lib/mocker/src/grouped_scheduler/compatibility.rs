@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use uuid::Uuid;
 
 use crate::common::handoff::{HandoffId as DynamoHandoffId, HandoffTransferTiming};
-use crate::common::protocols::{DirectRequest, KvTransferTimingMode, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{DirectRequest, KvTransferTimingMode, MockerConfig, OutputSignal};
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::scheduler::SchedulerLifecycleEvent;
 
@@ -26,13 +26,13 @@ pub(super) enum Cleanup {
 }
 
 pub(super) struct CompatibilityState {
-    args: MockEngineArgs,
+    args: MockerConfig,
     request_prompt_lengths: Mutex<HashMap<Uuid, usize>>,
     handoffs: Mutex<HandoffMap>,
 }
 
 impl CompatibilityState {
-    pub(super) fn new(args: MockEngineArgs) -> Self {
+    pub(super) fn new(args: MockerConfig) -> Self {
         Self {
             args,
             request_prompt_lengths: Mutex::new(HashMap::new()),
@@ -50,6 +50,9 @@ impl CompatibilityState {
             tokens: request.tokens,
             max_output_tokens: request.max_output_tokens,
             output_token_ids: request.output_token_ids,
+            session_id: request
+                .replay_context
+                .and_then(|context| context.session_id().map(str::to_owned)),
         }
     }
 
@@ -106,7 +109,7 @@ impl CompatibilityState {
                     output.completed,
                     prompt_len,
                     self.args.kv_transfer_bandwidth,
-                    self.args.kv_bytes_per_token,
+                    self.args.kv_transfer_bytes_per_token,
                 )
             }),
             cached_tokens: output.cached_tokens,
@@ -302,5 +305,25 @@ mod tests {
 
         assert!(handoffs.dynamo(target_native).is_err());
         assert_eq!(handoffs.dynamo(unrelated_native).unwrap(), unrelated);
+    }
+    use crate::common::protocols::ReplayRequestContext;
+
+    #[test]
+    fn native_request_preserves_normalized_optional_session() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        for (session_id, expected) in [
+            (Some(" session "), Some("session")),
+            (Some(" "), None),
+            (None, None),
+        ] {
+            let request = state.native_request(DirectRequest {
+                replay_context: session_id.map(|id| ReplayRequestContext {
+                    session_id: Some(id.to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            assert_eq!(request.session_id.as_deref(), expected);
+        }
     }
 }

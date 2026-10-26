@@ -39,7 +39,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -61,6 +60,11 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 			name:        "Grove provider selects Grove program",
 			provider:    workloadProviderGrove,
 			wantProgram: &groveProgram{},
+		},
+		{
+			name:        "DisaggregatedSet provider selects DisaggregatedSet program",
+			provider:    workloadProviderDisaggregatedSet,
+			wantProgram: &disaggregatedSetProgram{},
 		},
 	}
 
@@ -89,9 +93,16 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 				assert.NotNil(t, grove.rollout)
 				assert.NotNil(t, grove.restart)
 				assert.NotNil(t, grove.restartProgress)
+				assert.NotNil(t, grove.lpxRestartProgress)
 				assert.NotNil(t, grove.workloads)
 				assert.NotNil(t, grove.scalingAdapters)
 				assert.NotNil(t, grove.topology)
+			}
+			if disaggregatedSet, ok := got.(*disaggregatedSetProgram); ok {
+				assert.NotNil(t, disaggregatedSet.sharedResources)
+				assert.NotNil(t, disaggregatedSet.rollout)
+				assert.NotNil(t, disaggregatedSet.workloads)
+				assert.NotNil(t, disaggregatedSet.scalingAdapters)
 			}
 		})
 	}
@@ -100,7 +111,7 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 func TestSelectedGroveProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
 	t.Log("Create a DGD request and an unavailable Grove program")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Generation: 3},
+		Generation: 3,
 	}
 	program := &groveProgram{gate: features.Gates{}}
 
@@ -115,6 +126,50 @@ func TestSelectedGroveProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, string(reasonSelectedWorkloadProviderUnavailable), ready.Reason)
 	assert.Contains(t, ready.Message, "Grove is disabled")
+}
+
+func TestSelectedDisaggregatedSetProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
+	t.Log("Create a DGD request and an unavailable DisaggregatedSet program")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		Generation: 3,
+	}
+	program := &disaggregatedSetProgram{gate: features.Gates{LWS: true}}
+
+	t.Log("Reconcile the durably selected DisaggregatedSet program while prerequisites are unavailable")
+	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, reconcile.TerminalError(nil))
+
+	t.Log("Verify DisaggregatedSet reports provider unavailability without falling back")
+	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, string(reasonSelectedWorkloadProviderUnavailable), ready.Reason)
+	assert.Contains(t, ready.Message, "DisaggregatedSet prerequisites are unavailable")
+}
+
+func TestComponentProgramRejectsExternallyManagedComponents(t *testing.T) {
+	t.Log("Create a component-provider DGD containing an externally managed component")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		Generation: 4,
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "serving",
+				ComponentType: nvidiacomv1beta1.ComponentTypeLPX,
+			}},
+		},
+	}
+
+	t.Log("Reconcile the component program")
+	result, err := (&componentProgram{}).Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.ErrorIs(t, err, reconcile.TerminalError(nil))
+
+	t.Log("Verify the program returns the component rejection without a terminal-error prefix")
+	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, "UnsupportedComponent", ready.Reason)
+	assert.Equal(t, `component "serving" of type "lpx" requires the Grove workload provider`, ready.Message)
 }
 
 func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
@@ -137,6 +192,25 @@ func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 	t.Log("Verify status accumulation does not mutate the request object")
 	assert.NotContains(t, dgd.Status.Checkpoints, "decode")
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+}
+
+func TestDisaggregatedSetUnsupportedIntentIsSticky(t *testing.T) {
+	dgd := newEnvtestDSHappyPathDGD("unsupported-intent")
+	dgd.Generation = 7
+	dgd.Spec.Components[0].ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+	program := &disaggregatedSetProgram{gate: features.Gates{LWS: true, DisaggregatedSet: true}}
+
+	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.NoError(t, err)
+	condition := meta.FindStatusCondition(result.Status.Conditions, disaggregatedSetEligibleConditionType)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, "UnsupportedIntent", condition.Reason)
+	assert.Equal(t, int64(7), condition.ObservedGeneration)
+	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+	assert.Equal(t, int64(7), result.Status.ObservedGeneration)
+	assert.Contains(t, meta.FindStatusCondition(result.Status.Conditions, "Ready").Message, "scalingAdapter")
+	assert.Len(t, result.Events, 1)
 }
 
 func TestPersistWorkloadProgramResultEmitsEventsAfterStatusUpdate(t *testing.T) {
@@ -288,7 +362,7 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	}
 	program := reconciler.newComponentProgram()
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{
 			State: nvidiacomv1beta1.DGDStatePending,
 			Components: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
@@ -317,7 +391,7 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 func TestComponentProgram_ReconcileRejectsInvalidLegacyGMSClient(t *testing.T) {
 	t.Log("Build an already-admitted DGD with an unresolved GMS client")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Name: "test-dgd", Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
@@ -408,7 +482,7 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
 	t.Log("Build a two-node DRA worker and its initially resolvable claim template")
 	claimTemplate := &resourcev1.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "gpu-template", Namespace: "default"},
+		Name: "gpu-template", Namespace: "default",
 		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
 			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
 				Name: "gpu",
@@ -421,18 +495,18 @@ func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
 		}},
 	}
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "decode",
 				ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
-				Replicas:      ptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					ResourceClaims: []corev1.PodResourceClaim{{
 						Name:                      "gpu",
-						ResourceClaimTemplateName: ptr.To("gpu-template"),
+						ResourceClaimTemplateName: new("gpu-template"),
 					}},
 					Containers: []corev1.Container{{
 						Name:  commonconsts.MainContainerName,
@@ -449,7 +523,7 @@ func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 		WithObjects(
 			claimTemplate,
-			&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}},
+			&resourcev1.DeviceClass{Name: "gpu.nvidia.com"},
 		).
 		Build()
 	renderer := newGroveWorkloadRenderer(
@@ -460,14 +534,14 @@ func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
 	)
 
 	t.Log("Verify the renderer initially publishes the full multinode shape")
-	rendered, err := renderer.Render(t.Context(), dgd, nil, nil, false)
+	rendered, err := renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil, false)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerEngine)
 	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerReplica)
 
 	t.Log("Delete the dependency without changing DGD generation and render again")
 	require.NoError(t, kubeClient.Delete(t.Context(), claimTemplate))
-	_, err = renderer.Render(t.Context(), dgd, nil, nil, false)
+	_, err = renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil, false)
 	require.ErrorContains(t, err, "ResourceClaimTemplate default/gpu-template")
 }
 
@@ -644,7 +718,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 	})
 
-	t.Run("multinode component workload commits hash once target DCD is observed in cache", func(t *testing.T) {
+	t.Run("multinode component workload waits for readiness before committing an updated hash", func(t *testing.T) {
 		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: commonconsts.ComponentTypeWorker,
@@ -660,13 +734,11 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 
 		t.Log("Seed the fake cache with a worker DCD carrying the target hash")
 		targetDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-dgd-worker-" + desired.v2,
-				Namespace: dgd.Namespace,
-				Labels: map[string]string{
-					commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-					commonconsts.KubeLabelDynamoWorkerHash:          desired.v2,
-				},
+			Name:      "test-dgd-worker-" + desired.v2,
+			Namespace: dgd.Namespace,
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+				commonconsts.KubeLabelDynamoWorkerHash:          desired.v2,
 			},
 			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -680,7 +752,13 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
-		t.Log("Reconcile: hash must advance to the observed target generation")
+		t.Log("An observed replacement without readiness must not advance the current hash")
+		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
+
+		t.Log("Reach the DGD's default desired count of one before advancing the hash")
+		targetDCD.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{ReadyReplicas: new(int32(1))}
+		require.NoError(t, reconciler.Update(context.Background(), targetDCD))
 		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
 
 		assert.Nil(t, status.RollingUpdate)
@@ -728,14 +806,14 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 		{
 			name:             "existing DCD preserves its immutable stored backend",
 			dcdName:          "vllm-disagg-planner-frontend",
-			existingReplicas: ptr.To(int32(2)),
+			existingReplicas: new(int32(2)),
 			wantFramework:    "",
-			wantReplicas:     ptr.To(int32(5)),
+			wantReplicas:     new(int32(5)),
 		},
 		{
 			name:             "existing DCD follows automatic wait policy while native capture is pending",
 			dcdName:          "vllm-disagg-planner-decode-2dad72b9",
-			existingReplicas: ptr.To(int32(2)),
+			existingReplicas: new(int32(2)),
 			checkpointInfo: &checkpoint.CheckpointInfo{
 				Enabled:          true,
 				Exists:           true,
@@ -743,19 +821,19 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 				StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 			wantFramework: "",
-			wantReplicas:  ptr.To(int32(0)),
+			wantReplicas:  new(int32(0)),
 		},
 		{
 			name:             "explicit pending snapshot applies wait policy to an existing DCD",
 			dcdName:          "vllm-disagg-planner-decode-explicit",
-			existingReplicas: ptr.To(int32(2)),
+			existingReplicas: new(int32(2)),
 			checkpointInfo: &checkpoint.CheckpointInfo{
 				Enabled:       true,
 				Exists:        true,
 				StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 			wantFramework: "",
-			wantReplicas:  ptr.To(int32(0)),
+			wantReplicas:  new(int32(0)),
 		},
 		{
 			name:    "new DCD keeps its inferred backend and remains gated",
@@ -766,7 +844,7 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 				StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 			wantFramework: "vllm",
-			wantReplicas:  ptr.To(int32(0)),
+			wantReplicas:  new(int32(0)),
 		},
 	}
 
@@ -776,12 +854,12 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 			objects := []client.Object{}
 			if tt.existingReplicas != nil {
 				objects = append(objects, &nvidiacomv1beta1.DynamoComponentDeployment{
-					ObjectMeta: metav1.ObjectMeta{Name: tt.dcdName, Namespace: "jsm"},
+					Name: tt.dcdName, Namespace: "jsm",
 					Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 							ComponentName: "Frontend",
 							ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-							Replicas:      ptr.To(*tt.existingReplicas),
+							Replicas:      new(*tt.existingReplicas),
 						},
 					},
 				})
@@ -796,11 +874,11 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 				),
 			}
 			desired := &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: tt.dcdName, Namespace: "jsm"},
+				Name: tt.dcdName, Namespace: "jsm",
 				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 					BackendFramework: "vllm",
 					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-						Replicas: ptr.To(int32(5)),
+						Replicas: new(int32(5)),
 					},
 				},
 			}
@@ -840,6 +918,43 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			},
 			wantReplicas:      0,
 			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+		{
+			name:     "pending explicit snapshot under wait policy keeps compatibility hash and gates replicas",
+			replicas: 3,
+			checkpointInfo: checkpoint.CheckpointInfo{
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     false,
+				CheckpointName:            "snapshot-name",
+				StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				SnapshotCompatibilityHash: "compatibility-v1",
+			},
+			wantReplicas:          0,
+			wantStartupPolicy:     nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+			wantCompatibilityHash: true,
+		},
+		{
+			name:     "ready explicit snapshot under wait policy stamps candidate and compatibility hash",
+			replicas: 2,
+			checkpointInfo: checkpoint.CheckpointInfo{
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     true,
+				CheckpointName:            "snapshot-name",
+				StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				SnapshotCompatibilityHash: "compatibility-v1",
+				NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
+					UID:                  types.UID("snapshot-uid"),
+					BoundContentName:     "content-a",
+					CompatibilityVersion: commonconsts.SnapshotCompatibilityVersion,
+					GMSMode:              commonconsts.SnapshotGMSModeDisabled,
+				},
+			},
+			wantReplicas:          2,
+			wantStartupPolicy:     nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+			wantCandidate:         true,
+			wantCompatibilityHash: true,
 		},
 		{
 			name:     "pending explicit snapshot carries compatibility without becoming a restore candidate",
@@ -886,7 +1001,7 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
 				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-						Replicas:    ptr.To(tt.replicas),
+						Replicas:    new(tt.replicas),
 						PodTemplate: tt.podTemplate,
 					},
 				},
@@ -909,10 +1024,13 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 				assert.Equal(t, "compatibility-v1", dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotCandidateCompatibilityHashAnnotation])
 			}
 			if !tt.wantCandidate {
+				if dcd.Spec.PodTemplate != nil {
+					assert.NotContains(t, dcd.Spec.PodTemplate.Annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
+				}
 				return
 			}
 
-			t.Log("Verify immediate startup publishes stable restore-candidate metadata")
+			t.Log("Verify a Ready snapshot publishes stable restore-candidate metadata under every startup policy")
 			assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
 			assert.Equal(t, tt.checkpointInfo.CheckpointName, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
 			assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
@@ -944,7 +1062,7 @@ func TestComponentWorkloadsReconciler_ApplyPendingAutomaticSnapshotPolicy(t *tes
 			dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
 				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-						Replicas: ptr.To(int32(2)),
+						Replicas: new(int32(2)),
 					},
 				},
 			}
@@ -1004,6 +1122,12 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
+	t.Log("Do not initialize the current hash before any worker DCD is observed")
+	program := &componentProgram{rollout: rollout}
+	status := dgd.DeepCopy().Status
+	require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+	assert.Empty(t, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
+
 	t.Log("Reconcile: every generated worker DCD must carry the computed hash in its label and name")
 	_, err := workloads.Reconcile(context.Background(), dgd, nil, nil)
 	require.NoError(t, err)
@@ -1026,6 +1150,11 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 		assert.True(t, strings.HasSuffix(dcd.Name, expectedHash),
 			"DCD %s must have the worker hash as name suffix", dcd.Name)
 	}
+
+	t.Log("Initialize the first generation once both DCDs are visible, without requiring readiness")
+	require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+	assert.Equal(t, expectedHash, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
+	assert.Nil(t, status.RollingUpdate)
 }
 
 // TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero guards the
@@ -1052,12 +1181,12 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 
 	t.Log("Seed the fake cache with old-gen DCDs for both prefill and decode carrying the old hash")
 	prefillOldDCD := createTestDCD(t, reducedDGD, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-prefill-" + oldHash, Namespace: "default"},
+		Name: "test-dgd-prefill-" + oldHash, Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
 				ServiceName:   "prefill",
-				Replicas:      ptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				Labels: map[string]string{
 					commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 					commonconsts.KubeLabelDynamoWorkerHash:          oldHash,
@@ -1066,12 +1195,12 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 		},
 	})
 	decodeOldDCD := createTestDCD(t, reducedDGD, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-decode-" + oldHash, Namespace: "default"},
+		Name: "test-dgd-decode-" + oldHash, Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
 				ServiceName:   "decode",
-				Replicas:      ptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				Labels: map[string]string{
 					commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 					commonconsts.KubeLabelDynamoWorkerHash:          oldHash,

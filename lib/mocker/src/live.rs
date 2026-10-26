@@ -17,15 +17,13 @@ use futures::future::{BoxFuture, FutureExt, Shared};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::runtime::Handle;
-#[cfg(test)]
-use tokio::sync::watch;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
-    DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+    DirectRequest, FpmPublisher, KvEventPublishers, MockerConfig, OutputSignal,
 };
 use crate::engine::{LiveEngineScheduler, create_engine_with_rank_sink};
 #[cfg(test)]
@@ -49,8 +47,8 @@ use handoff::{
     shutdown_handoff_routes, supervise_lifecycle_dispatcher,
 };
 use request::{
-    ObservedOutput, OutputDelivery, RequestCancellation, RequestRoute, RequestRoutes, Routes,
-    remove_route, route_is_registered, shutdown_routes,
+    ObservedOutput, OutputDelivery, RequestCancellation, RequestLifecycle, RequestRoute,
+    RequestRoutes, Routes, remove_route, route_is_registered, shutdown_routes,
 };
 
 const DEFAULT_REQUEST_OUTPUT_CAPACITY: usize = 8;
@@ -239,17 +237,43 @@ pub fn stable_request_uuid(seed: u64, request_id: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+/// Deterministic output tokens with one hash per request and random access by position.
+#[derive(Clone, Copy, Debug)]
+pub struct DeterministicTokenGenerator {
+    seed: u64,
+}
+
+impl DeterministicTokenGenerator {
+    pub fn new(seed: u64, request_id: &str) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&seed.to_le_bytes());
+        hasher.update(request_id.as_bytes());
+        let mut seed_bytes = [0u8; 8];
+        seed_bytes.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+        Self {
+            seed: u64::from_le_bytes(seed_bytes),
+        }
+    }
+
+    pub fn token_id(&self, position: usize) -> u32 {
+        let mut value = self
+            .seed
+            .wrapping_add((position as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        1_000 + ((value ^ (value >> 31)) as u32 % 31_000)
+    }
+}
+
+pub fn deterministic_token_id(seed: u64, request_id: &str, position: usize) -> u32 {
+    DeterministicTokenGenerator::new(seed, request_id).token_id(position)
+}
+
 /// Produce deterministic, tokenizer-independent output token IDs.
 pub fn deterministic_output_tokens(seed: u64, request_id: &str, count: usize) -> Vec<u32> {
+    let generator = DeterministicTokenGenerator::new(seed, request_id);
     (0..count)
-        .map(|position| {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&seed.to_le_bytes());
-            hasher.update(request_id.as_bytes());
-            hasher.update(&(position as u64).to_le_bytes());
-            let bytes = hasher.finalize();
-            1_000 + (u32::from_le_bytes(bytes.as_bytes()[..4].try_into().unwrap()) % 31_000)
-        })
+        .map(|position| generator.token_id(position))
         .collect()
 }
 
@@ -340,13 +364,13 @@ impl Drop for LiveEngineGroup {
 
 impl LiveEngine {
     /// Start one live scheduler at `dp_rank`.
-    pub fn start(args: MockEngineArgs, dp_rank: u32) -> anyhow::Result<Self> {
+    pub fn start(args: MockerConfig, dp_rank: u32) -> anyhow::Result<Self> {
         Self::start_internal(args, dp_rank, LiveEngineOptions::default())
     }
 
     /// Start one live scheduler with runtime-owned KV and FPM publishers.
     pub fn start_with_config(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         config: LiveEngineConfig,
     ) -> anyhow::Result<Self> {
@@ -361,7 +385,7 @@ impl LiveEngine {
     /// Start one live scheduler with runtime-owned publishers and an explicit
     /// per-request output buffering policy.
     pub fn start_with_config_and_request_output_buffering(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         config: LiveEngineConfig,
         request_output_buffering: RequestOutputBuffering,
@@ -384,7 +408,7 @@ impl LiveEngine {
     /// and handoff API, while all ranks share one scheduler actor and one
     /// [`aisimulate_core::engine::generalized::GeneralizedMockerEngine`] barrier.
     pub fn start_grouped_with_configs(
-        args: MockEngineArgs,
+        args: MockerConfig,
         configs: Vec<LiveEngineConfig>,
     ) -> anyhow::Result<Vec<Self>> {
         Self::start_grouped_with_configs_and_request_output_buffering(
@@ -397,7 +421,7 @@ impl LiveEngine {
     /// Start all attention-DP ranks with an explicit per-request output
     /// buffering policy.
     pub fn start_grouped_with_configs_and_request_output_buffering(
-        args: MockEngineArgs,
+        args: MockerConfig,
         configs: Vec<LiveEngineConfig>,
         request_output_buffering: RequestOutputBuffering,
     ) -> anyhow::Result<Vec<Self>> {
@@ -414,7 +438,7 @@ impl LiveEngine {
     }
 
     pub(crate) fn start_grouped_with_options(
-        args: MockEngineArgs,
+        args: MockerConfig,
         options: Vec<LiveEngineOptions>,
     ) -> anyhow::Result<Vec<Self>> {
         let runtime = Handle::try_current()
@@ -472,7 +496,7 @@ impl LiveEngine {
 
     #[cfg(test)]
     pub(crate) fn start_with_options(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         options: LiveEngineOptions,
     ) -> anyhow::Result<Self> {
@@ -481,7 +505,7 @@ impl LiveEngine {
 
     #[cfg(test)]
     fn start_with_output_gate(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         output_gate: Option<watch::Receiver<bool>>,
         request_output_capacity: usize,
@@ -502,7 +526,7 @@ impl LiveEngine {
     }
 
     fn start_internal(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         options: LiveEngineOptions,
     ) -> anyhow::Result<Self> {
@@ -642,6 +666,7 @@ impl LiveEngine {
             client_id,
             rx,
             route: Arc::downgrade(&route),
+            lifecycle_rx: route.lifecycle_receiver(),
             routes: Arc::clone(&self.inner.routes),
             command_tx: self.inner.command_tx.clone(),
             cancellation_tx: self.inner.cancellation_tx.clone(),
@@ -724,7 +749,7 @@ impl LiveEngine {
         // ID-based cancellation is an Abort boundary: stop forwarding the
         // response immediately so a backpressured dispatcher cannot delay the
         // scheduler cancellation acknowledgement.
-        route.abandon_stream();
+        route.abort();
         await_cancellation(spawn_cancellation(
             &self.inner.runtime,
             self.inner.command_tx.clone(),
@@ -922,6 +947,7 @@ pub struct LiveRequest {
     client_id: Uuid,
     rx: mpsc::Receiver<ObservedOutput>,
     route: Weak<RequestRoute>,
+    lifecycle_rx: watch::Receiver<RequestLifecycle>,
     routes: Routes,
     command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
@@ -933,6 +959,11 @@ pub struct LiveRequest {
 impl LiveRequest {
     pub fn id(&self) -> Uuid {
         self.client_id
+    }
+
+    /// Whether an explicit abort closed this request's output route.
+    pub fn is_aborted(&self) -> bool {
+        self.lifecycle_rx.borrow().is_aborted
     }
 
     pub async fn recv(&mut self) -> Option<OutputSignal> {
@@ -956,7 +987,7 @@ impl LiveRequest {
         let Some(route) = request.route.upgrade() else {
             return Ok(false);
         };
-        route.abandon_stream();
+        route.abort();
         await_cancellation(spawn_cancellation(
             &request.runtime,
             request.command_tx.clone(),

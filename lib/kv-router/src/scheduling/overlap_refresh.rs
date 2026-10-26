@@ -277,8 +277,8 @@ mod tests {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Some(RefreshedOverlap::from_overlap(OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::new(),
-                effective_cached_tokens: HashMap::new(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             }))
         }
     }

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
@@ -12,6 +11,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::grpc::service::dispatch_error_status;
+// Re-exported so the old per-module path keeps resolving for outside users.
+pub use crate::grpc::service::grpc_monitor_for_disconnects;
 use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::types::Annotated;
 
@@ -20,9 +21,8 @@ use super::kserve;
 use validator::Validate;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::metrics::InflightGuard;
 use crate::http::service::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
+    disconnect::create_connection_monitor,
     metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
 };
 
@@ -108,13 +108,22 @@ pub async fn tensor_response_stream(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = inflight_guard.response_collector();
 
     // prepare to process any annotations
     let annotations = request.annotations();
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
+        // Deadline is checked before overload so a chain carrying both markers
+        // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
+        // surfaces' 429: the deadline elapsed waiting for capacity, so it is
+        // backpressure rather than a gateway timeout. No rejection accounting.
+        if crate::http::service::metrics::request_deadline_exceeded(e.as_ref()) {
+            return Status::resource_exhausted(
+                crate::http::service::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+            );
+        }
         if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
@@ -166,47 +175,6 @@ pub async fn tensor_response_stream(
     connection_handle.disarm();
 
     Ok(stream)
-}
-
-/// This method will consume an AsyncEngineStream and monitor for disconnects or context cancellation.
-/// This is gRPC variant of `monitor_for_disconnects` as that implementation has SSE specific handling.
-/// Should decouple and reuse `monitor_for_disconnects`
-///
-/// Uses `tokio::select!` to choose between receiving responses from the source stream or detecting when
-/// the context is stopped. If the context is stopped, we break the stream. If the source stream ends
-/// naturally, we mark the request as successful and send the final `[DONE]` event.
-pub fn grpc_monitor_for_disconnects<T>(
-    stream: impl Stream<Item = Annotated<T>>,
-    context: Arc<dyn AsyncEngineContext>,
-    mut inflight_guard: InflightGuard,
-    mut stream_handle: ConnectionHandle,
-) -> impl Stream<Item = Annotated<T>> {
-    stream_handle.arm();
-    async_stream::stream! {
-        tokio::pin!(stream);
-        loop {
-            tokio::select! {
-                event = stream.next() => {
-                    match event {
-                        Some(response) => {
-                            yield response;
-                        }
-                        None => {
-                            // Stream ended normally
-                            inflight_guard.mark_ok();
-                            stream_handle.disarm();
-                            break;
-                        }
-                    }
-                }
-                // todo - test request cancellation with kserve frontend and tensor-based models
-                _ = context.stopped() => {
-                    tracing::trace!("Context stopped; breaking stream");
-                    break;
-                }
-            }
-        }
-    }
 }
 
 /// Get the request ID from a primary source, or lastly create a new one if not present
@@ -845,6 +813,20 @@ impl DataType {
     }
 }
 
+/// KServe v2 `ModelMetadata` wire shape for a Triton tensor.
+///
+/// Triton's `ModelConfig` stores per-tensor `dims` without the batch dimension.
+/// When `max_batch_size > 0`, native Triton's KServe adapter prepends `-1`
+/// (variable batch) so clients can send batched inputs. Copying `dims`
+/// verbatim drops that axis and KServe v2 clients reject the tensor.
+pub fn kserve_metadata_shape(dims: &[i64], max_batch_size: i32) -> Vec<i64> {
+    if max_batch_size > 0 {
+        std::iter::once(-1).chain(dims.iter().copied()).collect()
+    } else {
+        dims.to_vec()
+    }
+}
+
 impl std::fmt::Display for tensor::DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
@@ -1211,5 +1193,24 @@ mod oip_datatype_tests {
                 "{name} is the model_config spelling, not the wire spelling"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod kserve_metadata_shape_tests {
+    use super::kserve_metadata_shape;
+
+    #[test]
+    fn prepends_variable_batch_dim_when_batching_enabled() {
+        assert_eq!(kserve_metadata_shape(&[-1], 4), vec![-1, -1]);
+        assert_eq!(kserve_metadata_shape(&[768], 8), vec![-1, 768]);
+        assert_eq!(kserve_metadata_shape(&[], 1), vec![-1]);
+    }
+
+    #[test]
+    fn leaves_dims_unchanged_when_batching_disabled() {
+        assert_eq!(kserve_metadata_shape(&[-1], 0), vec![-1]);
+        assert_eq!(kserve_metadata_shape(&[3, 224, 224], 0), vec![3, 224, 224]);
+        assert_eq!(kserve_metadata_shape(&[], 0), Vec::<i64>::new());
     }
 }

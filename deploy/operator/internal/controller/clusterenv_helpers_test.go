@@ -8,14 +8,12 @@
 package controller
 
 import (
-	"fmt"
-	"os/exec"
-	"strings"
+	"testing"
 
-	semver "github.com/Masterminds/semver/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
@@ -45,6 +43,7 @@ func newClusterTestScheme() *runtime.Scheme {
 	utilruntime.Must(configv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
+	utilruntime.Must(nvidiacomv1beta2.AddToScheme(scheme))
 	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
@@ -65,24 +64,16 @@ func newClusterTestScheme() *runtime.Scheme {
 	return scheme
 }
 
+func TestClusterTestSchemeIncludesDGDRV1Beta2(t *testing.T) {
+	if _, err := newClusterTestScheme().New(nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK); err != nil {
+		t.Fatalf("create v1beta2 DynamoGraphDeploymentRequest from cluster-test scheme: %v", err)
+	}
+}
+
 func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfiguration {
 	config := &configv1alpha1.OperatorConfiguration{}
 	configv1alpha1.SetDefaultsOperatorConfiguration(config)
 	config.Namespace.Restricted = namespace
 	config.GPU.DiscoveryEnabled = ptr.To(false)
 	return config
-}
-
-func clusterTestOperatorVersion() (string, error) {
-	output, err := exec.Command(
-		"git", "describe", "--tags", "--match", "v[0-9]*", "--abbrev=12", "--long", "HEAD",
-	).Output()
-	if err != nil {
-		return "", fmt.Errorf("describe current commit: %w", err)
-	}
-	version := strings.TrimPrefix(strings.TrimSpace(string(output)), "v")
-	if _, err := semver.NewVersion(version); err != nil {
-		return "", fmt.Errorf("git describe returned invalid semantic version %q: %w", version, err)
-	}
-	return version, nil
 }

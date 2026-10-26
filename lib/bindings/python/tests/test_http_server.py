@@ -24,6 +24,7 @@ from typing import AsyncGenerator, Dict
 import aiohttp
 import pytest
 
+from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
 
@@ -81,9 +82,20 @@ class MockHttpEngine:
         # Stream a mock response
         created = int(time.time())
         response_text = "This is a mock response."
+        prompt_logprobs = PromptLogprobsAccumulator(request)
+        prompt_logprobs.update(
+            {
+                "engine_data": {
+                    "prompt_logprobs": [
+                        None,
+                        {"17": {"logprob": -0.25, "rank": 1}},
+                    ]
+                }
+            }
+        )
         for i, char in enumerate(response_text):
             finish_reason = "stop" if i == len(response_text) - 1 else None
-            yield {
+            chunk = {
                 "id": f"chatcmpl-{context.id()}",
                 "object": "chat.completion.chunk",
                 "created": created,
@@ -96,6 +108,8 @@ class MockHttpEngine:
                     }
                 ],
             }
+            prompt_logprobs.attach(chunk)
+            yield {"_dynamo_annotated": True, "data": chunk}
             await asyncio.sleep(0.01)
 
 
@@ -230,17 +244,17 @@ async def test_chat_completion_success(http_server):
 
 
 HTTP_ERROR_CASES = (
-    (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
+    (MSG_CONTAINS_ERROR, 400, "Bad Request", "Bad Request"),
     (
         MSG_CONTAINS_STATUS_ERROR,
         415,
-        MSG_CONTAINS_STATUS_ERROR,
+        "Unsupported Media Type",
         "Unsupported Media Type",
     ),
     (
         MSG_CONTAINS_INVALID_ARGUMENT,
         400,
-        f"ValueError: {MSG_CONTAINS_INVALID_ARGUMENT}",
+        "Invalid request",
         "Bad Request",
     ),
     (
@@ -254,13 +268,8 @@ HTTP_ERROR_CASES = (
 
 def expected_error_body(status: int, message: str, error_type: str) -> Dict:
     body = {"message": message, "type": error_type, "code": status}
-    # A backend-asserted 500 that carries no retry semantics tunnels
-    # its own status into `details` so it survives for debugging,
-    # while the backend's own message text stays server-side. See
-    # `BackendStatusAction::CoerceToInternal` in
-    # lib/llm/src/http/service/openai.rs.
     if status == 500:
-        body["details"] = {"backend_status": 500}
+        body["details"] = {"backend_status": status}
     return body
 
 
@@ -319,7 +328,7 @@ async def test_streaming_chat_completion_http_error_waits_for_first_item(http_se
         async with session.post(url, json=data) as response:
             assert response.status == 400
             assert await response.json() == expected_error_body(
-                400, MSG_CONTAINS_ERROR, "Bad Request"
+                400, "Bad Request", "Bad Request"
             )
 
 

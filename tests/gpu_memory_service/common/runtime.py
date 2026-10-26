@@ -160,7 +160,10 @@ class GMSEngineProcess(EngineProcess, ABC):
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{frontend_port}/health", check_health_generate),
+                (
+                    f"http://localhost:{frontend_port}/health?instances=true",
+                    check_health_generate,
+                ),
             ],
             timeout=300,
             display_output=True,

@@ -46,15 +46,15 @@ pub(crate) use recovery::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
     RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
 };
+pub(crate) use recovery::{
+    KvStateAgentStatusCell, start_subscriber, start_worker_kv_query_endpoint,
+    start_worker_kv_query_endpoint_with_status,
+};
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
-pub(crate) use recovery::{
-    start_subscriber, start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedApproximatePrimaryPolicy {
-    Disabled,
     Ttl,
     Lru,
     TtlRemoteFallback,
@@ -69,9 +69,6 @@ fn resolve_approximate_primary_policy(
         anyhow::bail!(
             "router_approximate_cache_policy=lru requires use_kv_events=false; the local side indexer is TTL-only"
         );
-    }
-    if config.overlap_score_credit <= 0.0 {
-        return Ok(ResolvedApproximatePrimaryPolicy::Disabled);
     }
     if config.use_kv_events
         || config.router_approximate_cache_policy == ApproximateCachePolicyKind::Ttl
@@ -94,10 +91,6 @@ pub(crate) async fn build(
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 ) -> Result<Indexer> {
     let approximate_policy = resolve_approximate_primary_policy(kv_router_config)?;
-    if approximate_policy == ResolvedApproximatePrimaryPolicy::Disabled {
-        return Ok(Indexer::None);
-    }
-
     if approximate_policy == ResolvedApproximatePrimaryPolicy::TtlRemoteFallback {
         tracing::warn!(
             use_remote_indexer = kv_router_config.use_remote_indexer,
@@ -164,15 +157,17 @@ pub(crate) async fn build(
                     Some(retention),
                 ),
             );
-            let session_updates = session_prefix_index
-                .map(|index| SessionUpdateSender::for_concurrent(index, Arc::clone(&primary)));
+            let lower_tier = LowerTierIndexers::new_with_metrics(
+                kv_router_config.router_event_threads as usize,
+                block_size,
+                Some(kv_indexer_metrics),
+            );
+            let session_updates = session_prefix_index.map(|index| {
+                SessionUpdateSender::for_concurrent(index, Arc::clone(&primary), lower_tier.clone())
+            });
             return Ok(Indexer::Concurrent {
                 primary,
-                lower_tier: LowerTierIndexers::new_with_metrics(
-                    kv_router_config.router_event_threads as usize,
-                    block_size,
-                    Some(kv_indexer_metrics),
-                ),
+                lower_tier,
                 approx: None,
                 primary_records_routing_decisions: true,
                 session_updates,
@@ -185,15 +180,14 @@ pub(crate) async fn build(
             kv_indexer_metrics.clone(),
             Some(retention),
         );
-        let session_updates = session_prefix_index
-            .map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
+        let lower_tier =
+            LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics));
+        let session_updates = session_prefix_index.map(|index| {
+            SessionUpdateSender::for_legacy(index, primary.clone(), lower_tier.clone())
+        });
         return Ok(Indexer::Single {
             primary,
-            lower_tier: LowerTierIndexers::new_with_metrics(
-                1,
-                block_size,
-                Some(kv_indexer_metrics),
-            ),
+            lower_tier,
             approx: None,
             primary_records_routing_decisions: true,
             session_updates,
@@ -215,15 +209,17 @@ pub(crate) async fn build(
             block_size,
             Some(kv_indexer_metrics.clone()),
         ));
-        let session_updates = session_prefix_index
-            .map(|index| SessionUpdateSender::for_concurrent(index, Arc::clone(&primary)));
+        let lower_tier = LowerTierIndexers::new_with_metrics(
+            kv_router_config.router_event_threads as usize,
+            block_size,
+            Some(kv_indexer_metrics),
+        );
+        let session_updates = session_prefix_index.map(|index| {
+            SessionUpdateSender::for_concurrent(index, Arc::clone(&primary), lower_tier.clone())
+        });
         return Ok(Indexer::Concurrent {
             primary,
-            lower_tier: LowerTierIndexers::new_with_metrics(
-                kv_router_config.router_event_threads as usize,
-                block_size,
-                Some(kv_indexer_metrics),
-            ),
+            lower_tier,
             approx,
             primary_records_routing_decisions: false,
             session_updates,
@@ -237,11 +233,12 @@ pub(crate) async fn build(
         kv_indexer_metrics.clone(),
         None,
     );
-    let session_updates =
-        session_prefix_index.map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
+    let lower_tier = LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics));
+    let session_updates = session_prefix_index
+        .map(|index| SessionUpdateSender::for_legacy(index, primary.clone(), lower_tier.clone()));
     Ok(Indexer::Single {
         primary,
-        lower_tier: LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics)),
+        lower_tier,
         approx,
         primary_records_routing_decisions: false,
         session_updates,

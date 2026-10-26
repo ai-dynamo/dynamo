@@ -25,7 +25,7 @@ import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.test_output import resolve_test_output_path
+from tests.utils.output_paths import resolve_test_output_path
 
 # Check if engines are available and build list of available engines
 from .common import check_module_available
@@ -257,7 +257,7 @@ def wait_for_worker_registration(
 
     while time.time() - start_time < max_wait_seconds:
         try:
-            response = requests.get(f"{frontend_url}/health", timeout=5)
+            response = requests.get(f"{frontend_url}/health?instances=true", timeout=5)
             health_data = response.json()
             if health_data.get("instances"):
                 elapsed = time.time() - start_time

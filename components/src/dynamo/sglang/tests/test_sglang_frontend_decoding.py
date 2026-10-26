@@ -450,7 +450,15 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
-        yield None
+        async def wait_forever():
+            await asyncio.Future()
+
+        task = asyncio.create_task(wait_forever())
+        try:
+            yield task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     handler._cancellation_monitor = no_cancellation_monitor
 
@@ -506,6 +514,37 @@ async def test_aggregated_fd_off_passes_media_url_strings():
 
 
 @pytest.mark.asyncio
+async def test_aggregated_forwards_grouped_mm_hashes_in_sglang_item_order():
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    handler._mm_hashes_supported = True
+    captured: Dict[str, Any] = {}
+
+    async def fake_async_generate(**kwargs):
+        captured.update(kwargs)
+        return _empty_stream()
+
+    handler.engine = SimpleNamespace(async_generate=fake_async_generate)
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": ["https://example.com/a.jpg"],
+            "video_url": ["https://example.com/a.mp4"],
+        },
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                "video": ["video-a"],
+                "image": ["image-a"],
+            }
+        },
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert captured["mm_hashes"] == ["image-a", "video-a"]
+
+
+@pytest.mark.asyncio
 async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
     """With --frontend-decoding, Decoded items are loaded via ImageLoader and
     forwarded as PIL Images (not strings) to engine.async_generate."""
@@ -534,6 +573,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
 
     request = {
         "token_ids": [1, 2, 3],
+        "image_cache_scope": "session-42",
         "multi_modal_data": {"image_url": [{"Decoded": decoded_metadata}]},
     }
 
@@ -541,7 +581,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
         pass
 
     image_loader.load_image_batch.assert_awaited_once_with(
-        [{"Decoded": decoded_metadata}]
+        [{"Decoded": decoded_metadata}], cache_scope="session-42"
     )
     assert captured["image_data"] == [pil_stub]
 
@@ -667,7 +707,13 @@ def _new_prefill_handler() -> PrefillWorkerHandler:
     handler.enable_trace = False
     handler.serving_mode = DisaggregationMode.PREFILL
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model")
+        server_args=SimpleNamespace(
+            served_model_name="test-model",
+            enable_strict_thinking=True,
+            reasoning_parser="qwen3",
+            skip_tokenizer_init=False,
+            grammar_backend="xgrammar",
+        )
     )
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
@@ -676,7 +722,15 @@ def _new_prefill_handler() -> PrefillWorkerHandler:
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
-        yield None
+        async def wait_forever():
+            await asyncio.Future()
+
+        task = asyncio.create_task(wait_forever())
+        try:
+            yield task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     handler._cancellation_monitor = no_cancellation_monitor
 
@@ -685,6 +739,55 @@ def _new_prefill_handler() -> PrefillWorkerHandler:
     handler._priority_kwargs = lambda priority: {}
 
     return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    [
+        DisaggregationMode.AGGREGATED,
+        DisaggregationMode.PREFILL,
+        DisaggregationMode.DECODE,
+    ],
+)
+async def test_cache_salt_reaches_engine(mode, unused_tcp_port):
+    handler = (
+        _new_prefill_handler()
+        if mode == DisaggregationMode.PREFILL
+        else _new_decode_handler(enable_frontend_decoding=False)
+    )
+    handler.serving_mode = mode
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {"cache_salt": "tenant-a"},
+        "extra_args": {"nvext": {"cache_salt": "body-salt"}},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": unused_tcp_port,
+            "bootstrap_room": 7,
+        },
+    }
+    routed_request = (
+        {"request": request, "sampling_params": {}}
+        if mode == DisaggregationMode.PREFILL
+        else request
+    )
+
+    async for _ in handler.generate(routed_request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["cache_salt"] == "tenant-a"
+
+    del request["routing"]
+    del request["extra_args"]
+    async for _ in handler.generate(routed_request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 2
+    assert "cache_salt" not in recorder.calls[1]
 
 
 @pytest.mark.asyncio
@@ -778,3 +881,29 @@ async def test_prefill_omits_session_params_for_agent_context(
     captured = recorder.calls[0]
     assert captured["input_ids"] == [1, 2, 3]
     assert "session_params" not in captured
+
+
+@pytest.mark.asyncio
+async def test_prefill_forwards_thinking_budget_on_first_token():
+    handler = _new_prefill_handler()
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "require_reasoning": True,
+        "sampling_options": {},
+        "stop_conditions": {"max_thinking_tokens": 0},
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    captured = recorder.calls[0]
+    assert captured["sampling_params"] == {
+        "custom_params": {"thinking_budget": 0},
+        "n": 1,
+        "max_new_tokens": 1,
+    }
+    assert captured["require_reasoning"] is True

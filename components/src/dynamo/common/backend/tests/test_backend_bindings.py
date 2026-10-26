@@ -88,6 +88,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
             max_num_seqs=64,
             max_num_batched_tokens=2048,
             enable_eagle=True,
+            max_gpu_lora_count=4,
         ),
     )
     assert cfg.model == "m2"
@@ -101,6 +102,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert llm.max_num_seqs == 64
     assert llm.max_num_batched_tokens == 2048
     assert llm.enable_eagle is True
+    assert llm.max_gpu_lora_count == 4
 
 
 @pytest.mark.unified
@@ -109,6 +111,12 @@ def test_llm_registration_preserves_legacy_positional_arguments():
     assert llm.bootstrap_host == "host"
     assert llm.bootstrap_port == 9000
     assert llm.enable_eagle is False
+    assert llm.max_gpu_lora_count is None
+    extended = backend.LlmRegistration(
+        2048, 16, 1000, 64, 2048, 2, 1, "host", 9000, True, 8
+    )
+    assert extended.enable_eagle is True
+    assert extended.max_gpu_lora_count == 8
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"enable_eagle": True}])
@@ -150,6 +158,21 @@ def test_worker_config_accepts_parser_runtime_settings():
         exclude_tools_when_tool_choice_none=False,
         enable_local_indexer=False,
     )
+
+
+@pytest.mark.none
+def test_structural_tag_bindings_reject_unknown_config_fields():
+    from dynamo.llm import ModelRuntimeConfig
+
+    backend.WorkerConfig(namespace="dynamo", structural_tag={"scope": "always"})
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.set_structural_tag({"scope": "always"})
+
+    with pytest.raises(ValueError, match="unknown field `scpoe`"):
+        backend.WorkerConfig(namespace="dynamo", structural_tag={"scpoe": "always"})
+
+    with pytest.raises(ValueError, match="unknown field `scpoe`"):
+        runtime_config.set_structural_tag({"scpoe": "always"})
 
 
 def test_worker_config_preserves_legacy_positional_argument_order():
@@ -239,9 +262,14 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     runtime_cfg.dyn_default_thinking_mode = "disabled"
     runtime_cfg.exclude_tools_when_tool_choice_none = False
     runtime_cfg.enable_local_indexer = False
-    runtime_cfg.dyn_enable_structural_tag = True
-    runtime_cfg.dyn_structural_tag_scope = "always"
-    runtime_cfg.dyn_structural_tag_schema = "strict"
+    runtime_cfg.structural_tag = {
+        "scope": "always",
+        "schema": "strict",
+        "allow_tool_calls_with_structured_output": True,
+        "exclude_special_tokens": False,
+        "reasoning_boundary": "structural_tag",
+        "tool_arguments_any_order": False,
+    }
     # MagicMock auto-attrs would be rejected as a foreign type by the
     # strict coercer; pin them to None.
     runtime_cfg.disaggregation_mode = None
@@ -254,9 +282,7 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     assert config.default_thinking_mode == "disabled"
     assert config.exclude_tools_when_tool_choice_none is False
     assert config.enable_local_indexer is False
-    assert config.structural_tag_mode == "on"
-    assert config.structural_tag_scope == "always"
-    assert config.structural_tag_schema == "strict"
+    assert config.structural_tag == runtime_cfg.structural_tag
 
 
 @pytest.mark.unified
@@ -277,9 +303,7 @@ def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_a
     assert cfg.use_kv_events is False
     assert cfg.custom_jinja_template is None
     assert cfg.default_thinking_mode is None
-    assert cfg.structural_tag_mode == "off"
-    assert cfg.structural_tag_scope == "auto"
-    assert cfg.structural_tag_schema == "auto"
+    assert cfg.structural_tag is None
 
 
 @pytest.mark.unified

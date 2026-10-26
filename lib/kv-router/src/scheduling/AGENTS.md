@@ -16,17 +16,16 @@ sequenceDiagram
     end
     participant S as WorkerSelector
 
-    H->>A: Enqueue(request)
-    A->>A: Resolve class_index
-    alt Immediate path
+    H->>H: Resolve class_index, sample snapshot, stamp arrival
+    H->>A: Enqueue(request, metadata)
+    alt Direct path (never-queues class or zero workers)
         A->>S: select_worker(request)
         S-->>A: Selected worker
         A->>A: Reserve worker capacity and respond
-    else Queued path
-        A->>P: enqueue(class_index, request)
+    else Policy-queue path (every other request)
+        A->>P: enqueue(metadata, request)
         P->>C: Push into the selected class queue
-        H->>A: Update after capacity changes
-        A->>P: pop_next()
+        A->>P: pop_next() in the same actor turn
         P->>C: Get one candidate per dispatchable class
         C-->>P: Dispatch candidate
         P-->>A: DRR winner
@@ -34,12 +33,24 @@ sequenceDiagram
         S-->>A: Selected worker
         A->>A: Reserve worker capacity and respond
     end
+    H->>A: Update after capacity changes drains the remaining backlog
 ```
 
-- `SchedulerQueue` is the public handle that sends commands to the actor.
-- `SchedulerQueueActor` classifies each request and chooses the immediate or queued path.
+- `SchedulerQueue` is the public handle. It resolves the class index, samples the
+  cache-overlap snapshot, and stamps the arrival offset on the caller task before
+  sending the Enqueue command.
+- `SchedulerQueueActor` routes every request through the policy queue and drains the
+  ready backlog in the same actor turn, so freed capacity can go to another class's
+  queued head under DRR rather than to the arriving request. The direct path remains
+  only for classes that can never hold a queued entry (any zero per-worker limit) and
+  for zero-discovered-worker windows, which surface `NoEndpoints` from selection.
 - `PolicyQueue` does not classify requests. It owns all class queues and uses deficit round robin (DRR) to give each class weighted turns.
 - Each `PolicyClassQueue` owns ordering and accounting for one class such as `latency`, `agents`, or `batch`.
+- Within one strict-priority tier, deadline-bearing entries order earliest-due-first
+  ahead of all non-deadline entries before the FCFS/LCFS/WSPT policy score applies.
+  Deadlines are indexed in an ordered due set and a conditional actor timer rejects
+  expired entries; all deadline math uses `tokio::time::Instant` so paused-clock tests
+  stay coherent.
 - `SchedulerQueueActor::admit_one` performs final worker selection and reserves worker capacity after either path.
 - A single-class profile still uses `PolicyQueue`, but DRR has no cross-class effect.
 
@@ -111,7 +122,7 @@ PolicyClassQueue("agents")
 
 ## Public Worker-Selection API
 
-The `selector` module contains the public Rust contract for custom worker filters, scorers, and pickers. Treat each public item as a versioned external API.
+The `plugins::worker_selection` module contains the public Rust contract for custom worker filters, scorers, and pickers. Treat each public item as a versioned external API.
 
 - Do not add a public field, accessor, input group, type, or re-export unless the task explicitly requires a new external policy capability.
 - An internal need in the default scorer, logging, tests, or SelectionService does not justify a public API addition.
@@ -124,12 +135,12 @@ The `selector` module contains the public Rust contract for custom worker filter
 - Require callers to name each `WorkerInputs` group that they use. Do not add a public `ALL` shortcut.
 - Before you add a value to an existing input group, account for its calculation and retained-column cost for every policy that requests that group.
 - Do not pass the full `SchedulingRequest`, worker maps, router configuration internals, default-score weights, or host-owned eligibility and reservation state to custom policies.
-- Keep `DefaultWorkerScorer` and `DefaultWorkerPicker` internal. External policies own their filters and both scoring and picking stages.
+- The builtin default policy lives in `lib/router-plugins/builtin` and uses only the public policy API. Keep the reference selector test/benchmark-only. Plugins own their score calculation and worker choice.
 - Keep eligibility, picker-row validation, accounting, and reservation in the host path.
 
 Before each public API addition:
 
 1. Search all accessors, re-exports, documentation, examples, and external-looking call sites.
 2. Add one focused contract test that uses the new value through `WorkerFilter`, `WorkerScorer`, or `WorkerPicker`.
-3. Update `docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx` and one canonical example.
+3. Update `docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx` and one canonical example.
 4. If the signal adds work, storage, allocation, or another scan to the selection path, run the worker-selection benchmark.

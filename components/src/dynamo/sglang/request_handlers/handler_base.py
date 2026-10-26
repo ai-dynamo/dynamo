@@ -9,17 +9,7 @@ import random
 import re
 import threading
 from abc import ABC, abstractmethod
-from contextlib import asynccontextmanager
-from typing import (
-    Any,
-    AsyncGenerator,
-    AsyncIterator,
-    Dict,
-    Generic,
-    Optional,
-    Tuple,
-    TypeVar,
-)
+from typing import Any, AsyncIterator, Dict, Generic, Optional, Tuple, TypeVar
 
 import sglang as sgl
 from sglang.srt.managers.io_struct import ProfileReq
@@ -44,12 +34,15 @@ from dynamo.llm import (
     register_llm,
     unregister_llm,
 )
-from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import supports_disagg_prefill_cancel_anytime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
+from dynamo.sglang.engine_generate import native_generate_payload
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
+from dynamo.sglang.gateway import follow_pause_broadcasts
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.cancellation import CancellationMixin
 
 logger = logging.getLogger(__name__)
 
@@ -556,7 +549,9 @@ class LoraMixin:
             yield {"status": "error", "message": str(e)}
 
 
-class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
+class BaseWorkerHandler(
+    CancellationMixin, LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]
+):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -591,6 +586,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         self.generate_endpoint = generate_endpoint
         self.publisher = publisher
         self.shutdown_event = shutdown_event
+        self._abort_tasks: set[asyncio.Task[Any]] = set()
+        self._supports_ordered_cancellation = (
+            engine is not None and supports_disagg_prefill_cancel_anytime(engine)
+        )
+        logger.info(
+            "SGLang ordered cancellation support: %s",
+            self._supports_ordered_cancellation,
+        )
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
@@ -885,6 +888,13 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         else:
             await self.generate_endpoint.register_endpoint_instance()
 
+    def follow_shared_pause_state(self) -> None:
+        async def resync() -> None:
+            async with self._engine_route_lock:
+                await self._sync_discovery_with_sglang_pause_state()
+
+        follow_pause_broadcasts(getattr(self.engine, "tokenizer_manager", None), resync)
+
     async def _invoke_engine_route(self, route_handler, body: dict) -> dict:
         """Invoke one engine route and then synchronize worker discovery."""
         async with self._engine_route_lock:
@@ -970,6 +980,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
+        self._cancel_abort_tasks()
         if self.publisher is not None:
             self.publisher.cleanup()
 
@@ -977,7 +988,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
-        self._validate_nvext_token_data(request, request_input)
+        self._validate_request_token_ids(request, request_input)
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
@@ -1046,39 +1057,65 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         self,
         token_ids: Any,
         allowed_oov_ids: frozenset[int] = frozenset(),
+        *,
+        label: str = "token_ids",
     ) -> None:
+        """Reject IDs outside the model vocabulary in one ID list or a batch of them.
+
+        ``label`` names the request field in error messages.
+        """
         if not isinstance(token_ids, list):
-            raise HttpError(400, "nvext.token_data must resolve to a token ID list")
+            raise HttpError(400, f"{label} must resolve to a token ID list")
 
+        batched = bool(token_ids) and isinstance(token_ids[0], list)
+        prompts = token_ids if batched else [token_ids]
         max_input_token_id = self._max_input_token_id
-        for index, token_id in enumerate(token_ids):
-            if isinstance(token_id, bool) or not isinstance(token_id, int):
-                raise HttpError(
-                    400,
-                    f"nvext.token_data[{index}] must be an integer token ID",
-                )
-            # Dynamo's Rust frontend uses u32 token IDs, so negatives are not expected.
-            if (
-                max_input_token_id is not None and token_id > max_input_token_id
-            ) and token_id not in allowed_oov_ids:
-                raise HttpError(400, f"Token id {token_id} is out of vocabulary")
+        for prompt_index, prompt_ids in enumerate(prompts):
+            prompt_label = f"{label}[{prompt_index}]" if batched else label
+            if not isinstance(prompt_ids, list):
+                raise HttpError(400, f"{prompt_label} must be a token ID list")
+            for index, token_id in enumerate(prompt_ids):
+                if isinstance(token_id, bool) or not isinstance(token_id, int):
+                    raise HttpError(
+                        400,
+                        f"{prompt_label}[{index}] must be an integer token ID",
+                    )
+                # Packed int32 token_ids decode ids above i32::MAX as negative numbers.
+                if token_id < 0:
+                    raise HttpError(
+                        400, f"{prompt_label}[{index}] must not be negative"
+                    )
+                if (
+                    max_input_token_id is not None and token_id > max_input_token_id
+                ) and token_id not in allowed_oov_ids:
+                    raise HttpError(
+                        400,
+                        f"Token id {token_id} is out of vocabulary at "
+                        f"{prompt_label}[{index}]",
+                    )
 
-    def _validate_nvext_token_data(
+    def _validate_request_token_ids(
         self,
         request: Dict[str, Any],
-        token_ids: Any,
+        request_input: Any,
     ) -> None:
-        """Reject out-of-vocabulary IDs supplied through ``nvext.token_data``."""
+        """Reject token IDs outside the model vocabulary on every token input path."""
         extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
+        nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+        if isinstance(nvext, dict) and nvext.get("token_in") is True:
+            label = "nvext.token_data"
+        elif not isinstance(request_input, list):
+            # Not token input, for example text for the SGLang tokenizer.
             return
-        nvext = extra_args.get("nvext")
-        if not isinstance(nvext, dict) or nvext.get("token_in") is not True:
-            return
+        elif native_generate_payload(request) is not None:
+            label = "input_ids"
+        else:
+            label = "token_ids"
 
         self._validate_token_ids(
-            token_ids,
+            request_input,
             self._resolve_request_multimodal_token_ids(request),
+            label=label,
         )
 
     @staticmethod
@@ -1166,161 +1203,3 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             )
 
         return bootstrap_host, bootstrap_port
-
-    def _abort_requests(self, request_ids: set[str], context: Context) -> None:
-        if not request_ids:
-            return
-        if not getattr(self.engine, "tokenizer_manager", None):
-            logging.error("SGLang tokenizer_manager not found for abort requests")
-            return
-        for request_id in request_ids:
-            self.engine.tokenizer_manager.abort_request(rid=request_id, abort_all=False)
-        request_ids.clear()
-        logging.info("Aborted Request ID: %s", context.id())
-
-    async def _handle_cancellation(
-        self,
-        request_id_future: asyncio.Future,
-        context: Context,
-        request_ids: set[str] | None = None,
-    ):
-        """Background task to handle cancellation and shutdown by monitoring both signals.
-
-        Args:
-            request_id_future: Future that will be set with the SGLang request ID
-                              when the first response arrives.
-            context: Context object for cancellation handling.
-            request_ids: Live set of unfinished parallel-choice IDs, when available.
-
-        Raises:
-            EngineShutdown: If shutdown event was triggered.
-        """
-        cancellation_future: asyncio.Future[Any] | None = None
-        shutdown_task: asyncio.Task[Any] | None = None
-        try:
-            logging.debug(f"Cancellation monitor started for Context: {context.id()}")
-
-            # Always wait for the request ID to ensure we can abort the request
-            sglang_request_id = await request_id_future
-            logging.debug(
-                f"Cancellation monitor received SGLang Request ID {sglang_request_id} for Context: {context.id()}"
-            )
-            logging.debug(f"Request ID future cancelled for Context: {context.id()}")
-
-            # Get the cancellation future
-            cancellation_future = context.async_killed_or_stopped()
-
-            # Build list of futures/tasks to wait for
-            wait_for: list[asyncio.Future[Any]] = [cancellation_future]
-
-            if self.shutdown_event:
-                # Create task for shutdown monitoring and add to wait list
-                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
-                wait_for.append(shutdown_task)
-
-            # Wait for whichever happens first
-            done, pending = await asyncio.wait(
-                wait_for,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            # Cancel the pending task/future
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-            logging.info(
-                f"Cancellation or shutdown signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
-            )
-
-            self._abort_requests(
-                request_ids if request_ids is not None else {sglang_request_id}, context
-            )
-
-            # Check which event triggered and raise EngineShutdown if shutdown
-            if shutdown_task and shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during token generation")
-
-        except asyncio.CancelledError:
-            # Task was cancelled, which is expected when generation completes
-            request_id = "unknown"
-            if request_id_future.done() and not request_id_future.cancelled():
-                try:
-                    request_id = request_id_future.result()
-                except Exception:
-                    pass
-            logging.debug(
-                f"Cancellation monitor task cancelled for SGLang Request ID {request_id}, Context: {context.id()}"
-            )
-            raise
-        finally:
-            for awaitable in (cancellation_future, shutdown_task):
-                if awaitable is None or awaitable.done():
-                    continue
-                awaitable.cancel()
-                try:
-                    await awaitable
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-    @asynccontextmanager
-    async def _cancellation_monitor(
-        self,
-        request_id_future: asyncio.Future,
-        context: Context,
-        request_ids: set[str] | None = None,
-    ) -> AsyncGenerator[asyncio.Task, None]:
-        """
-        Context manager for monitoring request cancellation and shutdown.
-        Automatically creates a background task to monitor for cancellation and
-        shutdown events, cleaning it up when the context exits.
-
-        If shutdown event was triggered, raises EngineShutdown on exit.
-
-        Args:
-            request_id_future: Future that will be set with the SGLang request ID
-                              when the first response arrives.
-            context: Context object for cancellation handling
-            request_ids: Live set of unfinished parallel-choice IDs to abort on exit.
-
-        Yields:
-            asyncio.Task: The cancellation monitoring task being managed
-        """
-        logging.debug(f"Creating cancellation monitor task for Context: {context.id()}")
-
-        # Start the cancellation monitoring task
-        cancellation_task = asyncio.create_task(
-            self._handle_cancellation(request_id_future, context, request_ids)
-        )
-
-        try:
-            yield cancellation_task
-        finally:
-            # Stream closure can beat the monitor's cancellation wake-up.
-            if request_ids is not None:
-                self._abort_requests(request_ids, context)
-            # Clean up the background cancellation task
-            request_id = "unknown"
-            if request_id_future.done() and not request_id_future.cancelled():
-                try:
-                    request_id = request_id_future.result()
-                except Exception:
-                    pass
-
-            if not cancellation_task.done():
-                logging.debug(
-                    f"Cancelling cancellation monitor task for SGLang Request ID {request_id}, Context: {context.id()}"
-                )
-                cancellation_task.cancel()
-                try:
-                    await cancellation_task
-                except asyncio.CancelledError:
-                    pass
-            else:
-                cancellation_task.result()
-
-            if self.shutdown_event and self.shutdown_event.is_set():
-                raise EngineShutdown("Engine was shut down during token generation")

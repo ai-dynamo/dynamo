@@ -59,6 +59,12 @@ If your workload consists entirely of unique multimodal content, the cache provi
 
 Set `--multimodal-embedding-cache-capacity-gb` based on your expected working set of unique multimodal content. A larger cache holds more embeddings but consumes more host memory.
 
+> [!NOTE]
+> If one image URL can return different content for different sessions, enable
+> session-scoped caching as described in [Multimodal Model Serving](overview.md#session-scoping).
+> Dynamo then partitions its image embedding caches by affinity scope and
+> bypasses them when a request has no valid scope.
+
 See the backend-specific documentation ([vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#embedding-cache), [TRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md#embedding-cache)) for more details.
 
 ## How It Works

@@ -43,7 +43,9 @@ fn drive_moved_jail(
             a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                 inner,
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             })
         })
 }
@@ -70,6 +72,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -251,6 +254,7 @@ async fn test_required_tool_choice_parses_json_array() {
             .as_deref(),
         Some(r#"{"topic":"memory"}"#)
     );
+    assert_responses_preserves_forced_calls(response).await;
 }
 
 #[tokio::test]
@@ -518,7 +522,9 @@ fn make_text_chunk(
             service_tier: None,
         },
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -661,7 +667,9 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
         a.data.map(|inner| NvCreateChatCompletionStreamResponse {
             inner,
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         })
     })
     .collect()
@@ -987,6 +995,26 @@ async fn test_qwen3_coder_tool_choice_named_correct_tool_passes() {
     assert_eq!(calls[0].0, "get_weather");
 }
 
+const QWEN3_DOTTED: &str = "<tool_call>\n<function=my-tool.v2>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>";
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_auto_dotted_name() {
+    let responses = apply_jail_with_parser_and_choice(QWEN3_DOTTED, "qwen3_coder", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_named_dotted_name_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(QWEN3_DOTTED, "qwen3_coder", named_choice("my-tool.v2"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
 #[tokio::test]
 async fn test_qwen3_coder_tool_choice_named_wrong_tool_filtered() {
     let responses =
@@ -1059,6 +1087,7 @@ async fn test_nemotron_deci_tool_choice_named_wrong_tool_filtered() {
 
 const HARMONY_GET_WEATHER: &str = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
 const HARMONY_SEARCH: &str = "<|channel|>commentary to=functions.search <|constrain|>json<|message|>{\"query\":\"Paris weather\"}<|call|>";
+const HARMONY_DOTTED: &str = "<|channel|>commentary to=functions.my-tool.v2 <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
 
 #[tokio::test]
 async fn test_harmony_tool_choice_auto() {
@@ -1073,6 +1102,24 @@ async fn test_harmony_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_auto_dotted_name() {
+    let responses = apply_jail_with_parser_and_choice(HARMONY_DOTTED, "harmony", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_named_dotted_name_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(HARMONY_DOTTED, "harmony", named_choice("my-tool.v2"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
 }
 
 #[tokio::test]
@@ -1103,4 +1150,37 @@ async fn test_harmony_tool_choice_named_wrong_tool_filtered() {
         calls.is_empty(),
         "wrong tool must be filtered; got {calls:?}"
     );
+}
+
+async fn assert_responses_preserves_forced_calls(response: NvCreateChatCompletionStreamResponse) {
+    use dynamo_llm::protocols::{
+        Annotated,
+        openai::{
+            ParsingOptions,
+            chat_completions::{
+                NvCreateChatCompletionResponse, aggregator::ChatCompletionAggregator,
+            },
+            responses::{ResponseParams, chat_completion_to_response},
+        },
+    };
+    use dynamo_protocols::types::responses::OutputItem;
+
+    let expected = response.inner.choices[0].delta.tool_calls.clone().unwrap();
+    let chat = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([Annotated::from_data(response)]),
+        ParsingOptions::default(),
+    )
+    .await
+    .unwrap();
+    let response = chat_completion_to_response(chat, &ResponseParams::default(), None).unwrap();
+    assert_eq!(response.inner.output.len(), expected.len());
+    for (item, expected) in response.inner.output.iter().zip(expected) {
+        let OutputItem::FunctionCall(call) = item else {
+            panic!("expected a guided tool call without a model parser");
+        };
+        assert_eq!(Some(&call.call_id), expected.id.as_ref());
+        let function = expected.function.unwrap();
+        assert_eq!(Some(call.name.as_str()), function.name.as_deref());
+        assert_eq!(Some(call.arguments.as_str()), function.arguments.as_deref());
+    }
 }

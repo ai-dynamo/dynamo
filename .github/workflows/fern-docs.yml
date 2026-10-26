@@ -72,7 +72,7 @@ permissions:
 jobs:
   # Detect changed files for conditional job execution
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Skip for tag pushes - version release doesn't need changed-files check
     if: github.ref_type != 'tag'
     outputs:
@@ -114,7 +114,7 @@ jobs:
         github.event_name == 'workflow_dispatch'
       ) &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Determine context
         id: ctx
@@ -189,6 +189,15 @@ jobs:
           fi
           python3 -m pip install --quiet pyyaml
           python3 source-checkout/docs/fern/scripts/gen_nightly_selector.py
+
+      - name: Generate nightly ledger tables
+        # The generated nightly module is the source for both the interactive
+        # ledger and the agent-readable tables. Do this before content sync so
+        # docs-website receives the same rows as the install selector.
+        run: |
+          set -euo pipefail
+          python3 source-checkout/docs/fern/scripts/gen_llms_tables.py \
+            --nightly-data source-checkout/docs/fern/components/nightly-selector-data.generated.ts
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -364,7 +373,11 @@ jobs:
             sync_assets
             exit 0
           fi
-          python3 "$gen_script" --assets-only
+          # Same nightly rows as "Generate nightly ledger tables" above, which
+          # already rewrote releases.json and releases-atom.xml as a side
+          # effect. It runs again so this asset step stands on its own.
+          python3 "$gen_script" --assets-only \
+            --nightly-data source-checkout/docs/fern/components/nightly-selector-data.generated.ts
 
           generated_json="source-checkout/docs/fern/assets/releases.json"
           generated_atom="source-checkout/docs/fern/assets/releases-atom.xml"
@@ -737,7 +750,7 @@ jobs:
     if: |
       github.ref_type == 'tag' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && github.event.inputs.tag != null)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Determine version tag
         id: version
@@ -770,6 +783,17 @@ jobs:
           ref: ${{ steps.version.outputs.tag }}
           path: source-checkout
           fetch-depth: 1
+
+      - name: Checkout workflow scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # Scripts this workflow revision calls that may predate the tag, so a
+          # force_rebuild of an older release still finds them.
+          ref: ${{ github.sha }}
+          path: workflow-checkout
+          fetch-depth: 1
+          sparse-checkout: docs/fern/scripts/relink_shared_reference.py
+          sparse-checkout-cone-mode: false
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -903,8 +927,22 @@ jobs:
             echo "::error::$SHARED not found — the shared-reference exclusion would be a no-op and $TAG would freeze its own reference copy. If reference/general/ was renamed, update the path key in this workflow and in docs/fern/scripts/simulate_docs_website.sh."
             exit 1
           fi
-          rm -rf "$SHARED"
+          # A page removed or moved on main after this tag was cut has no shared
+          # copy in pages-dev, so the tag keeps its own frozen copy of it.
+          while IFS= read -r f; do
+            rel="${f#docs-checkout/fern/pages-$TAG/}"
+            if [ -e "docs-checkout/fern/pages-dev/$rel" ]; then
+              rm -f "$f"
+            else
+              echo "::warning::$rel has no shared copy in pages-dev; $TAG keeps its own."
+            fi
+          done < <(find "$SHARED" -type f)
           find "docs-checkout/fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
+
+          # Snapshot pages still link to the copies just dropped; point them at
+          # the shared pages-dev/ files the nav serves instead.
+          python3 workflow-checkout/docs/fern/scripts/relink_shared_reference.py \
+            "docs-checkout/fern/pages-$TAG" docs-checkout/fern/pages-dev
 
       - name: Snapshot translation mirrors
         run: |
@@ -1033,6 +1071,14 @@ jobs:
           # injected an empty `variants: []` once #12410 removed the variants,
           # which invalidates the whole navigation against Fern's schema.
           perl -pi -e "s|path: \.\./pages-$TAG/reference/general/|path: ../pages-dev/reference/general/|g" "$VERSION_FILE"
+
+          # Pages the snapshot kept (no shared copy) stay on the frozen snapshot.
+          if [ -d "docs-checkout/fern/pages-$TAG/reference/general" ]; then
+            while IFS= read -r f; do
+              rel="${f#docs-checkout/fern/pages-$TAG/}"
+              perl -pi -e "s|path: \.\./pages-dev/\Q$rel\E|path: ../pages-$TAG/$rel|g" "$VERSION_FILE"
+            done < <(find "docs-checkout/fern/pages-$TAG/reference/general" -type f)
+          fi
 
           if ! grep -q "path: \.\./pages-dev/reference/general/" "$VERSION_FILE"; then
             echo "::error::$VERSION_FILE has no shared reference/general/ paths after the revert; $TAG would freeze its own reference copy."

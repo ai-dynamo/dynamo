@@ -24,10 +24,15 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    crate::kv_router::plugins::RouterPluginBuilder::default()
+        .validate_config(&engine_config.local_model().router_config().kv_router_config)?;
+
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .metrics_prefix(engine_config.local_model().metrics_prefix())
         .http_cancel_token(Some(distributed_runtime.primary_token()))
+        .runtime(Some(distributed_runtime.clone()))
+        .namespace(engine_config.local_model().namespace().map(str::to_owned))
         .with_request_template(engine_config.local_model().request_template());
 
     // Set HTTP metrics port if provided (for parallel test execution)

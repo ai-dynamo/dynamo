@@ -23,19 +23,19 @@ Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Framework</span>
-<input type="radio" id="recipe-framework-vllm" name="recipe-framework" value="vllm" defaultChecked />
-<label htmlFor="recipe-framework-vllm">vLLM</label>
 <input type="radio" id="recipe-framework-sglang" name="recipe-framework" value="sglang" />
 <label htmlFor="recipe-framework-sglang">SGLang</label>
+<input type="radio" id="recipe-framework-vllm" name="recipe-framework" value="vllm" defaultChecked />
+<label htmlFor="recipe-framework-vllm">vLLM</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">GPU</span>
-<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" />
-<label htmlFor="recipe-sku-gb300">GB300</label>
-<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
-<label htmlFor="recipe-sku-gb200">GB200</label>
 <input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
 <label htmlFor="recipe-sku-h200">H200</label>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" />
+<label htmlFor="recipe-sku-gb300">GB300</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
@@ -85,7 +85,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
 <span><b>Precision</b> MXFP4 experts, FP8 KV</span>
-<span><b>GPUs</b> 24x GB300 (3 replicas)</span>
+<span><b>GPUs</b> 16x GB300 (2 replicas)</span>
 <span><b>Parallelism</b> DCP8 attention, TP8/EP1 MoE</span>
 <span><b>Routing</b> Load-aware</span>
 <span><b>Speculative decoding</b> DSPARK</span>
@@ -175,7 +175,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-
 
 <div data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
 
-- A Kubernetes cluster with the Dynamo platform installed and 24 GB300 GPUs available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and 16 GB300 GPUs available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to the checkpoint `moonshotai/Kimi-K3` and draft model `RadixArk/Kimi-K3-DSpark`.
 
@@ -340,8 +340,8 @@ Benchmarking uses a synthetic acceptance length with the SpeedBench coding AL.
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
 | Agentic (15% subset) | SGLang | Aggregated (2 workers) | GB200 | 28 | 32.9 | 56.1 | 828 |
 | Agentic (15% subset) | SGLang | Disaggregated (2P1D) | GB200 | 24 | 29.3 | 77.9 | 3,090 |
-| Agentic (15% subset) | SGLang | Aggregated (3 workers) | GB300 | 54 | 84.4 | 51.3 | 573 |
-| Agentic (15% subset) | SGLang | Disaggregated (1P1D) | GB300 | 18 | 61.0 | 75.9 | 4,809 |
+| Agentic (15% subset) | SGLang | Aggregated (2 workers) | GB300 | 36 | 91.3 | 55.6 | 486 |
+| Agentic (15% subset) | SGLang | Disaggregated (1P1D) | GB300 | 18 | 62.0 | 77.6 | 4,793 |
 | Agentic (15% subset) | vLLM | Aggregated (1 worker) | H200 | 4 | 3.54 | 39.95 | 3660 |
 | Agentic (15% subset) | vLLM | Aggregated (1 worker) | GB200 | 7 | 20.1 | 56.1 | 638 |
 | Agentic (15% subset) | vLLM | Aggregated (1 worker) | GB300 | 24 | 62.2 | 57.8 | 879 |
@@ -355,10 +355,23 @@ Benchmarking uses a synthetic acceptance length with the SpeedBench coding AL.
 | vLLM | GB300 | Disaggregated (1P1D) | MXFP4 experts, FP8 KV | KV-aware | DSPARK | 1M |
 | vLLM | GB200 | Aggregated (1 worker) | MXFP4 experts, FP8 KV | KV-aware | None | 1M |
 | vLLM | H200 | Aggregated (1 worker) | MXFP4 experts, BF16 KV | KV-aware | None | 1M |
-| SGLang | GB300 | Aggregated (3 workers) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
+| SGLang | GB300 | Aggregated (2 workers) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
 | SGLang | GB300 | Disaggregated (1P1D) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
 | SGLang | GB200 | Aggregated (2 workers) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
 | SGLang | GB200 | Disaggregated (2P1D) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
+
+## Workaround: Health Check During Long Prefill
+
+Dynamo v0.5.1 and later run a canary health check on each worker. The check sends a small `generate` request with a timeout of 3 seconds (`DYN_HEALTH_CHECK_REQUEST_TIMEOUT`). The operator turns the check on from its runtime feature gate. During a long prefill, the check can wait for more than 3 seconds. The liveness probe then fails, and Kubernetes restarts a worker that is busy but healthy.
+
+Before the restart, the worker log shows a `Health check timeout for` warning that names the `generate` endpoint. If you see this warning, turn off the canary check on each SGLang worker:
+
+```yaml
+- name: DYN_HEALTH_CHECK_ENABLED
+  value: "false"
+```
+
+The manifest value overrides the operator default. With the canary off, Kubernetes does not restart the worker during a long prefill. The trade-off: liveness no longer checks the `generate` endpoint.
 
 ## Limitations
 

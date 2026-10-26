@@ -179,6 +179,41 @@ def test_convert_output_to_chunk_normalizes_abort_finish_reason():
     assert chunk["finish_reason"] == "cancelled"
 
 
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize(
+    "message,err_type",
+    [
+        ("PD/EPD remote transfer failed or timed out", "UnknownError"),
+        ("PD/EPD remote transfer failed or timed out", 522),
+        ("kv transfer failed", None),
+        ("remote peer disconnected", 521),
+        ("NaN in logits", 523),
+    ],
+)
+def test_convert_output_preserves_native_failure(as_object, message, err_type):
+    reason = {
+        "type": "abort",
+        "message": message,
+        "err_type": err_type,
+    }
+    if as_object:
+
+        class FinishReason:
+            def to_json(self):
+                return reason
+
+        finish_reason = FinishReason()
+    else:
+        finish_reason = reason
+    with pytest.raises(RuntimeError, match=message):
+        convert_output_to_chunk(
+            {
+                "output_ids": [],
+                "meta_info": {"finish_reason": finish_reason},
+            }
+        )
+
+
 def test_validate_single_choice_sampling_rejects_n_greater_than_one():
     with pytest.raises(InvalidArgument, match="n=2"):
         _validate_single_choice_sampling(
@@ -209,3 +244,32 @@ def test_completion_delta_output_preserves_later_token_delta():
 
     assert emitted == 2
     assert delta_out["output_ids"] == [100]
+
+
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "request was cancelled",
+        "generation stopped by content filter",
+        "Abort before prefill",
+        "AbortReq from client",
+        "Aborted by AbortReq.",
+        "Aborted by pause",
+    ],
+)
+@pytest.mark.parametrize("err_type", [None, 522])
+def test_convert_output_preserves_native_cancellation(as_object, message, err_type):
+    reason = {"type": "abort", "message": message, "err_type": err_type}
+
+    class FinishReason:
+        def to_json(self):
+            return reason
+
+    chunk = convert_output_to_chunk(
+        {
+            "output_ids": [],
+            "meta_info": {"finish_reason": FinishReason() if as_object else reason},
+        }
+    )
+    assert chunk["finish_reason"] == "cancelled"
