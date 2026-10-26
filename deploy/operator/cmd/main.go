@@ -193,11 +193,13 @@ func main() {
 	setupLog.Info("Operator configuration loaded successfully", "configFile", configFile)
 
 	// Validate and normalize operator version to semver
-	if _, err := semver.NewVersion(operatorVersion); err != nil {
+	parsedOperatorVersion, err := semver.NewVersion(operatorVersion)
+	if err != nil {
 		setupLog.Error(err, "operator-version is not valid semver",
 			"provided", operatorVersion, "error", err.Error())
 		os.Exit(1)
 	}
+	dynamoVersion := fmt.Sprintf("%d.%d.%d", parsedOperatorVersion.Major(), parsedOperatorVersion.Minor(), parsedOperatorVersion.Patch())
 	setupLog.Info("Operator version configured", "version", operatorVersion)
 
 	pullPolicy := corev1.PullPolicy(operatorImagePullPolicy)
@@ -499,7 +501,7 @@ func main() {
 	if err := registerControllers(
 		mgr, operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
-		operatorImage, pullPolicy, plannerImage,
+		operatorImage, pullPolicy, plannerImage, dynamoVersion,
 		dgdrV1beta2Enabled,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
@@ -551,6 +553,7 @@ func registerControllers(
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
 	plannerImage string,
+	dynamoVersion string,
 	dgdrV1beta2Enabled bool,
 ) error {
 	if operatorCfg.Namespace.Restricted == "" {
@@ -619,6 +622,7 @@ func registerControllers(
 		if err := controller.SetupDynamoGraphDeploymentRunV1beta2(mgr, controller.DynamoGraphDeploymentRunSetupOptions{
 			SetupOptions:            setupOptions,
 			PlannerImage:            plannerImage,
+			DynamoVersion:           dynamoVersion,
 			OperatorImage:           operatorImage,
 			OperatorImagePullPolicy: operatorPullPolicy,
 		}); err != nil {
