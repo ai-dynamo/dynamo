@@ -158,7 +158,6 @@ mod tests {
     use super::*;
     use crate::replicas::ReplicaId;
 
-    /// Reads `json` as `T` and writes it back unchanged.
     fn round_trip<T: Serialize + for<'de> Deserialize<'de>>(json: Value) -> T {
         let parsed: T = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);

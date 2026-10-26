@@ -15,7 +15,6 @@ pub enum WatchEvent<T, K> {
     Resync(Snapshot<T>),
 }
 
-/// A list, and whether it is complete.
 #[derive(Clone, Debug)]
 pub struct Snapshot<T> {
     pub items: Vec<T>,

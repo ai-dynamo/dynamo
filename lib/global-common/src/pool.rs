@@ -138,7 +138,6 @@ impl PoolIdDeriver for V1PoolIdDeriver {
     }
 }
 
-/// Where a pool runs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolLocation {
     pub region: String,
