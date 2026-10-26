@@ -3,6 +3,11 @@
 
 use std::process::{Command, Output};
 
+/// Prevent an uncaptured thread from caching a shared callsite's interest for a sole capture.
+pub(crate) fn tracing_interest_guard() -> tracing::Dispatch {
+    tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default())
+}
+
 /// Carry execution support without inheriting process-global test configuration.
 pub(crate) fn isolated_command(exact_test_name: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
@@ -19,6 +24,13 @@ pub(crate) fn isolated_command(exact_test_name: &str) -> Command {
             command.env(key, value);
         }
     }
+    // Harmony's downloader publishes directly to its cache path; child processes must not share it.
+    let tokenizer_cache = tempfile::Builder::new()
+        .prefix("dynamo-tokenizer-")
+        .tempdir()
+        .expect("create isolated tokenizer cache")
+        .keep();
+    command.env("TIKTOKEN_RS_CACHE_DIR", tokenizer_cache);
     // The parent harness owns ignoring tests; explicitly rerun its selected test in the child.
     command.args([
         "--exact",
@@ -57,6 +69,35 @@ pub(crate) fn assert_isolated_success(output: &Output) {
             .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
         "isolated subprocess must run exactly one passing test: {stdout}\n{stderr}"
     );
+}
+
+#[test]
+fn isolated_commands_own_distinct_tokenizer_caches() {
+    let _interest_guard = tracing_interest_guard();
+    let commands = [
+        isolated_command("cache-probe"),
+        isolated_command("cache-probe"),
+    ];
+    let paths: Vec<_> = commands
+        .iter()
+        .map(|command| {
+            let path = command
+                .get_envs()
+                .find_map(|(key, value)| {
+                    (key == "TIKTOKEN_RS_CACHE_DIR").then_some(value).flatten()
+                })
+                .expect("isolated cache override");
+            let path = std::path::PathBuf::from(path);
+            assert!(path.is_dir());
+            assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+            let child_tmpdir = command
+                .get_envs()
+                .find_map(|(key, value)| (key == "TMPDIR").then_some(value).flatten());
+            assert_eq!(child_tmpdir, std::env::var_os("TMPDIR").as_deref());
+            path
+        })
+        .collect();
+    assert_ne!(paths[0], paths[1]);
 }
 
 #[test]

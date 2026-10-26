@@ -3877,9 +3877,7 @@ mod tests {
     fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
         use tracing_subscriber::layer::SubscriberExt;
 
-        // A sole dispatcher lets tracing cache an uncaptured thread's interest for shared callsites.
-        // Keep interest per dispatcher while this thread-local capture is active.
-        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
         let out = tracing::subscriber::with_default(subscriber, body);
