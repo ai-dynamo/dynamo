@@ -173,6 +173,20 @@ def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
     return resolve_routing_image_token_id(config.model, _resolve_model_dir(config))
 
 
+def build_kv_connector_config(config: Config):
+    if config.connector:
+        if config.connector[0] == "kvbm":
+            raise ValueError(
+                "TRT-LLM KVBM integration has been removed. Use --connector none."
+            )
+        elif config.connector[0] == "none":
+            return None
+        else:
+            logging.error(f"Invalid connector: {config.connector[0]}")
+            sys.exit(1)
+    return None
+
+
 def _warn_override_collisions(target: dict, source: dict, path: str = "") -> None:
     """Log warnings for keys in *source* that will overwrite existing values in *target*."""
     for key, new_val in source.items():
@@ -358,6 +372,7 @@ async def init_llm_worker(
         capacity_scheduler_policy=CapacitySchedulerPolicy.GUARANTEED_NO_EVICT,
         dynamic_batch_config=dynamic_batch_config,
     )
+    kv_connector_config = build_kv_connector_config(config)
 
     try:
         model_loader_extra_config = _parse_model_loader_extra_config(
@@ -424,6 +439,7 @@ async def init_llm_worker(
         "enable_iter_perf_stats": (
             config.publish_metrics or config.publish_forward_pass_metrics
         ),
+        "kv_connector_config": kv_connector_config,
     }
 
     arg_map["load_format"] = engine_load_format

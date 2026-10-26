@@ -99,6 +99,13 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
                 )
                 self.connector = ["none"]
 
+    def has_connector(self, connector_name: str) -> bool:
+        return (
+            self.connector is not None
+            and len(self.connector) > 0
+            and connector_name == self.connector[0]
+        )
+
 
 @register_encoder(Config)
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:

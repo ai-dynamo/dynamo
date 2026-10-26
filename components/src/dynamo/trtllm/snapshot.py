@@ -171,6 +171,7 @@ def _validate_supported_snapshot_config(config: Any) -> None:
             ),
             (not config.encode_endpoint, "--encode-endpoint"),
             (not config.frontend_decoding, "--frontend-decoding"),
+            (not config.has_connector("kvbm"), "--connector kvbm"),
         )
         if not supported
     ]
