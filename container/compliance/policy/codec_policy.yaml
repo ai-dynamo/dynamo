@@ -80,9 +80,14 @@ deny_components:
 # the narrow decoder/encoder allowlist in wheel_builder.Dockerfile. Matches here
 # are reported as ALLOWED and never fail the build.
 allow_paths:
-  - "/usr/local/lib/libav"
-  - "/usr/local/lib/libsw"
-  - "/usr/local/lib/libpostproc"
+  - "/usr/local/lib/libavcodec_dynamo"
+  - "/usr/local/lib/libavdevice_dynamo"
+  - "/usr/local/lib/libavfilter_dynamo"
+  - "/usr/local/lib/libavformat_dynamo"
+  - "/usr/local/lib/libavutil_dynamo"
+  - "/usr/local/lib/libswresample_dynamo"
+  - "/usr/local/lib/libswscale_dynamo"
+  - "/usr/local/lib/libpostproc_dynamo"
   - "/usr/local/src/ffmpeg"   # retained source tree (kept for legal reasons)
 
 # Standalone tools must match exactly, without allowing similarly named paths.
@@ -93,6 +98,13 @@ allow_exact_paths:
 # Explicit third-party exceptions: LOGGED in the report but do NOT fail the build.
 # Every entry must carry a reason and an owner so the waiver is auditable.
 exceptions:
+  - glob: "/usr/local/lib/lib*-nimlgpl.so*"
+    reason: >-
+      The NIM vLLM enterprise base ships its own LGPL FFmpeg libraries
+      (libav*/libsw* with the -nimlgpl suffix) for its PyNvVideoCodec and audio
+      paths. They are approved and validated by NIM and kept as shipped; the
+      in-tree FFmpeg uses distinct _dynamo SONAMEs and does not replace them.
+    owner: NIM
   - glob: "**/nvidia/dali/.libs/*"
     reason: >-
       NVIDIA DALI (nvidia-dali-cuda130) vendors its own ffmpeg stack (libav* plus
