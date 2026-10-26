@@ -50,22 +50,25 @@ impl MetaInfo {
 
     /// Merges one `map<string, string>` entry, allocating only for [`META_KEYS`].
     fn merge_entry(&mut self, buf: &mut impl Buf, ctx: DecodeContext) -> Result<(), DecodeError> {
-        // `None` until the key is read: protobuf allows the value to come first.
-        let mut index: Option<Option<usize>> = None;
+        let mut index = None;
+        // Protobuf allows the value before the key; skip it only once the key
+        // is known to be unread.
+        let mut is_unknown_key = false;
         let mut value = String::new();
         encoding::merge_loop(&mut (), buf, ctx, |_, buf, ctx| {
             let (tag, wire_type) = encoding::decode_key(buf)?;
             match tag {
                 1 => {
-                    index = Some(decode_meta_key(wire_type, buf)?);
+                    index = decode_meta_key(wire_type, buf)?;
+                    is_unknown_key = index.is_none();
                     Ok(())
                 }
-                2 if index == Some(None) => encoding::skip_field(wire_type, tag, buf, ctx),
+                2 if is_unknown_key => encoding::skip_field(wire_type, tag, buf, ctx),
                 2 => encoding::string::merge(wire_type, &mut value, buf, ctx),
                 _ => encoding::skip_field(wire_type, tag, buf, ctx),
             }
         })?;
-        if let Some(Some(index)) = index {
+        if let Some(index) = index {
             self.0[index] = Some(value);
         }
         Ok(())
@@ -127,7 +130,6 @@ impl Message for GenerateChunk {
         *self = Self::default();
     }
 
-    // The sidecar only receives `GenerateResponse`; it never encodes one.
     fn encode_raw(&self, _buf: &mut impl BufMut) {
         unreachable!("GenerateChunk is decode-only")
     }

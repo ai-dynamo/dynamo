@@ -7,7 +7,6 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
@@ -18,7 +17,6 @@ use dynamo_sidecar_common::{
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
-use tonic::GrpcMethod;
 use tonic::codec::ProstCodec;
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::Channel;
@@ -325,7 +323,6 @@ fn client_from_channel(channel: Channel) -> Client {
 
 /// `SglangServiceClient::generate`, but decoding each streamed response as a
 /// [`GenerateChunk`] instead of a `pb::GenerateResponse`.
-#[derive(Clone)]
 pub(crate) struct GenerateClient(tonic::client::Grpc<Channel>);
 
 impl GenerateClient {
@@ -346,24 +343,15 @@ impl GenerateClient {
             .await
             .map_err(|error| tonic::Status::unknown(format!("Service was not ready: {error}")))?;
         let path = PathAndQuery::from_static("/sglang.runtime.v1.SglangService/Generate");
-        let mut request = tonic::Request::new(request);
-        request.extensions_mut().insert(GrpcMethod::new(
-            "sglang.runtime.v1.SglangService",
-            "Generate",
-        ));
         self.0
-            .server_streaming(request, path, ProstCodec::default())
+            .server_streaming(tonic::Request::new(request), path, ProstCodec::default())
             .await
     }
 }
 
 /// Fixed-size pool of independent HTTP/2 connections. Generation calls are
 /// round-robined so high concurrency does not funnel through one codec task.
-pub struct Pool {
-    control: Client,
-    streams: Vec<GenerateClient>,
-    next: AtomicUsize,
-}
+pub struct Pool(GrpcChannelPool);
 
 impl Pool {
     // bootstrap=false: Pool::connect's only call site is LLMEngine::start
@@ -374,28 +362,20 @@ impl Pool {
         cfg: &GrpcTransportConfig,
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
-        let pool = connect_pool(uri, *cfg, deadline, false).await?;
-        Ok(Self {
-            control: client_from_channel(pool.next_channel()),
-            streams: (0..pool.len())
-                .map(|_| GenerateClient::new(pool.next_channel()))
-                .collect(),
-            next: AtomicUsize::new(0),
-        })
+        Ok(Self(connect_pool(uri, *cfg, deadline, false).await?))
     }
 
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
-        self.streams.len()
+        self.0.len()
     }
 
     pub(crate) fn stream_client(&self) -> GenerateClient {
-        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.streams.len();
-        self.streams[index].clone()
+        GenerateClient::new(self.0.next_channel())
     }
 
     pub fn control_client(&self) -> Client {
-        self.control.clone()
+        client_from_channel(self.0.next_channel())
     }
 }
 
