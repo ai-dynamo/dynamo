@@ -32,6 +32,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 
 | Model | Framework | Mode | GPUs | Deployment | Benchmark | Notes | GAIE |
 |-------|-----------|------|------|------------|-----------|-------|------|
+| **[Beam-1.0-501B-A23B](beam-1.0-501b/)** | SGLang / vLLM | Aggregated / Disaggregated | 8–16x H200; 8x B200/B300/GB200/GB300 | ✅ | ✅ | FP8 / NVFP4, FP8 KV cache, KV-aware routing, NIXL prefill/decode transfer, and DFlash2 block length 8 | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x H100/H200/A100 | ✅ | ✅ | FP8 quantization | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x H100/H200/A100 | ✅ | ✅ | Prefill + Decode separation | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/vllm/disagg/)** | vLLM | Disagg (Single-Node) | 8x A100 | ✅ | ✅ | 2× TP2 prefill + 1× TP4 decode, NixlConnector KV transfer | ❌ |
@@ -107,6 +108,7 @@ These recipes are under active development and may require additional setup step
 | **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/sglang/agg/)** | SGLang | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available (shared with [DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/sglang/agg/)). |
 | **[Solar-Open2-250B-NVFP4](solar-open2-250b/vllm/agg-b200-chat/)** | vLLM | Aggregated | 4x B200 | ✅ | Text only — NVFP4 checkpoint, 2 replicas × TP2, reasoning + tool calling. Prebuilt image available. |
 | **[Solar-Open2-250B-NVFP4](solar-open2-250b/vllm/disagg-b200-chat/)** | vLLM | Disaggregated | 8x B200 | ✅ | Text only — NVFP4 checkpoint, 1× prefill TP4 + EP and 2× decode TP2, NIXL/RDMA KV transfer, reasoning + tool calling. Prebuilt image available. |
+| **[MiniMax-M3.1-Flash](minimax-m3.1/)** | vLLM, SGLang, TensorRT-LLM | Aggregated | 4x B200 or 4x GB300 | ✅ | Day-0 profile for the MiniMax-M3.1-Flash checkpoint — TP4 + EP on one node, 1M context, up to 256 concurrent requests with prefix caching (plus FP8 KV cache and KV-aware routing on vLLM and SGLang), reasoning + tool calling; text + image input. |
 
 ## Recipe Structure
 

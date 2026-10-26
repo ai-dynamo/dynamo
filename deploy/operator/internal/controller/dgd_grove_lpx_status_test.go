@@ -10,7 +10,6 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -46,10 +45,8 @@ func TestLPXStatusUsesOneCurrentChild(t *testing.T) {
 			for i, component := range source.Spec.Components {
 				replicas := int32(i + 1)
 				child.Status.Components[component.ComponentName] = v1alpha1.LPXComponentStatus{
-					ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{
-						Replicas: replicas, UpdatedReplicas: replicas, ReadyReplicas: ptr.To(replicas),
-						AvailableReplicas: ptr.To(replicas), ScheduledReplicas: ptr.To(replicas),
-					},
+					Replicas: replicas, UpdatedReplicas: replicas, ReadyReplicas: new(replicas),
+					AvailableReplicas: new(replicas), ScheduledReplicas: new(replicas),
 					Conditions: []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
 				}
 			}

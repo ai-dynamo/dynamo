@@ -84,14 +84,12 @@ func resolvePipelineRequests(
 			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
-					Annotations: map[string]string{
-						lpx.DeploymentNameAnnotation:                 deployment.Name,
-						pipelineRequestModelAnnotation:               projection.Model(),
-						lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
-						lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
-					},
+				Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
+				Annotations: map[string]string{
+					lpx.DeploymentNameAnnotation:                 deployment.Name,
+					pipelineRequestModelAnnotation:               projection.Model(),
+					lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
+					lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
 				},
 				Spec: projection.RequestSpec(replicaPlan, replicaPlan.Agents[index].CliqueName),
 			}
@@ -240,11 +238,11 @@ func pipelineRequestCommitted(request *lpxv1alpha1.LPUPipelineRequest) bool {
 	return request.Status != nil && request.Status.Committed != nil
 }
 
-// removeReleasedAgentPods removes journaled Agent Pods for matching, still-desired
-// requests. The Dynamo operator's LPX controller owns this cleanup; Grove recreates
-// the Pods, and the LPX scheduler completes release and replanning.
-// pcsgs contains owned observations. Requests are owned observations, or unpublished
-// desired objects with nil status.
+// removeReleasedAgentPods removes journaled Agent Pods for observed requests with
+// an eligible release. Grove recreates the Pods, and the LPX scheduler completes
+// release and replanning. The caller must complete DGD handoff and owned Grove-resource
+// observation checks first. pcsgs and requests contain owned observations, rather than
+// derived desired requests. Both maps may be nil before initial PCS creation.
 func (r *graphReconciler) removeReleasedAgentPods(ctx context.Context, pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup, requests map[string]*lpxv1alpha1.LPUPipelineRequest) error {
 	var cleanupErr error
 	for _, request := range requests {

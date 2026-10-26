@@ -119,6 +119,31 @@ def test_load_can_cancel_startup_and_drain_serving_workers(mode, ready):
     assert decision.num_prefill is None
 
 
+@pytest.mark.parametrize(
+    ("mode", "target"),
+    [
+        ("prefill", "load"),
+        ("prefill", "latency"),
+        ("prefill", "throughput"),
+        ("decode", "load"),
+        ("agg", "load"),
+    ],
+)
+def test_startup_cancellation_preserves_last_ready_worker_with_zero_floor(mode, target):
+    config = _config(mode, min_endpoint=0)
+    config.optimization_target = target
+    capabilities = _caps()
+    capabilities.prefill.context_length = 4096
+    state = PlannerScalingState(config, capabilities)
+    counts = _counts()
+    if mode == "prefill":
+        counts.pending_num_prefill, counts.pending_num_decode = 1, 0
+    state.observe_worker_counts(counts)
+    decision = state.advance_load(_obs())
+    assert decision is not None
+    assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 1
+
+
 @pytest.mark.parametrize("kv", [500, 950])
 def test_hold_or_scale_up_signal_does_not_cancel_startup(kv):
     state = PlannerScalingState(_config(), _caps())

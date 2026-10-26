@@ -5,15 +5,17 @@
 FROM nvidia/cuda:13.1.1-devel-ubuntu24.04
 
 RUN apt-get update \
- && apt-get install -yq libucx0 python3-dev python3-pip python3-venv git protobuf-compiler curl ffmpeg libclang-dev \
+ && apt-get install -yq ca-certificates libucx0 python3-dev python3-pip python3-venv git protobuf-compiler curl ffmpeg libclang-dev \
+ && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
+ && update-ca-certificates \
  && apt-get clean
 
-COPY --from=ghcr.io/astral-sh/uv:0.10.11 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
 ENV UV_LINK_MODE=copy
 
 RUN uv venv /opt/dynamo/venv --python 3.12 \
  && . /opt/dynamo/venv/bin/activate \
- && uv pip install pip setuptools wheel packaging ninja psutil uvloop \
+ && uv pip install certifi==2026.10.23 pip==26.2.2 setuptools wheel packaging ninja psutil uvloop \
  && uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130 \
  && uv pip install flashinfer-python
 

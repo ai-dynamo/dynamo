@@ -759,8 +759,8 @@ class PlannerConfig(BaseModel):
             "may override this limit."
         ),
     )
-    max_gpu_budget: int = SLAPlannerDefaults.max_gpu_budget
-    min_gpu_budget: int = SLAPlannerDefaults.min_gpu_budget
+    max_gpu_budget: int = Field(default=SLAPlannerDefaults.max_gpu_budget, ge=-1)
+    min_gpu_budget: int = Field(default=SLAPlannerDefaults.min_gpu_budget, ge=-1)
     """Per-DGD GPU floor enforced by the local planner. -1 disables (default).
 
     When set alongside ``max_gpu_budget`` with ``min == max``, the local
@@ -813,6 +813,19 @@ class PlannerConfig(BaseModel):
         ),
     )
 
+    enable_runtime_reconfiguration: bool = Field(
+        default=False,
+        description=(
+            "Expose /engine/planner on DYN_SYSTEM_PORT. Restrict this management "
+            "listener to trusted callers; no application authentication is added."
+        ),
+    )
+    runtime_warmup_trace_dir: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Directory containing traces permitted for runtime predictor warmup. Required when using warmup_trace.",
+    )
+
     decode_engine_num_gpu: Optional[int] = None
     prefill_engine_num_gpu: Optional[int] = None
 
@@ -850,10 +863,14 @@ class PlannerConfig(BaseModel):
     ttft_ms: float = Field(
         default=SLAPlannerDefaults.ttft_ms,
         validation_alias=AliasChoices("ttft_ms", "ttft"),
+        gt=0,
+        allow_inf_nan=False,
     )
     itl_ms: float = Field(
         default=SLAPlannerDefaults.itl_ms,
         validation_alias=AliasChoices("itl_ms", "itl"),
+        gt=0,
+        allow_inf_nan=False,
     )
 
     # Load predictor settings
@@ -867,10 +884,16 @@ class PlannerConfig(BaseModel):
     load_predictor_warmup_trace: Optional[str] = None
 
     # Kalman filter settings
-    kalman_q_level: float = SLAPlannerDefaults.kalman_q_level
-    kalman_q_trend: float = SLAPlannerDefaults.kalman_q_trend
-    kalman_r: float = SLAPlannerDefaults.kalman_r
-    kalman_min_points: int = SLAPlannerDefaults.kalman_min_points
+    kalman_q_level: float = Field(
+        default=SLAPlannerDefaults.kalman_q_level, ge=0, allow_inf_nan=False
+    )
+    kalman_q_trend: float = Field(
+        default=SLAPlannerDefaults.kalman_q_trend, ge=0, allow_inf_nan=False
+    )
+    kalman_r: float = Field(
+        default=SLAPlannerDefaults.kalman_r, ge=0, allow_inf_nan=False
+    )
+    kalman_min_points: int = Field(default=SLAPlannerDefaults.kalman_min_points, gt=0)
 
     # Prometheus settings
     metric_pulling_prometheus_endpoint: str = Field(
@@ -1217,9 +1240,6 @@ class PlannerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
-        if self.ttft_ms <= 0:
-            raise ValueError(f"ttft_ms must be > 0, got {self.ttft_ms}")
-
         if self.mode == "prefill" and self.decode_min_endpoint is not None:
             raise ValueError("decode_min_endpoint is not supported when mode='prefill'")
         if self.mode == "decode" and self.prefill_min_endpoint is not None:

@@ -30,8 +30,8 @@ use super::disconnect::{
 use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, find_invalid_argument_in_chain,
-    get_body_limit, get_or_create_request_id,
+    check_model_serving_ready, check_ready, find_invalid_argument_in_chain, get_body_limit,
+    get_or_create_request_id, preprocessed_context_from_headers,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
@@ -340,7 +340,7 @@ async fn handler(
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+        match preprocessed_context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
@@ -402,6 +402,8 @@ async fn dispatch(
         streaming,
         &request_id,
     );
+    let tracked = inflight_guard.request_metrics().clone();
+    tracked.add_input_tokens(context.content().token_ids.len());
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -473,6 +475,11 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
+    let stream = stream.inspect(move |delta| {
+        if let Some(output) = &delta.data {
+            tracked.add_output_tokens(output.token_ids.len());
+        }
+    });
     if !streaming {
         let fold = SglangGenerateStream::fold(stream, merger());
         return match run_until_killed(request_context.as_ref(), fold).await {
@@ -808,6 +815,40 @@ mod tests {
                 request.context(),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn streaming_dispatch_preserves_native_json() {
+        let native = serde_json::json!({
+            "text": "Unicode: λ\nCR: \r",
+            "meta_info": {"routed_experts": "AQID".repeat(16384)},
+            "unknown_field": {"value": true}
+        });
+        let outputs = vec![crate::protocols::Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"sglang_response": native})),
+            ..Default::default()
+        })];
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let response = dispatch(
+            Arc::new(ReplayEngine(outputs)),
+            dispatch_test_context(),
+            "req-stream".to_string(),
+            "test-model".to_string(),
+            state,
+            ConnectionHandle::create_disabled(tx),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(body, format!("data: {native}\n\ndata: [DONE]\n\n"));
     }
 
     #[tokio::test]

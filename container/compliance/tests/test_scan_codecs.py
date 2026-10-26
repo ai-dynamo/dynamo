@@ -121,6 +121,8 @@ def test_pynvvideocodec_demux_libs_waived_but_codec_denied(tmp_path: Path):
 @pytest.mark.parametrize(
     "rel",
     [
+        "usr/bin/ffprobe",
+        "opt/venv/bin/ffprobe",
         "usr/lib/x86_64-linux-gnu/libx264.so.164",
         "usr/lib/x86_64-linux-gnu/libx265.so.199",
         # A third-party bundled libavcodec NOT under /usr/local and NOT DALI.

@@ -4,6 +4,7 @@
 """Tests for output_formatter.py — modality-specific formatters."""
 
 import base64
+import io
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +21,7 @@ from dynamo.common.utils.output_modalities import RequestType
 try:
     import torch
 
+    from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni.output_formatter import (
         AudioAggregateState,
         AudioFormatter,
@@ -243,6 +245,11 @@ class TestDiffusionFormatterPrepareImages:
         assert len(results) == 3
 
 
+def _generated_images(count: int, size: tuple[int, int] = (8, 8)) -> list:
+    """Real PIL images, as the diffusion engine returns them."""
+    return [Image.new("RGB", size, color="red") for _ in range(count)]
+
+
 class TestDiffusionFormatterImage:
     @pytest.mark.asyncio
     async def test_b64_outputs_report_decoded_encoding_and_size(self):
@@ -393,6 +400,9 @@ class TestDiffusionFormatterImage:
         )
         assert chunk["object"] == "chat.completion.chunk"
         assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
+        # The chat shape is unchanged: image accounting is an images-API field.
+        assert "usage" not in chunk
+        assert "nvext" not in chunk
 
     @pytest.mark.asyncio
     async def test_image_generation_b64_format(self):
@@ -423,6 +433,49 @@ class TestDiffusionFormatterImage:
             request_type=RequestType.IMAGE_GENERATION,
         )
         assert chunk["data"][0]["b64_json"] is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "requested_steps", [4, None], ids=["steps", "model-default"]
+    )
+    async def test_format_reports_image_accounting_from_an_async_omni_stage_output(
+        self, requested_steps
+    ):
+        """The stage output `AsyncOmni` yields carries the images and the
+        orchestrator's stage metrics, not the step count the engine ran. The
+        accounting counts the images in the output and takes `input_images`
+        and `num_inference_steps` from the handler. Token usage stays unset:
+        a diffusion model has no token counts."""
+        f = _make_diffusion_formatter()
+        # Shaped like `OmniBase._process_single_result`'s return value.
+        stage = SimpleNamespace(
+            request_id="req-1",
+            final_output_type="image",
+            images=_generated_images(2, size=(64, 32)),
+            metrics={
+                "stage_metrics": {"stage_0": {"duration_ms": 12.0}},
+                "stage_id": 0,
+                "final_output_type": "image",
+                "num_tokens_in": 0,
+                "num_tokens_out": 0,
+            },
+        )
+        chunk = await f.format(
+            stage,
+            "req-1",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+            input_images=1,
+            num_inference_steps=requested_steps,
+        )
+        assert len(chunk["data"]) == 2
+        assert "usage" not in chunk
+        assert chunk["size"] == "64x32"
+        assert chunk["output_format"] == "png"
+        expected = {"output_images": 2, "input_images": 1}
+        if requested_steps is not None:
+            expected["num_inference_steps"] = requested_steps
+        assert chunk["nvext"]["usage"] == expected
 
     @pytest.mark.asyncio
     async def test_empty_images_returns_error(self):
@@ -1427,6 +1480,33 @@ class TestOutputFormatter:
 
     # Full ctx matching _generate_openai_mode's call signature
     _FULL_CTX = dict(fps=16, response_format=None, previous_text="", speed=1.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("count", [1, 2])
+    async def test_video_labeled_image_request_preserves_pil_outputs(self, count):
+        # Cosmos3 can retain its model-level "video" label for T2I output.
+        # The public image request must still receive lossless PNGs, not MP4.
+        images = [
+            Image.new("RGB", (32, 48), (index * 80, 90, 150)) for index in range(count)
+        ]
+        stage = SimpleNamespace(final_output_type="video", images=images)
+        formatter = OutputFormatter(model_name="test-model")
+
+        response = await formatter.format(
+            stage,
+            "cosmos-image",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+        )
+
+        assert len(response["data"]) == count
+        for expected, item in zip(images, response["data"], strict=True):
+            with Image.open(
+                io.BytesIO(base64.b64decode(item["b64_json"], validate=True))
+            ) as decoded:
+                assert decoded.format == "PNG"
+                assert decoded.size == expected.size
+                assert decoded.tobytes() == expected.tobytes()
 
     @pytest.mark.asyncio
     async def test_routes_text(self):
