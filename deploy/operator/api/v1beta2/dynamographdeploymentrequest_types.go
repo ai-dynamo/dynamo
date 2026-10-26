@@ -201,8 +201,9 @@ type ObjectiveSpec struct {
 	// +listType=set
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
-	// SLA defines per-request latency bounds used to calculate goodput. When omitted, no
-	// bounds apply. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+	// SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
+	// omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
+	// defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
 	// +optional
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }

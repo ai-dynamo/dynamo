@@ -25,7 +25,8 @@ import (
 )
 
 // DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
-// Run creators resolve optional Request inputs before persisting the Run.
+// Run creators resolve optional Request inputs and the final AISimulate parameters before
+// persisting the Run. Request admission defaulting does not apply to Runs.
 // +kubebuilder:validation:XValidation:rule="has(self.model)",message="model is required"
 type DynamoGraphDeploymentRunSpec struct {
 	NativeSearchInput `json:",inline"`
