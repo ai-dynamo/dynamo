@@ -92,16 +92,11 @@ pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
         .iter()
         .find_map(|(alias, family)| (*alias == parser).then_some(*family))
         .unwrap_or(parser);
-    // Muse Spark serving is integrated separately in #17068; registry presence alone must not enable it.
-    dynamo_parsers_v2::canonical_unified_family(parser).filter(|family| *family != "muse_spark")
+    dynamo_parsers_v2::canonical_unified_family(parser)
 }
 
 pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    let mut names: Vec<_> = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES
-        .iter()
-        .copied()
-        .filter(|name| canonical_family(name).is_some())
-        .collect();
+    let mut names = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.to_vec();
     names.extend(DYNAMO_FAMILY_ALIASES.iter().map(|(alias, _)| *alias));
     names.sort_unstable();
     names.dedup();
@@ -1901,7 +1896,6 @@ impl ChoiceState {
     fn delta_to_choice(&mut self, index: u32, delta: UnifiedParserEvent) -> ChatChoiceStream {
         let mut choice = empty_choice(index);
         match delta {
-            UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd => {}
             UnifiedParserEvent::Text(text) => {
                 choice.delta.content = Some(ChatCompletionMessageContent::Text(text));
             }
@@ -1975,11 +1969,7 @@ impl ChoiceState {
         let mut run = Vec::new();
         let mut projected = Vec::new();
         for (position, delta) in deltas.into_iter().enumerate() {
-            if matches!(
-                delta,
-                UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd
-            ) || !emit_tool_calls && matches!(delta, UnifiedParserEvent::ToolCall(_))
-            {
+            if !emit_tool_calls && matches!(delta, UnifiedParserEvent::ToolCall(_)) {
                 continue;
             }
             if source_positions.contains(&position) {
@@ -2389,7 +2379,6 @@ fn parse_complete_in_mode(
     let events = dynamo_parsers_v2::assemble(&output.events);
     for event in events {
         match event {
-            UnifiedEvent::MessageStart { .. } | UnifiedEvent::MessageEnd => {}
             UnifiedEvent::Text { text: chunk } => text.push_str(&chunk),
             UnifiedEvent::Reasoning { text: chunk } => {
                 if policy.reasoning_disabled {
@@ -4011,19 +4000,6 @@ pub(crate) mod tests {
     }
 
     // --- tool_choice -> UnifiedToolOutputMode ------------------------------------
-
-    #[test]
-    fn muse_spark_waits_for_serving_integration() {
-        for alias in ["muse_spark", "muse_spark_open"] {
-            assert_eq!(
-                dynamo_parsers_v2::canonical_unified_family(alias),
-                Some("muse_spark")
-            );
-            assert_eq!(canonical_family(alias), None);
-            assert!(!FAMILY_NAMES.contains(&alias));
-        }
-        assert_eq!(canonical_family("harmony"), Some("gpt_oss"));
-    }
 
     #[test]
     fn gpt_oss_aliases_select_the_unified_route_unless_v1() {
@@ -11814,10 +11790,7 @@ pub(crate) mod tests {
             UnifiedParserStartingState::None,
             UnifiedParserStartingState::Reasoning,
         ] {
-            for family in dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES
-                .iter()
-                .filter(|family| canonical_family(family).is_some())
-            {
+            for family in dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES {
                 for raw in [
                     " \n{\"country\":\"France\"}",
                     "[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]",
