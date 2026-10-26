@@ -34,6 +34,7 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.snapshot import warmup_engine
 
 
 async def _warmup_prefill_engine(
@@ -156,6 +157,13 @@ async def init_decode(
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
+
+    if (
+        snapshot_engine is None
+        and attached_engine is None
+        and config.serving_mode != DisaggregationMode.DECODE
+    ):
+        await warmup_engine(engine, server_args)
 
     ready_event = asyncio.Event()
 

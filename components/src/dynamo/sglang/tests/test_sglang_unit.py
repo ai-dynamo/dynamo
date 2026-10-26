@@ -736,6 +736,34 @@ async def test_prepare_snapshot_engine_rejects_dcp_before_warmup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_warmup_engine_sends_greedy_and_sampled_requests():
+    """A greedy batch skips the sampling kernels, so warmup also sends top_k=2."""
+    from dynamo.sglang import snapshot as sglang_snapshot
+
+    sampling_params = []
+
+    async def async_generate(**kwargs):
+        sampling_params.append(kwargs["sampling_params"])
+
+    engine = SimpleNamespace(
+        async_generate=async_generate,
+        tokenizer_manager=SimpleNamespace(is_generation=True),
+    )
+    server_args = SimpleNamespace(
+        skip_tokenizer_init=True,
+        debug_tensor_dump_input_file=None,
+        disaggregation_mode="null",
+    )
+
+    await sglang_snapshot.warmup_engine(engine, server_args)
+
+    assert sampling_params == [
+        {"temperature": 0, "max_new_tokens": 8},
+        {"temperature": 1.0, "top_k": 2, "max_new_tokens": 8},
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "overrides",
     [
