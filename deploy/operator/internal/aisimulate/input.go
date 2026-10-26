@@ -27,19 +27,32 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// Lower returns the effective native input: the typed underlay and derived defaults, merged
+// Lower returns the effective public recommendation input: the typed underlay and derived defaults, merged
 // with spec.aisimulate.inputOverrides. The spec must already carry its structural defaults;
-// lowering repeats none of them. The only error is malformed inputOverrides (not a JSON
-// object); semantic problems are the caller's to validate.
+// lowering repeats none of them.
 func Lower(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
+	return LowerWithUnderlay(spec, nil)
+}
+
+// LowerWithUnderlay returns the effective public recommendation input with a controller-owned
+// static underlay beneath the typed API fields and derived defaults. InputOverrides remains the
+// final merge patch, so it may override or delete fields from either underlay.
+func LowerWithUnderlay(spec *v1beta2.NativeSearchInput, staticUnderlay map[string]any) (map[string]any, error) {
 	overrides, err := InputOverrides(spec)
 	if err != nil {
 		return nil, err
 	}
-	underlay, err := Underlay(spec)
+	typedUnderlay, err := Underlay(spec)
 	if err != nil {
 		return nil, err
 	}
+	staticUnderlay, err = normalize(staticUnderlay)
+	if err != nil {
+		return nil, err
+	}
+	underlay := publicUnderlay()
+	underlay, _ = mergePatch(underlay, staticUnderlay).(map[string]any)
+	underlay, _ = mergePatch(underlay, typedUnderlay).(map[string]any)
 	if underlay, err = normalize(underlay); err != nil {
 		return nil, err
 	}
@@ -82,85 +95,107 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	}
 }
 
-// Underlay translates the typed spec into native input. Typed fields that are unset
-// produce no key, so the native defaults and input overrides decide them.
+// Underlay translates the typed spec into the public CoreRecommendationConfig input consumed by
+// `aisimulate recommend`. Typed fields that are unset produce no key, so AISimulate defaults and
+// input overrides decide them.
 func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	b := builder{root: map[string]any{}}
 
 	if spec.Model != nil {
-		b.set(spec.Model.Name, searchSpaceModelName)
+		b.set(spec.Model.Name, engineModel)
 	}
 	if len(spec.Backends) > 0 {
 		backends := make([]string, len(spec.Backends))
 		for i, backend := range spec.Backends {
 			backends[i] = string(backend)
 		}
-		b.setStrings(backends, searchSpaceBackend)
+		b.setStrings(backends, engineBackendChoices)
 	}
 	if spec.Hardware != nil && spec.Hardware.GPU != nil {
 		if sku := spec.Hardware.GPU.SKU; sku != nil && *sku != "" {
-			b.set(*sku, searchSpaceHardwareSKU)
+			b.set(*sku, engineHardware)
 		}
 		if budget := spec.Hardware.GPU.Budget; budget != nil {
-			b.set(int64(*budget), searchSpaceGPUBudget)
+			b.set(int64(*budget), optimizationHardwareBudget)
 		}
 	}
 
 	if spec.Workload != nil && spec.Workload.Static != nil {
 		static := spec.Workload.Static
-		if static.ISL != nil {
-			b.set(int64(*static.ISL), workloadISL)
+		if hasStaticWorkloadFields(static) {
+			b.set("synthetic", trafficSourceType)
 		}
-		if static.OSL != nil {
-			b.set(int64(*static.OSL), workloadOSL)
+		if static.InputTokens != nil {
+			b.set(int64(*static.InputTokens), trafficSourceInputTokens)
 		}
-		if static.NumRequestRatio != nil {
-			b.set(*static.NumRequestRatio, workloadNumRequestRatio)
+		if static.OutputTokens != nil {
+			b.set(int64(*static.OutputTokens), trafficSourceOutputTokens)
 		}
-		if static.RequestRate != nil {
-			b.set(*static.RequestRate, workloadRequestRate)
-		}
-		if static.Concurrency != nil {
-			b.set(int64(*static.Concurrency), workloadConcurrency)
-		}
-		switch len(static.KVLoadRatio) {
-		case 0:
-		case 1:
-			b.set(static.KVLoadRatio[0], workloadKVLoadRatio)
-		default:
-			ratios := make([]any, len(static.KVLoadRatio))
-			for i, ratio := range static.KVLoadRatio {
-				ratios[i] = ratio
+		if load := static.Load; load != nil {
+			switch {
+			case load.RequestsPerSecond != nil:
+				b.set("constant_rate", trafficLoadType)
+				b.set(*load.RequestsPerSecond, trafficLoadRequestsPerSecond)
+			case load.Concurrency != nil:
+				b.set("concurrency", trafficLoadType)
+				b.set(int64(*load.Concurrency), trafficLoadConcurrency)
+			case load.KVCapacityFraction != nil:
+				b.set("kv_capacity_fraction", trafficLoadType)
+				fraction := load.KVCapacityFraction
+				switch {
+				case fraction.Value != nil:
+					b.set(*fraction.Value, trafficLoadFraction)
+				case fraction.Range != nil:
+					b.set(map[string]any{"range": map[string]any{
+						"min": fraction.Range.Min,
+						"max": fraction.Range.Max,
+					}}, trafficLoadFraction)
+				}
 			}
-			b.set(ratios, workloadKVLoadRatio)
 		}
 	}
 
 	if objective := spec.Objective; objective != nil {
 		if objective.Mode == v1beta2.ObjectiveModePareto {
-			b.set(TargetPareto, goalTarget)
-			if len(objective.Metrics) > 0 {
-				b.setStrings(nativeMetrics(objective.Metrics), goalParetoObjectives)
+			if len(objective.Metrics) > 0 && !isDefaultParetoMetrics(objective.Metrics) {
+				b.err = fmt.Errorf("spec.objective.metrics: the AISimulate public recommendation input only exposes its default Pareto objectives")
+			} else {
+				b.set(TargetPareto, optimizationTarget)
 			}
 		} else if objective.Metric != nil {
-			b.set(nativeMetric(*objective.Metric), goalTarget)
+			b.set(publicMetric(*objective.Metric), optimizationTarget)
 		}
 		if sla := objective.SLA; sla != nil {
 			if sla.TTFTMs != nil {
-				b.set(*sla.TTFTMs, goalSLATTFTMs)
+				b.set(*sla.TTFTMs, evaluationSLATTFTMs)
 			}
 			if sla.ITLMs != nil {
-				b.set(*sla.ITLMs, goalSLAITLMs)
+				b.set(*sla.ITLMs, evaluationSLAITLMs)
 			}
 			if sla.E2EMs != nil {
-				b.set(*sla.E2EMs, goalSLAE2EMs)
+				b.set(*sla.E2EMs, evaluationSLAE2EMs)
 			}
 		}
 	}
 	return b.root, b.err
 }
 
-// builder writes native input values, remembering the first failure so the translation reads
+func hasStaticWorkloadFields(static *v1beta2.StaticWorkloadSpec) bool {
+	return static.InputTokens != nil || static.OutputTokens != nil || static.Load != nil
+}
+
+func isDefaultParetoMetrics(metrics []v1beta2.ObjectiveMetric) bool {
+	if len(metrics) != 2 {
+		return false
+	}
+	found := map[v1beta2.ObjectiveMetric]bool{}
+	for _, metric := range metrics {
+		found[metric] = true
+	}
+	return found[v1beta2.ObjectiveMetric("ThroughputPerGPU")] && found[v1beta2.ObjectiveMetric("ThroughputPerUser")]
+}
+
+// builder writes public input values, remembering the first failure so the translation reads
 // as a straight list of assignments. Every path is written under a map the caller created
 // and every value is a JSON scalar or a list of them, so a failure means a bad path.
 type builder struct {
@@ -186,11 +221,11 @@ func (b *builder) setStrings(values []string, path []string) {
 	}
 }
 
-// nativeMetric maps an API metric to AISimulate's goal.target by converting its CamelCase
+// publicMetric maps an API metric to AISimulate's optimization.target by converting its CamelCase
 // name to snake_case: ThroughputPerGPU becomes throughput_per_gpu and E2ELatency becomes
 // e2e_latency. A run of capitals stays together, a digit does not start a word, and the last
 // capital of a run starts the next word when a lowercase letter follows it.
-func nativeMetric(metric v1beta2.ObjectiveMetric) string {
+func publicMetric(metric v1beta2.ObjectiveMetric) string {
 	name := []rune(string(metric))
 	var out []rune
 	for i, r := range name {
@@ -206,17 +241,12 @@ func nativeMetric(metric v1beta2.ObjectiveMetric) string {
 	return string(out)
 }
 
-func nativeMetrics(metrics []v1beta2.ObjectiveMetric) []string {
-	out := make([]string, len(metrics))
-	for i, metric := range metrics {
-		out[i] = nativeMetric(metric)
-	}
-	return out
-}
-
 // normalize round-trips through JSON so every number is a float64, the type the
 // input overrides decode to. Merge and validation then see one representation.
 func normalize(value map[string]any) (map[string]any, error) {
+	if value == nil {
+		return nil, nil
+	}
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return nil, err

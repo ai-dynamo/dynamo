@@ -58,4 +58,9 @@ func TestValidateEnvelopeV1beta2(t *testing.T) {
 		v1beta2Envelope(`{"model":{"name":"meta-llama/Llama-3.1-8B-Instruct"}}`), path))
 
 	v1beta2RequireError(t, validateDynamoGraphDeploymentRequestEnvelopeV1beta2(v1beta2Envelope(`{"model": 3}`), path), "spec.v1beta2: must be a valid v1beta2 spec")
+
+	v1beta2RequireError(t, validateDynamoGraphDeploymentRequestEnvelopeV1beta2(v1beta2Envelope(`{
+		"model":{"name":"meta-llama/Llama-3.1-8B-Instruct"},
+		"objective":{"mode":"Pareto","metrics":["Throughput","TTFT"]}
+	}`), path), "cannot be lowered to the public AISimulate recommendation input")
 }

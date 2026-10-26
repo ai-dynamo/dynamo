@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -37,6 +38,13 @@ func validateDynamoGraphDeploymentRequestEnvelopeV1beta2(
 	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
 	if err := json.Unmarshal(raw.Raw, &spec); err != nil {
 		return field.ErrorList{field.Invalid(fldPath, "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
+	}
+	if _, err := aisimulate.Lower(&spec.NativeSearchInput); err != nil {
+		return field.ErrorList{field.Invalid(
+			field.NewPath("spec"),
+			"<redacted>",
+			"cannot be lowered to the public AISimulate recommendation input: "+err.Error(),
+		)}
 	}
 	return nil
 }

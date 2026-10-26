@@ -60,6 +60,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	runtimeserializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 	"sigs.k8s.io/randfill"
 	"sigs.k8s.io/yaml"
@@ -568,22 +569,21 @@ func fuzzBeta2Workload(workload *v1beta2.WorkloadSpec, c randfill.Continue) {
 	}
 
 	static := workload.Static
-	static.ISL = oneOfPtr(c, int32(1), int32(4000), int32(131072))
-	static.OSL = oneOfPtr(c, int32(1), int32(1000), int32(16384))
-	static.NumRequestRatio = oneOfPtr(c, 0.5, 1.0, 1000.0)
-	static.RequestRate = nil
-	static.Concurrency = nil
-	static.KVLoadRatio = nil
+	static.InputTokens = oneOfPtr(c, int32(1), int32(4000), int32(131072))
+	static.OutputTokens = oneOfPtr(c, int32(1), int32(1000), int32(16384))
+	static.Load = nil
 	switch c.Intn(4) {
 	case 1:
-		static.RequestRate = oneOfPtr(c, 0.1, 1.0, 100.0)
+		static.Load = &v1beta2.StaticLoadSpec{RequestsPerSecond: oneOfPtr(c, 0.1, 1.0, 100.0)}
 	case 2:
-		static.Concurrency = oneOfPtr(c, int32(1), int32(32), int32(1024))
+		static.Load = &v1beta2.StaticLoadSpec{Concurrency: oneOfPtr(c, int32(1), int32(32), int32(1024))}
 	case 3:
 		if c.Bool() {
-			static.KVLoadRatio = v1beta2.KVLoadRatio{0.5}
+			static.Load = &v1beta2.StaticLoadSpec{KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{Value: ptr.To(0.5)}}
 		} else {
-			static.KVLoadRatio = v1beta2.KVLoadRatio{0.0, 1.0}
+			static.Load = &v1beta2.StaticLoadSpec{KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{
+				Range: &v1beta2.KVCapacityFractionRange{Min: 0.1, Max: 1.0},
+			}}
 		}
 	}
 }

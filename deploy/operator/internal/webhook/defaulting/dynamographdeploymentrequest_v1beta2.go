@@ -37,10 +37,10 @@ const defaultMetricV1beta2 = nvidiacomv1beta2.ObjectiveMetric("Throughput")
 // defaults a mutated object in the webhook's version (v1beta1, whose v1beta2 carrier is
 // opaque), so the v1beta2 schema carries no default markers for them.
 const (
-	defaultStaticISLV1beta2         int32 = 1024
-	defaultStaticOSLV1beta2         int32 = 128
-	defaultStaticConcurrencyV1beta2 int32 = 10
-	defaultMaxCandidatesV1beta2     int32 = 1
+	defaultStaticInputTokensV1beta2  int32 = 1024
+	defaultStaticOutputTokensV1beta2 int32 = 128
+	defaultStaticConcurrencyV1beta2  int32 = 10
+	defaultMaxCandidatesV1beta2      int32 = 1
 )
 
 // This file defaults the v1beta2 shape of a DynamoGraphDeploymentRequest. It is separate
@@ -51,8 +51,9 @@ const (
 //
 // Admission owns every v1beta2 default, and each default has this one owner: backends,
 // objective.mode, the scalar metric, recommendation.maxCandidates, workload.static and the
-// cluster hardware. workload.static: {} opts out of the static workload. objective.sla has no
-// default: an omitted SLA stays absent.
+// cluster hardware. workload.static: {} opts out of the static workload; a nonempty static
+// object receives any missing inputTokens, outputTokens and load defaults. objective.sla has
+// no default: an omitted SLA stays absent.
 // spec.aisimulate.inputOverrides never changes a default. It overrides the defaulted typed
 // values later, when the input is lowered.
 
@@ -203,18 +204,28 @@ func defaultGPUHardwareSpecV1beta2(gpu *nvidiacomv1beta2.GPUHardwareSpec, defaul
 }
 
 func defaultWorkloadSpecV1beta2(workload *nvidiacomv1beta2.WorkloadSpec) {
-	// An explicit static: {} is the opt-out, so the static defaults apply only to the object
-	// created here.
 	if workload.Static == nil {
 		workload.Static = &nvidiacomv1beta2.StaticWorkloadSpec{}
-		defaultStaticWorkloadSpecV1beta2(workload.Static)
+	} else if workload.Static.InputTokens == nil && workload.Static.OutputTokens == nil && workload.Static.Load == nil {
+		// An explicit empty object is the one static-workload opt-out.
+		return
 	}
+	defaultStaticWorkloadSpecV1beta2(workload.Static)
 }
 
+// defaultStaticWorkloadSpecV1beta2 completes a static workload with every omitted default.
 func defaultStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpec) {
-	static.ISL = ptr.To(defaultStaticISLV1beta2)
-	static.OSL = ptr.To(defaultStaticOSLV1beta2)
-	static.Concurrency = ptr.To(defaultStaticConcurrencyV1beta2)
+	if static.InputTokens == nil {
+		static.InputTokens = ptr.To(defaultStaticInputTokensV1beta2)
+	}
+	if static.OutputTokens == nil {
+		static.OutputTokens = ptr.To(defaultStaticOutputTokensV1beta2)
+	}
+	if static.Load == nil {
+		static.Load = &nvidiacomv1beta2.StaticLoadSpec{
+			Concurrency: ptr.To(defaultStaticConcurrencyV1beta2),
+		}
+	}
 }
 
 // defaultObjectiveSpecV1beta2 defaults the mode and gives an Optimize objective without a

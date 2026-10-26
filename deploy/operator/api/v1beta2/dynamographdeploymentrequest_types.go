@@ -64,56 +64,81 @@ type HardwareSpec struct {
 	GPU *GPUHardwareSpec `json:"gpu,omitempty"`
 }
 
-// KVLoadRatio is either a pinned load ratio or a minimum/maximum range.
-// AISimulate performs mode-specific validation.
-// +kubebuilder:validation:MinItems=1
-// +kubebuilder:validation:MaxItems=2
-// +kubebuilder:validation:items:Minimum=0
-// +kubebuilder:validation:items:Maximum=1
-// +kubebuilder:validation:XValidation:rule="size(self) != 2 || self[0] < self[1]",message="a range needs min < max"
-type KVLoadRatio []float64
+// KVCapacityFractionRange defines the searched fraction of a candidate's KV capacity.
+// +kubebuilder:validation:XValidation:rule="self.min < self.max",message="min must be less than max"
+type KVCapacityFractionRange struct {
+	// Min is the lower end of the searched fraction range.
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Min float64 `json:"min"`
 
-// StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
-// +kubebuilder:validation:XValidation:rule="(has(self.requestRate) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvLoadRatio) ? 1 : 0) <= 1",message="at most one of requestRate, concurrency, or kvLoadRatio may be specified"
-type StaticWorkloadSpec struct {
-	// ISL is the input sequence length in tokens.
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	ISL *int32 `json:"isl,omitempty"`
+	// Max is the upper end of the searched fraction range.
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Max float64 `json:"max"`
+}
 
-	// OSL is the output sequence length in tokens.
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	OSL *int32 `json:"osl,omitempty"`
-
-	// NumRequestRatio sets request count relative to the selected load.
+// KVCapacityFractionSpec selects either one fixed fraction or a searched range.
+// +kubebuilder:validation:XValidation:rule="(has(self.value) ? 1 : 0) + (has(self.range) ? 1 : 0) == 1",message="exactly one of value or range must be specified"
+type KVCapacityFractionSpec struct {
+	// Value uses a fixed fraction of the candidate's KV capacity. A value of 1
+	// uses its full estimated capacity.
 	// +optional
 	// +kubebuilder:validation:ExclusiveMinimum=true
 	// +kubebuilder:validation:Minimum=0
-	NumRequestRatio *float64 `json:"numRequestRatio,omitempty"`
+	// +kubebuilder:validation:Maximum=1
+	Value *float64 `json:"value,omitempty"`
 
-	// RequestRate is a fixed open-loop arrival rate in requests per second.
+	// Range searches fractions between min and max.
+	// +optional
+	Range *KVCapacityFractionRange `json:"range,omitempty"`
+}
+
+// StaticLoadSpec selects exactly one synthetic load model by field presence.
+// +kubebuilder:validation:XValidation:rule="(has(self.requestsPerSecond) ? 1 : 0) + (has(self.concurrency) ? 1 : 0) + (has(self.kvCapacityFraction) ? 1 : 0) == 1",message="exactly one of requestsPerSecond, concurrency, or kvCapacityFraction must be specified"
+type StaticLoadSpec struct {
+	// RequestsPerSecond is a fixed open-loop arrival rate.
 	// +optional
 	// +kubebuilder:validation:ExclusiveMinimum=true
 	// +kubebuilder:validation:Minimum=0
-	RequestRate *float64 `json:"requestRate,omitempty"`
+	RequestsPerSecond *float64 `json:"requestsPerSecond,omitempty"`
 
 	// Concurrency is a fixed closed-loop in-flight request cap.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	Concurrency *int32 `json:"concurrency,omitempty"`
 
-	// KVLoadRatio derives concurrency from candidate KV capacity. A two-value
-	// range requires a bounded AISimulate sweep.
+	// KVCapacityFraction derives concurrency from each candidate's estimated KV capacity.
 	// +optional
-	KVLoadRatio KVLoadRatio `json:"kvLoadRatio,omitempty"`
+	KVCapacityFraction *KVCapacityFractionSpec `json:"kvCapacityFraction,omitempty"`
+}
+
+// StaticWorkloadSpec defines AISimulate synthetic traffic. Admission completes a nonempty
+// object with the omitted static defaults; an explicit empty object opts out of them.
+type StaticWorkloadSpec struct {
+	// InputTokens is the synthetic request input length in tokens.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	InputTokens *int32 `json:"inputTokens,omitempty"`
+
+	// OutputTokens is the synthetic request output length in tokens.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	OutputTokens *int32 `json:"outputTokens,omitempty"`
+
+	// Load selects the synthetic load model. When omitted from a nonempty static
+	// workload, admission defaults it to concurrency 10.
+	// +optional
+	Load *StaticLoadSpec `json:"load,omitempty"`
 }
 
 // WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
 type WorkloadSpec struct {
-	// Static defines one of AISimulate's synthetic workload shapes. Its fields are not
-	// defaulted individually: the default belongs to spec.workload as a whole, so an
-	// explicit workload object keeps exactly the fields it names.
+	// Static defines AISimulate synthetic traffic. When omitted, admission supplies the
+	// complete static default. An explicit empty object opts out; any nonempty object is
+	// completed with omitted inputTokens, outputTokens and load defaults.
 	// +optional
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
@@ -156,6 +181,7 @@ type ObjectiveSLASpec struct {
 
 // ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
 // +kubebuilder:validation:XValidation:rule="!has(self.mode) || (self.mode == 'Optimize' && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize accepts only metric; Pareto requires metrics"
+// +kubebuilder:validation:XValidation:rule="!has(self.metrics) || (size(self.metrics) == 2 && self.metrics.exists(m, m == 'ThroughputPerGPU') && self.metrics.exists(m, m == 'ThroughputPerUser'))",message="Pareto supports exactly ThroughputPerGPU and ThroughputPerUser"
 // +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
 // +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGPU'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound"
 type ObjectiveSpec struct {
@@ -168,20 +194,22 @@ type ObjectiveSpec struct {
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
-	// Metrics lists two or more distinct scalar targets when mode is Pareto.
+	// Metrics selects AISimulate's public Pareto objective pair when mode is Pareto.
+	// The configured AISimulate release supports exactly ThroughputPerGPU and
+	// ThroughputPerUser through its public recommendation input.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
-	// +kubebuilder:validation:MaxItems=7
+	// +kubebuilder:validation:MaxItems=2
 	// +listType=set
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
 	// SLA defines per-request latency bounds used to calculate goodput. When omitted, no
-	// bounds apply. spec.aisimulate.inputOverrides.goal.sla overrides the bounds it names.
+	// bounds apply. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
 	// +optional
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }
 
-// AISimulateSpec supplies native input to the AISimulate version in the operator's configured
+// AISimulateSpec supplies public recommendation input to the AISimulate version in the operator's configured
 // planner image.
 type AISimulateSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
@@ -225,13 +253,13 @@ type NativeSearchInput struct {
 	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
 	// Workload defines the synthetic traffic model used for every candidate evaluation.
-	// When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;
-	// an explicit empty workload receives the same shape from admission. An explicit
-	// workload.static: {} opts out of that shape, leaving the workload to
-	// spec.aisimulate.inputOverrides.workload. spec.aisimulate.inputOverrides.workload overrides the
-	// fields it names.
-	// The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a
-	// KV-load ratio search.
+	// When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;
+	// an explicit empty workload receives the same shape. workload.static: {} opts out of all
+	// traffic defaults. Any other static object is completed with its missing defaults.
+	// spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
+	// every lowered traffic field it names.
+	// The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials
+	// nor a KV-capacity-fraction search.
 	// +optional
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
@@ -241,7 +269,7 @@ type NativeSearchInput struct {
 	// +optional
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
-	// AISimulate supplies native input to the operator's AISimulate execution bundle.
+	// AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
 	// +optional
 	AISimulate *AISimulateSpec `json:"aisimulate,omitempty"`
 

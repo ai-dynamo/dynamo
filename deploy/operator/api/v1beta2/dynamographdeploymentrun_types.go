@@ -120,7 +120,7 @@ type DGDRRunProgress struct {
 	Candidates *CandidateProgress `json:"candidates,omitempty"`
 }
 
-// AISimulateRunStatus reports the exact native input used for this execution.
+// AISimulateRunStatus reports the exact public recommendation input used for this execution.
 type AISimulateRunStatus struct {
 	// Input is the fully lowered AISimulate input after typed fields, derived defaults and
 	// spec.aisimulate.inputOverrides have been merged. Field names and nesting use the
