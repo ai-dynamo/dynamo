@@ -31,6 +31,6 @@ pub(crate) struct Args {
     // Kubernetes resolves a rank bound to a missing Pod label to an empty
     // value. clap's u32 parser rejects it rather than applying the default,
     // which would give the engine a second serving rank 0.
-    #[arg(long = "node-rank", env = "DYN_SIDECAR_NODE_RANK", default_value_t = 0)]
+    #[arg(long = "node-rank", env = "DYNAMO_RANK", default_value_t = 0)]
     pub node_rank: u32,
 }

@@ -13,6 +13,7 @@ fn sidecar() -> Command {
     }) {
         command.env_remove(key);
     }
+    command.env_remove("DYNAMO_RANK");
     command
 }
 
@@ -170,7 +171,7 @@ fn a_nonzero_node_rank_stands_by() {
                 "nats",
             ])
             // A launcher may pass the rank through the environment instead of --node-rank.
-            .env("DYN_SIDECAR_NODE_RANK", "1")
+            .env("DYNAMO_RANK", "1")
             .env("ETCD_ENDPOINTS", format!("http://{peer_address}"))
             .env("NATS_SERVER", format!("nats://{peer_address}"))
             .env("DYN_SYSTEM_HOST", "127.0.0.1")
@@ -239,7 +240,7 @@ fn an_empty_node_rank_fails() {
             "--model-path",
             "model-source",
         ])
-        .env("DYN_SIDECAR_NODE_RANK", "")
+        .env("DYNAMO_RANK", "")
         .output()
         .expect("run the sidecar");
     assert_eq!(output.status.code(), Some(2));
