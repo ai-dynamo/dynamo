@@ -483,7 +483,10 @@ def main():
             sub.add_argument("action", choices=["render", "up", "down"])
         if name == "control":
             sub.add_argument(
-                "--policy", choices=["round-robin", "least-in-flight"], required=True
+                "--policy",
+                choices=["none", "round-robin", "least-in-flight"],
+                required=True,
+                help="none passes no --router-policy, for images that predate it",
             )
         if name in ("loadgen", "collect"):
             sub.add_argument("--label", required=True)
@@ -544,7 +547,7 @@ def main():
         value = cluster.deploy(
             member,
             stack(member, "control"),
-            control_manifest(cfg, member, args.policy),
+            control_manifest(cfg, member, None if args.policy == "none" else args.policy),
             args.evidence,
         )
         print(json.dumps(value))
