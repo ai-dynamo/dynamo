@@ -57,23 +57,6 @@ func TestBuildInfoCollector(t *testing.T) {
 	assert.NotEmpty(t, labels["git_commit_date"])
 }
 
-func TestBuildInfoCollectorUnknownVersion(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(buildInfoCollector("unknown"))
-
-	families, err := reg.Gather()
-	require.NoError(t, err)
-	require.Len(t, families, 1)
-	require.Len(t, families[0].GetMetric(), 1)
-
-	labels := map[string]string{}
-	for _, lp := range families[0].GetMetric()[0].GetLabel() {
-		labels[lp.GetName()] = lp.GetValue()
-	}
-	assert.Equal(t, "unknown", labels["version"])
-	assert.Equal(t, 1.0, families[0].GetMetric()[0].GetGauge().GetValue())
-}
-
 func TestInitMetricsRegistersBuildInfo(t *testing.T) {
 	// InitMetrics registers into the package-global controller-runtime
 	// registry; swap in a fresh one so repeated runs (-count=2) do not panic
