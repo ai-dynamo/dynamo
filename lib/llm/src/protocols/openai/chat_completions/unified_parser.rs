@@ -1879,6 +1879,20 @@ impl ChoiceState {
     }
 
     /// Convert one ordered delta into a streaming choice for `index`.
+    ///
+    /// This function transforms a unified parser event into an OpenAI-compatible
+    /// streaming choice, handling text, reasoning, tool calls, and message boundary
+    /// markers (MessageStart/MessageEnd) from v0.8.0.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The choice index for the streaming response
+    /// * `delta` - The unified parser event to convert
+    ///
+    /// # Returns
+    ///
+    /// Returns a `ChatChoiceStream` with the appropriate delta content based on
+    /// the event type (text, reasoning, tool call, or message boundary).
     fn delta_to_choice(&mut self, index: u32, delta: UnifiedParserEvent) -> ChatChoiceStream {
         let mut choice = empty_choice(index);
         match delta {
