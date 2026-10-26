@@ -78,9 +78,6 @@ python3 nsight_operator_dynamo.py -n <namespace> configure \
 The helper then prints the next steps: deploy the DGD or recreate its pods, then start a capture, stop it, and list
 the reports with `nsight_operator.py`.
 
-The helper puts every selected pod on the `default` tag and keeps reports in Nsight's in-cluster storage. For S3, or
-for a tag per test, write your own profile config as described below.
-
 ## Select Components
 
 Select pods with the labels the Dynamo operator already sets on every pod; see
