@@ -46,14 +46,17 @@ use crate::{
 };
 
 mod builtin;
-mod cancellation;
+pub(super) mod cancellation;
 mod kv;
 mod kv_selection;
 mod occupancy;
 mod request_guard;
 
 use builtin::BuiltinWorkerSelector;
-use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
+use cancellation::{
+    CleanupBudget, DispatchCancellation, PendingDecode, PendingDecodeGuard, StagedKv,
+    await_with_cleanup_policy,
+};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
@@ -736,7 +739,11 @@ impl RoutingHost {
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
     {
-        let staged_kv = StagedKv::for_request(request.content());
+        let staged_kv = if matches!(&self.policy, RoutingPolicy::Kv(_)) {
+            StagedKv::for_selection(request)
+        } else {
+            StagedKv::for_request(request.content())
+        };
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
@@ -795,13 +802,17 @@ impl RoutingHost {
     pub(crate) async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
+        client_context: Arc<dyn AsyncEngineContext>,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         match &self.policy {
-            RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
+            RoutingPolicy::Kv(_) => {
+                self.select_and_dispatch_kv_prefill(request, client_context, prepare)
+                    .await
+            }
             RoutingPolicy::Builtin(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {
@@ -853,6 +864,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .map(|(_, stream)| stream);
         }
 
+        let _pending_decode_cleanup = PendingDecodeGuard::for_request(&request);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let phase = request.phase();
         let phase_label = phase.to_string();

@@ -1,7 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{future::Future, pin::Pin, sync::Mutex, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 // `tokio::time::Instant` rather than the std type so the budget is measured on
 // the same clock as the `tokio::time::timeout` that consumes it.
@@ -9,7 +17,7 @@ use tokio::time::Instant;
 
 use dynamo_runtime::{
     error::{DynamoError, ErrorType},
-    pipeline::{AsyncEngineContext, Error},
+    pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Error, SingleIn},
 };
 
 use crate::{preprocessor::PreprocessedRequest, protocols::common::timing::RequestPhase};
@@ -43,6 +51,69 @@ impl CleanupBudget {
     }
 }
 
+/// Local ownership for an asynchronous prefill whose decode leg has not been sent.
+/// Not serialized: completed/push-style prefills retain the legacy KV cleanup route.
+const PENDING_DECODE_KEY: &str = "dynamo.pending_decode_cleanup";
+
+pub(crate) struct PendingDecode {
+    prefill: Arc<dyn AsyncEngineContext>,
+    dispatched: AtomicBool,
+}
+
+impl PendingDecode {
+    pub(crate) fn install(
+        request: &mut SingleIn<PreprocessedRequest>,
+        prefill: Arc<dyn AsyncEngineContext>,
+    ) {
+        request.insert(
+            PENDING_DECODE_KEY,
+            Self {
+                prefill,
+                dispatched: AtomicBool::new(false),
+            },
+        );
+    }
+
+    fn get(request: &SingleIn<PreprocessedRequest>) -> Option<Arc<Self>> {
+        request
+            .get_optional::<Self>(PENDING_DECODE_KEY)
+            .ok()
+            .flatten()
+    }
+
+    fn cancel_before_dispatch(&self) {
+        if !self.dispatched.load(Ordering::Acquire) {
+            self.prefill.stop_generating();
+        }
+    }
+
+    /// Synchronous ownership boundary: once entered, D may own a KV receiver.
+    pub(super) fn start_dispatch(request: &SingleIn<PreprocessedRequest>) -> Result<(), Error> {
+        if let Some(pending) = Self::get(request) {
+            if request.context().is_stopped() && !pending.dispatched.load(Ordering::Acquire) {
+                pending.cancel_before_dispatch();
+                return Err(cancelled_error(request.context().id()));
+            }
+            pending.dispatched.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
+/// Cancelling selection (including dropping its future) releases P independently
+/// of D's business queue. After dispatch starts, preserve the normal transfer cleanup.
+pub(super) struct PendingDecodeGuard(Arc<PendingDecode>);
+impl PendingDecodeGuard {
+    pub(super) fn for_request(request: &SingleIn<PreprocessedRequest>) -> Option<Self> {
+        PendingDecode::get(request).map(Self)
+    }
+}
+impl Drop for PendingDecodeGuard {
+    fn drop(&mut self) {
+        self.0.cancel_before_dispatch();
+    }
+}
+
 /// Whether remote prefill left KV blocks that only this request's decode worker
 /// can release.
 ///
@@ -59,6 +130,16 @@ pub(super) enum StagedKv {
 }
 
 impl StagedKv {
+    pub(super) fn for_selection(request: &SingleIn<PreprocessedRequest>) -> Self {
+        if PendingDecode::get(request)
+            .is_some_and(|pending| !pending.dispatched.load(Ordering::Acquire))
+        {
+            Self::Absent
+        } else {
+            Self::for_request(request.content())
+        }
+    }
+
     pub(super) fn for_request(request: &PreprocessedRequest) -> Self {
         if request.staged_kv_cleanup {
             Self::Present

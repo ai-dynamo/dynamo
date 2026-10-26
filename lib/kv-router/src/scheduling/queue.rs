@@ -623,7 +623,8 @@ impl<
         let queueing_enabled = profile
             .classes()
             .iter()
-            .any(PolicyClassConfig::queueing_enabled);
+            .any(PolicyClassConfig::queueing_enabled)
+            || overloaded_worker_provider.is_some();
         for class in profile.classes() {
             tracing::info!(
                 policy_class = class.name,
@@ -1307,7 +1308,13 @@ impl<
                 .available_worker_provider
                 .as_ref()
                 .and_then(|provider| provider(&request));
-            let should_queue = class.queueing_enabled()
+            let should_queue = Self::wait_for_overload(
+                &request,
+                queue_metadata.due_at,
+                &self.workers_with_configs.borrow(),
+                self.overloaded_worker_provider.as_ref(),
+                self.available_worker_provider.as_ref(),
+            ) || class.queueing_enabled()
                 && (self.pending.has_backlog(class_index) || {
                     let active_tokens = self.slots.active_tokens(decay_now);
                     let configs = self.workers_with_configs.borrow();
@@ -1480,6 +1487,15 @@ impl<
         let decay_now = Instant::now();
         let mut active_tokens = None;
         self.pending.any_ready_head(|_, class, queued| {
+            if Self::wait_for_overload(
+                &queued.request,
+                queued.due_at,
+                &self.workers_with_configs.borrow(),
+                self.overloaded_worker_provider.as_ref(),
+                self.available_worker_provider.as_ref(),
+            ) {
+                return false;
+            }
             if !class.queueing_enabled() {
                 return true;
             }
@@ -1580,7 +1596,17 @@ impl<
                 let slots = &self.slots;
                 let provider = self.available_worker_provider.as_ref();
                 let workers = &self.workers_with_configs;
+                let overloaded = self.overloaded_worker_provider.as_ref();
                 self.pending.pop_next(|_, class, queued| {
+                    if Self::wait_for_overload(
+                        &queued.request,
+                        queued.due_at,
+                        &workers.borrow(),
+                        overloaded,
+                        provider,
+                    ) {
+                        return false;
+                    }
                     if !class.queueing_enabled() {
                         return true;
                     }
@@ -2005,6 +2031,34 @@ impl<
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
         })
+    }
+
+    /// Initial capacity-wait policy: an optional future due time bounds waiting.
+    /// Keep no-deadline rejection semantics; richer SLO policies can replace this rule.
+    /// Missing or ineligible workers are errors, not transient capacity waits.
+    fn wait_for_overload(
+        request: &SchedulingRequest,
+        due_at: Option<Instant>,
+        configs: &HashMap<WorkerId, C>,
+        overloaded_provider: Option<&OverloadedWorkerProvider>,
+        available_provider: Option<&WorkerAvailabilityProvider>,
+    ) -> bool {
+        if request.response_is_closed() || due_at.is_none_or(|due| due <= Instant::now()) {
+            return false;
+        }
+        let Some(overloaded) = overloaded_provider.and_then(|provider| provider()) else {
+            return false;
+        };
+        let available = available_provider.and_then(|provider| provider(request));
+        let eligibility = request
+            .eligibility()
+            .with_available_workers(available.as_deref());
+        let mut checked_any = false;
+        let has_capacity = eligibility.any_eligible_worker_rank(configs, |worker, _| {
+            checked_any = true;
+            !overloaded.contains(&worker.worker_id)
+        });
+        checked_any && !has_capacity
     }
 
     fn all_workers_prefill_busy_with(
@@ -4616,6 +4670,71 @@ policy_classes:
         let response = scheduled.expect("scheduling returned error");
         assert_eq!(response.best_worker.worker_id, 0);
         assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_capacity_wait_recovers_or_expires_without_changing_legacy_rejection() {
+        for pinned in [false, true] {
+            let overloaded = Arc::new(AtomicBool::new(true));
+            let provider: OverloadedWorkerProvider = {
+                let overloaded = overloaded.clone();
+                Arc::new(move || {
+                    overloaded
+                        .load(Ordering::SeqCst)
+                        .then(|| HashSet::from([0]))
+                })
+            };
+            let (queue, slots) = make_queue_with_providers(1, 16, 256, Some(provider), None);
+            let (legacy, legacy_rx) = make_request("legacy-no-deadline", 256);
+            queue.enqueue(legacy).await;
+            assert!(matches!(
+                legacy_rx.await.unwrap(),
+                Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+            ));
+
+            let (mut waiting, mut waiting_rx) = make_request("deadline-capacity", 256);
+            if pinned {
+                waiting.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+            }
+            queue
+                .enqueue_with_due_at_for_test(waiting, Instant::now() + Duration::from_secs(10))
+                .await;
+            assert_eq!(
+                queue.pending_count(),
+                1,
+                "deadline-bearing overload must wait"
+            );
+            assert!(matches!(
+                waiting_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            overloaded.store(false, Ordering::SeqCst);
+            queue.capacity_changed(Some(WorkerWithDpRank::new(0, 0)));
+            assert_eq!(waiting_rx.await.unwrap().unwrap().best_worker.worker_id, 0);
+            slots
+                .free(&"deadline-capacity".to_string(), Instant::now())
+                .unwrap();
+            assert_eq!(queue.pending_count(), 0);
+
+            overloaded.store(true, Ordering::SeqCst);
+            let (expired, expired_rx) = make_request("capacity-expiry", 256);
+            queue
+                .enqueue_with_due_at_for_test(expired, Instant::now() + Duration::from_secs(5))
+                .await;
+            assert!(matches!(
+                expired_rx.await.unwrap(),
+                Err(KvSchedulerError::DeadlineExceeded)
+            ));
+            assert_eq!(queue.pending_count(), 0);
+            assert_eq!(queue.pending_isl_tokens(), 0);
+            assert_eq!(
+                queue
+                    .class_queue_stats(0)
+                    .unwrap()
+                    .rejected_due_time_passed_total,
+                1
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

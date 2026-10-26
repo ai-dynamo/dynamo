@@ -1501,6 +1501,12 @@ impl KvRouterConfig {
             self.router_policy_config.is_some(),
             super::policy_config::RouterPolicyConfig::has_routing_profiles,
         );
+        // A classifier can set due_at without enabling a prefill-load queue.
+        // Reuse the scheduler's existing recheck task for external overload
+        // changes/lease expiry, which do not necessarily publish slot updates.
+        if self.request_classifier_config().ok().flatten().is_some() {
+            return PREFILL_LOAD_RECHECK_INTERVAL;
+        }
         if self.router_prefill_load_model.is_enabled()
             && (has_routing_profiles || self.router_queue_threshold.is_some())
         {
@@ -2563,6 +2569,26 @@ worker_selection:
         assert!(
             error.contains("failed to parse router policy config"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn deadline_classifier_reuses_fast_capacity_recheck_without_prefill_queue() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "request_classifier:\n  type: deadline-test\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        config.validate_config().unwrap();
+        assert!(!config.queueing_enabled(None).unwrap());
+        assert_eq!(
+            config.router_queue_recheck_interval(),
+            Duration::from_millis(100)
         );
     }
 
