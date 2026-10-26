@@ -156,6 +156,8 @@ navigation:
             contents:
               - page: Fast Model Loading
                 path: pages/kubernetes/model-deployment/model-loading/fast-model-loading.mdx
+              - page: Dynamo Snapshot (Experimental)
+                path: pages/kubernetes/model-deployment/model-loading/snapshot.mdx
               - page: MatrixHub
                 path: pages/kubernetes/model-deployment/model-loading/matrixhub.md
 
@@ -204,6 +206,8 @@ navigation:
             path: pages/kubernetes/fault-tolerance/request-rejection.md
           - page: Graceful Shutdown
             path: pages/kubernetes/fault-tolerance/graceful-shutdown.md
+          - page: Shadow Engine Failover
+            path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md
 
       - section: Auto Deployment
         icon: wand-magic-sparkles

@@ -3,14 +3,19 @@
 
 # Experimental Dynamo Snapshot restore example for Qwen3-0.6B with TensorRT-LLM.
 #
-# This example uses DynamoCheckpoint Auto mode: the operator starts a checkpoint
-# job for TRTLLMWorker, waits for it to become Ready, and then restores the DGD
-# worker from that checkpoint. Use a snapshot placeholder image for the worker
-# and the matching runtime/frontend image for the frontend. Replace the
-# placeholder image names below with the tags for the Dynamo/TRTLLM revision
-# being tested.
+# With checkpoint.enabled=true and no checkpointRef, Dynamo creates a
+# SnapshotJob for TRTLLMWorker. WaitForCheckpoint holds serving replicas at zero
+# until capture completes, then restores them from the generated PodSnapshot.
+# The default Immediate policy starts workers cold during capture; only later
+# Pods restore, and snapshot readiness does not restart existing workers.
+#
+# Use the same TensorRT-LLM runtime image for capture and restore, and a
+# matching frontend image. Omit the deprecated checkpoint.mode and
+# checkpoint.identity fields.
 #
 # Requirements validated for the single-GPU TRTLLM path:
+# - Install standalone Snapshot and enable checkpoint support in the Dynamo
+#   operator before applying this manifest.
 # - Create a PersistentVolumeClaim (PVC) named model-cache in the target
 #   namespace before applying this manifest.
 # - Run the normal TRTLLM entrypoint. Do not wrap it in cuda-checkpoint
@@ -70,7 +75,7 @@ spec:
                 type: CharDevice
           containers:
             - name: main
-              image: my-registry/tensorrtllm-placeholder:my-tag
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
