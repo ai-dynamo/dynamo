@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ops::{Deref, DerefMut};
 use std::process::{Command, Output};
+use tempfile::TempDir;
 
 /// Prevent an uncaptured thread from caching a shared callsite's interest for a sole capture.
 pub(crate) fn tracing_interest_guard() -> tracing::Dispatch {
@@ -9,7 +11,60 @@ pub(crate) fn tracing_interest_guard() -> tracing::Dispatch {
 }
 
 /// Carry execution support without inheriting process-global test configuration.
-pub(crate) fn isolated_command(exact_test_name: &str) -> Command {
+pub(crate) struct IsolatedCommand {
+    command: Command,
+    _tokenizer_cache: TempDir,
+}
+
+impl Deref for IsolatedCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl DerefMut for IsolatedCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
+impl IsolatedCommand {
+    pub(crate) fn into_tokio(self) -> IsolatedTokioCommand {
+        IsolatedTokioCommand {
+            command: tokio::process::Command::from(self.command),
+            _tokenizer_cache: self._tokenizer_cache,
+        }
+    }
+}
+
+pub(crate) struct IsolatedTokioCommand {
+    command: tokio::process::Command,
+    _tokenizer_cache: TempDir,
+}
+
+impl Deref for IsolatedTokioCommand {
+    type Target = tokio::process::Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl DerefMut for IsolatedTokioCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
+impl IsolatedTokioCommand {
+    pub(crate) async fn output(mut self) -> std::io::Result<Output> {
+        self.command.output().await
+    }
+}
+
+pub(crate) fn isolated_command(exact_test_name: &str) -> IsolatedCommand {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     // The test owns parser/TLS/HTTP settings; carry only execution support, never credentials.
     command.env_clear();
@@ -28,9 +83,8 @@ pub(crate) fn isolated_command(exact_test_name: &str) -> Command {
     let tokenizer_cache = tempfile::Builder::new()
         .prefix("dynamo-tokenizer-")
         .tempdir()
-        .expect("create isolated tokenizer cache")
-        .keep();
-    command.env("TIKTOKEN_RS_CACHE_DIR", tokenizer_cache);
+        .expect("create isolated tokenizer cache");
+    command.env("TIKTOKEN_RS_CACHE_DIR", tokenizer_cache.path());
     // The parent harness owns ignoring tests; explicitly rerun its selected test in the child.
     command.args([
         "--exact",
@@ -38,7 +92,10 @@ pub(crate) fn isolated_command(exact_test_name: &str) -> Command {
         "--include-ignored",
         "--nocapture",
     ]);
-    command
+    IsolatedCommand {
+        command,
+        _tokenizer_cache: tokenizer_cache,
+    }
 }
 
 /// Keep temporary environment settings out of sibling tests and their cached configuration.
@@ -98,6 +155,43 @@ fn isolated_commands_own_distinct_tokenizer_caches() {
         })
         .collect();
     assert_ne!(paths[0], paths[1]);
+}
+
+#[test]
+fn isolated_command_removes_tokenizer_cache_after_child_exit() {
+    let mut command = isolated_command("__dynamo_nonexistent_isolated_test__");
+    let cache = command
+        .get_envs()
+        .find_map(|(key, value)| (key == "TIKTOKEN_RS_CACHE_DIR").then_some(value).flatten())
+        .expect("isolated cache override");
+    let cache = std::path::PathBuf::from(cache);
+    assert!(cache.is_dir());
+
+    let output = command.output().expect("run isolated test executable");
+    drop(command);
+
+    assert!(output.status.success());
+    assert!(!cache.exists());
+}
+
+#[tokio::test]
+async fn isolated_tokio_command_removes_tokenizer_cache_after_child_exit() {
+    let command = isolated_command("__dynamo_nonexistent_isolated_test__");
+    let cache = command
+        .get_envs()
+        .find_map(|(key, value)| (key == "TIKTOKEN_RS_CACHE_DIR").then_some(value).flatten())
+        .expect("isolated cache override");
+    let cache = std::path::PathBuf::from(cache);
+    assert!(cache.is_dir());
+
+    let output = command
+        .into_tokio()
+        .output()
+        .await
+        .expect("run isolated test executable");
+
+    assert!(output.status.success());
+    assert!(!cache.exists());
 }
 
 #[test]

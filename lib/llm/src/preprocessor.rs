@@ -211,6 +211,18 @@ pub struct PromptReasoningPrefill {
     prefix: Option<Arc<str>>,
 }
 
+/// Drop plain message bodies from a GPT-OSS parser seed; Harmony retains its init for reset.
+fn compact_gpt_oss_prefill(prefix: &str) -> &str {
+    const MESSAGE: &str = "<|message|>";
+    let Some((header, body)) = prefix.split_once(MESSAGE) else {
+        return prefix;
+    };
+    if body.contains("<|") {
+        return prefix;
+    }
+    &prefix[..header.len() + MESSAGE.len()]
+}
+
 impl std::fmt::Debug for PromptReasoningPrefill {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -6864,7 +6876,7 @@ impl OpenAIPreprocessor {
                 // The Harmony parser owns header/body state, including a continued recipient or channel.
                 prompt
                     .rfind("<|start|>")
-                    .map(|start| Arc::from(&prompt[start..]))
+                    .map(|start| Arc::from(compact_gpt_oss_prefill(&prompt[start..])))
             }),
             _ => None,
         };
@@ -8890,12 +8902,15 @@ mod tests {
         preprocessor.tool_call_parser = Some("harmony".into());
         preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
         let input = "<|channel|>analysis<|message|>private thought<|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>";
-        for args in [
+        for (alias_index, args) in [
             serde_json::json!({}),
             serde_json::json!({"thinking": false}),
             serde_json::json!({"enable_thinking": false}),
             serde_json::json!({"thinking_mode": "disabled"}),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut request: NvCreateChatCompletionRequest =
                 serde_json::from_value(serde_json::json!({
                     "model": "test", "messages": [{"role": "user", "content": "hello"}],
@@ -8926,31 +8941,168 @@ mod tests {
                 ("answer", "private thought"),
                 "args={args}"
             );
-            for split in 0..=input.len() {
-                let chunks =
-                    [(&input[..split], false), (&input[split..], true)].map(|(text, terminal)| {
-                        let mut chunk = chat_stream_chunk(0, None);
-                        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
-                        choice.delta.content =
-                            Some(ChatCompletionMessageContent::Text(text.into()));
-                        choice.finish_reason = terminal.then_some(FinishReason::Stop);
-                        chunk
-                    });
-                let output = preprocessor
-                    .postprocessor_parsing_stream(
-                        futures::stream::iter(chunks),
-                        &request,
-                        false,
-                        false,
-                    )
-                    .unwrap()
-                    .collect::<Vec<_>>()
-                    .await;
-                let (content, reasoning) = gpt_oss_stream_text(&output);
-                assert_eq!(content, "answer", "args={args} split={split}");
-                assert_eq!(reasoning, "private thought", "args={args} split={split}");
+            let mut chunk = chat_stream_chunk(0, None);
+            let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = Some(ChatCompletionMessageContent::Text(input.into()));
+            choice.finish_reason = Some(FinishReason::Stop);
+            let output = preprocessor
+                .postprocessor_parsing_stream(
+                    futures::stream::iter([chunk]),
+                    &request,
+                    false,
+                    false,
+                )
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let (content, reasoning) = gpt_oss_stream_text(&output);
+            assert_eq!(content, "answer", "args={args}");
+            assert_eq!(reasoning, "private thought", "args={args}");
+
+            if alias_index == 0 {
+                for split in 0..=input.len() {
+                    let chunks = [(&input[..split], false), (&input[split..], true)].map(
+                        |(text, terminal)| {
+                            let mut chunk = chat_stream_chunk(0, None);
+                            let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                            choice.delta.content =
+                                Some(ChatCompletionMessageContent::Text(text.into()));
+                            choice.finish_reason = terminal.then_some(FinishReason::Stop);
+                            chunk
+                        },
+                    );
+                    let output = preprocessor
+                        .postprocessor_parsing_stream(
+                            futures::stream::iter(chunks),
+                            &request,
+                            false,
+                            false,
+                        )
+                        .unwrap()
+                        .collect::<Vec<_>>()
+                        .await;
+                    let (content, reasoning) = gpt_oss_stream_text(&output);
+                    assert_eq!(content, "answer", "args={args} split={split}");
+                    assert_eq!(reasoning, "private thought", "args={args} split={split}");
+                }
             }
         }
+    }
+
+    #[test]
+    fn gpt_oss_prefill_does_not_retain_plain_continued_message_bodies() {
+        let header = "<|start|>assistant<|channel|>final<|message|>";
+        let prompt = format!("{header}{}", "x".repeat(64 * 1024));
+        let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            None,
+            Some("gpt_oss"),
+            Some(&prompt),
+        );
+
+        assert_eq!(
+            prefill.prefix.as_deref().map(str::len),
+            Some(header.len()),
+            "plain message body is irrelevant to the parser seed"
+        );
+
+        let structural_prompt = format!("{header}quoted marker <|ghissue|> remains structural");
+        let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            None,
+            Some("gpt_oss"),
+            Some(&structural_prompt),
+        );
+        assert_eq!(
+            structural_prefill.prefix.as_deref().map(str::len),
+            Some(structural_prompt.len()),
+            "marker-bearing bodies must retain their parser state"
+        );
+
+        let incomplete_header = "<|start|>assistant to=";
+        let incomplete_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            None,
+            Some("gpt_oss"),
+            Some(incomplete_header),
+        );
+        assert_eq!(
+            incomplete_prefill.prefix.as_deref(),
+            Some(incomplete_header),
+            "incomplete headers must remain intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_large_plain_continuation_prefill_supports_multiple_choices() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_large_plain_continuation_prefill_supports_multiple_choices"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        preprocessor.formatter = test_prompt_formatter(
+            "{% for message in messages %}<|start|>{{ message.role }}<|channel|>final<|message|>{{ message.content }}<|return|>{% endfor %}",
+        );
+        let message_body = "x".repeat(64 * 1024);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [{"role": "assistant", "content": message_body}],
+            "n": 2, "continue_final_message": true, "add_generation_prompt": false,
+        }))
+        .unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        let prefill = preprocessor.configured_prompt_prefill(Some(prompt.as_str()));
+        let header = "<|start|>assistant<|channel|>final<|message|>";
+        assert_eq!(prefill.prefix.as_deref().map(str::len), Some(header.len()));
+
+        let mut common = preprocessor
+            .builder(&request)
+            .unwrap()
+            .token_ids(vec![1])
+            .build()
+            .unwrap();
+        let constraint = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common, prefill.unified)
+            .unwrap();
+        let route = preprocessor
+            .tool_processing_route(&request, &constraint)
+            .unwrap();
+        let mut chunk = chat_stream_chunk(0, None);
+        let data = chunk.data.as_mut().unwrap();
+        let mut second = data.inner.choices[0].clone();
+        for choice in [&mut data.inner.choices[0], &mut second] {
+            choice.delta.content = Some(ChatCompletionMessageContent::Text(" world".into()));
+            choice.finish_reason = Some(FinishReason::Stop);
+        }
+        second.index = 1;
+        data.inner.choices.push(second);
+
+        let output = preprocessor
+            .postprocessor_parsing_stream_with_constraint(
+                futures::stream::iter([chunk]),
+                &request,
+                prefill,
+                constraint,
+                route,
+            )
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let mut content = std::collections::BTreeMap::<u32, String>::new();
+        for choice in output
+            .iter()
+            .filter_map(|response| response.data.as_ref())
+            .flat_map(|data| &data.inner.choices)
+        {
+            if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                content.entry(choice.index).or_default().push_str(text);
+            }
+        }
+        assert_eq!(content.len(), 2);
+        assert!(content.values().all(|text| text == " world"));
     }
 
     #[tokio::test]
