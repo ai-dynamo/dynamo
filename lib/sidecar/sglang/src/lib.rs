@@ -4,10 +4,11 @@
 //! Dynamo SGLang sidecar.
 //!
 //! A [`SglangSidecarEngine`] implements [`dynamo_backend_common::LLMEngine`] by
-//! proxying inference to an out-of-process SGLang engine over SGLang's native
-//! `sglang.runtime.v1.SglangService` contract. Model identity, disaggregation
-//! role, parallelism, KV block sizing, and context length are discovered from
-//! the engine's gRPC metadata RPCs.
+//! proxying inference to an out-of-process SGLang engine over
+//! `sglang.api.v1.SglangService`, the native gRPC contract of SGLang's Rust
+//! server (`SGLANG_RUST_SERVER=1`). Model identity, disaggregation role,
+//! parallelism, KV block sizing, and context length are discovered from the
+//! engine's gRPC metadata RPCs.
 //!
 //! The crate never depends on `sglang` or any engine crate. It uses
 //! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`/`prost`,
@@ -19,12 +20,11 @@ use clap::{CommandFactory, FromArgMatches};
 use dynamo_sidecar_common::SidecarStartupError;
 
 use args::Args;
-use headless::HeadlessSidecar;
 
 pub mod args;
 pub mod client;
+mod discovery;
 pub mod engine;
-mod headless;
 mod native_http;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
@@ -90,26 +90,12 @@ pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
             anyhow::bail!("runtime shut down during sidecar initialization");
         }
         let (drt, discovery) = result?;
-        match discovery {
-            client::StartupDiscovery::Follower => {
-                let follower =
-                    HeadlessSidecar::from_args(args).map_err(SidecarStartupError::from)?;
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => Ok(()),
-                    _ = runtime_shutdown.cancelled() => anyhow::bail!("runtime shut down during follower relay"),
-                    result = follower.run_inner(drt, shutdown.clone()) => result,
-                }
-            }
-            client::StartupDiscovery::Leader(discovery) => {
-                let (engine, config) = SglangSidecarEngine::from_discovered(args, *discovery)
-                    .map_err(SidecarStartupError::from)?;
-                dynamo_backend_common::Worker::new(Arc::new(engine), config)
-                    .run_with_drt(drt, shutdown)
-                    .await
-                    .map_err(Into::into)
-            }
-        }
+        let (engine, config) = SglangSidecarEngine::from_discovered(args, discovery)
+            .map_err(SidecarStartupError::from)?;
+        dynamo_backend_common::Worker::new(Arc::new(engine), config)
+            .run_with_drt(drt, shutdown)
+            .await
+            .map_err(Into::into)
     })
 }
 
