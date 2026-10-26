@@ -99,7 +99,6 @@ rules:
   - apps
   resources:
   - daemonsets
-  - replicasets
   verbs:
   - get
   - list
