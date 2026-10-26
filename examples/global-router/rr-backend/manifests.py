@@ -25,7 +25,19 @@ ETCD_IMAGE = (
 )
 
 
-def render(namespace, stem, site_id, planner_image, relay_image, model, node_selector):
+def render(
+    namespace,
+    stem,
+    site_id,
+    planner_image,
+    relay_image,
+    model,
+    node_selector,
+    worker_replicas=2,
+    mocker_args=(),
+    tolerations=(),
+    frontend_cpu=None,
+):
     for value in (namespace, stem):
         if len(value) > 40 or not re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", value):
             raise ValueError(
@@ -69,6 +81,8 @@ def render(namespace, stem, site_id, planner_image, relay_image, model, node_sel
         pod = {"automountServiceAccountToken": False, "containers": [container]}
         if node_selector:
             pod["nodeSelector"] = node_selector
+        if tolerations:
+            pod["tolerations"] = list(tolerations)
         if volumes:
             pod["volumes"] = volumes
         if component == "worker":
@@ -146,6 +160,8 @@ def render(namespace, stem, site_id, planner_image, relay_image, model, node_sel
             "1",
             "--speedup-ratio",
             "1",
+            # Later flags win, so these can override the defaults above.
+            *mocker_args,
         ],
         "env": [
             *env,
@@ -192,7 +208,9 @@ def render(namespace, stem, site_id, planner_image, relay_image, model, node_sel
             "periodSeconds": 5,
             "timeoutSeconds": 4,
         },
-        "resources": resources("250m", "512Mi", "1", "2Gi"),
+        "resources": resources(
+            frontend_cpu or "250m", "512Mi", frontend_cpu or "1", "2Gi"
+        ),
     }
     relay_config = {
         "dc_id": f"{site_id}-{stem}",
@@ -243,7 +261,7 @@ def render(namespace, stem, site_id, planner_image, relay_image, model, node_sel
             "etcd", etcd, volumes=[{"name": "data", "emptyDir": {"sizeLimit": "1Gi"}}]
         ),
         service("etcd", [{"name": "client", "port": 2379, "targetPort": 2379}]),
-        deploy("worker", worker, replicas=2),
+        deploy("worker", worker, replicas=worker_replicas),
         deploy("frontend", frontend),
         service("frontend", [{"name": "http", "port": 8000, "targetPort": 8000}]),
         deploy(
@@ -273,6 +291,23 @@ def main():
     parser.add_argument(
         "--node-selector", action="append", default=[], metavar="KEY=VALUE"
     )
+    parser.add_argument(
+        "--toleration",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE:EFFECT",
+        type=toleration,
+    )
+    parser.add_argument("--worker-replicas", type=int, default=2)
+    parser.add_argument(
+        "--mocker-arg",
+        action="append",
+        default=[],
+        help="Extra Mocker argument; repeat for each token, e.g. --mocker-arg=--max-num-seqs --mocker-arg=16",
+    )
+    parser.add_argument(
+        "--frontend-cpu", help="Frontend CPU request and limit, e.g. 2"
+    )
     args = parser.parse_args()
     selectors = dict(value.split("=", 1) for value in args.node_selector)
     print(
@@ -285,10 +320,26 @@ def main():
                 args.relay_image,
                 args.model,
                 selectors,
+                worker_replicas=args.worker_replicas,
+                mocker_args=args.mocker_arg,
+                tolerations=args.toleration,
+                frontend_cpu=args.frontend_cpu,
             ),
             indent=2,
         )
     )
+
+
+def toleration(value):
+    """A ``KEY=VALUE:EFFECT`` toleration, e.g. ``bench=true:NoSchedule``."""
+    key, rest = value.split("=", 1)
+    toleration_value, effect = rest.rsplit(":", 1)
+    return {
+        "key": key,
+        "operator": "Equal",
+        "value": toleration_value,
+        "effect": effect,
+    }
 
 
 if __name__ == "__main__":

@@ -19,15 +19,15 @@ import argparse
 import json
 
 
-def render(namespace, stem, members):
-    services = {
-        f"{stem}-frontend": [{"name": "http", "port": 8000, "protocol": "TCP"}],
-        f"{stem}-pool-relay": [
+def render(namespace, stems, members):
+    services = {}
+    for stem in stems:
+        services[f"{stem}-frontend"] = [{"name": "http", "port": 8000, "protocol": "TCP"}]
+        services[f"{stem}-pool-relay"] = [
             {"name": "wan-grpc", "port": 50051, "protocol": "TCP"},
             {"name": "stats-grpc", "port": 50052, "protocol": "TCP"},
-        ],
-        "global-router": [{"name": "http", "port": 8000, "protocol": "TCP"}],
-    }
+        ]
+    services["global-router"] = [{"name": "http", "port": 8000, "protocol": "TCP"}]
     mcs_api = "multicluster.x-k8s.io/v1alpha1"
     items = [
         {
@@ -81,10 +81,15 @@ def render(namespace, stem, members):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--namespace", default="global-router-v2-rr")
-    parser.add_argument("--stem", default="rr-mocker")
+    parser.add_argument(
+        "--stem",
+        action="append",
+        help="Pool Service stem; repeat for each pool in the namespace (default rr-mocker)",
+    )
     parser.add_argument("--member", action="append", required=True)
     args = parser.parse_args()
-    print(json.dumps(render(args.namespace, args.stem, args.member), indent=2))
+    stems = args.stem or ["rr-mocker"]
+    print(json.dumps(render(args.namespace, stems, args.member), indent=2))
 
 
 if __name__ == "__main__":

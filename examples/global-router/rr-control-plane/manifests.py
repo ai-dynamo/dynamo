@@ -20,7 +20,16 @@ import re
 from pathlib import Path
 
 
-def render(namespace, image, routing):
+def render(
+    namespace,
+    image,
+    routing,
+    replicas=1,
+    router_policy=None,
+    router_cpu=None,
+    node_selector=None,
+    tolerations=(),
+):
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", namespace):
         raise ValueError("namespace must be a DNS label")
     if "@sha256:" not in image:
@@ -105,10 +114,15 @@ def render(namespace, image, routing):
                 "http://global-discovery:8080/",
                 "--discovery-interval-secs",
                 "2",
+                *(["--router-policy", router_policy] if router_policy else []),
             ],
             "/health",
         ),
     ]:
+        requests = {"cpu": "100m", "memory": "128Mi"}
+        limits = {"memory": "512Mi"}
+        if name == "global-router" and router_cpu:
+            requests["cpu"] = limits["cpu"] = router_cpu
         pod = {
             "serviceAccountName": "global-discovery"
             if name == "global-discovery"
@@ -142,10 +156,7 @@ def render(namespace, image, routing):
                         "tcpSocket": {"port": "http"},
                         "initialDelaySeconds": 20,
                     },
-                    "resources": {
-                        "requests": {"cpu": "100m", "memory": "128Mi"},
-                        "limits": {"memory": "512Mi"},
-                    },
+                    "resources": {"requests": requests, "limits": limits},
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
                         "readOnlyRootFilesystem": True,
@@ -154,6 +165,10 @@ def render(namespace, image, routing):
                 }
             ],
         }
+        if node_selector:
+            pod["nodeSelector"] = node_selector
+        if tolerations:
+            pod["tolerations"] = list(tolerations)
         if name == "global-discovery":
             pod["volumes"] = [
                 {"name": "routing", "configMap": {"name": "global-discovery-routing"}}
@@ -181,7 +196,7 @@ def render(namespace, image, routing):
                     "kind": "Deployment",
                     "metadata": meta(name),
                     "spec": {
-                        "replicas": 1,
+                        "replicas": replicas,
                         "selector": {"matchLabels": {"app": name}},
                         "template": {
                             "metadata": {"labels": {"app": name, **labels}},
@@ -199,11 +214,45 @@ if __name__ == "__main__":
     parser.add_argument("--namespace", default="global-router-rr")
     parser.add_argument("--image", required=True)
     parser.add_argument("--routing-config", type=Path, required=True)
+    parser.add_argument(
+        "--replicas", type=int, default=1, help="Global Ingress and GDS replicas each"
+    )
+    parser.add_argument(
+        "--router-policy",
+        choices=["round-robin", "least-in-flight"],
+        help="Global Ingress pool selection; omitted uses the binary's default",
+    )
+    parser.add_argument("--router-cpu", help="Global Ingress CPU request and limit")
+    parser.add_argument(
+        "--node-selector", action="append", default=[], metavar="KEY=VALUE"
+    )
+    parser.add_argument(
+        "--toleration", action="append", default=[], metavar="KEY=VALUE:EFFECT"
+    )
     args = parser.parse_args()
+    tolerations = []
+    for value in args.toleration:
+        key, rest = value.split("=", 1)
+        toleration_value, effect = rest.rsplit(":", 1)
+        tolerations.append(
+            {
+                "key": key,
+                "operator": "Equal",
+                "value": toleration_value,
+                "effect": effect,
+            }
+        )
     print(
         json.dumps(
             render(
-                args.namespace, args.image, json.loads(args.routing_config.read_text())
+                args.namespace,
+                args.image,
+                json.loads(args.routing_config.read_text()),
+                replicas=args.replicas,
+                router_policy=args.router_policy,
+                router_cpu=args.router_cpu,
+                node_selector=dict(value.split("=", 1) for value in args.node_selector),
+                tolerations=tolerations,
             ),
             indent=2,
         )
