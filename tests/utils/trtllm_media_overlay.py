@@ -11,7 +11,8 @@ import inspect
 import shutil
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 
 def _replace_definition(destination, source, class_name, names):
@@ -56,6 +57,24 @@ def _replace_definition(destination, source, class_name, names):
     destination.write_text(result)
 
 
+def _overlay_server(server, source):
+    """Keep the release launcher while installing the class and its imports."""
+    _replace_definition(server, source, None, ["OpenEngineServer"])
+    server.write_text(
+        server.read_text()
+        .replace(
+            "from typing import Any",
+            "from typing import Any\nfrom concurrent.futures import ThreadPoolExecutor\n"
+            "from .coordinator import FrontendClient\n"
+            "from .kv_events import KvEventsUnavailableError, events_config",
+        )
+        .replace(
+            "from openengine.v1 import openengine_pb2_grpc",
+            "from .bindings import openengine_pb2_grpc",
+        )
+    )
+
+
 def install_overlay(source):
     """Install the pinned media implementation into a release runtime."""
     package = Path(
@@ -78,21 +97,7 @@ def install_overlay(source):
     # Retain release-coupled launch_server; use the pinned class's worker pools
     # and cleanup rather than silently running preprocessing on the default pool.
     server = package / "grpc/openengine/server.py"
-    _replace_definition(
-        server, source / "grpc/openengine/server.py", None, ["OpenEngineServer"]
-    )
-    server.write_text(
-        server.read_text()
-        .replace(
-            "from typing import Any",
-            "from typing import Any\nfrom concurrent.futures import ThreadPoolExecutor\n"
-            "from .coordinator import FrontendClient",
-        )
-        .replace(
-            "from openengine.v1 import openengine_pb2_grpc",
-            "from .bindings import openengine_pb2_grpc",
-        )
-    )
+    _overlay_server(server, source / "grpc/openengine/server.py")
     registry = package / "inputs/registry.py"
     _replace_definition(
         registry,
@@ -154,12 +159,47 @@ def check_signatures():
     print("TRT-LLM overlay: retained media helper signatures passed")
 
 
+async def check_server_startup():
+    """Exercise the installed startup method without loading model weights."""
+    from tensorrt_llm.grpc.openengine.kv_events import KvEventsUnavailableError
+    from tensorrt_llm.grpc.openengine.server import OpenEngineServer
+
+    for configured, available in ((False, False), (True, True), (True, False)):
+        events = SimpleNamespace(enable_kv_cache_events=configured, publisher="zmq")
+        capacity = Mock(return_value={"kvEventsEnabled": available})
+        server = OpenEngineServer.__new__(OpenEngineServer)
+        server._llm = SimpleNamespace(
+            args=SimpleNamespace(
+                kv_cache_config=SimpleNamespace(kv_events_config=events)
+            ),
+            _executor=SimpleNamespace(get_kv_cache_capacity=capacity),
+        )
+        server._server = AsyncMock()
+        server.host, server.port = "127.0.0.1", 0
+        if configured and not available:
+            try:
+                await server.start()
+            except KvEventsUnavailableError:
+                pass
+            else:
+                raise AssertionError(
+                    "Startup accepted an unavailable KV event publisher"
+                )
+            server._server.start.assert_not_awaited()
+        else:
+            await server.start()
+            server._server.start.assert_awaited_once()
+        assert capacity.call_count == int(configured)
+    print("TRT-LLM overlay: server startup with and without KV events passed")
+
+
 async def validate():
     import numpy as np
     import soundfile
     from PIL import Image
     from tensorrt_llm.inputs import media_io, utils
 
+    await check_server_startup()
     image_bytes = BytesIO()
     Image.new("RGB", (32, 32), "red").save(image_bytes, format="PNG")
     audio_bytes = BytesIO()
