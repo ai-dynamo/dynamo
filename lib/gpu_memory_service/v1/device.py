@@ -57,6 +57,17 @@ def get_device_uuid(device: int) -> str:
     return f"GPU-{UUID(bytes=bytes(uuid.bytes))}"
 
 
+def cuda_ordinal(device: int) -> int:
+    """The CUDA ordinal of GMS device ``device`` in this process.
+
+    GMS device N is the pod's N-th GPU: it names the sockets and the artifact
+    directory. A process pinned to that one GPU with CUDA_VISIBLE_DEVICES, as
+    the V1 supervisor starts each device's server, sees it as ordinal 0.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    return 0 if visible and "," not in visible else device
+
+
 def invalidate_device_uuid_cache() -> None:
     """Clear cached device UUIDs after the visible GPU assignment changes."""
     get_device_uuid.cache_clear()

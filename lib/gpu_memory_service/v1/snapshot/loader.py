@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 
 from gpu_memory_service.cli.snapshot.loader import _build_parser as _build_v0_parser
 from gpu_memory_service.common.vmm import VMMDeviceType, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
-from gpu_memory_service.v1.device import get_socket_path
+from gpu_memory_service.v1.device import cuda_ordinal, get_socket_path
 from gpu_memory_service.v1.snapshot.weight_artifact import load_weights
 
 logging.basicConfig(
@@ -63,7 +64,8 @@ def _backend_config(parser, args) -> dict[str, object]:
     return config
 
 
-def main(argv: list[str] | None = None) -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Validated loader arguments, with ``backend_config`` resolved."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     if not args.checkpoint_dir:
@@ -76,17 +78,26 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--max-workers must be a positive integer")
     if args.sharded_ssd_queues_per_root <= 0:
         parser.error("--sharded-ssd-queues-per-root must be a positive integer")
-    backend_config = _backend_config(parser, args)
+    args.backend_config = _backend_config(parser, args)
+    return args
 
+
+def load(args: argparse.Namespace) -> None:
+    """Fill GMS device ``args.device``'s weights server from its artifact."""
+    logger.info("GMS V1 loader starting device=%d", args.device)
     init_vmm(VMMDeviceType.CUDA)
     load_weights(
         os.path.join(args.checkpoint_dir, f"device-{args.device}"),
         get_socket_path(args.device, "weights"),
-        args.device,
+        cuda_ordinal(args.device),
         max_workers=args.max_workers,
         transfer_backend=args.transfer_backend,
-        backend_config=backend_config,
+        backend_config=args.backend_config,
     )
+
+
+def main(argv: list[str] | None = None) -> None:
+    load(parse_args(argv))
     logger.info("GMS V1 loader complete; exiting")
 
 
