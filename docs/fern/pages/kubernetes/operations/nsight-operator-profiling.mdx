@@ -66,6 +66,18 @@ fastest first look. Adjust it as follows:
 - Leave out `--gpu-metrics`. It installs Nsight's GPU metrics collector: a DaemonSet whose pods run with
   `privileged: true`, plus a profile config that runs `nsys --gpu-metrics-devices=all` in those pods.
 
+For example, to profile the frontend and the aggregated workers of one DGD:
+
+```bash
+python3 nsight_operator_dynamo.py -n <namespace> configure \
+    --deployment-name <dgd> \
+    --components frontend worker \
+    --nsys-profile-args "-t cuda,nvtx,osrt --python-sampling=true"
+```
+
+The helper then prints the next steps: deploy the DGD or recreate its pods, then start a capture, stop it, and list
+the reports with `nsight_operator.py`.
+
 The helper puts every selected pod on the `default` tag and keeps reports in Nsight's in-cluster storage. For S3, or
 for a tag per test, write your own profile config as described below.
 
