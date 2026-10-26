@@ -269,7 +269,7 @@ fn plain_functions_retain_the_existing_flat_prompt_view() {
 }
 
 #[test]
-fn responses_validation_accepts_internal_qualified_names_but_chat_keeps_its_name_rules() {
+fn responses_and_chat_accept_qualified_functions_but_reject_invalid_namespaces() {
     let chat: NvCreateChatCompletionRequest = request(namespace(false), json!("Read."))
         .try_into()
         .unwrap();
@@ -279,9 +279,9 @@ fn responses_validation_accepts_internal_qualified_names_but_chat_keeps_its_name
         "tools":[{"type":"function","function":{"name":"fs.read"}}]
     }))
     .unwrap();
-    assert!(crate::engines::ValidateRequest::validate(&wire_chat).is_err());
+    crate::engines::ValidateRequest::validate(&wire_chat).unwrap();
     let mut invalid = namespace(false);
-    invalid[0]["name"] = json!("bad.namespace");
+    invalid[0]["name"] = json!("bad namespace");
     let chat: NvCreateChatCompletionRequest = request(invalid, json!("Read.")).try_into().unwrap();
     assert!(crate::engines::ValidateRequest::validate(&chat).is_err());
 }

@@ -29,8 +29,12 @@ from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
-from dynamo.frontend._vllm_chat_utils import make_tool_call_id
-from dynamo.frontend.vllm_protocol import DeltaFunctionCall, DeltaMessage, DeltaToolCall
+from dynamo.frontend.vllm_protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    make_tool_call_id,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_template

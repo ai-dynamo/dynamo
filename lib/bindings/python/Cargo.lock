@@ -2080,7 +2080,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2104,7 +2104,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-builtin"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "async-trait",
  "dynamo-kv-router",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2284,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2301,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2332,14 +2332,15 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "10.0.7"
+version = "10.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d16648322cc1b4feb6fd722cb0b3cc23f6a545b7d37e167543a1675fa1c3d4a"
+checksum = "fbc60902ba2ad3611da2a19a7e7b3b359a9c944bf1bc8c3461c2e601a99e8376"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
  "dynamo-protocols",
+ "dynamo-structural-tag",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2356,11 +2357,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.24"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a62c4aea442890712dcdb64e493fac636edad8c9b25f793948800507c41bedc"
+checksum = "705005ac5414c4dc7327f8f868c56ae85bc247c71dfd250ab95fc1aa9622e72d"
 dependencies = [
  "anyhow",
+ "dynamo-structural-tag",
  "openai-harmony",
  "percent-encoding",
  "regex",
@@ -2373,9 +2375,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.2.0"
+version = "8.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "774a621dbee86866def6f59eac858651bf080af0732e9c3c4e46081563749c9a"
+checksum = "c9638cc27c7cc42903cb022e3f686507b007f6466ddbd2e97a092e5b0b8938fb"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2392,7 +2394,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2438,9 +2440,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "8.0.3"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144979b6e4a9fe44556c02ea92d17413d803b704de73e1f1f8255da9ce9dd99d"
+checksum = "a9e6a7ebe51c63049c4088131c3e8bfe5687fafb699e659fda20728b34e4dc31"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2456,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2471,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2550,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2577,7 +2579,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2597,10 +2599,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-tokenizers"
-version = "3.1.1"
+name = "dynamo-structural-tag"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "914bc0a92430a2fc39164e21a7849587de190e0fea824f56c5f8bb9f29413658"
+checksum = "c8d57353db2c855b6d8154bb67b752d95547ee33eda3ee55342c0625211bdaae"
+dependencies = [
+ "anyhow",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dynamo-tokenizers"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b42180c97822bdad3574873cdf9fb986cc12086dd8a09a0cd321ba76dd2ee8dd"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2621,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2636,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-trtllm-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2662,14 +2676,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-vllm-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2694,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-worker-selection-policy-catalog"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
 ]
@@ -3868,7 +3882,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.10",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -7261,7 +7275,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.10",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -9911,9 +9925,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.10"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -9924,14 +9938,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.10",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.10"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]

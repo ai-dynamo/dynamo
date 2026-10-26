@@ -38,7 +38,6 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
-from dynamo.frontend._vllm_chat_utils import load_chat_template
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
@@ -62,6 +61,7 @@ from .utils import (
     random_uuid,
     resolve_chat_template,
 )
+from .vllm_protocol import load_chat_template
 
 logger = logging.getLogger(__name__)
 

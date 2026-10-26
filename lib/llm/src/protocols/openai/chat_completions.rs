@@ -1778,13 +1778,24 @@ mod tests {
             make_tool("func-name_v2"),
             make_tool("FuncName"),
             make_tool("Func_Name-123"),
+            make_tool("my-tool.v2"),
         ];
         assert!(validate::validate_tools(&Some(&tools)).is_ok());
     }
 
     #[test]
     fn test_validate_tools_invalid_names() {
-        for name in ["<func_name>", "func name", "func@name", "func,name", ""] {
+        for name in [
+            "<func_name>",
+            "func name",
+            "func@name",
+            "func,name",
+            "func=name",
+            "func\"name",
+            "func:name",
+            "func/name",
+            "",
+        ] {
             let tools = vec![ChatCompletionTool {
                 custom: None,
                 r#type: ChatCompletionToolType::Function,
