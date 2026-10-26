@@ -42,7 +42,7 @@ ENABLED: bool = bool(int(os.getenv("DYN_NVTX", "0")))
 if ENABLED:
     try:
         import nvtx as _nvtx_lib
-        from nvtx.colors import color_to_hex as _color_to_hex
+        from nvtx.colors import color_to_hex  # type: ignore[import-untyped]
     except ModuleNotFoundError as exc:
         # Only a missing nvtx package degrades to the no-op path: profiling presets
         # set DYN_NVTX for every launch and an image without the package must still
@@ -72,7 +72,7 @@ if ENABLED:
         if color is None or isinstance(color, int):
             return color
         try:
-            return _color_to_hex(_EXTRA_COLORS.get(color, color))
+            return color_to_hex(_EXTRA_COLORS.get(color, color))
         except (TypeError, ValueError):
             # Missing matplotlib or an invalid color: use nvtx's default.
             return None

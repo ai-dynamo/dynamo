@@ -513,7 +513,6 @@ disable_error_code = ["var-annotated"]
 # TODO: fix the ones that do have stub package
 module = [
     "nvtx",
-    "nvtx.*",
     "fsspec",
     "fsspec.*",
     "zstandard",

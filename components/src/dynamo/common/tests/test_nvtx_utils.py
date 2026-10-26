@@ -91,7 +91,7 @@ def test_invalid_color_with_matplotlib_falls_back_to_the_default_color(
     def invalid_color(color):
         raise ValueError(f"Invalid RGBA argument: {color!r}")
 
-    monkeypatch.setattr(enabled_nvtx_utils, "_color_to_hex", invalid_color)
+    monkeypatch.setattr(enabled_nvtx_utils, "color_to_hex", invalid_color)
 
     assert enabled_nvtx_utils._resolve_color("not-a-color") is None
 
