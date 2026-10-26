@@ -22,18 +22,18 @@ use dynamo_llm::http::service::{
     axum::http::{HeaderMap, HeaderName, HeaderValue},
     client_error_response, preprocessed_request_context,
 };
+use dynamo_llm::kv_router::RoutingHost;
 use dynamo_llm::kv_router::gateway_dispatch::{GatewayDispatch, GatewayProgress};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::FinishReason;
 use dynamo_llm::protocols::common::extensions::{
     HEADER_DP_RANK, HEADER_WORKER_INSTANCE_ID, apply_frontend_nvext_policy,
 };
-use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use dynamo_llm::types::Annotated;
+use dynamo_llm::protocols::common::llm_backend::PreprocessedRequest;
 use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::{CompletionUsage, Prompt};
-use dynamo_runtime::pipeline::{Context, ManyOut, ServiceEngine, SingleIn};
+use dynamo_runtime::pipeline::{AsyncEngine, Context};
 use futures::StreamExt;
 
 use crate::picker::{PickError, PickResult};
@@ -47,11 +47,8 @@ pub const SESSION_AFFINITY_TTL_ENV: &str = "DYN_EPP_SESSION_AFFINITY_TTL_SECS";
 /// buffer it (the delta it might have carried counts as one token).
 const MAX_PENDING_SSE_BYTES: usize = 1024 * 1024;
 
-pub(crate) type RoutingEngine =
-    ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>;
-
 pub(crate) struct GatewayRouting {
-    engine: RoutingEngine,
+    host: Arc<RoutingHost>,
     dispatch: Arc<GatewayDispatch>,
     responses: DashMap<String, ResponseProgress>,
 }
@@ -62,9 +59,9 @@ pub(crate) struct RoutableRequest {
 }
 
 impl GatewayRouting {
-    pub(crate) fn new(engine: RoutingEngine, dispatch: Arc<GatewayDispatch>) -> Self {
+    pub(crate) fn new(host: Arc<RoutingHost>, dispatch: Arc<GatewayDispatch>) -> Self {
         Self {
-            engine,
+            host,
             dispatch,
             responses: DashMap::new(),
         }
@@ -133,11 +130,7 @@ impl GatewayRouting {
 
     /// Route through the host and return where Envoy should send the request.
     /// Pre-dispatch failures carry the status the frontend would return.
-    pub(crate) async fn pick(
-        &self,
-        request: RoutableRequest,
-        resolve_endpoint: impl Fn(u64) -> Option<String>,
-    ) -> Result<PickResult, PickError> {
+    pub(crate) async fn pick(&self, request: RoutableRequest) -> Result<PickResult, PickError> {
         let request_id = request.context.id().to_string();
         // If this future is dropped (the ext_proc stream closed mid-pick) after
         // the host dispatched, release the dispatch entry it left behind.
@@ -147,14 +140,10 @@ impl GatewayRouting {
             armed: true,
         };
 
-        let stream = self
-            .engine
-            .generate(request.context)
-            .await
-            .map_err(|error| {
-                let (status, message) = client_error_response(error);
-                PickError::Rejected { status, message }
-            })?;
+        let stream = self.host.generate(request.context).await.map_err(|error| {
+            let (status, message) = client_error_response(error);
+            PickError::Rejected { status, message }
+        })?;
         let route = self.dispatch.take_route(&request_id).ok_or_else(|| {
             PickError::RoutingFailed("routing host returned without dispatching".to_string())
         })?;
@@ -162,13 +151,6 @@ impl GatewayRouting {
         // keep polling until the EPP completes or aborts the stream.
         tokio::spawn(stream.for_each(|_| async {}));
 
-        let Some(endpoint) = resolve_endpoint(route.worker_id) else {
-            tracing::warn!(
-                worker_id = route.worker_id,
-                "Selected worker has no resolved endpoint"
-            );
-            return Err(PickError::NoEndpoints);
-        };
         self.responses
             .insert(request_id.clone(), ResponseProgress::default());
         pending.armed = false;
@@ -177,12 +159,12 @@ impl GatewayRouting {
         tracing::info!(
             worker_id = route.worker_id,
             dp_rank,
-            endpoint = %endpoint,
+            endpoint = %route.endpoint,
             token_count = route.token_ids.len(),
             "Picked endpoint through the routing host"
         );
         Ok(PickResult {
-            endpoint,
+            endpoint: route.endpoint,
             headers: vec![
                 (
                     HEADER_WORKER_INSTANCE_ID.to_string(),

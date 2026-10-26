@@ -58,6 +58,7 @@ pub struct RoutingHostBuilder {
     affinity: Affinity,
     lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     dispatch: Option<LlmDispatch>,
+    fault_detection: bool,
     worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     multimodal_cache: Option<(
         Arc<dyn MultimodalCacheIndex>,
@@ -80,6 +81,7 @@ impl RoutingHost {
             affinity: Affinity::None,
             lora: None,
             dispatch: None,
+            fault_detection: true,
             worker_monitor: None,
             multimodal_cache: None,
             transport: None,
@@ -149,6 +151,16 @@ impl RoutingHostBuilder {
         self
     }
 
+    /// Whether the transport treats dispatch errors and response inactivity as
+    /// worker faults (on by default). A host whose dispatch cannot observe the
+    /// worker, such as a gateway endpoint picker where the gateway owns the
+    /// connection and its timeouts, turns it off so a slow response never marks
+    /// a healthy worker down.
+    pub fn fault_detection(mut self, enabled: bool) -> Self {
+        self.fault_detection = enabled;
+        self
+    }
+
     /// Durable overload detection for the transport.
     pub fn worker_monitor(
         mut self,
@@ -178,6 +190,7 @@ impl RoutingHostBuilder {
             affinity,
             lora,
             dispatch,
+            fault_detection,
             worker_monitor,
             multimodal_cache,
             transport,
@@ -221,7 +234,7 @@ impl RoutingHostBuilder {
                         multimodal_cache_indexer,
                         multimodal_cache_key_extractor,
                         dispatch,
-                        ..PushRouterOptions::default()
+                        fault_detection,
                     },
                 )
                 .await?

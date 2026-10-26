@@ -40,6 +40,8 @@ use crate::protocols::common::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayRoute {
     pub worker_id: u64,
+    /// The worker's address for the gateway (`host:port`).
+    pub endpoint: String,
     pub dp_rank: Option<u32>,
     /// The prompt tokens routed on, for the host to forward to the worker.
     pub token_ids: Vec<u32>,
@@ -62,16 +64,24 @@ struct GatewayRequest {
     responses: mpsc::UnboundedSender<Annotated<LLMEngineOutput>>,
 }
 
+/// Maps a worker id to the address the gateway forwards to (`host:port`).
+pub type EndpointResolver = Box<dyn Fn(u64) -> Option<String> + Send + Sync>;
+
 /// Records each selected worker by request id and streams host-reported
 /// progress back into the routing host. See the module docs.
-#[derive(Default)]
 pub struct GatewayDispatch {
     requests: DashMap<String, GatewayRequest>,
+    resolve_endpoint: EndpointResolver,
 }
 
 impl GatewayDispatch {
-    pub fn new() -> Self {
-        Self::default()
+    /// `resolve_endpoint` runs at dispatch: a worker it cannot resolve fails
+    /// the send, so the host never commits a session to an unreachable worker.
+    pub fn new(resolve_endpoint: impl Fn(u64) -> Option<String> + Send + Sync + 'static) -> Self {
+        Self {
+            requests: DashMap::new(),
+            resolve_endpoint: Box::new(resolve_endpoint),
+        }
     }
 
     /// Take the worker selected for `request_id`. Present once the routing
@@ -142,8 +152,19 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Gate
             .as_ref()
             .map(Instance::id)
             .ok_or_else(|| anyhow::anyhow!("gateway dispatch requires a selected worker"))?;
+        // Unavailable rather than a worker fault: the worker may be healthy and
+        // merely not yet indexed by the gateway's endpoint view.
+        let endpoint = (self.resolve_endpoint)(worker_id).ok_or_else(|| {
+            DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message(format!(
+                    "selected worker {worker_id} has no gateway endpoint"
+                ))
+                .build()
+        })?;
         let route = GatewayRoute {
             worker_id,
+            endpoint,
             dp_rank: request.routing.as_ref().and_then(|routing| routing.dp_rank),
             token_ids: request.token_ids.to_vec(),
         };

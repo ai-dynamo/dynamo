@@ -38,7 +38,7 @@ use dynamo_runtime::{
     engine::{AsyncEngineStream, Data},
     pipeline::{
         Context, ManyOut, MultimodalCacheKeyExtractor, Operator, RouterMode, SegmentSource,
-        ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source, StreamingDispatch,
+        ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
 use std::sync::Arc;
@@ -185,66 +185,6 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: SessionAffinityMode,
 ) -> anyhow::Result<PreprocessedRouting> {
-    build_preprocessed_routing_inner(
-        client,
-        model_manager,
-        router_mode,
-        load_context,
-        chooser,
-        prefill_chooser,
-        encoder_chooser,
-        enable_multimodal_cache_indexer,
-        session_affinity_ttl_secs,
-        session_affinity_mode,
-        None,
-    )
-    .await
-}
-
-/// [`build_preprocessed_routing`] with a caller-supplied final hop in place of
-/// the request plane. A host that does not send the request itself (the
-/// Gateway EPP, where Envoy forwards it) uses this to run the same routing
-/// pipeline as the frontend.
-#[allow(clippy::too_many_arguments)]
-pub async fn build_preprocessed_routing_with_dispatch(
-    client: &Client,
-    model_manager: Arc<crate::discovery::ModelManager>,
-    router_mode: RouterMode,
-    load_context: Arc<RoutingLoadContext>,
-    chooser: Option<Arc<KvRouter>>,
-    session_affinity_ttl_secs: Option<u64>,
-    dispatch: Arc<dyn StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>>,
-) -> anyhow::Result<PreprocessedRouting> {
-    build_preprocessed_routing_inner(
-        client,
-        model_manager,
-        router_mode,
-        load_context,
-        chooser,
-        None,
-        None,
-        false,
-        session_affinity_ttl_secs,
-        SessionAffinityMode::Hard,
-        Some(dispatch),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn build_preprocessed_routing_inner(
-    client: &Client,
-    model_manager: Arc<crate::discovery::ModelManager>,
-    router_mode: RouterMode,
-    load_context: Arc<RoutingLoadContext>,
-    chooser: Option<Arc<KvRouter>>,
-    prefill_chooser: Option<Arc<PrefillRouter>>,
-    encoder_chooser: Option<Arc<EncoderRouter>>,
-    enable_multimodal_cache_indexer: bool,
-    session_affinity_ttl_secs: Option<u64>,
-    session_affinity_mode: SessionAffinityMode,
-    dispatch: Option<Arc<dyn StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>>>,
-) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
@@ -304,8 +244,7 @@ async fn build_preprocessed_routing_inner(
         .kv_router(chooser)
         .load_context(load_context)
         .affinity_coordinator(affinity)
-        .lora(lora)
-        .dispatch(dispatch);
+        .lora(lora);
     if let Some((indexer, extractor)) = embedding_cache_indexer.zip(cache_key_extractor) {
         host = host.multimodal_cache(indexer, extractor);
     }
@@ -474,14 +413,6 @@ where
 }
 
 impl PreprocessedRouting {
-    /// The routing engine (a [`RoutingHost`] under KV routing), for hosts that
-    /// drive routing without building the HTTP pipeline.
-    pub fn backend_engine(
-        &self,
-    ) -> &ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>> {
-        &self.backend_engine
-    }
-
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,

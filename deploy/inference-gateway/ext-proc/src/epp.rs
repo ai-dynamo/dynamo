@@ -18,10 +18,11 @@ use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::entrypoint::build_preprocessed_routing_with_dispatch;
 use dynamo_llm::kv_router::gateway_dispatch::GatewayDispatch;
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
-use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{
+    FindBestMatchOutcome, LlmDispatch, ManagedKvRouter, PrefillRouter, RoutingHost,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
@@ -234,32 +235,13 @@ impl Router {
             );
         }
 
-        let gateway = if routing_host_enabled()? {
-            // The gateway relays output text, not token IDs, so output-hashing
-            // approximate indexing cannot run on this path.
-            anyhow::ensure!(
-                kv_router_config.use_kv_events,
-                "{ROUTING_HOST_ENV} requires KV events (approximate KV indexing needs output token IDs)"
-            );
-            let dispatch = Arc::new(GatewayDispatch::new());
-            let routing = build_preprocessed_routing_with_dispatch(
-                &endpoint.client().await?,
-                model_manager.clone(),
-                RouterMode::KV,
-                decode_router.load_context().clone(),
-                Some(decode_router.router().clone()),
-                session_affinity_ttl_secs()?,
-                dispatch.clone(),
-            )
-            .await?;
-            tracing::info!("Routing aggregated requests through the frontend routing host");
-            Some(GatewayRouting::new(
-                routing.backend_engine().clone(),
-                dispatch,
-            ))
-        } else {
-            None
-        };
+        let routing_host = routing_host_enabled()?;
+        // The gateway relays output text, not token IDs, so output-hashing
+        // approximate indexing cannot run on the routing-host path.
+        anyhow::ensure!(
+            !routing_host || kv_router_config.use_kv_events,
+            "{ROUTING_HOST_ENV} requires KV events (approximate KV indexing needs output token IDs)"
+        );
 
         let mut prefill_config = kv_router_config;
         prefill_config.router_track_active_blocks = false;
@@ -296,6 +278,35 @@ impl Router {
         // would silently match zero pods during/after a DGD rolling update.
         let (worker_index, pod_store_ready) =
             spawn_pod_reflector(&namespace_filter, container_discovery).await?;
+
+        let gateway = if routing_host {
+            // The dispatch resolves the worker's pod address itself, so a worker
+            // the reflector has not indexed fails the send before the host
+            // commits a session to it.
+            let dispatch = Arc::new(GatewayDispatch::new({
+                let worker_index = worker_index.clone();
+                move |worker_id| read_index(&worker_index).endpoints.get(&worker_id).cloned()
+            }));
+            let router = decode_router.router();
+            // Envoy owns the connection and its timeouts, and the dispatch never
+            // observes a worker fault: keep the transport's fault detection off
+            // so a slow or buffered response cannot mark a healthy worker down.
+            let host = RoutingHost::builder(router.client().clone(), RouterMode::KV)
+                .kv_router(router.clone())
+                .load_context(decode_router.load_context().clone())
+                .session_affinity(
+                    session_affinity_ttl_secs()?.map(Duration::from_secs),
+                    dynamo_llm::session_affinity::SessionAffinityMode::Hard,
+                )
+                .dispatch(dispatch.clone() as LlmDispatch)
+                .fault_detection(false)
+                .build()
+                .await?;
+            tracing::info!("Routing aggregated requests through the frontend routing host");
+            Some(GatewayRouting::new(Arc::new(host), dispatch))
+        } else {
+            None
+        };
 
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
@@ -1527,9 +1538,7 @@ impl EndpointPicker for Router {
             )
             .await?
         {
-            return gateway
-                .pick(request, |worker_id| self.resolve_worker_endpoint(worker_id))
-                .await;
+            return gateway.pick(request).await;
         }
 
         let TokenizeResult {

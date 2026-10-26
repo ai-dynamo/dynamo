@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A frontend `RoutingHost`, built by the frontend's routing builder, routing
+//! A frontend `RoutingHost`, built the way the Gateway EPP builds it, routing
 //! over [`GatewayDispatch`] across two discovered workers. Each test drives
 //! the host the way the Gateway EPP does: generate, take the route, feed the
 //! progress Envoy relays, then complete or abort.
@@ -21,7 +21,7 @@ use dynamo_runtime::{
     component::Client,
     discovery::EventTransportKind,
     distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
-    pipeline::{Context, RouterMode, ServiceEngine},
+    pipeline::{AsyncEngine, Context, RouterMode},
     storage::kv::Selector,
     traits::DistributedRuntimeProvider,
 };
@@ -29,20 +29,28 @@ use futures::StreamExt;
 use tokio::{sync::watch, task::JoinHandle};
 
 use super::*;
+use crate::kv_router::LlmDispatch;
 use crate::{
-    discovery::{LoadThresholdConfig, LoadThresholdHandle, ModelManager},
-    entrypoint::build_preprocessed_routing_with_dispatch,
+    discovery::{LoadThresholdConfig, LoadThresholdHandle},
     http::service::client_error_response,
-    kv_router::{KvRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource},
+    kv_router::{
+        KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource,
+    },
     local_model::runtime_config::ModelRuntimeConfig,
-    protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    protocols::common::{
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        preprocessor::RoutingHints,
+    },
+    session_affinity::SessionAffinityMode,
 };
 
-type Engine = ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>;
-
 struct Harness {
-    engine: Engine,
+    engine: Arc<RoutingHost>,
     dispatch: Arc<GatewayDispatch>,
+    /// Workers the dispatch's endpoint resolver does not know.
+    unresolvable: Arc<Mutex<HashSet<u64>>>,
+    /// Every worker the resolver was asked for, in order.
+    lookups: Arc<Mutex<Vec<u64>>>,
     chooser: Arc<KvRouter>,
     client: Client,
     workers: HashSet<u64>,
@@ -57,6 +65,8 @@ struct Options {
     classifier: Option<RecordingClassifier>,
     track_output_blocks: bool,
     prefill_tokens_threshold: Option<u64>,
+    /// The EPP turns fault detection off; a test can turn it back on as a control.
+    fault_detection: bool,
 }
 
 async fn harness(namespace: &str, options: Options) -> Harness {
@@ -162,22 +172,34 @@ async fn harness(namespace: &str, options: Options) -> Harness {
     }
     let chooser = Arc::new(chooser);
 
-    let dispatch = Arc::new(GatewayDispatch::new());
-    let routing = build_preprocessed_routing_with_dispatch(
-        &client,
-        Arc::new(ModelManager::new()),
-        RouterMode::KV,
-        load_context,
-        Some(chooser.clone()),
-        options.session_affinity_ttl_secs,
-        dispatch.clone(),
-    )
-    .await
-    .unwrap();
+    let unresolvable = Arc::new(Mutex::new(HashSet::<u64>::new()));
+    let lookups = Arc::new(Mutex::new(Vec::new()));
+    let dispatch = Arc::new(GatewayDispatch::new({
+        let (unresolvable, lookups) = (unresolvable.clone(), lookups.clone());
+        move |worker_id| {
+            lookups.lock().unwrap().push(worker_id);
+            (!unresolvable.lock().unwrap().contains(&worker_id))
+                .then(|| format!("10.0.0.1:{}", worker_id % 60_000))
+        }
+    }));
+    let engine = RoutingHost::builder(chooser.client().clone(), RouterMode::KV)
+        .kv_router(chooser.clone())
+        .load_context(load_context)
+        .session_affinity(
+            options.session_affinity_ttl_secs.map(Duration::from_secs),
+            SessionAffinityMode::Hard,
+        )
+        .dispatch(dispatch.clone() as LlmDispatch)
+        .fault_detection(options.fault_detection)
+        .build()
+        .await
+        .unwrap();
 
     Harness {
-        engine: routing.backend_engine().clone(),
+        engine: Arc::new(engine),
         dispatch,
+        unresolvable,
+        lookups,
         chooser,
         client,
         workers,
@@ -513,4 +535,111 @@ async fn overload_rejection_carries_the_frontend_status() {
     first_drained.await.unwrap();
     second_drained.await.unwrap();
     harness.runtime.shutdown();
+}
+
+/// A pick that lands on a worker the gateway cannot address fails before the
+/// host commits the session, so the session is not stuck on that worker.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unaddressable_worker_fails_the_pick_without_binding_the_session() {
+    let harness = harness(
+        "gateway-dispatch-unaddressable",
+        Options {
+            session_affinity_ttl_secs: Some(60),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    harness
+        .unresolvable
+        .lock()
+        .unwrap()
+        .extend(harness.workers.iter().copied());
+    let error = match route(&harness, "req-1", prompt(1), Some("session-a")).await {
+        Ok(_) => panic!("no worker has a gateway endpoint"),
+        Err(error) => error,
+    };
+    assert_eq!(client_error_response(error).0, 503);
+    assert_eq!(active_requests(&harness).await, 0);
+    assert_eq!(
+        harness.client.instance_ids_avail().len(),
+        2,
+        "not a worker fault"
+    );
+    let first = *harness.lookups.lock().unwrap().last().unwrap();
+    harness.unresolvable.lock().unwrap().clear();
+
+    // Load the worker the failed pick chose. An unbound session now prefers the
+    // idle worker; a session bound by the failed pick would return to `first`.
+    let mut pinned = prompt(100);
+    pinned.routing = Some(RoutingHints {
+        decode_worker_id: Some(first),
+        dp_rank: Some(0),
+        ..Default::default()
+    });
+    let (busy, busy_drained) = route(&harness, "req-2", pinned, None).await.unwrap();
+    assert_eq!(busy.worker_id, first);
+    let (retry, retry_drained) = route(&harness, "req-3", prompt(200), Some("session-a"))
+        .await
+        .unwrap();
+    assert_ne!(retry.worker_id, first);
+
+    for id in ["req-2", "req-3"] {
+        harness.dispatch.complete(id);
+    }
+    busy_drained.await.unwrap();
+    retry_drained.await.unwrap();
+    harness.runtime.shutdown();
+}
+
+/// Route one request on a host built under a 1 s backend inactivity timeout,
+/// stay quiet past it, and report whether the worker is still available.
+async fn worker_available_after_quiet_response(namespace: &str, fault_detection: bool) -> bool {
+    let harness = temp_env::async_with_vars(
+        [("DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS", Some("1"))],
+        harness(
+            namespace,
+            Options {
+                fault_detection,
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+    let (route, drained) = route(&harness, "req-1", prompt(1), None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let available = harness
+        .client
+        .instance_ids_avail()
+        .contains(&route.worker_id);
+    if !fault_detection {
+        assert_eq!(
+            active_requests(&harness).await,
+            1,
+            "the booking outlives the quiet spell"
+        );
+    }
+    harness.dispatch.complete("req-1");
+    drained.await.unwrap();
+    harness.runtime.shutdown();
+    available
+}
+
+/// The gateway owns the connection and its timeouts, so a response that stays
+/// quiet (a long prefill, or a buffered non-streaming body) must not mark a
+/// healthy worker down.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_quiet_response_does_not_time_out_the_worker() {
+    assert!(worker_available_after_quiet_response("gateway-dispatch-quiet", false).await);
+}
+
+/// Control for the test above: with fault detection on, the same quiet spell
+/// trips the inactivity timeout and quarantines the worker.
+#[tokio::test]
+#[serial_test::serial]
+async fn with_fault_detection_a_quiet_response_times_out_the_worker() {
+    assert!(!worker_available_after_quiet_response("gateway-dispatch-quiet-control", true).await);
 }
