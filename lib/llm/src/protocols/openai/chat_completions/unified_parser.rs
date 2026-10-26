@@ -4163,6 +4163,102 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn gpt_oss_argument_progress_preserves_long_field_positions() {
+        let tools = to_v2_tools(Some(&write_file_tools()));
+        let value = format!(
+            "é {} STAGE_TWO {} END",
+            "first content ".repeat(64),
+            "second content ".repeat(64)
+        );
+        for position in 0..3 {
+            let mut fields = vec![
+                ("path", serde_json::json!("a.rs")),
+                ("count", serde_json::json!(2)),
+            ];
+            fields.insert(position, ("content", serde_json::json!(value)));
+            let arguments = ordered_arguments(&fields);
+            let expected: serde_json::Value = serde_json::from_str(&arguments).unwrap();
+            for mode in [
+                UnifiedToolOutputMode::Native,
+                UnifiedToolOutputMode::GuidedJson { named_tool: None },
+                UnifiedToolOutputMode::GuidedJson {
+                    named_tool: Some("write_file".into()),
+                },
+            ] {
+                let input = match &mode {
+                    UnifiedToolOutputMode::Native => format!(
+                        " to=functions.write_file<|channel|>commentary<|message|>{arguments}<|call|>"
+                    ),
+                    UnifiedToolOutputMode::GuidedJson { named_tool: None } => {
+                        format!("[{{\"name\":\"write_file\",\"parameters\":{arguments}}}]")
+                    }
+                    _ => arguments.clone(),
+                };
+                let mut state = ChoiceState::new(
+                    "gpt_oss",
+                    &tools,
+                    UnifiedParserStartingState::None,
+                    mode.clone(),
+                    true,
+                )
+                .unwrap();
+                let mut wire = Vec::new();
+                let mut start = 0;
+                for (marker, fragment) in
+                    [(" STAGE_TWO ", "first content"), (" END", "second content")]
+                {
+                    let end = input.find(marker).unwrap();
+                    let events = state.push(&input[start..end]);
+                    wire.extend(state.choices_for(&empty_choice(0), events, true, None));
+                    let arguments: String = wire
+                        .iter()
+                        .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                        .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                        .collect();
+                    assert!(
+                        arguments.contains(fragment),
+                        "position={position} mode={mode:?} marker={marker}: {arguments:?}"
+                    );
+                    start = end;
+                }
+                let mut events = state.push(&input[start..]);
+                events.extend(state.finish());
+                wire.extend(state.choices_for(
+                    &empty_choice(0),
+                    events,
+                    true,
+                    Some(FinishReason::Stop),
+                ));
+                let calls: Vec<_> = wire
+                    .iter()
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                    .collect();
+                assert!(calls.iter().all(|call| call.index == 0));
+                assert_eq!(calls.iter().filter(|call| call.id.is_some()).count(), 1);
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                        .collect::<String>(),
+                    "write_file"
+                );
+                let arguments: String = calls
+                    .iter()
+                    .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                    .collect();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    wire.last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn maps_tool_choice_onto_the_output_mode() {
         assert_eq!(
             tool_output_mode(&GuidedToolConstraint::GuidedJsonNamed {
@@ -6525,6 +6621,51 @@ pub(crate) mod tests {
             "text after the already-parsed gap must resume as content, not reasoning"
         );
         assert_eq!(reasoning, "secretalready parsed");
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_consumed_analysis_prefix_is_not_replayed_after_parsed_gap() {
+        let mut parsed = chunk("", false);
+        let choice = &mut parsed.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("already parsed".into());
+        let responses = apply_stream_with_policy(
+            stream::iter([
+                chunk(
+                    "secret<|end|><|start|>assistant<|channel|>final<|message|>before ",
+                    false,
+                ),
+                parsed,
+                chunk("after", true),
+            ]),
+            None,
+            GuidedToolConstraint::None,
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::Reasoning,
+                prefix: Some(std::sync::Arc::from(
+                    "<|start|>assistant<|channel|>analysis<|message|>consumed",
+                )),
+            },
+            "gpt_oss",
+            true,
+            UnifiedRequestPolicy::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(responses.iter().all(|response| !response.is_error()));
+        assert_eq!(
+            logical_events(&responses),
+            vec![
+                LogicalEvent::Reasoning("secret".into()),
+                LogicalEvent::Text("before ".into()),
+                LogicalEvent::Reasoning("already parsed".into()),
+                LogicalEvent::Text("after".into()),
+            ]
+        );
+        assert_eq!(
+            collect_choices(&responses).last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
     }
 
     #[tokio::test]
