@@ -31,7 +31,7 @@ import (
 )
 
 // defaultMetricV1beta2 is the scalar target an Optimize objective receives when it names none.
-const defaultMetricV1beta2 = nvidiacomv1beta2.ObjectiveMetric("Throughput")
+const defaultMetricV1beta2 = nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
 
 // Defaults of the objects admission creates. Admission is their only owner: the API server
 // defaults a mutated object in the webhook's version (v1beta1, whose v1beta2 carrier is
@@ -40,6 +40,8 @@ const (
 	defaultStaticInputTokensV1beta2  int32 = 1024
 	defaultStaticOutputTokensV1beta2 int32 = 128
 	defaultStaticConcurrencyV1beta2  int32 = 10
+	defaultSLATTFTMsV1beta2                = 2000.0
+	defaultSLAITLMsV1beta2                 = 30.0
 	defaultMaxCandidatesV1beta2      int32 = 1
 )
 
@@ -50,10 +52,10 @@ const (
 // API version because the canonical names belong to v1beta1.
 //
 // Admission owns every v1beta2 default, and each default has this one owner: backends,
-// objective.mode, the scalar metric, recommendation.maxCandidates, workload.static and the
-// cluster hardware. workload.static: {} opts out of the static workload; a nonempty static
-// object receives any missing inputTokens, outputTokens and load defaults. objective.sla has
-// no default: an omitted SLA stays absent.
+// objective.mode, the scalar metric, objective.sla, recommendation.maxCandidates,
+// workload.static and the cluster hardware. workload.static: {} opts out of the static
+// workload; a nonempty static object receives any missing inputTokens, outputTokens and load
+// defaults. objective.sla: {} opts out of the latency defaults.
 // spec.aisimulate.inputOverrides never changes a default. It overrides the defaulted typed
 // values later, when the input is lowered.
 
@@ -228,10 +230,10 @@ func defaultStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpe
 	}
 }
 
-// defaultObjectiveSpecV1beta2 defaults the mode and gives an Optimize objective without a
-// metric the default scalar target. It reads the typed objective alone: a goal.target in
-// spec.aisimulate.inputOverrides overrides the completed typed value when the input is lowered,
-// so it never suppresses this default.
+// defaultObjectiveSpecV1beta2 defaults the mode, the Optimize metric and an absent SLA.
+// Existing SLA objects are preserved, including the empty opt-out. It reads the typed objective
+// alone: spec.aisimulate.inputOverrides overrides the completed typed values when the input is
+// lowered, so it never suppresses these defaults.
 func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	if objective.Mode == "" {
 		objective.Mode = nvidiacomv1beta2.ObjectiveModeOptimize
@@ -239,6 +241,16 @@ func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	if objective.Mode == nvidiacomv1beta2.ObjectiveModeOptimize && objective.Metric == nil {
 		objective.Metric = ptr.To(defaultMetricV1beta2)
 	}
+	if objective.SLA == nil {
+		objective.SLA = &nvidiacomv1beta2.ObjectiveSLASpec{}
+		defaultObjectiveSLASpecV1beta2(objective.SLA)
+	}
+}
+
+// defaultObjectiveSLASpecV1beta2 fills the whole-object SLA default admission creates.
+func defaultObjectiveSLASpecV1beta2(sla *nvidiacomv1beta2.ObjectiveSLASpec) {
+	sla.TTFTMs = ptr.To(defaultSLATTFTMsV1beta2)
+	sla.ITLMs = ptr.To(defaultSLAITLMsV1beta2)
 }
 
 func defaultRecommendationSpecV1beta2(recommendation *nvidiacomv1beta2.RecommendationSpec) {

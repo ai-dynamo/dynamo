@@ -122,9 +122,9 @@ spec:
                   type: object
                 objective:
                   description: |-
-                    Objective defines scalar optimization or a multi-objective Pareto search.
-                    When omitted, admission supplies the object. Its mode defaults to Optimize, and admission
-                    supplies the conditional scalar metric.
+                    Objective defines scalar optimization or a multi-objective Pareto search. When omitted,
+                    admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults
+                    to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms.
                   properties:
                     metric:
                       description: |-
@@ -167,8 +167,9 @@ spec:
                       type: string
                     sla:
                       description: |-
-                        SLA defines per-request latency bounds used to calculate goodput. When omitted, no
-                        bounds apply. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+                        SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
+                        omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
+                        defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
                       properties:
                         e2eMs:
                           description: E2EMs is an alternative end-to-end bound in milliseconds.

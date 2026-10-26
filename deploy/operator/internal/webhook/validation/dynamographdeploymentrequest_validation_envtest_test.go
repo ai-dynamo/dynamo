@@ -1383,9 +1383,14 @@ func expectV1beta2StructuralDefaults(t *testing.T, obj *unstructured.Unstructure
 	if got := v1beta2Number(t, obj, "spec", "workload", "static", "load", "concurrency"); got != 10 {
 		t.Fatalf("workload.static.load.concurrency = %v, want 10", got)
 	}
-	v1beta2Absent(t, obj, "spec", "objective", "sla")
 	if got := v1beta2String(t, obj, "spec", "objective", "mode"); got != "Optimize" {
 		t.Fatalf("objective.mode = %q, want Optimize", got)
+	}
+	if got := v1beta2Number(t, obj, "spec", "objective", "sla", "ttftMs"); got != 2000 {
+		t.Fatalf("objective.sla.ttftMs = %v, want 2000", got)
+	}
+	if got := v1beta2Number(t, obj, "spec", "objective", "sla", "itlMs"); got != 30 {
+		t.Fatalf("objective.sla.itlMs = %v, want 30", got)
 	}
 	if got, _ := v1beta2Field(t, obj, "spec", "backends"); !reflect.DeepEqual(got, []any{"vllm", "sglang", "trtllm"}) {
 		t.Fatalf("backends = %#v, want vllm, sglang and trtllm", got)
@@ -1434,8 +1439,8 @@ func expectV1beta2ExplicitValues(t *testing.T, obj *unstructured.Unstructured) {
 // expectV1beta2AdmissionDefaults checks what admission supplies from the environment.
 func expectV1beta2AdmissionDefaults(t *testing.T, obj *unstructured.Unstructured) {
 	t.Helper()
-	if got := v1beta2String(t, obj, "spec", "objective", "metric"); got != "Throughput" {
-		t.Fatalf("objective.metric = %q, want Throughput", got)
+	if got := v1beta2String(t, obj, "spec", "objective", "metric"); got != "ThroughputPerGPU" {
+		t.Fatalf("objective.metric = %q, want ThroughputPerGPU", got)
 	}
 	if got := v1beta2String(t, obj, "spec", "hardware", "gpu", "sku"); got != "h200_sxm" {
 		t.Fatalf("hardware.gpu.sku = %q, want h200_sxm", got)
