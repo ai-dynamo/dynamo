@@ -37,8 +37,12 @@ pub const DYNAMO_RUNTIME_MODE: &str = "dynamo";
 /// directly here because standalone mode has no Dynamo runtime to read it for.
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
+/// Session-affinity TTL in seconds (fractions allowed), read by both the
+/// standalone selector and the runtime EPP's routing-host path.
+pub const SESSION_AFFINITY_TTL_ENV: &str = "DYN_EPP_SESSION_AFFINITY_TTL_SECS";
+
 /// Reads an environment variable, matching the injectable getter used in tests.
-type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
+pub(crate) type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
 /// Top-level EPP operating mode from `DYN_EPP_MODE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,7 +256,7 @@ impl EppStandaloneConfig {
             max_num_batched_tokens: opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?,
             max_inflight_requests: opt_parse::<usize>(get, "DYN_EPP_MAX_INFLIGHT_REQUESTS")?
                 .unwrap_or(DEFAULT_MAX_INFLIGHT_REQUESTS),
-            session_affinity_ttl_secs: opt_parse::<f64>(get, "DYN_EPP_SESSION_AFFINITY_TTL_SECS")?,
+            session_affinity_ttl_secs: session_affinity_ttl_secs(get)?,
         })
     }
 
@@ -321,6 +325,17 @@ fn trimmed(v: Option<String>) -> Option<String> {
             Some(t.to_string())
         }
     })
+}
+
+/// Parse [`SESSION_AFFINITY_TTL_ENV`]; `None` disables session affinity.
+pub(crate) fn session_affinity_ttl_secs(get: &EnvGet) -> anyhow::Result<Option<f64>> {
+    opt_parse::<f64>(get, SESSION_AFFINITY_TTL_ENV)
+}
+
+/// The TTL both hosts' affinity tables take. Range limits are the tables' own.
+pub(crate) fn session_affinity_ttl(secs: f64) -> anyhow::Result<std::time::Duration> {
+    std::time::Duration::try_from_secs_f64(secs)
+        .map_err(|e| anyhow::anyhow!("invalid session affinity TTL {secs}: {e}"))
 }
 
 fn opt_parse<T>(get: &EnvGet, key: &str) -> anyhow::Result<Option<T>>

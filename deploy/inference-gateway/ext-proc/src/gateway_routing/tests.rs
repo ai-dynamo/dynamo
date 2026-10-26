@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
+use dynamo_llm::protocols::common::extensions::{
+    InputTrigger, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+};
 
 use super::*;
 
@@ -57,6 +59,49 @@ async fn prepare_applies_the_frontend_header_policy() {
         .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
         .expect("session affinity rides the request context, as in the frontend");
     assert_eq!(session.as_str(), "session-a");
+}
+
+/// Oversized metadata headers get the frontend's 431, not a generic 400.
+#[tokio::test]
+async fn prepare_rejects_oversized_metadata_with_431() {
+    let metadata: Vec<(String, String)> = (0..65)
+        .map(|i| (format!("x-dynamo-meta-key{i}"), "v".to_string()))
+        .collect();
+
+    let error = match GatewayRouting::prepare(&preprocessor(), CHAT, &metadata, "req-1", None).await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("65 metadata entries exceed the limit of 64"),
+    };
+    assert!(
+        matches!(error, PickError::Rejected { status: 431, .. }),
+        "{error:?}"
+    );
+}
+
+/// An agent request continuing after a tool call carries the frontend's
+/// tool-result classification, which trigger-aware policies select on.
+#[tokio::test]
+async fn prepare_classifies_a_tool_result_turn() {
+    let tool_turn = r#"{"model":"m","messages":[
+        {"role":"user","content":"weather?"},
+        {"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"weather","arguments":"{}"}}]},
+        {"role":"tool","tool_call_id":"call-1","content":"sunny"}
+    ]}"#;
+
+    let request = GatewayRouting::prepare(
+        &preprocessor(),
+        tool_turn,
+        &headers(&[("x-dynamo-session-id", "session-a")]),
+        "req-1",
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("a chat request takes the routing-host path");
+
+    let agent_context = request.context.content().agent_context.as_ref().unwrap();
+    assert_eq!(agent_context.input_trigger, Some(InputTrigger::ToolResult));
 }
 
 #[tokio::test]

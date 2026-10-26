@@ -29,6 +29,9 @@ use dynamo_llm::protocols::common::FinishReason;
 use dynamo_llm::protocols::common::extensions::{
     HEADER_DP_RANK, HEADER_WORKER_INSTANCE_ID, apply_frontend_nvext_policy,
 };
+use dynamo_llm::protocols::common::input_trigger::{
+    classify_chat_request, classify_completion_request,
+};
 use dynamo_llm::protocols::common::llm_backend::PreprocessedRequest;
 use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
@@ -40,8 +43,6 @@ use crate::picker::{PickError, PickResult};
 
 /// Enables this path for the runtime EPP.
 pub const ROUTING_HOST_ENV: &str = "DYN_EPP_ROUTING_HOST";
-/// Session-affinity TTL for this path; the same variable the standalone EPP reads.
-pub const SESSION_AFFINITY_TTL_ENV: &str = "DYN_EPP_SESSION_AFFINITY_TTL_SECS";
 
 /// An SSE line longer than this is not a token delta; drop it rather than
 /// buffer it (the delta it might have carried counts as one token).
@@ -93,7 +94,9 @@ impl GatewayRouting {
             .and_then(|messages| messages.as_array())
             .is_some_and(|messages| !messages.is_empty());
 
-        let mut preprocessed = if is_chat {
+        // Classify user vs tool-result input on the typed request, as the
+        // frontend's routes do, so trigger-aware policies see it.
+        let (mut preprocessed, input_trigger) = if is_chat {
             let mut request: NvCreateChatCompletionRequest = serde_json::from_value(value)
                 .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
             request.nvext = apply_frontend_nvext_policy(request.nvext.take(), &headers, true);
@@ -101,7 +104,7 @@ impl GatewayRouting {
                 .preprocess_request(&request, None)
                 .await
                 .map_err(|e| PickError::InvalidRequest(format!("{e:#}")))?;
-            preprocessed
+            (preprocessed, classify_chat_request(&request))
         } else if value.get("prompt").is_some() {
             let mut request: NvCreateCompletionRequest = serde_json::from_value(value)
                 .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
@@ -115,7 +118,7 @@ impl GatewayRouting {
                 .preprocess_request(&request, None)
                 .await
                 .map_err(|e| PickError::InvalidRequest(format!("{e:#}")))?;
-            preprocessed
+            (preprocessed, classify_completion_request(&request))
         } else {
             return Ok(None);
         };
@@ -123,8 +126,13 @@ impl GatewayRouting {
         if allowed_worker_ids.is_some() {
             preprocessed.routing_mut().allowed_worker_ids = allowed_worker_ids;
         }
-        let context = preprocessed_request_context(preprocessed, request_id.to_string(), &headers)
-            .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
+        let context = preprocessed_request_context(
+            preprocessed,
+            request_id.to_string(),
+            &headers,
+            Some(input_trigger),
+        )
+        .map_err(|(status, message)| PickError::Rejected { status, message })?;
         Ok(Some(RoutableRequest { context }))
     }
 

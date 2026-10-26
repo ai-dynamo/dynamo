@@ -37,7 +37,8 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
-use crate::gateway_routing::{GatewayRouting, ROUTING_HOST_ENV, SESSION_AFFINITY_TTL_ENV};
+use crate::epp_standalone_config::{session_affinity_ttl, session_affinity_ttl_secs};
+use crate::gateway_routing::{GatewayRouting, ROUTING_HOST_ENV};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
@@ -92,15 +93,6 @@ fn routing_host_enabled() -> Result<bool> {
         Ok(value) => dynamo_runtime::config::parse_bool(&value)
             .map_err(|error| anyhow::anyhow!("{ROUTING_HOST_ENV}: {error}")),
         Err(_) => Ok(false),
-    }
-}
-
-fn session_affinity_ttl_secs() -> Result<Option<u64>> {
-    match std::env::var(SESSION_AFFINITY_TTL_ENV) {
-        Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().parse().map_err(|e| {
-            anyhow::anyhow!("{SESSION_AFFINITY_TTL_ENV} must be a number of seconds: {e}")
-        })?)),
-        _ => Ok(None),
     }
 }
 
@@ -295,7 +287,9 @@ impl Router {
                 .kv_router(router.clone())
                 .load_context(decode_router.load_context().clone())
                 .session_affinity(
-                    session_affinity_ttl_secs()?.map(Duration::from_secs),
+                    session_affinity_ttl_secs(&|key| std::env::var(key).ok())?
+                        .map(session_affinity_ttl)
+                        .transpose()?,
                     dynamo_llm::session_affinity::SessionAffinityMode::Hard,
                 )
                 .dispatch(dispatch.clone() as LlmDispatch)
