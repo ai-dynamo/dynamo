@@ -5,6 +5,7 @@ package dynamo
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,7 +19,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
@@ -50,12 +50,12 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 		},
 		{
 			name:     "authored fsGroup without policy",
-			authored: &corev1.PodSecurityContext{FSGroup: ptr.To(int64(2000))},
+			authored: &corev1.PodSecurityContext{FSGroup: new(int64(2000))},
 		},
 		{
 			name: "authored always policy",
 			authored: &corev1.PodSecurityContext{
-				FSGroup:             ptr.To(int64(2000)),
+				FSGroup:             new(int64(2000)),
 				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
 			},
 		},
@@ -66,17 +66,17 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 		{
 			name: "authored root security context",
 			authored: &corev1.PodSecurityContext{
-				RunAsUser: ptr.To(int64(0)), RunAsGroup: ptr.To(int64(0)), RunAsNonRoot: ptr.To(false),
+				RunAsUser: new(int64(0)), RunAsGroup: new(int64(0)), RunAsNonRoot: new(false),
 			},
 		},
 		{
-			name: "explicit shared memory size", sharedMemorySize: ptr.To(resource.MustParse("64Mi")),
-			volumes: []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("64Mi")),
-			}}}},
+			name: "explicit shared memory size", sharedMemorySize: new(resource.MustParse("64Mi")),
+			volumes: []corev1.Volume{{Name: "shared-memory", EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium: corev1.StorageMediumMemory, SizeLimit: new(resource.MustParse("64Mi")),
+			}}},
 			mounts: []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}},
 		},
-		{name: "explicit zero shared memory size", sharedMemorySize: ptr.To(resource.MustParse("0"))},
+		{name: "explicit zero shared memory size", sharedMemorySize: new(resource.MustParse("0"))},
 		{name: "image entrypoint with arguments", container: corev1.Container{Args: []string{"serve"}}},
 		{name: "explicit command with image arguments", container: corev1.Container{Command: []string{"/custom-runtime"}}},
 		{name: "shell startup", container: corev1.Container{
@@ -89,19 +89,19 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 			Command: []string{"python3"}, Args: []string{"-m", "dynamo.trtllm"},
 		}},
 		{name: "authored health probes", container: corev1.Container{
-			StartupProbe:   &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/health", "started"}}}, FailureThreshold: 12},
-			LivenessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/health", "live"}}}, PeriodSeconds: 6},
-			ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/health", "ready"}}}, TimeoutSeconds: 2},
+			StartupProbe:   &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"/health", "started"}}, FailureThreshold: 12},
+			LivenessProbe:  &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"/health", "live"}}, PeriodSeconds: 6},
+			ReadinessProbe: &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"/health", "ready"}}, TimeoutSeconds: 2},
 		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Author a Cyborg role using the shared LPX role base renderer")
 			source := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "hybrid", Namespace: "test"},
+				Name: "hybrid", Namespace: "test",
 			}
 			container := test.container.DeepCopy()
-			container.Name, container.Image = "main", "cyborg:test"
+			container.Name, container.Image = commonconsts.MainContainerName, "cyborg:test"
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeDecode, SharedMemorySize: test.sharedMemorySize,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -113,14 +113,14 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 			t.Log("Render the role before runtime-specific lowering")
 			template, err := renderSelectedLPXRole(component, source, nil,
 				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
-				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()})
+				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: "serving"})
 			require.NoError(t, err)
 
 			t.Log("Retain authored security and use the ordinary shared memory default unless resized or disabled")
 			if test.sharedMemorySize == nil {
-				test.volumes = []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
-					Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("8Gi")),
-				}}}}
+				test.volumes = []corev1.Volume{{Name: "shared-memory", EmptyDir: &corev1.EmptyDirVolumeSource{
+					Medium: corev1.StorageMediumMemory, SizeLimit: new(resource.MustParse("8Gi")),
+				}}}
 				test.mounts = []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}}
 			}
 			require.Equal(t, test.authored, template.Spec.SecurityContext)
@@ -139,13 +139,13 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 }
 
 func TestLPXPCSNameUsesStableMaterializationIdentity(t *testing.T) {
-	deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "workloads", UID: "materialization-uid"}}
+	deployment := &v1alpha1.LPXGraphDeployment{Name: "chat", Namespace: "workloads", UID: "materialization-uid"}
 	name := PCSNameForLPX(deployment)
 	t.Log("Keep the deployment name visible with four hexadecimal identity characters")
 	require.Equal(t, "chat-3efb", name)
 	t.Log("An ordinary DGD named chat-lpx must not collide with the LPX PCS of chat")
-	require.NotEqual(t, PCSNameForDGD(&v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "chat-lpx"}}, nil), name)
-	require.NotEqual(t, PCSNameForDGD(&v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: deployment.Name}}, nil), name)
+	require.NotEqual(t, PCSNameForDGD(&v1beta1.DynamoGraphDeployment{Name: "chat-lpx"}, nil), name)
+	require.NotEqual(t, PCSNameForDGD(&v1beta1.DynamoGraphDeployment{Name: deployment.Name}, nil), name)
 
 	for _, test := range []struct {
 		name   string
@@ -195,9 +195,8 @@ func TestLPXPCSNamePreservesReadablePrefixWithinGroveBudget(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Retain the readable deployment prefix while bounding the complete Grove name")
-			deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{
-				Name: test.name, Namespace: "workloads", UID: "materialization-uid",
-			}}
+			deployment := &v1alpha1.LPXGraphDeployment{
+				Name: test.name, Namespace: "workloads", UID: "materialization-uid"}
 			got := PCSNameForLPX(deployment)
 			require.True(t, strings.HasPrefix(got, test.prefix+"-"), got)
 			require.Len(t, got, len(test.prefix)+5)
@@ -214,10 +213,10 @@ func TestLPXInputRevision(t *testing.T) {
 	const updatedMetadata = "updated"
 	t.Log("Create a DGD with independent prefill and LPX engine capacity")
 	source := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "hybrid", Namespace: "test", UID: "source", Generation: 1},
+		Name: "hybrid", Namespace: "test", UID: "source", Generation: 1,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-			{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
-			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeLPX, Replicas: ptr.To(int32(2)), LPX: &v1beta1.LPXConfig{BuildID: "hybrid-build"},
+			{ComponentName: "a-long-independent-prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: new(int32(1))},
+			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeLPX, Replicas: new(int32(2)), LPX: &v1beta1.LPXConfig{BuildID: "hybrid-build"},
 				Roles: []v1beta1.ComponentRoleSpec{
 					{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{}},
 					{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{}},
@@ -228,36 +227,42 @@ func TestLPXInputRevision(t *testing.T) {
 	require.NoError(t, err)
 	require.Regexp(t, `^sha256:[a-f0-9]{64}$`, want)
 
-	t.Log("Prefill-only edits and DGD bookkeeping do not alter the LPX revision")
+	t.Log("Prefill capacity and DGD bookkeeping do not alter the LPX revision")
 	source.Generation++
 	source.ResourceVersion = "2"
 	source.Labels = map[string]string{"unrelated": "metadata"}
 	source.Annotations = map[string]string{"unrelated": "bookkeeping"}
-	source.Spec.Components[0].ComponentName = "a-long-independent-prefill"
-	source.Spec.Components[0].Replicas = ptr.To(int32(5))
+	source.Spec.Components[0].Replicas = new(int32(5))
 	source.Spec.Restart = &v1beta1.Restart{ID: "not-yet-selected"}
 	got, err := LPXInputRevision(source, "")
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 
-	t.Log("Each LPX component or shared-input change invalidates the revision; ordinary edits do not")
+	t.Log("LPX intent and cooperating worker serving edits invalidate the revision")
 	source.GetComponentByName("decode").LPX.Scheduling = &v1beta1.SchedulingSpec{}
 	want, err = LPXInputRevision(source, "")
 	require.NoError(t, err)
+	servingHash := mustComputeBetaDGDWorkersSpecHash(t, source)
+	servingChanges := map[string]bool{
+		"component/build": true, "agent/image": true, "conductor/image": true,
+		"conductor/arguments": true, "shared/environment": true, "ordinary/image": true,
+		"component/replicas": false, "component/min-available": false, "conductor/replicas": false,
+		"scheduling/deadline": false, "ignored/ordinary-replicas": false, "ignored/role-order": false,
+	}
 	for _, test := range []struct {
 		name       string
 		wantChange bool
 		mutate     func(*v1beta1.DynamoGraphDeployment)
 	}{
 		{"component/name", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").ComponentName = "new-engine" }},
-		{"component/replicas", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").Replicas = ptr.To(int32(3)) }},
-		{"component/min-available", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").MinAvailable = ptr.To(int32(1)) }},
+		{"component/replicas", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").Replicas = new(int32(3)) }},
+		{"component/min-available", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").MinAvailable = new(int32(1)) }},
 		{"component/namespace", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").GlobalDynamoNamespace = true }},
 		{"component/runtime-version", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.GetComponentByName("decode").RuntimeVersionOverride = "1.5.0"
 		}},
 		{"component/shared-memory", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.GetComponentByName("decode").SharedMemorySize = ptr.To(resource.MustParse("16Gi"))
+			d.GetComponentByName("decode").SharedMemorySize = new(resource.MustParse("16Gi"))
 		}},
 		{"component/model", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.GetComponentByName("decode").ModelRef = &v1beta1.ModelReference{Name: "model", Revision: "2"}
@@ -270,16 +275,22 @@ func TestLPXInputRevision(t *testing.T) {
 		}},
 		{"component/build", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").LPX.BuildID = "next-build" }},
 		{"agent/replicas", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(int32(4))
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = new(int32(4))
 		}},
 		{"conductor/replicas", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = new(int32(2))
 		}},
 		{"agent/image", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "agent:next"}}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers = []corev1.Container{{Name: commonconsts.MainContainerName, Image: "agent:next"}}
 		}},
 		{"conductor/image", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "conductor:next"}}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: commonconsts.MainContainerName, Image: "conductor:next"}}
+		}},
+		{"conductor/arguments", true, func(d *v1beta1.DynamoGraphDeployment) {
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Args: []string{"--setting", "new"}}}
+		}},
+		{"ignored/role-order", false, func(d *v1beta1.DynamoGraphDeployment) {
+			slices.Reverse(d.GetComponentByName("decode").Roles)
 		}},
 		{"agent/placement", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeSelector = map[string]string{"lpu": "new"}
@@ -294,7 +305,7 @@ func TestLPXInputRevision(t *testing.T) {
 			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Annotations = map[string]string{"role": "new"}
 		}},
 		{"scheduling/deadline", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.GetComponentByName("decode").LPX.Scheduling.AttemptDeadlineSeconds = ptr.To(int64(60))
+			d.GetComponentByName("decode").LPX.Scheduling.AttemptDeadlineSeconds = new(int64(60))
 		}},
 		{"shared/labels", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Labels = map[string]string{"workload": "new"} }},
 		{"shared/annotations", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Annotations = map[string]string{"workload": "new"} }},
@@ -310,10 +321,11 @@ func TestLPXInputRevision(t *testing.T) {
 			d.Spec.Restart = &v1beta1.Restart{ID: "restart-selected"}
 			d.Status.Restart = &v1beta1.RestartStatus{ObservedID: d.Spec.Restart.ID, Phase: v1beta1.RestartPhaseRestarting, InProgress: []string{"decode"}}
 		}},
-		{"ignored/backend", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = "vllm" }},
-		{"ignored/ordinary-replicas", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].Replicas = ptr.To(int32(9)) }},
-		{"ignored/ordinary-image", false, func(d *v1beta1.DynamoGraphDeployment) {
-			d.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "prefill:next"}}}}
+		{"shared/backend", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = string(BackendFrameworkVLLM) }},
+		{"ordinary/name", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].ComponentName = "new-prefill" }},
+		{"ignored/ordinary-replicas", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].Replicas = new(int32(9)) }},
+		{"ordinary/image", true, func(d *v1beta1.DynamoGraphDeployment) {
+			d.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "prefill:next"}}}}
 		}},
 		{"ignored/ordinary-restart", false, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.Restart = &v1beta1.Restart{ID: "restart-ordinary"}
@@ -335,6 +347,9 @@ func TestLPXInputRevision(t *testing.T) {
 			got, err := LPXInputRevision(changed, LPXRestartToken(changed, ""))
 			require.NoError(t, err)
 			require.Equal(t, test.wantChange, got != want)
+			if changes, checked := servingChanges[test.name]; checked {
+				require.Equal(t, changes, servingHash != mustComputeBetaDGDWorkersSpecHash(t, changed))
+			}
 		})
 	}
 
@@ -368,11 +383,13 @@ func TestLPXInputRevision(t *testing.T) {
 	t.Log("Both members independently contribute to the shared LPX revision")
 	pair := source.DeepCopy()
 	target := pair.GetComponentByName("decode")
-	target.Replicas = ptr.To(int32(1))
+	target.Replicas = new(int32(1))
 	draft := target.DeepCopy()
 	draft.ComponentName = "small-model"
+	draft.Replicas = nil
 	draft.Roles = []v1beta1.ComponentRoleSpec{*draft.ComponentRole(v1beta1.ComponentRoleLPXAgent)}
 	pair.Spec.Components = append(pair.Spec.Components, *draft)
+	pairHash := mustComputeBetaDGDWorkersSpecHash(t, pair)
 	pairRevision, err := LPXInputRevision(pair, "")
 	require.NoError(t, err)
 	for _, name := range []string{draft.ComponentName, target.ComponentName} {
@@ -381,7 +398,13 @@ func TestLPXInputRevision(t *testing.T) {
 		after, err := LPXInputRevision(changed, "")
 		require.NoError(t, err)
 		require.NotEqual(t, pairRevision, after, name)
+		require.NotEqual(t, pairHash, mustComputeBetaDGDWorkersSpecHash(t, changed))
 	}
+	pair.GetComponentByName(draft.ComponentName).Replicas = new(int32(1))
+	require.Equal(t, pairHash, mustComputeBetaDGDWorkersSpecHash(t, pair))
+	pair.GetComponentByName(draft.ComponentName).Replicas = new(int32(2))
+	require.NotEqual(t, pairHash, mustComputeBetaDGDWorkersSpecHash(t, pair))
+	require.Equal(t, servingHash, mustComputeBetaDGDWorkersSpecHash(t, source))
 	got, err = LPXInputRevision(source, "selected-restart")
 	require.NoError(t, err)
 	require.NotEqual(t, want, got)
@@ -460,12 +483,12 @@ func TestLPXInputRevisionIgnoresUnrelatedConvertedMetadata(t *testing.T) {
 	source := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(payload, source))
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "epp", ComponentType: v1beta1.ComponentTypeEPP, Replicas: ptr.To(int32(1)),
-		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "epp:before"}}}},
+		ComponentName: "epp", ComponentType: v1beta1.ComponentTypeEPP, Replicas: new(int32(1)),
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "epp:before"}}}},
 	})
 	before, err := LPXInputRevision(source, "")
 	require.NoError(t, err)
-	source.Spec.Components[1].Replicas = ptr.To(int32(3))
+	source.Spec.Components[1].Replicas = new(int32(3))
 	source.Spec.Components[1].PodTemplate.Spec.Containers[0].Image = "epp:after"
 	after, err := LPXInputRevision(source, "")
 	require.NoError(t, err)

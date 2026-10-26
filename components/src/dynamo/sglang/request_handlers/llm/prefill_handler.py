@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -26,13 +27,20 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _kv_cache_hit_engine_data,
     _native_payload_is_batched,
     _ordered_cancellation_request_id,
+    _raise_if_sglang_error,
     _sampling_option_params,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
+    engine_consumes_media,
     raise_if_unextracted_multimodal,
+    reject_unconsumed_media,
 )
 from dynamo.sglang.request_utils import request_cache_salt
+from dynamo.sglang.thinking_budget import (
+    apply_thinking_budget,
+    thinking_budget_requested,
+)
 
 # Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
 # This remains as a compatibility fallback for older callers that still encode
@@ -121,7 +129,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 k: v for k, v in sampling_params.items() if v is not None
             }
         native_payload = native_generate_payload(inner_request)
+        has_thinking_budget = False
         if native_payload is None:
+            has_thinking_budget = thinking_budget_requested(inner_request)
+            sampling_params = apply_thinking_budget(
+                inner_request,
+                sampling_params,
+                self.config.server_args,
+                engine=self.engine,
+            )
             sampling_params["n"] = 1
             sampling_params["max_new_tokens"] = 1
 
@@ -163,6 +179,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Prefill encodes the media so the KV it transfers carries the vision
         # context; decode extracts the same URLs to match the token layout.
         raise_if_unextracted_multimodal(inner_request)
+        reject_unconsumed_media(
+            inner_request, consumes_media=engine_consumes_media(self.engine)
+        )
         mm_kwargs = build_disagg_mm_kwargs(inner_request)
 
         routing = inner_request.get("routing") or {}
@@ -216,13 +235,23 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 supported=getattr(self, "_supports_ordered_cancellation", False),
                 batched=False,
             )
+            output_options = inner_request.get("output_options", {}) or {}
+            # Prompt logprobs are discarded until the handoff carries their metadata.
+            logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
+                {"logprobs": output_options.get("logprobs")},
+            )
             results = await self.engine.async_generate(
                 **input_param,
+                **logprob_kwargs,
                 **mm_kwargs,
                 **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
                 sampling_params=sampling_params,
                 stream=True,
-                **require_reasoning_kwargs(self.engine, inner_request),
+                **require_reasoning_kwargs(
+                    self.engine,
+                    inner_request,
+                    thinking_budget_requested=has_thinking_budget,
+                ),
                 bootstrap_host=bootstrap_host,
                 bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,
@@ -258,6 +287,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         final_meta_info = await task
         if final_meta_info is None:
             return
+        finish_reason = final_meta_info.get("finish_reason")
+        if isinstance(finish_reason, dict) and finish_reason.get("type") == "abort":
+            # Unsolicited error-bearing aborts raise while consuming the stream.
+            # An ordinary backend cancellation must also terminate decode,
+            # rather than looking like a successful prefill handoff.
+            yield {"token_ids": [], "finish_reason": "cancelled"}
+            return
         # Bootstrap happens before prefill runs, so the cache-hit report for
         # this attempt needs its own trailing chunk.
         kv_cache_hit = _kv_cache_hit_engine_data(final_meta_info)
@@ -287,6 +323,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         async with self._cancellation_monitor(
             request_id_future, context, submitted_request_id
         ) as cancellation_task:
+            # The shared iterator briefly drains after abort so SGLang can
+            # clean up, then closes a stream that does not terminate.
             async for res in self._stream_until_cancelled(results, cancellation_task):
                 meta_info = res.get("meta_info") or (
                     res.get("engine_data", {})
@@ -301,8 +339,18 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New Prefill Request ID: {sglang_request_id}")
 
-                # The shared iterator briefly drains after abort so SGLang can
-                # clean up, then closes a stream that does not terminate.
+                finish_reason = meta_info.get("finish_reason")
+                if isinstance(finish_reason, dict):
+                    if cancellation_task.done():
+                        # SGLang reports our bootstrap-queue abort with status 500.
+                        # Keep draining so engine-side request cleanup can finish.
+                        continue
+                    # Bootstrap has already been sent. Surface failures now so
+                    # the router can cancel decode instead of waiting for KV.
+                    _raise_if_sglang_error(finish_reason)
+                    if finish_reason.get("type") == "abort":
+                        break
+
             if cancellation_task.done():
                 return None
         return final_meta_info

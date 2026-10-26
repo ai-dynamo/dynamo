@@ -23,10 +23,10 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	t.Log("Project a hybrid workload at the combined name limit and maximum scheduling replica count")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	projection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	projection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 	projection.stage = testRenderComponentName
-	projection.configuredBuild.IOFPGACount = 1
-	projection.configuredBuild.IOFanoutFactor = 1
+	projection.configuredBuild.ioFPGACount = 1
+	projection.configuredBuild.ioFanoutFactor = 1
 	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 2496,
@@ -54,7 +54,7 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 			cyborg := namedClique(t, pcs, "cond")
 			cyborg.Name, cyborg.Spec.RoleName = plan.CyborgTemplate, plan.CyborgTemplate
 			cyborg.Spec.Replicas = test.replicas
-			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
+			cyborg.Spec.MinAvailable = new(test.replicas)
 			_, err := RenderNodeLocal(workload, plan, RenderInput{
 				Cyborg: cyborg,
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
@@ -80,18 +80,17 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Log("Project a split-I/O selected workload")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.numLPUNodes = 1
-	fixture.partitions[0].topology = "URSA_V2_1__Q8__8C__G_106__KP_FEC__GHZ_1_0__NO_FPGA"
+	fixture.partitions[0].topology = registryTestTopology
 	fixture.partitions[0].numChips = 8
 	fixture.partitions[0].devicesPerNode = 8
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
-	build.IOFPGACount = 2
-	build.IOFanoutFactor = 2
+	fixture.architecture = "polaris"
+	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+	build := normalized
+	build.ioFPGACount = 2
+	build.ioFanoutFactor = 2
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"},
-		BuildSnapshot:   normalized,
+		Pipeline: PipelineHybrid, Models: []string{"default"},
+		Build:           normalized,
 		RuntimeBuildRef: "model-build",
 	})
 	require.NoError(t, err)
@@ -178,7 +177,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			pcs := renderTestPCS(true)
 			cyborg := namedClique(t, pcs, "cond")
 			cyborg.Spec.Replicas = test.replicas
-			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
+			cyborg.Spec.MinAvailable = new(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
 			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{

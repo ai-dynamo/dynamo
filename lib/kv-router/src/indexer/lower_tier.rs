@@ -15,13 +15,16 @@
 //! event is ignored.
 
 use std::hash::BuildHasher;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use arc_swap::ArcSwap;
 
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
+use super::concurrent_radix_tree_compressed::mix_worker;
 use super::{
     EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
@@ -51,39 +54,54 @@ pub struct KvTransferExtensions {
 }
 
 impl KvTransferExtensions {
-    fn record_match<'a>(
-        &mut self,
-        pos: usize,
-        child_hash: ExternalSequenceBlockHash,
-        workers: impl IntoIterator<Item = &'a WorkerWithDpRank>,
-        hint_sources: impl IntoIterator<Item = &'a ResidencyOwnerKey>,
-    ) {
+    /// Record the matched child hash at `pos` in the root-aligned chain.
+    /// Returns false when another group already recorded a different hash
+    /// there; the caller must not credit its owners past `pos`.
+    fn record_block(&mut self, pos: usize, child_hash: ExternalSequenceBlockHash) -> bool {
+        if self
+            .block_hashes
+            .last()
+            .is_none_or(|(last_pos, _)| *last_pos < pos)
+        {
+            self.block_hashes.push((pos, child_hash));
+            return true;
+        }
         match self
             .block_hashes
             .binary_search_by_key(&pos, |(existing_pos, _)| *existing_pos)
         {
-            Ok(idx) => {
-                if self.block_hashes[idx].1 != child_hash {
-                    return;
-                }
+            Ok(idx) => self.block_hashes[idx].1 == child_hash,
+            Err(idx) => {
+                self.block_hashes.insert(idx, (pos, child_hash));
+                true
             }
-            Err(idx) => self.block_hashes.insert(idx, (pos, child_hash)),
         }
+    }
 
-        for worker in workers {
-            self.owner_prefix_blocks
-                .insert(KvTransferCandidateSource::Worker(*worker), pos + 1);
-        }
-        for owner in hint_sources {
-            self.owner_prefix_blocks
-                .insert(KvTransferCandidateSource::CacheOwner(*owner), pos + 1);
+    /// Credit `source` with a root-aligned prefix of `blocks`. Owners are
+    /// credited once, when they leave the walk, instead of at every matched
+    /// block; an earlier entry is a cap from a chain conflict and never rises.
+    fn record_prefix(&mut self, source: KvTransferCandidateSource, blocks: usize) {
+        self.owner_prefix_blocks
+            .entry(source)
+            .and_modify(|existing| *existing = (*existing).min(blocks))
+            .or_insert(blocks);
+    }
+
+    fn record_hint_source_prefixes(
+        &mut self,
+        sources: impl IntoIterator<Item = ResidencyOwnerKey>,
+        blocks: usize,
+    ) {
+        for source in sources {
+            self.record_prefix(KvTransferCandidateSource::CacheOwner(source), blocks);
         }
     }
 }
 type OwnerBlockIndex = FxHashMap<ExternalSequenceBlockHash, TransitionKey>;
 
-/// Compact identity stored per edge. Full owners are retained once in the
-/// reverse index for reset filtering and exact recovery dumps.
+/// Exact owner identity. Edges store its [`OwnerId`]; full owners are kept once
+/// in the reverse index for reset filtering and recovery dumps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum IndexedResidencyOwner {
     Worker(WorkerWithDpRank),
@@ -105,231 +123,369 @@ impl IndexedResidencyOwner {
             Self::Exact(key) => projection.project_key(key),
         }
     }
+
+    /// Identity XORed into a multi-owner edge's fingerprint, as in the CRTC's
+    /// `WorkerSet`. Exact owners are already BLAKE3 digests.
+    #[inline]
+    fn fingerprint(self) -> u64 {
+        match self {
+            Self::Worker(worker) => mix_worker(worker),
+            Self::Exact(key) => u128::from_le_bytes(key.digest()) as u64,
+        }
+    }
+}
+
+/// Index of an owner in [`OwnerTable`]. Edges store it instead of the 24-byte
+/// [`IndexedResidencyOwner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct OwnerId(u32);
+
+/// Append-only owner interning table. Lookups in both directions read one
+/// `ArcSwap` snapshot and take no lock. Only a never-seen owner takes `append`
+/// and copies the snapshot, so the table costs about 70 bytes per owner
+/// identity ever seen. Ids are never reused: a reader holding an older snapshot
+/// can miss a new owner but never misname one.
+#[derive(Default)]
+struct OwnerTable {
+    snapshot: ArcSwap<OwnerSnapshot>,
+    append: Mutex<()>,
+}
+
+#[derive(Clone, Default)]
+struct OwnerSnapshot {
+    owners: Vec<IndexedResidencyOwner>,
+    ids: FxHashMap<IndexedResidencyOwner, OwnerId>,
+}
+
+impl OwnerTable {
+    fn intern(&self, owner: IndexedResidencyOwner) -> OwnerId {
+        if let Some(&id) = self.snapshot.load().ids.get(&owner) {
+            return id;
+        }
+        let _append = self.append.lock().expect("owner table lock poisoned");
+        let current = self.snapshot.load();
+        if let Some(&id) = current.ids.get(&owner) {
+            return id;
+        }
+        let mut next = OwnerSnapshot::clone(&current);
+        let id = OwnerId(u32::try_from(next.owners.len()).expect("fewer than 2^32 owners"));
+        next.owners.push(owner);
+        next.ids.insert(owner, id);
+        self.snapshot.store(Arc::new(next));
+        id
+    }
+
+    /// Writer-side lookups; every id and owner passed here was interned.
+    fn owner(&self, id: OwnerId) -> IndexedResidencyOwner {
+        self.snapshot.load().owners[id.0 as usize]
+    }
+
+    fn id(&self, owner: IndexedResidencyOwner) -> OwnerId {
+        self.snapshot.load().ids[&owner]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OwnerView<'a> {
+    owners: &'a [IndexedResidencyOwner],
+    ids: &'a FxHashMap<IndexedResidencyOwner, OwnerId>,
+    projection: &'a ResidencyProjection,
+}
+
+impl<'a> OwnerView<'a> {
+    fn new(snapshot: &'a OwnerSnapshot, projection: &'a ResidencyProjection) -> Self {
+        Self {
+            owners: &snapshot.owners,
+            ids: &snapshot.ids,
+            projection,
+        }
+    }
+
+    /// `None` for an owner interned after the query began.
+    #[inline]
+    fn exact_id(&self, key: ResidencyOwnerKey) -> Option<OwnerId> {
+        self.ids.get(&IndexedResidencyOwner::Exact(key)).copied()
+    }
+
+    /// `None` for an id newer than the snapshot: that owner was interned after
+    /// the query began.
+    #[inline]
+    fn owner(&self, id: OwnerId) -> Option<IndexedResidencyOwner> {
+        self.owners.get(id.0 as usize).copied()
+    }
+
+    #[inline]
+    fn project(&self, id: OwnerId) -> Option<WorkerWithDpRank> {
+        self.owner(id)?.project(self.projection)
+    }
+
+    #[inline]
+    fn exact(&self, id: OwnerId) -> Option<ResidencyOwnerKey> {
+        match self.owner(id)? {
+            IndexedResidencyOwner::Exact(key) => Some(key),
+            IndexedResidencyOwner::Worker(_) => None,
+        }
+    }
 }
 
 struct OwnerBlockState {
     owner: ResidencyOwner,
+    id: OwnerId,
     blocks: OwnerBlockIndex,
 }
 
 type WorkerBlockIndex = FxHashMap<IndexedResidencyOwner, OwnerBlockState>;
 
+/// Parent stand-in for root edges, so keys carry no `Option` (16 bytes, not
+/// 24). A real block hashing to this value would alias its children onto root
+/// edges; at 2^-64 per block that is not worth a check.
+const ROOT_PARENT: ExternalSequenceBlockHash = ExternalSequenceBlockHash(u64::MAX);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TransitionKey {
-    parent_hash: Option<ExternalSequenceBlockHash>,
+    parent_hash: ExternalSequenceBlockHash,
     local_hash: LocalBlockHash,
 }
 
+impl TransitionKey {
+    #[inline]
+    fn new(parent_hash: Option<ExternalSequenceBlockHash>, local_hash: LocalBlockHash) -> Self {
+        Self {
+            parent_hash: parent_hash.unwrap_or(ROOT_PARENT),
+            local_hash,
+        }
+    }
+
+    fn parent(self) -> Option<ExternalSequenceBlockHash> {
+        (self.parent_hash != ROOT_PARENT).then_some(self.parent_hash)
+    }
+}
+
+/// Owners of one edge. Only `Single` is inline, so the value stays 16 bytes.
 #[derive(Debug, Clone)]
 enum EdgeOwnersEntry {
     Single {
         child_hash: ExternalSequenceBlockHash,
-        owner: IndexedResidencyOwner,
+        owner: OwnerId,
     },
-    Pair {
-        child_hash: ExternalSequenceBlockHash,
-        owners: [IndexedResidencyOwner; 2],
-    },
-    Multi {
-        child_hash: ExternalSequenceBlockHash,
-        workers: WorkerSet,
-        exact_owners: FxHashSet<ResidencyOwnerKey>,
-    },
+    Pair(Box<PairOwners>),
+    Multi(Box<MultiOwners>),
 }
 
-impl EdgeOwnersEntry {
-    fn new(child_hash: ExternalSequenceBlockHash, owner: IndexedResidencyOwner) -> Self {
-        Self::Single { child_hash, owner }
+#[derive(Debug, Clone)]
+struct PairOwners {
+    child_hash: ExternalSequenceBlockHash,
+    owners: [OwnerId; 2],
+}
+
+#[derive(Debug, Clone)]
+struct MultiOwners {
+    child_hash: ExternalSequenceBlockHash,
+    workers: WorkerSet,
+    exact_owners: FxHashSet<ResidencyOwnerKey>,
+    /// XOR of every owner's fingerprint; see [`EdgeOwnersEntry::owner_set`].
+    owners_fp: u64,
+}
+
+impl MultiOwners {
+    fn add(&mut self, owner: IndexedResidencyOwner) {
+        let inserted = match owner {
+            IndexedResidencyOwner::Worker(worker) => self.workers.insert(worker),
+            IndexedResidencyOwner::Exact(key) => self.exact_owners.insert(key),
+        };
+        if inserted {
+            self.owners_fp ^= owner.fingerprint();
+        }
     }
 
+    fn remove(&mut self, owner: IndexedResidencyOwner) -> bool {
+        let removed = match owner {
+            IndexedResidencyOwner::Worker(worker) => self.workers.remove(&worker),
+            IndexedResidencyOwner::Exact(key) => self.exact_owners.remove(&key),
+        };
+        if removed {
+            self.owners_fp ^= owner.fingerprint();
+        }
+        removed
+    }
+
+    fn len(&self) -> usize {
+        self.workers.len() + self.exact_owners.len()
+    }
+
+    fn owners(&self) -> impl Iterator<Item = IndexedResidencyOwner> + '_ {
+        self.workers
+            .iter()
+            .copied()
+            .map(IndexedResidencyOwner::Worker)
+            .chain(
+                self.exact_owners
+                    .iter()
+                    .copied()
+                    .map(IndexedResidencyOwner::Exact),
+            )
+    }
+}
+
+/// Set sizes and XOR fingerprint of a multi-owner edge's owners.
+type OwnerSetFingerprint = (usize, usize, u64);
+
+impl EdgeOwnersEntry {
+    #[inline]
     fn child_hash(&self) -> ExternalSequenceBlockHash {
         match self {
-            Self::Single { child_hash, .. }
-            | Self::Pair { child_hash, .. }
-            | Self::Multi { child_hash, .. } => *child_hash,
+            Self::Single { child_hash, .. } => *child_hash,
+            Self::Pair(pair) => pair.child_hash,
+            Self::Multi(multi) => multi.child_hash,
+        }
+    }
+
+    /// Equal values mean equal owner sets, up to a 2^-64 XOR coincidence.
+    /// Only multi-owner edges carry one; smaller edges intersect cheaply.
+    #[inline]
+    fn owner_set(&self) -> Option<OwnerSetFingerprint> {
+        match self {
+            Self::Multi(multi) => Some((
+                multi.workers.len(),
+                multi.exact_owners.len(),
+                multi.owners_fp,
+            )),
+            Self::Single { .. } | Self::Pair(_) => None,
         }
     }
 
     fn insert(
         &mut self,
         child_hash: ExternalSequenceBlockHash,
+        id: OwnerId,
         owner: IndexedResidencyOwner,
+        table: &OwnerTable,
     ) -> bool {
+        if self.child_hash() != child_hash {
+            return false;
+        }
         match self {
             Self::Single {
-                child_hash: existing_hash,
-                owner: existing_owner,
+                owner: existing, ..
             } => {
-                if *existing_hash != child_hash {
-                    return false;
+                if *existing != id {
+                    let owners = [*existing, id];
+                    *self = Self::Pair(Box::new(PairOwners { child_hash, owners }));
                 }
-                if *existing_owner == owner {
-                    return true;
-                }
-                *self = Self::Pair {
-                    child_hash,
-                    owners: [*existing_owner, owner],
-                };
-                true
             }
-            Self::Pair {
-                child_hash: existing_hash,
-                owners,
-            } => {
-                if *existing_hash != child_hash {
-                    return false;
-                }
-                if owners.contains(&owner) {
-                    return true;
-                }
-                let mut workers = WorkerSet::default();
-                let mut exact_owners = FxHashSet::default();
-                for owner in owners.iter().copied().chain(std::iter::once(owner)) {
-                    match owner {
-                        IndexedResidencyOwner::Worker(worker) => {
-                            workers.insert(worker);
-                        }
-                        IndexedResidencyOwner::Exact(owner) => {
-                            exact_owners.insert(owner);
-                        }
+            Self::Pair(pair) => {
+                if !pair.owners.contains(&id) {
+                    let mut multi = MultiOwners {
+                        child_hash,
+                        workers: WorkerSet::default(),
+                        exact_owners: FxHashSet::default(),
+                        owners_fp: 0,
+                    };
+                    for existing in pair.owners {
+                        multi.add(table.owner(existing));
                     }
+                    multi.add(owner);
+                    *self = Self::Multi(Box::new(multi));
                 }
-                *self = Self::Multi {
-                    child_hash,
-                    workers,
-                    exact_owners,
-                };
-                true
             }
-            Self::Multi {
-                child_hash: existing_hash,
-                workers,
-                exact_owners,
-            } => {
-                if *existing_hash != child_hash {
-                    return false;
-                }
-                match owner {
-                    IndexedResidencyOwner::Worker(worker) => {
-                        workers.insert(worker);
-                    }
-                    IndexedResidencyOwner::Exact(owner) => {
-                        exact_owners.insert(owner);
-                    }
-                }
-                true
-            }
+            Self::Multi(multi) => multi.add(owner),
         }
+        true
     }
 
-    fn remove(&mut self, owner: IndexedResidencyOwner) -> bool {
+    /// Returns true when the edge has no owners left.
+    fn remove(&mut self, id: OwnerId, owner: IndexedResidencyOwner, table: &OwnerTable) -> bool {
         match self {
             Self::Single {
-                owner: existing_owner,
-                ..
-            } => *existing_owner == owner,
-            Self::Pair { child_hash, owners } => {
-                let Some(removed) = owners.iter().position(|candidate| *candidate == owner) else {
+                owner: existing, ..
+            } => *existing == id,
+            Self::Pair(pair) => {
+                let Some(removed) = pair.owners.iter().position(|candidate| *candidate == id)
+                else {
                     return false;
                 };
-                let remaining = owners[1 - removed];
-                *self = Self::Single {
-                    child_hash: *child_hash,
-                    owner: remaining,
-                };
+                let child_hash = pair.child_hash;
+                let owner = pair.owners[1 - removed];
+                *self = Self::Single { child_hash, owner };
                 false
             }
-            Self::Multi {
-                child_hash,
-                workers,
-                exact_owners,
-            } => {
-                let removed = match owner {
-                    IndexedResidencyOwner::Worker(worker) => workers.remove(&worker),
-                    IndexedResidencyOwner::Exact(owner) => exact_owners.remove(&owner),
-                };
-                if !removed {
+            Self::Multi(multi) => {
+                if !multi.remove(owner) {
                     return false;
                 }
-
-                let remaining = workers.len() + exact_owners.len();
+                let remaining = multi.len();
                 if remaining == 0 {
                     return true;
                 }
-
                 if remaining <= 2 {
-                    let mut owners = workers
-                        .iter()
-                        .copied()
-                        .map(IndexedResidencyOwner::Worker)
-                        .chain(
-                            exact_owners
-                                .iter()
-                                .copied()
-                                .map(IndexedResidencyOwner::Exact),
-                        );
-                    let first = owners.next().expect("at least one owner remains");
-                    if remaining == 1 {
-                        *self = Self::Single {
-                            child_hash: *child_hash,
-                            owner: first,
-                        };
-                        return false;
+                    let child_hash = multi.child_hash;
+                    let mut owners = [OwnerId(0); 2];
+                    for (slot, owner) in owners.iter_mut().zip(multi.owners()) {
+                        *slot = table.id(owner);
                     }
-                    let second = owners.next().expect("two owners remain");
-                    *self = Self::Pair {
-                        child_hash: *child_hash,
-                        owners: [first, second],
+                    *self = if remaining == 1 {
+                        Self::Single {
+                            child_hash,
+                            owner: owners[0],
+                        }
+                    } else {
+                        Self::Pair(Box::new(PairOwners { child_hash, owners }))
                     };
                 }
-
                 false
             }
         }
     }
 
     #[inline]
-    fn contains_worker(&self, worker: &WorkerWithDpRank, projection: &ResidencyProjection) -> bool {
+    fn contains_worker(&self, worker: &WorkerWithDpRank, view: OwnerView<'_>) -> bool {
         match self {
-            Self::Single { owner, .. } => owner.project(projection).as_ref() == Some(worker),
-            Self::Pair { owners, .. } => owners
+            Self::Single { owner, .. } => view.project(*owner).as_ref() == Some(worker),
+            Self::Pair(pair) => pair
+                .owners
                 .iter()
-                .any(|owner| owner.project(projection).as_ref() == Some(worker)),
-            Self::Multi {
-                workers,
-                exact_owners,
-                ..
-            } => {
-                workers.contains(worker)
-                    || exact_owners
+                .any(|owner| view.project(*owner).as_ref() == Some(worker)),
+            Self::Multi(multi) => {
+                multi.workers.contains(worker)
+                    || multi
+                        .exact_owners
                         .iter()
-                        .any(|owner| projection.project_key(*owner).as_ref() == Some(worker))
+                        .any(|owner| view.projection.project_key(*owner).as_ref() == Some(worker))
             }
         }
     }
 
-    fn collect_workers(&self, projection: &ResidencyProjection) -> Vec<WorkerWithDpRank> {
+    /// `id` is `owner`'s id in the query's owner snapshot, if it has one.
+    #[inline]
+    fn contains_exact_owner(&self, owner: ResidencyOwnerKey, id: Option<OwnerId>) -> bool {
         match self {
-            Self::Single { owner, .. } => owner.project(projection).into_iter().collect(),
-            Self::Pair { owners, .. } => {
-                let first = owners[0].project(projection);
-                let second = owners[1].project(projection);
+            Self::Single {
+                owner: existing, ..
+            } => Some(*existing) == id,
+            Self::Pair(pair) => id.is_some_and(|id| pair.owners.contains(&id)),
+            Self::Multi(multi) => multi.exact_owners.contains(&owner),
+        }
+    }
+
+    fn collect_workers(&self, view: OwnerView<'_>) -> Vec<WorkerWithDpRank> {
+        match self {
+            Self::Single { owner, .. } => view.project(*owner).into_iter().collect(),
+            Self::Pair(pair) => {
+                let first = view.project(pair.owners[0]);
+                let second = view.project(pair.owners[1]);
                 match (first, second) {
                     (Some(first), Some(second)) if first != second => vec![first, second],
                     (Some(worker), _) | (_, Some(worker)) => vec![worker],
                     (None, None) => Vec::new(),
                 }
             }
-            Self::Multi {
-                workers,
-                exact_owners,
-                ..
-            } => {
-                let mut projected = workers.clone();
+            Self::Multi(multi) => {
+                let mut projected = multi.workers.clone();
                 projected.extend(
-                    exact_owners
+                    multi
+                        .exact_owners
                         .iter()
-                        .filter_map(|owner| projection.project_key(*owner)),
+                        .filter_map(|owner| view.projection.project_key(*owner)),
                 );
                 projected.into_iter().collect()
             }
@@ -338,31 +494,31 @@ impl EdgeOwnersEntry {
 
     fn collect_matching_workers(
         &self,
-        projection: &ResidencyProjection,
+        view: OwnerView<'_>,
         active: &WorkerSet,
         matched: &mut WorkerSet,
     ) {
         match self {
             Self::Single { owner, .. } => {
                 matched.extend(
-                    owner
-                        .project(projection)
+                    view.project(*owner)
                         .filter(|worker| active.contains(worker)),
                 );
             }
-            Self::Pair { owners, .. } => {
+            Self::Pair(pair) => {
                 matched.extend(
-                    owners
+                    pair.owners
                         .iter()
-                        .filter_map(|owner| owner.project(projection))
+                        .filter_map(|owner| view.project(*owner))
                         .filter(|worker| active.contains(worker)),
                 );
             }
-            Self::Multi {
-                workers,
-                exact_owners,
-                ..
-            } => {
+            Self::Multi(multi) => {
+                let MultiOwners {
+                    workers,
+                    exact_owners,
+                    ..
+                } = &**multi;
                 if workers.len() <= active.len() {
                     matched.extend(
                         workers
@@ -378,13 +534,13 @@ impl EdgeOwnersEntry {
                             .filter(|worker| workers.contains(worker)),
                     );
                 }
-                if projection.is_empty() {
+                if view.projection.is_empty() {
                     return;
                 }
                 matched.extend(
                     exact_owners
                         .iter()
-                        .filter_map(|owner| projection.project_key(*owner))
+                        .filter_map(|owner| view.projection.project_key(*owner))
                         .filter(|worker| active.contains(worker)),
                 );
             }
@@ -394,6 +550,7 @@ impl EdgeOwnersEntry {
     fn collect_router_hint_sources(
         &self,
         snapshot: &ResidencyRoutingSnapshot,
+        view: OwnerView<'_>,
         sources: &mut HintSourceSet,
     ) {
         let mut insert = |owner: ResidencyOwnerKey| {
@@ -402,20 +559,20 @@ impl EdgeOwnersEntry {
             }
         };
         match self {
-            Self::Single {
-                owner: IndexedResidencyOwner::Exact(owner),
-                ..
-            } => insert(*owner),
-            Self::Single { .. } => {}
-            Self::Pair { owners, .. } => {
-                for owner in owners {
-                    if let IndexedResidencyOwner::Exact(owner) = owner {
-                        insert(*owner);
+            Self::Single { owner, .. } => {
+                if let Some(owner) = view.exact(*owner) {
+                    insert(owner);
+                }
+            }
+            Self::Pair(pair) => {
+                for owner in pair.owners {
+                    if let Some(owner) = view.exact(owner) {
+                        insert(owner);
                     }
                 }
             }
-            Self::Multi { exact_owners, .. } => {
-                for owner in exact_owners {
+            Self::Multi(multi) => {
+                for owner in &multi.exact_owners {
                     insert(*owner);
                 }
             }
@@ -424,6 +581,7 @@ impl EdgeOwnersEntry {
 
     fn collect_matching_router_hint_sources(
         &self,
+        view: OwnerView<'_>,
         active: &HintSourceSet,
         matched: &mut HintSourceSet,
     ) {
@@ -433,19 +591,20 @@ impl EdgeOwnersEntry {
             }
         };
         match self {
-            Self::Single {
-                owner: IndexedResidencyOwner::Exact(owner),
-                ..
-            } => retain(*owner),
-            Self::Single { .. } => {}
-            Self::Pair { owners, .. } => {
-                for owner in owners {
-                    if let IndexedResidencyOwner::Exact(owner) = owner {
-                        retain(*owner);
+            Self::Single { owner, .. } => {
+                if let Some(owner) = view.exact(*owner) {
+                    retain(owner);
+                }
+            }
+            Self::Pair(pair) => {
+                for owner in pair.owners {
+                    if let Some(owner) = view.exact(owner) {
+                        retain(owner);
                     }
                 }
             }
-            Self::Multi { exact_owners, .. } => {
+            Self::Multi(multi) => {
+                let exact_owners = &multi.exact_owners;
                 if exact_owners.len() <= active.len() {
                     matched.extend(
                         exact_owners
@@ -500,6 +659,7 @@ pub struct LowerTierMatchDetails {
 pub struct LowerTierIndexer {
     lifecycle: super::HashLifecycle<IndexedResidencyOwner>,
     edges: DashMap<TransitionKey, EdgeOwnersEntry, FxBuildHasher>,
+    owners: OwnerTable,
 }
 
 impl LowerTierIndexer {
@@ -513,6 +673,7 @@ impl LowerTierIndexer {
         Self {
             edges: DashMap::with_hasher(FxBuildHasher),
             lifecycle: super::HashLifecycle::default(),
+            owners: OwnerTable::default(),
         }
     }
 
@@ -577,18 +738,17 @@ impl LowerTierIndexer {
             .entry(indexed_owner)
             .or_insert_with(|| OwnerBlockState {
                 owner,
+                id: self.owners.intern(indexed_owner),
                 blocks: OwnerBlockIndex::default(),
             });
         if owner_state.owner != owner {
             return Err(KvCacheEventError::UnsupportedResidencyDomain);
         }
+        let owner_id = owner_state.id;
         let worker_map = &mut owner_state.blocks;
 
         for block in store_data.blocks {
-            let key = TransitionKey {
-                parent_hash,
-                local_hash: block.tokens_hash,
-            };
+            let key = TransitionKey::new(parent_hash, block.tokens_hash);
 
             // If this worker already has a different parent/local for the same
             // block_hash, or if the shared edge is owned by a conflicting
@@ -603,10 +763,14 @@ impl LowerTierIndexer {
 
             let inserted = match self.edges.entry(key) {
                 dashmap::mapref::entry::Entry::Occupied(mut edge) => {
-                    edge.get_mut().insert(block.block_hash, indexed_owner)
+                    edge.get_mut()
+                        .insert(block.block_hash, owner_id, indexed_owner, &self.owners)
                 }
                 dashmap::mapref::entry::Entry::Vacant(edge) => {
-                    edge.insert(EdgeOwnersEntry::new(block.block_hash, indexed_owner));
+                    edge.insert(EdgeOwnersEntry::Single {
+                        child_hash: block.block_hash,
+                        owner: owner_id,
+                    });
                     true
                 }
             };
@@ -636,6 +800,7 @@ impl LowerTierIndexer {
             if owner_state.owner != owner {
                 return Err(KvCacheEventError::UnsupportedResidencyDomain);
             }
+            let owner_id = owner_state.id;
             let worker_map = &mut owner_state.blocks;
 
             for block_hash in block_hashes {
@@ -643,7 +808,7 @@ impl LowerTierIndexer {
                     continue;
                 };
 
-                self.remove_owner_from_edge(key, indexed_owner);
+                self.remove_owner_from_edge(key, owner_id, indexed_owner);
                 self.lifecycle.remove(indexed_owner, *block_hash);
             }
 
@@ -700,14 +865,19 @@ impl LowerTierIndexer {
         }
 
         for (hash, key) in owner_state.blocks {
-            self.remove_owner_from_edge(key, indexed_owner);
+            self.remove_owner_from_edge(key, owner_state.id, indexed_owner);
             self.lifecycle.remove(indexed_owner, hash);
         }
     }
 
-    fn remove_owner_from_edge(&self, key: TransitionKey, owner: IndexedResidencyOwner) {
+    fn remove_owner_from_edge(
+        &self,
+        key: TransitionKey,
+        id: OwnerId,
+        owner: IndexedResidencyOwner,
+    ) {
         if let dashmap::mapref::entry::Entry::Occupied(mut edge) = self.edges.entry(key)
-            && edge.get_mut().remove(owner)
+            && edge.get_mut().remove(id, owner, &self.owners)
         {
             edge.remove();
         }
@@ -731,12 +901,11 @@ impl LowerTierIndexer {
         local_hash: LocalBlockHash,
         projection: &ResidencyProjection,
     ) -> Vec<WorkerWithDpRank> {
+        let owners = self.owners.snapshot.load();
+        let view = OwnerView::new(&owners, projection);
         self.edges
-            .get(&TransitionKey {
-                parent_hash: None,
-                local_hash,
-            })
-            .map(|edge| edge.collect_workers(projection))
+            .get(&TransitionKey::new(None, local_hash))
+            .map(|edge| edge.collect_workers(view))
             .unwrap_or_default()
     }
 
@@ -746,11 +915,10 @@ impl LowerTierIndexer {
         snapshot: &ResidencyRoutingSnapshot,
     ) -> HintSourceSet {
         let mut sources = HintSourceSet::default();
-        if let Some(edge) = self.edges.get(&TransitionKey {
-            parent_hash: None,
-            local_hash,
-        }) {
-            edge.collect_router_hint_sources(snapshot, &mut sources);
+        let owners = self.owners.snapshot.load();
+        let view = OwnerView::new(&owners, snapshot.projection());
+        if let Some(edge) = self.edges.get(&TransitionKey::new(None, local_hash)) {
+            edge.collect_router_hint_sources(snapshot, view, &mut sources);
         }
         sources
     }
@@ -777,7 +945,7 @@ impl LowerTierIndexer {
                     KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash: key.parent_hash,
+                            parent_hash: key.parent(),
                             start_position: None,
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash: *block_hash,
@@ -895,7 +1063,8 @@ impl LowerTierIndexer {
     where
         S: BuildHasher,
     {
-        let projection = snapshot.projection();
+        let owners = self.owners.snapshot.load();
+        let view = OwnerView::new(&owners, snapshot.projection());
         let mut kv_transfer_extensions =
             retain_kv_transfer_extensions.then(KvTransferExtensions::default);
 
@@ -976,7 +1145,7 @@ impl LowerTierIndexer {
                     &mut overflow,
                     &mut final_states,
                     kv_transfer_extensions.as_mut(),
-                    projection,
+                    view,
                 );
             }
 
@@ -1005,6 +1174,11 @@ impl LowerTierIndexer {
 
             let hits = final_pos.saturating_sub(continuation.start_pos);
             results.hits.insert(*worker, hits);
+            if hits > 0
+                && let Some(extensions) = results.kv_transfer_extensions.as_mut()
+            {
+                extensions.record_prefix(KvTransferCandidateSource::Worker(*worker), final_pos);
+            }
 
             let next_continuation = if hits == 0 {
                 *continuation
@@ -1121,7 +1295,6 @@ impl SyncIndexer for LowerTierIndexer {
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }
-                WorkerTask::CleanupStaleChildren => {}
                 WorkerTask::Terminate => {
                     break;
                 }
@@ -1178,59 +1351,71 @@ fn advance_state_to_breakpoint(
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
     mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
-    projection: &ResidencyProjection,
+    view: OwnerView<'_>,
 ) {
     let mut cur_pos = start_pos;
     let mut cur_hash = start_hash;
     let mut active_workers = frontier.workers;
     let mut active_hint_sources = frontier.hint_sources;
 
-    // When only one worker is active we can skip all set bookkeeping and just
-    // do a straight edge-lookup loop.
-    if active_workers.len() == 1 && active_hint_sources.is_empty() {
-        let worker = active_workers.into_iter().next().unwrap();
-        advance_single_worker(
-            index,
-            local_hashes,
-            worker,
-            &mut cur_pos,
-            &mut cur_hash,
-            next_breakpoint,
-            overflow,
-            final_states,
-            kv_transfer_extensions.as_deref_mut(),
-            projection,
-        );
-        return;
-    }
-
     // Reusable scratch buffer for partitioning workers each iteration, avoids
     // allocating new HashSets on every step.
     let mut worker_scratch = WorkerSet::default();
     let mut hint_source_scratch = HintSourceSet::default();
+    // Owner set of the last edge the active sets were intersected with.
+    let mut prev_owner_set: Option<OwnerSetFingerprint> = None;
 
     while cur_pos < next_breakpoint
         && (!active_workers.is_empty() || !active_hint_sources.is_empty())
     {
+        // At most one worker and one hint source left (e.g. a cache owner
+        // projected to its own worker): finish without set overhead.
+        if active_workers.len() <= 1 && active_hint_sources.len() <= 1 {
+            advance_scalar(
+                index,
+                local_hashes,
+                active_workers.into_iter().next(),
+                active_hint_sources.into_iter().next(),
+                cur_pos,
+                cur_hash,
+                next_breakpoint,
+                overflow,
+                final_states,
+                kv_transfer_extensions,
+                view,
+            );
+            return;
+        }
+
         // Look up the edge for the current (parent_hash, local_hash) pair.
         // If no edge exists, no worker can continue — finalize everyone.
-        let Some(edge) = index.edges.get(&TransitionKey {
-            parent_hash: cur_hash,
-            local_hash: local_hashes[cur_pos],
-        }) else {
+        let Some(edge) = index
+            .edges
+            .get(&TransitionKey::new(cur_hash, local_hashes[cur_pos]))
+        else {
             finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
+            if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
+                extensions.record_hint_source_prefixes(active_hint_sources.drain(), cur_pos);
+            }
             active_hint_sources.clear();
             break;
         };
+
+        // The active sets are already subsets of the previous edge's owners, so
+        // an edge with the same owner set (common along a shared prefix) cannot
+        // drop anyone and both intersections are skipped.
+        let owner_set = edge.owner_set();
+        let owners_unchanged = owner_set.is_some() && owner_set == prev_owner_set;
+        prev_owner_set = owner_set;
 
         // Partition active workers into matched (own the edge) and unmatched.
         // For single-owner edges we can check membership in O(1) instead of
         // iterating all active workers. For multi-owner edges we iterate
         // whichever side is smaller.
-        if !active_workers.is_empty() {
+        if !active_workers.is_empty() && !owners_unchanged {
             match edge.value() {
                 EdgeOwnersEntry::Single { owner, .. } => {
-                    if let Some(worker) = owner.project(projection)
+                    if let Some(worker) = view.project(*owner)
                         && active_workers.remove(&worker)
                     {
                         finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
@@ -1239,12 +1424,12 @@ fn advance_state_to_breakpoint(
                         finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
                     }
                 }
-                EdgeOwnersEntry::Pair { .. } | EdgeOwnersEntry::Multi { .. } => {
+                EdgeOwnersEntry::Pair(_) | EdgeOwnersEntry::Multi(_) => {
                     // Exact ownership may contain both Worker and CacheOwner entries
                     // that project to the same routing worker. Project the edge once,
                     // then intersect the two sets in linear expected time.
                     worker_scratch.clear();
-                    edge.collect_matching_workers(projection, &active_workers, &mut worker_scratch);
+                    edge.collect_matching_workers(view, &active_workers, &mut worker_scratch);
                     for worker in &worker_scratch {
                         active_workers.remove(worker);
                     }
@@ -1254,12 +1439,25 @@ fn advance_state_to_breakpoint(
             }
         }
 
-        if !active_hint_sources.is_empty() {
+        if !active_hint_sources.is_empty() && !owners_unchanged {
             hint_source_scratch.clear();
             edge.collect_matching_router_hint_sources(
+                view,
                 &active_hint_sources,
                 &mut hint_source_scratch,
             );
+            // Sources missing from this edge matched every block before it.
+            if hint_source_scratch.len() < active_hint_sources.len()
+                && let Some(extensions) = kv_transfer_extensions.as_deref_mut()
+            {
+                extensions.record_hint_source_prefixes(
+                    active_hint_sources
+                        .iter()
+                        .copied()
+                        .filter(|source| !hint_source_scratch.contains(source)),
+                    cur_pos,
+                );
+            }
             std::mem::swap(&mut active_hint_sources, &mut hint_source_scratch);
         }
 
@@ -1268,35 +1466,16 @@ fn advance_state_to_breakpoint(
         }
 
         let child_hash = edge.child_hash();
-        if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
-            extensions.record_match(
-                cur_pos,
-                child_hash,
-                active_workers.iter(),
-                active_hint_sources.iter(),
-            );
+        if let Some(extensions) = kv_transfer_extensions.as_deref_mut()
+            && !extensions.record_block(cur_pos, child_hash)
+        {
+            for worker in &active_workers {
+                extensions.record_prefix(KvTransferCandidateSource::Worker(*worker), cur_pos);
+            }
+            extensions.record_hint_source_prefixes(active_hint_sources.iter().copied(), cur_pos);
         }
         cur_hash = Some(child_hash);
         cur_pos += 1;
-
-        // If we're down to one worker, switch to the scalar loop for the
-        // remaining positions to avoid set overhead.
-        if active_workers.len() == 1 && active_hint_sources.is_empty() {
-            let worker = active_workers.into_iter().next().unwrap();
-            advance_single_worker(
-                index,
-                local_hashes,
-                worker,
-                &mut cur_pos,
-                &mut cur_hash,
-                next_breakpoint,
-                overflow,
-                final_states,
-                kv_transfer_extensions.as_deref_mut(),
-                projection,
-            );
-            return;
-        }
     }
 
     if active_workers.is_empty() && active_hint_sources.is_empty() {
@@ -1308,6 +1487,9 @@ fn advance_state_to_breakpoint(
     // the next breakpoint for continued walking.
     if cur_pos >= local_hashes.len() {
         finalize_workers(final_states, active_workers, cur_pos, cur_hash);
+        if let Some(extensions) = kv_transfer_extensions {
+            extensions.record_hint_source_prefixes(active_hint_sources, cur_pos);
+        }
     } else {
         let next = overflow.entry(cur_hash).or_default();
         next.workers.extend(active_workers);
@@ -1315,57 +1497,72 @@ fn advance_state_to_breakpoint(
     }
 }
 
-/// Simplified walk for exactly one worker. Just does sequential edge lookups
-/// without any set operations — either the worker owns each edge and continues,
-/// or it stops.
+/// Scalar form of the walk loop for at most one worker and at most one hint source.
 #[allow(clippy::too_many_arguments)]
-fn advance_single_worker(
+fn advance_scalar(
     index: &LowerTierIndexer,
     local_hashes: &[LocalBlockHash],
-    worker: WorkerWithDpRank,
-    cur_pos: &mut usize,
-    cur_hash: &mut Option<ExternalSequenceBlockHash>,
+    mut worker: Option<WorkerWithDpRank>,
+    mut hint_source: Option<ResidencyOwnerKey>,
+    mut cur_pos: usize,
+    mut cur_hash: Option<ExternalSequenceBlockHash>,
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
     mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
-    projection: &ResidencyProjection,
+    view: OwnerView<'_>,
 ) {
-    while *cur_pos < next_breakpoint {
-        let Some(edge) = index.edges.get(&TransitionKey {
-            parent_hash: *cur_hash,
-            local_hash: local_hashes[*cur_pos],
-        }) else {
-            final_states.insert(worker, (*cur_pos, *cur_hash));
+    let hint_source_id = hint_source.and_then(|source| view.exact_id(source));
+    while cur_pos < next_breakpoint {
+        let edge = index
+            .edges
+            .get(&TransitionKey::new(cur_hash, local_hashes[cur_pos]));
+        let owners = edge.as_deref();
+
+        if let Some(active) = worker
+            && !owners.is_some_and(|owners| owners.contains_worker(&active, view))
+        {
+            final_states.insert(active, (cur_pos, cur_hash));
+            worker = None;
+        }
+        // A source missing from this edge matched every block before it.
+        if let Some(source) = hint_source
+            && !owners.is_some_and(|owners| owners.contains_exact_owner(source, hint_source_id))
+        {
+            if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
+                extensions.record_prefix(KvTransferCandidateSource::CacheOwner(source), cur_pos);
+            }
+            hint_source = None;
+        }
+        let Some(owners) = owners else {
             return;
         };
-
-        if !edge.contains_worker(&worker, projection) {
-            final_states.insert(worker, (*cur_pos, *cur_hash));
+        if worker.is_none() && hint_source.is_none() {
             return;
         }
 
-        let child_hash = edge.child_hash();
-        if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
-            extensions.record_match(
-                *cur_pos,
-                child_hash,
-                std::iter::once(&worker),
-                std::iter::empty(),
-            );
+        let child_hash = owners.child_hash();
+        if let Some(extensions) = kv_transfer_extensions.as_deref_mut()
+            && !extensions.record_block(cur_pos, child_hash)
+        {
+            if let Some(worker) = worker {
+                extensions.record_prefix(KvTransferCandidateSource::Worker(worker), cur_pos);
+            }
+            extensions.record_hint_source_prefixes(hint_source, cur_pos);
         }
-        *cur_hash = Some(child_hash);
-        *cur_pos += 1;
+        cur_hash = Some(child_hash);
+        cur_pos += 1;
     }
 
-    if *cur_pos >= local_hashes.len() {
-        final_states.insert(worker, (*cur_pos, *cur_hash));
+    if cur_pos >= local_hashes.len() {
+        finalize_workers(final_states, worker, cur_pos, cur_hash);
+        if let Some(extensions) = kv_transfer_extensions {
+            extensions.record_hint_source_prefixes(hint_source, cur_pos);
+        }
     } else {
-        overflow
-            .entry(*cur_hash)
-            .or_default()
-            .workers
-            .insert(worker);
+        let next = overflow.entry(cur_hash).or_default();
+        next.workers.extend(worker);
+        next.hint_sources.extend(hint_source);
     }
 }
 
@@ -1973,6 +2170,7 @@ mod tests {
                 RouterHintSourceMetadata {
                     source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
                     worker_type: "prefill".to_string(),
+                    topology_domains: Default::default(),
                 },
                 None,
             )],
@@ -1996,6 +2194,151 @@ mod tests {
             extensions.block_hashes,
             vec![(0, ExternalSequenceBlockHash(101))]
         );
+    }
+
+    #[test]
+    fn hint_sources_are_credited_where_they_leave_the_walk() {
+        let owner_a = cache_owner_id();
+        let owner_b = CacheOwnerId::new(
+            owner_a.pool(),
+            StableDpSlotId::new([5; 16], IdentitySource::Explicit),
+        );
+        let mut index = TestLowerTierIndex::new();
+        let store = |event_id, local: &[u64], external: &[u64]| {
+            store_event_in_domain(
+                7,
+                event_id,
+                None,
+                local,
+                external,
+                ResidencyDomain::CacheOwner,
+            )
+        };
+        index
+            .apply_event(store(0, &[11, 12, 13], &[101, 102, 103]))
+            .unwrap();
+        index
+            .apply_event(store(1, &[11], &[101]).with_state_source(owner_b))
+            .unwrap();
+        let metadata = RouterHintSourceMetadata {
+            source_control_endpoint: "tcp://owner:23280".to_string(),
+            worker_type: "prefill".to_string(),
+            topology_domains: Default::default(),
+        };
+        let snapshot = ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            [owner_a, owner_b].map(|owner| (owner, metadata.clone(), None)),
+        );
+
+        // Source b drops at the second edge; source a reaches the end.
+        let details = index.index.query_match_details_with_options_and_snapshot(
+            &local_hashes(&[11, 12, 13]),
+            &FxHashMap::<WorkerWithDpRank, LowerTierContinuation>::default(),
+            true,
+            &snapshot,
+        );
+        let key = |owner| {
+            KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key())
+        };
+        assert_eq!(
+            details.kv_transfer_extensions.unwrap().owner_prefix_blocks,
+            FxHashMap::from_iter([(key(owner_a), 3), (key(owner_b), 1)])
+        );
+    }
+
+    #[test]
+    fn projected_worker_and_own_hint_source_leave_independently() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = cache_owner_id();
+        let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
+        let mut index = TestLowerTierIndex::new();
+        let store = |event_id, local: &[u64], external: &[u64], domain| {
+            store_event_in_domain(7, event_id, None, local, external, domain)
+        };
+        index
+            .apply_event(store(
+                0,
+                &[11, 12],
+                &[101, 102],
+                ResidencyDomain::CacheOwner,
+            ))
+            .unwrap();
+        index
+            .apply_event(store(
+                1,
+                &[11, 12, 13],
+                &[101, 102, 103],
+                ResidencyDomain::Worker,
+            ))
+            .unwrap();
+        let snapshot = ResidencyRoutingSnapshot::new(
+            projection(worker),
+            [(
+                owner,
+                RouterHintSourceMetadata {
+                    source_control_endpoint: "tcp://owner:23280".to_string(),
+                    worker_type: "prefill".to_string(),
+                    topology_domains: Default::default(),
+                },
+                None,
+            )],
+        );
+        let continuations = FxHashMap::from_iter([(worker, LowerTierContinuation::from_root(0))]);
+
+        // The source leaves at the worker-only third edge; the worker continues.
+        let details = index.index.query_match_details_with_options_and_snapshot(
+            &local_hashes(&[11, 12, 13, 14]),
+            &continuations,
+            true,
+            &snapshot,
+        );
+
+        assert_eq!(details.hits, FxHashMap::from_iter([(worker, 3)]));
+        let extensions = details.kv_transfer_extensions.unwrap();
+        assert_eq!(
+            extensions.block_hashes,
+            vec![
+                (0, ExternalSequenceBlockHash(101)),
+                (1, ExternalSequenceBlockHash(102)),
+                (2, ExternalSequenceBlockHash(103)),
+            ]
+        );
+        assert_eq!(
+            extensions.owner_prefix_blocks,
+            FxHashMap::from_iter([
+                (KvTransferCandidateSource::CacheOwner(owner_key), 2),
+                (KvTransferCandidateSource::Worker(worker), 3),
+            ])
+        );
+    }
+
+    #[test]
+    fn equal_size_owner_set_change_stops_dropped_worker() {
+        let mut index = TestLowerTierIndex::new();
+        for worker_id in [1, 2, 3] {
+            index
+                .apply_event(store_event(worker_id, 0, 0, None, &[11, 12], &[101, 102]))
+                .unwrap();
+        }
+        // The third edge keeps the owner count but swaps worker 3 for worker 4.
+        for worker_id in [1, 2, 4] {
+            index
+                .apply_event(store_event(worker_id, 0, 1, Some(102), &[13], &[103]))
+                .unwrap();
+        }
+        let continuations: FxHashMap<_, _> = [1, 2, 3]
+            .map(|id| {
+                (
+                    WorkerWithDpRank::new(id, 0),
+                    LowerTierContinuation::from_root(0),
+                )
+            })
+            .into_iter()
+            .collect();
+
+        let hits = index.query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
+        assert_eq!(hits[&WorkerWithDpRank::new(1, 0)], 3);
+        assert_eq!(hits[&WorkerWithDpRank::new(3, 0)], 2);
     }
 
     #[test]

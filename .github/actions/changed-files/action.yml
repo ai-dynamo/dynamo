@@ -55,6 +55,9 @@ outputs:
   sample:
     description: 'Whether sample-backend files changed'
     value: ${{ steps.filter.outputs.sample_any_modified }}
+  planner_gym:
+    description: 'Whether Planner Gym sources or its CPU test workflow changed'
+    value: ${{ steps.filter.outputs.planner_gym_any_modified }}
   planner:
     description: 'Whether planner files changed'
     value: ${{ steps.filter.outputs.planner_any_modified }}
@@ -92,6 +95,13 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: Create changed-file output directory
+      id: output-dir
+      shell: bash
+      run: |
+        output_dir=$(mktemp -d "$RUNNER_TEMP/dynamo-changed-files.XXXXXX")
+        printf 'path=%s\n' "$output_dir" >> "$GITHUB_OUTPUT"
+
     # Skipped for pull_request events — tj-actions uses the REST API instead.
     - name: Get merge base for push events
       id: merge-base
@@ -99,6 +109,9 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.gh_token }}
+        REF_NAME: ${{ github.ref_name }}
+        REPOSITORY: ${{ github.repository }}
+        HEAD_SHA: ${{ github.sha }}
       run: |
         # How changed-file detection works (callers use fetch-depth: 1):
         #
@@ -114,10 +127,10 @@ runs:
         #     base_sha is empty, skip_initial_fetch is false — tj-actions falls back
         #     to its default behaviour (deepens history and diffs against the previous
         #     commit). Callers short-circuit outputs to true for main/release anyway.
-        if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+        if [[ "$REF_NAME" =~ ^pull-request/([0-9]+)$ ]]; then
           BASE=$(gh pr view "${BASH_REMATCH[1]}" --json baseRefName -q '.baseRefName')
           # Compare API returns the true merge-base (fork point), not the branch tip.
-          BASE_SHA=$(gh api "repos/${{ github.repository }}/compare/${BASE}...${{ github.sha }}" \
+          BASE_SHA=$(gh api "repos/${REPOSITORY}/compare/${BASE}...${HEAD_SHA}" \
             --jq '.merge_base_commit.sha')
           echo "Merge base: $BASE_SHA"
           # Fetch the merge-base commit so tj-actions can `git diff` against it.
@@ -137,6 +150,13 @@ runs:
       with:
         files_yaml_from_source_file: .github/filters.yaml
         token: ${{ inputs.gh_token }}
+        # v42 writes JSON files after removing one escape_json quote layer.
+        # Keep filenames intact and consume those files as data, never shell code.
+        json: 'true'
+        escape_json: 'true'
+        safe_output: 'false'
+        write_output_files: 'true'
+        output_dir: ${{ steps.output-dir.outputs.path }}
         # pull_request: calls GET /pulls/{n}/files — accurate, no git history needed.
         use_rest_api: ${{ github.event_name == 'pull_request' }}
         # push to pull-request/N: merge-base SHA from Compare API (set above).
@@ -146,91 +166,10 @@ runs:
         # When base_sha is empty, let tj-actions fetch history itself.
         skip_initial_fetch: ${{ steps.merge-base.outputs.base_sha != '' }}
 
-    - name: Debug changed files
+    - name: Report changes and check filter coverage
       shell: bash
-      run: |
-        echo "=== Base SHA Used ==="
-        echo "base_sha: ${{ steps.merge-base.outputs.base_sha || 'default (previous commit)' }}"
-        echo ""
-        echo "=== All Modified Files (${{ steps.filter.outputs.all_all_modified_files_count }} total) ==="
-        echo "${{ steps.filter.outputs.all_all_modified_files }}"
-        echo ""
-        echo "=== Filters That Matched ==="
-        echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
-        echo ""
-        echo "=== Filter Results ==="
-        echo "api_docs: ${{ steps.filter.outputs.api_docs_any_modified }}"
-        echo "docs: ${{ steps.filter.outputs.docs_any_modified }}"
-        echo "examples: ${{ steps.filter.outputs.examples_any_modified }}"
-        echo "fern_components: ${{ steps.filter.outputs.fern_components_any_modified }}"
-        echo "ci: ${{ steps.filter.outputs.ci_any_modified }}"
-        echo "core: ${{ steps.filter.outputs.core_any_modified }}"
-        echo "dev_images: ${{ steps.filter.outputs.dev_images_any_modified }}"
-        echo "operator: ${{ steps.filter.outputs.operator_any_modified }}"
-        echo "snapshot: ${{ steps.filter.outputs.snapshot_any_modified }}"
-        echo "snapshot_vllm: ${{ steps.filter.outputs.snapshot_vllm_any_modified }}"
-        echo "snapshot_sglang: ${{ steps.filter.outputs.snapshot_sglang_any_modified }}"
-        echo "snapshot_trtllm: ${{ steps.filter.outputs.snapshot_trtllm_any_modified }}"
-        echo "power_agent: ${{ steps.filter.outputs.power_agent_any_modified }}"
-        echo "deploy: ${{ steps.filter.outputs.deploy_any_modified }}"
-        echo "dgdr: ${{ steps.filter.outputs.dgdr_any_modified }}"
-        echo "planner: ${{ steps.filter.outputs.planner_any_modified }}"
-        echo "sidecar: ${{ steps.filter.outputs.sidecar_any_modified }}"
-        echo "vllm: ${{ steps.filter.outputs.vllm_any_modified }}"
-        echo "sglang: ${{ steps.filter.outputs.sglang_any_modified }}"
-        echo "trtllm: ${{ steps.filter.outputs.trtllm_any_modified }}"
-        echo "triton: ${{ steps.filter.outputs.triton_any_modified }}"
-        echo "sample: ${{ steps.filter.outputs.sample_any_modified }}"
-        echo "frontend: ${{ steps.filter.outputs.frontend_any_modified }}"
-        echo "benchmarks: ${{ steps.filter.outputs.benchmarks_any_modified }}"
-        echo "efa: ${{ steps.filter.outputs.efa_any_modified }}"
-        echo "rust: ${{ steps.filter.outputs.rust_any_modified }}"
-        echo ""
-        echo "=== Files Matching Each Filter ==="
-        echo "api_docs: ${{ steps.filter.outputs.api_docs_all_modified_files }}"
-        echo "docs: ${{ steps.filter.outputs.docs_all_modified_files }}"
-        echo "examples: ${{ steps.filter.outputs.examples_all_modified_files }}"
-        echo "ci: ${{ steps.filter.outputs.ci_all_modified_files }}"
-        echo "core: ${{ steps.filter.outputs.core_all_modified_files }}"
-        echo "dev_images: ${{ steps.filter.outputs.dev_images_all_modified_files }}"
-        echo "operator: ${{ steps.filter.outputs.operator_all_modified_files }}"
-        echo "snapshot: ${{ steps.filter.outputs.snapshot_all_modified_files }}"
-        echo "snapshot_vllm: ${{ steps.filter.outputs.snapshot_vllm_all_modified_files }}"
-        echo "snapshot_sglang: ${{ steps.filter.outputs.snapshot_sglang_all_modified_files }}"
-        echo "snapshot_trtllm: ${{ steps.filter.outputs.snapshot_trtllm_all_modified_files }}"
-        echo "power_agent: ${{ steps.filter.outputs.power_agent_all_modified_files }}"
-        echo "deploy: ${{ steps.filter.outputs.deploy_all_modified_files }}"
-        echo "dgdr: ${{ steps.filter.outputs.dgdr_all_modified_files }}"
-        echo "planner: ${{ steps.filter.outputs.planner_all_modified_files }}"
-        echo "sidecar: ${{ steps.filter.outputs.sidecar_all_modified_files }}"
-        echo "vllm: ${{ steps.filter.outputs.vllm_all_modified_files }}"
-        echo "sglang: ${{ steps.filter.outputs.sglang_all_modified_files }}"
-        echo "trtllm: ${{ steps.filter.outputs.trtllm_all_modified_files }}"
-        echo "triton: ${{ steps.filter.outputs.triton_all_modified_files }}"
-        echo "sample: ${{ steps.filter.outputs.sample_all_modified_files }}"
-        echo "frontend: ${{ steps.filter.outputs.frontend_all_modified_files }}"
-        echo "benchmarks: ${{ steps.filter.outputs.benchmarks_all_modified_files }}"
-        echo "efa: ${{ steps.filter.outputs.efa_all_modified_files }}"
-        echo "rust: ${{ steps.filter.outputs.rust_all_modified_files }}"
-
-    - name: Check for uncovered files
-      shell: bash
-      run: |
-        # Combine all filter-specific files into one list
-        COVERED_FILES=$(echo "${{ steps.filter.outputs.api_docs_all_modified_files }} ${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.dev_images_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.snapshot_all_modified_files }} ${{ steps.filter.outputs.snapshot_vllm_all_modified_files }} ${{ steps.filter.outputs.snapshot_sglang_all_modified_files }} ${{ steps.filter.outputs.snapshot_trtllm_all_modified_files }} ${{ steps.filter.outputs.power_agent_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.dgdr_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.sidecar_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }} ${{ steps.filter.outputs.triton_all_modified_files }} ${{ steps.filter.outputs.sample_all_modified_files }} ${{ steps.filter.outputs.frontend_all_modified_files }} ${{ steps.filter.outputs.benchmarks_all_modified_files }} ${{ steps.filter.outputs.efa_all_modified_files }} ${{ steps.filter.outputs.rust_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
-
-        # Get all modified files
-        ALL_FILES=$(echo "${{ steps.filter.outputs.all_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
-
-        # Find files in ALL but not in COVERED
-        UNCOVERED=$(comm -23 <(echo "$ALL_FILES") <(echo "$COVERED_FILES"))
-
-        if [ -n "$UNCOVERED" ]; then
-          echo "::error::The following files are not covered by any CI filter:"
-          echo "$UNCOVERED"
-          echo ""
-          echo "Please add these paths to .github/filters.yaml"
-          echo "See .github/FILTERS.md for documentation"
-          exit 1
-        fi
-        echo "All modified files are covered by CI filters."
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CHANGED_FILES_DIR: ${{ steps.output-dir.outputs.path }}
+        BASE_SHA: ${{ steps.merge-base.outputs.base_sha }}
+      run: python3 "$ACTION_PATH/report.py"

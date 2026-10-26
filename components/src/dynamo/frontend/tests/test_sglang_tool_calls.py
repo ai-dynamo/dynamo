@@ -485,6 +485,10 @@ class TestMalformedToolCalls:  # FRONTEND.4 — malformed model output → grace
                 self.parameters = parameters
 
         class DummyParser:
+            detector = FunctionCallParser(
+                tools=TOOLS, tool_call_parser="hermes"
+            ).detector
+
             def parse_stream_chunk(self, text):
                 return "", [DummyToolCall(0, "get_weather", '{"city": "Paris"')]
 

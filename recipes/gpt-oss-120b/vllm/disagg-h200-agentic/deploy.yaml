@@ -64,7 +64,7 @@ spec:
                 - --no-disable-hybrid-kv-cache-manager
                 - --enable-flashinfer-autotune
                 - '--speculative-config={"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'   # EAGLE3 on BOTH P+D so draft-layer KV layout matches for NIXL
-                - '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+                - '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda"}'
                 - --disaggregation-mode=prefill
                 - --dyn-reasoning-parser
                 - gpt_oss
@@ -127,7 +127,7 @@ spec:
                 - --no-disable-hybrid-kv-cache-manager
                 - --enable-flashinfer-autotune
                 - '--speculative-config={"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'   # EAGLE3 on BOTH P+D so draft-layer KV layout matches for NIXL
-                - '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+                - '--kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
                 - --disaggregation-mode=decode
                 - --dyn-reasoning-parser
                 - gpt_oss

@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -70,6 +69,17 @@ func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
 		return fmt.Sprintf("%d", d.Rank), false
 	}
 	return "$((GROVE_PCLQ_POD_INDEX + 1))", true
+}
+
+// GetPodRank returns the absolute engine rank for the current pod. Standard
+// layouts follow Grove's PCSG-wide pod order. Inter-pod GMS layouts contain
+// additional weight-server cliques, so they use the engine rank carried by
+// the role-specific deployer instead of Grove's flat pod index.
+func (d *GroveMultinodeDeployer) GetPodRank() string {
+	if d.IsInterPodGMS {
+		return fmt.Sprintf("%d", d.Rank)
+	}
+	return fmt.Sprintf("$(%s)", groveconstants.EnvVarPodCliqueScalingGroupPodIndex)
 }
 
 func (d *GroveMultinodeDeployer) NeedsDNSWait() bool {
@@ -469,20 +479,10 @@ func observePodCliqueReadiness(ctx context.Context, reader client.Reader, resour
 		ComponentNames:  []string{resourceName},
 		Replicas:        podClique.Status.Replicas,
 		UpdatedReplicas: podClique.Status.UpdatedReplicas,
-		ReadyReplicas:   ptr.To(podClique.Status.ReadyReplicas),
-	}
-	componentReadiness.revision = groveComponentRevisionState{
-		generationObserved:     podClique.Status.ObservedGeneration != nil && *podClique.Status.ObservedGeneration >= podClique.Generation,
-		currentPCSRevisionHash: podClique.Status.CurrentPodCliqueSetGenerationHash,
-		replicas:               podClique.Status.Replicas,
-		updatedReplicas:        podClique.Status.UpdatedReplicas,
-		desiredReplicas:        podClique.Spec.Replicas,
-		updateInProgress:       podClique.Status.UpdateProgress != nil,
-		updateEnded: podClique.Status.UpdateProgress != nil &&
-			podClique.Status.UpdateProgress.UpdateEndedAt != nil,
+		ReadyReplicas:   new(podClique.Status.ReadyReplicas),
 	}
 	if componentReadiness.revision.generationObserved {
-		componentReadiness.status.ScheduledReplicas = ptr.To(podClique.Status.ScheduledReplicas)
+		componentReadiness.status.ScheduledReplicas = new(podClique.Status.ScheduledReplicas)
 	}
 
 	// The cache must observe the requested scale before readiness or namespace cutover.
@@ -517,7 +517,16 @@ func podCliqueReadiness(podClique *grovev1alpha1.PodClique, logger logr.Logger) 
 		"scheduleGatedReplicas", scheduleGatedReplicas,
 	)
 
-	componentReadiness := groveComponentReadiness{}
+	componentReadiness := groveComponentReadiness{revision: groveComponentRevisionState{
+		generationObserved:     podClique.Status.ObservedGeneration != nil && *podClique.Status.ObservedGeneration >= podClique.Generation,
+		currentPCSRevisionHash: podClique.Status.CurrentPodCliqueSetGenerationHash,
+		replicas:               podClique.Status.Replicas,
+		updatedReplicas:        podClique.Status.UpdatedReplicas,
+		desiredReplicas:        podClique.Spec.Replicas,
+		updateInProgress:       podClique.Status.UpdateProgress != nil,
+		updateEnded: podClique.Status.UpdateProgress != nil &&
+			podClique.Status.UpdateProgress.UpdateEndedAt != nil,
+	}}
 	if observedGeneration == nil {
 		logger.V(1).Info("PodClique observedGeneration is nil", "resourceName", resourceName)
 		return componentReadiness.withResult(false, groveObservedGenerationNilReason, v1beta1.DGDReadyReasonSomeResourcesNotReady)

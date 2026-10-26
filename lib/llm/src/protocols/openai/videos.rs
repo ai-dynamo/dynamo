@@ -3,15 +3,14 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 mod aggregator;
 mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use nvext::NvExt;
 
 /// Request for video generation (/v1/videos endpoint)
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
     pub prompt: String,
@@ -35,9 +34,10 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// How the generated data should be returned: "url" or "b64_json" (default: "url")
+    /// Delivery mode of the generated video. If absent, the worker applies its
+    /// own default.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<String>,
+    pub response_format: Option<VideoResponseFormat>,
 
     /// Output container format: "mp4", "webm", "gif", etc.
     /// This field is used as model hint and the model may not
@@ -68,6 +68,18 @@ pub struct NvCreateVideoRequest {
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Delivery mode of the generated video.
+///
+/// The set has two values. A request with an unknown value fails to parse.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoResponseFormat {
+    /// The response carries a URL to the video file.
+    Url,
+    /// The response carries the video bytes as base64 text.
+    B64Json,
 }
 
 impl NvCreateVideoRequest {
@@ -102,7 +114,7 @@ pub struct VideoData {
 }
 
 /// Response structure for video generation
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NvVideosResponse {
     /// Unique identifier for the response
     pub id: String,
@@ -163,15 +175,6 @@ impl NvVideosResponse {
             error: None,
             inference_time_s: None,
         }
-    }
-}
-
-/// Implements `NvExtProvider` for `NvCreateVideoRequest`,
-/// providing access to NVIDIA-specific extensions.
-impl NvExtProvider for NvCreateVideoRequest {
-    /// Returns a reference to the optional `NvExt` extension, if available.
-    fn nvext(&self) -> Option<&NvExt> {
-        self.nvext.as_ref()
     }
 }
 
@@ -249,6 +252,27 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("stream"));
+    }
+
+    #[test]
+    fn video_request_response_format_round_trips() {
+        let json = r#"{"prompt":"cat","model":"wan","response_format":"b64_json"}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.response_format, Some(VideoResponseFormat::B64Json));
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"response_format\":\"b64_json\""));
+    }
+
+    #[test]
+    fn video_request_unknown_response_format_is_rejected() {
+        let json = r#"{"prompt":"cat","model":"wan","response_format":"ftp"}"#;
+        let err = serde_json::from_str::<NvCreateVideoRequest>(json).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("url") && message.contains("b64_json"),
+            "expected the parse error to list the valid values; got: {message}"
+        );
     }
 
     #[test]

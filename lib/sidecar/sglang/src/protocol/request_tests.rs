@@ -4,8 +4,8 @@
 use super::*;
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
-    BackendError, BootstrapInfo, ErrorType, GuidedDecodingOptions, OutputOptions, PrefillResult,
-    SamplingOptions, StopConditions,
+    BackendError, BootstrapInfo, ErrorType, GuidedDecodingOptions, KvHint, KvHintAction,
+    OutputOptions, PrefillResult, SamplingOptions, StopConditions,
 };
 use serde_json::json;
 
@@ -191,6 +191,7 @@ fn room_above_signed_int64_is_rejected() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn sampling_and_stopping_fields_preserve_native_values() {
     let mut request = request();
     request.sampling_options = SamplingOptions {
@@ -237,13 +238,37 @@ fn sampling_and_stopping_fields_preserve_native_values() {
             stop_token_ids: vec![19, 20, 21],
             ignore_eos: Some(true),
             n: Some(1),
+            seed: None,
             json_schema: None,
             regex: None,
+            guided_decoding: None,
         })
     );
     assert_eq!(mapped.stream, Some(true));
     assert!(mapped.disaggregated_params.is_none());
     assert!(mapped.session_id.is_none());
+}
+
+#[test]
+fn visible_stop_tokens_stop_in_engine_and_return_only_ids() {
+    let mut request = request();
+    request.stop_conditions.stop_token_ids = Some(vec![19]);
+    request.stop_conditions.stop_token_ids_hidden = Some(vec![200002, 199999]);
+    request.stop_conditions.stop_token_ids_visible = Some(vec![200012, 19]);
+    let mapped = build_generate_request(
+        &request,
+        "visible",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        mapped.sampling_params.unwrap().stop_token_ids,
+        vec![19, 200002, 199999, 200012]
+    );
+    // SGLang text trims the stop token.
+    assert_eq!(mapped.return_text, None);
 }
 
 #[test]
@@ -331,6 +356,7 @@ fn values_outside_native_signed_fields_are_rejected() {
         ("token", "token ids must fit in i32"),
         ("stop", "stop token ids must fit in i32"),
         ("hidden_stop", "stop token ids must fit in i32"),
+        ("visible_stop", "stop token ids must fit in i32"),
         ("max_tokens", "max_tokens does not fit in i32"),
         ("min_tokens", "min_tokens does not fit in i32"),
         ("logprobs", "requested logprobs does not fit in i32"),
@@ -343,6 +369,7 @@ fn values_outside_native_signed_fields_are_rejected() {
             "token" => request.token_ids = vec![overflow].into(),
             "stop" => request.stop_conditions.stop_token_ids = Some(vec![overflow]),
             "hidden_stop" => request.stop_conditions.stop_token_ids_hidden = Some(vec![overflow]),
+            "visible_stop" => request.stop_conditions.stop_token_ids_visible = Some(vec![overflow]),
             "max_tokens" => request.stop_conditions.max_tokens = Some(overflow),
             "min_tokens" => request.stop_conditions.min_tokens = Some(overflow),
             "logprobs" => request.output_options.logprobs = Some(overflow),
@@ -403,13 +430,6 @@ fn unsupported_sampling_controls_are_rejected() {
         ),
         (
             SamplingOptions {
-                seed: Some(0),
-                ..Default::default()
-            },
-            "seed",
-        ),
-        (
-            SamplingOptions {
                 include_stop_str_in_output: Some(true),
                 ..Default::default()
             },
@@ -432,9 +452,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
         "prompt_embeds",
         "multimodal",
         "mm_processor_kwargs",
-        "max_thinking_tokens",
-        "visible",
-        "priority",
     ] {
         let mut request = request();
         let message = match field {
@@ -454,21 +471,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
                 request.mm_processor_kwargs = Some(json!({}));
                 "multimodal"
             }
-            "max_thinking_tokens" => {
-                request.stop_conditions.max_thinking_tokens = Some(0);
-                "max_thinking_tokens"
-            }
-            "visible" => {
-                request.stop_conditions.stop_token_ids_visible = Some(vec![42]);
-                "visible stop-token"
-            }
-            "priority" => {
-                request.routing = Some(RoutingHints {
-                    priority: Some(-1),
-                    ..Default::default()
-                });
-                "engine priority"
-            }
             _ => unreachable!(),
         };
         let error =
@@ -479,7 +481,8 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
 }
 
 #[test]
-fn json_and_regex_guides_preserve_native_payloads() {
+#[allow(deprecated)]
+fn json_and_regex_guides_use_typed_constraints() {
     for schema in [json!({"type": "string"}), json!(r#"{"type":"string"}"#)] {
         let mut request = request();
         request.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
@@ -491,8 +494,14 @@ fn json_and_regex_guides_preserve_native_payloads() {
                 .unwrap()
                 .sampling_params
                 .unwrap();
-        assert_eq!(mapped.json_schema.as_deref(), Some(r#"{"type":"string"}"#));
+        assert_eq!(mapped.json_schema, None);
         assert!(mapped.regex.is_none());
+        assert_eq!(
+            mapped.guided_decoding.unwrap().constraint,
+            Some(pb::guided_decoding::Constraint::JsonSchema(
+                r#"{"type":"string"}"#.to_string()
+            ))
+        );
     }
     let mut request = request();
     request.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
@@ -509,8 +518,12 @@ fn json_and_regex_guides_preserve_native_payloads() {
     .unwrap()
     .sampling_params
     .unwrap();
-    assert_eq!(mapped.regex.as_deref(), Some("[a-z]+"));
+    assert_eq!(mapped.regex, None);
     assert!(mapped.json_schema.is_none());
+    assert_eq!(
+        mapped.guided_decoding.unwrap().constraint,
+        Some(pb::guided_decoding::Constraint::Regex("[a-z]+".to_string()))
+    );
 
     request
         .sampling_options
@@ -518,41 +531,77 @@ fn json_and_regex_guides_preserve_native_payloads() {
         .as_mut()
         .unwrap()
         .json = Some(json!({"type": "string"}));
-    let mapped = build_generate_request(
-        &request,
-        "both-guides",
-        DisaggregationMode::Aggregated,
-        None,
-        None,
-    )
-    .unwrap()
-    .sampling_params
-    .unwrap();
-    assert_eq!(mapped.regex.as_deref(), Some("[a-z]+"));
-    assert_eq!(mapped.json_schema.as_deref(), Some(r#"{"type":"string"}"#));
+    assert_invalid(
+        build_generate_request(
+            &request,
+            "both-guides",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap_err(),
+        "only one guided-decoding constraint",
+    );
 }
 
 #[test]
-fn unsupported_guides_and_modifiers_are_rejected() {
+fn additional_guides_use_typed_constraints() {
+    for (guided, expected) in [
+        (
+            GuidedDecodingOptions {
+                choice: Some(vec!["a".to_string(), "b".to_string()]),
+                ..Default::default()
+            },
+            pb::guided_decoding::Constraint::Choice(pb::ChoiceConstraint {
+                values: vec!["a".to_string(), "b".to_string()],
+            }),
+        ),
+        (
+            GuidedDecodingOptions {
+                grammar: Some("root ::= 'a'".to_string()),
+                ..Default::default()
+            },
+            pb::guided_decoding::Constraint::Ebnf("root ::= 'a'".to_string()),
+        ),
+        (
+            GuidedDecodingOptions {
+                structural_tag: Some(json!({"type": "object"})),
+                ..Default::default()
+            },
+            pb::guided_decoding::Constraint::StructuralTag(r#"{"type":"object"}"#.to_string()),
+        ),
+    ] {
+        let mut request = request();
+        request.sampling_options.guided_decoding = Some(guided);
+        let mapped = build_generate_request(
+            &request,
+            "guide",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            mapped
+                .sampling_params
+                .unwrap()
+                .guided_decoding
+                .unwrap()
+                .constraint,
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn unsupported_guide_modifiers_are_rejected() {
     for guided in [
-        GuidedDecodingOptions {
-            choice: Some(vec!["a".to_string()]),
-            ..Default::default()
-        },
-        GuidedDecodingOptions {
-            grammar: Some("root ::= 'a'".to_string()),
-            ..Default::default()
-        },
         GuidedDecodingOptions {
             backend: Some("xgrammar".to_string()),
             ..Default::default()
         },
         GuidedDecodingOptions {
             whitespace_pattern: Some(" *".to_string()),
-            ..Default::default()
-        },
-        GuidedDecodingOptions {
-            structural_tag: Some(json!({})),
             ..Default::default()
         },
     ] {
@@ -567,9 +616,60 @@ fn unsupported_guides_and_modifiers_are_rejected() {
                 None,
             )
             .unwrap_err(),
-            "only JSON-schema and regex",
+            "backend and whitespace modifiers",
         );
     }
+}
+
+#[test]
+fn sglang_0521_request_controls_are_forwarded() {
+    let mut request = request();
+    request.sampling_options.seed = Some(42);
+    request.stop_conditions.max_thinking_tokens = Some(17);
+    request.require_reasoning = true;
+    request.routing = Some(RoutingHints {
+        priority: Some(-3),
+        ..Default::default()
+    });
+    request.kv_hint = Some(KvHint::new(
+        "message-1",
+        vec![KvHintAction::new(
+            "action-1",
+            "kv.fetch",
+            "1.0",
+            std::collections::BTreeMap::from([("source".to_string(), json!("worker-7"))]),
+        )],
+    ));
+
+    let mapped = build_generate_request(
+        &request,
+        "controls",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(mapped.sampling_params.unwrap().seed, Some(42));
+    assert_eq!(mapped.priority, Some(-3));
+    assert_eq!(mapped.require_reasoning, Some(true));
+    assert_eq!(mapped.max_thinking_tokens, Some(17));
+    let hints = mapped.kv_hints.unwrap();
+    assert_eq!(hints.protocol_version, "0.1");
+    assert_eq!(hints.message_id, "message-1");
+    assert_eq!(hints.actions.len(), 1);
+    let action = &hints.actions[0];
+    assert_eq!(action.action_id, "action-1");
+    assert_eq!(action.action_type, "kv.fetch");
+    assert_eq!(action.action_version, "1.0");
+    assert_eq!(
+        dynamo_sidecar_common::struct_to_json(
+            action.payload.clone().unwrap(),
+            "SGLang",
+            "kv hint action payload",
+        )
+        .unwrap(),
+        json!({"source": "worker-7"})
+    );
 }
 
 #[test]

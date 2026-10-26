@@ -37,10 +37,12 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_full
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
-ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 ARG NIXL_REF
+
+# Remove the upstream runtime's Git LFS package without pruning shared dependencies.
+RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 
 # Create the LD_PRELOAD target before the ENV below names it. ENV applies to
 # every RUN after it, so a preload path that does not exist yet costs one
@@ -253,6 +255,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        ca-certificates \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -265,6 +268,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         keyboxd \
         libssl3t64 \
         openssl
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
@@ -292,9 +299,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 {% endif %}
 
 # Place wheels in /opt/dynamo/wheelhouse unconditionally — dev/local-dev images
-# install from source and skip the pip install RUN below, but they still need
-# the wheels on disk because tests/dependencies/test_kvbm_imports.py greps
-# this path and runs in dev-derived test images.
+# install from source and skip the pip install RUN below.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
@@ -307,8 +312,8 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
     \
-    # nixl/nixl-cu13 for KVBM's `import nixl` ABI; version from NIXL_REF, matching
-    # the nixl-sys wheel_builder links. LD_PRELOAD swaps the runtime .so (nixl#1668).
+    # nixl/nixl-cu13 for `import nixl` (dynamo.nixl_connect); version from NIXL_REF.
+    # LD_PRELOAD swaps the runtime .so (nixl#1668).
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     _nixl_ver="${NIXL_REF#v}" && \
     uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
@@ -322,14 +327,6 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     # below points imageio at the in-tree LGPL CLI.
     uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
     \
-    if [ "${ENABLE_KVBM}" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM=true but no kvbm*.whl found in /opt/dynamo/wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install --no-deps "$KVBM_WHEEL"; \
-    fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --no-deps "$GMS_WHEEL"; fi; \
@@ -599,7 +596,7 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # No `import PyNvVideoCodec` smoke test here, deliberately. Unlike nvidia.dali it
 # dlopens libnvcuvid and needs NVIDIA_DRIVER_CAPABILITIES to include "video",
 # which the builder does not have, so an import check would fail every build.
-RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     set -eu; \
     before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
     echo "PyNvVideoCodec in base image: $before"; \
@@ -629,32 +626,14 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     fi; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
         'PyNvVideoCodec==2.2.3'; \
+    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.3; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
     echo "PyNvVideoCodec version: $v"; \
-    [ "$v" = "2.2.3" ] \
-        || { echo "ERROR: wanted PyNvVideoCodec 2.2.3, got $v -- this stage and" >&2; \
-             echo "       requirements.trtllm.txt must pin the same version." >&2; exit 1; }; \
-    dists=$(find /usr/local/lib/python3.12/dist-packages -maxdepth 1 \
-        -name 'pynvvideocodec-*.dist-info' | wc -l); \
-    [ "$dists" -eq 1 ] \
-        || { echo "ERROR: expected exactly one PyNvVideoCodec in system site, found $dists:" >&2; \
-             find /usr/local/lib/python3.12/dist-packages -maxdepth 1 \
-                 -name 'pynvvideocodec-*.dist-info' >&2; exit 1; }; \
-    tarballs=$(find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' 2>/dev/null | wc -l); \
-    [ "$tarballs" -eq 1 ] \
-        || { echo "ERROR: expected exactly one bundled FFmpeg source tarball after the" >&2; \
-             echo "       removal and reinstall, found $tarballs:" >&2; \
-             find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' >&2; exit 1; }; \
-    if find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' | grep -q .; then \
-        echo "ERROR: PyNvVideoCodec $v still bundles a libavcodec:" >&2; \
-        find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
-        exit 1; \
-    fi; \
     examined=0; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
             -name 'libavcodec*.so*' -o -name 'libavformat*.so*'); do \
         examined=$((examined + 1)); \
-        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+        /usr/bin/python3 /tmp/compliance/compliance/enumerate_bundled_decoders.py "$lib"; \
     done; \
     [ "$examined" -gt 0 ] \
         || { echo "ERROR: found no FFmpeg libraries under PyNvVideoCodec to examine;" >&2; \
@@ -709,8 +688,41 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # one, in range, so a surviving old copy beside the new one fails the build.
 # Version-compared rather than glob-matched: a glob range silently stops matching
 # at the end of the series it was written for.
-RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
-    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade pip==26.2.2 "aiohttp>=3.14.4,<4.0" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 4) <= tv(vs[0]) < (4, 0, 0) else 1)'
+
+# Refresh the base image's certifi CA bundle in system site, for the same
+# inventory reason as aiohttp above. certifi has no dependencies, so this moves
+# exactly one distribution. Mirrored by the pre_runtime whiteout below: the
+# upgrade renames the version-stamped dist-info directory.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade certifi==2026.10.23 && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
+
+# Raise the base image's Pillow in system site, for the same inventory reason as
+# aiohttp above; requirements.trtllm.txt only reaches the venv. Pillow has no
+# required dependencies, so this moves exactly one distribution. Mirrored by the
+# pre_runtime whiteout below: the upgrade renames the dist-info directory and the
+# hash-named libraries vendored in pillow.libs.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "pillow>=13.0.0,<14" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
+
+# Pin the upstream developer stack in system site, where the image inventory
+# reads it. The rc29 baseline on both architectures satisfies all transitive
+# requirements of these versions. Fail if the solve changes another distribution:
+# its package paths must be added to the rebase whiteouts first.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/jupyter-upgrade.json \
+        "jupyter-server==2.21.1" "jupyterlab==4.6.4" \
+        "notebook==7.6.3" "urllib3==2.8.0" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/jupyter-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"jupyter-server", "jupyterlab", "notebook", "urllib3"}, "Add whiteouts for upgraded transitive distributions"' && \
+    rm /tmp/jupyter-upgrade.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
+
+{% if target not in ("dev", "local-dev") %}
+# The runtime venv takes precedence over system site. Check its resolved imports
+# so an older venv distribution cannot shadow the refreshed system packages.
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
+{% endif %}
 
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
@@ -738,6 +750,12 @@ CMD ["/bin/bash"]
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+# The filesystem overlay does not carry runtime_full's image environment.
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
+# Remove the upstream runtime's Git LFS package without pruning shared dependencies.
+RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
+
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
 # without this, upstream's /workspace, /home/ubuntu, standalone
 # /usr/local/bin/etcd* tools, and preinstalled opencv (cv2/ + vendored
@@ -804,7 +822,12 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+# Remove old trust-store files and Python metadata before restoring the updated overlay.
 RUN rm -rf /workspace /home/ubuntu \
+    /etc/ssl/certs \
+    /usr/share/ca-certificates \
+    /usr/local/lib/python3.12/dist-packages/pip \
+    /usr/local/lib/python3.12/dist-packages/pip-*.dist-info \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
     /usr/local/bin/etcdutl \
@@ -818,6 +841,16 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
     /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
     /usr/local/external/ffmpeg \
+    /usr/local/share/jupyter/lab \
+    /usr/local/share/jupyter/labextensions/@jupyter-notebook/lab-extension \
+    /usr/local/lib/python3.12/dist-packages/jupyter_server \
+    /usr/local/lib/python3.12/dist-packages/jupyter_server-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/jupyterlab \
+    /usr/local/lib/python3.12/dist-packages/jupyterlab-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/notebook \
+    /usr/local/lib/python3.12/dist-packages/notebook-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/urllib3 \
+    /usr/local/lib/python3.12/dist-packages/urllib3-*.dist-info \
     /usr/local/lib/python3.12/dist-packages/aiohttp \
     /usr/local/lib/python3.12/dist-packages/aiohttp-* \
     /usr/local/lib/python3.12/dist-packages/multidict \
@@ -834,10 +867,33 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/aiohappyeyeballs-* \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
-    /usr/local/lib/python3.12/dist-packages/attrs-* && \
+    /usr/local/lib/python3.12/dist-packages/attrs-* \
+    /usr/local/lib/python3.12/dist-packages/certifi \
+    /usr/local/lib/python3.12/dist-packages/certifi-* \
+    /usr/local/lib/python3.12/dist-packages/PIL \
+    /usr/local/lib/python3.12/dist-packages/pillow-* \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
+
+# Package trees and shared JupyterLab assets are whiteouted before the overlay.
+# Validate after the overlay so stale base metadata cannot survive the refresh.
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
+RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
+RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
+
+{% if target not in ("dev", "local-dev") %}
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
+{% endif %}
+
+# Check the merged filesystem: both base stages must purge package-owned paths.
+RUN test ! -e /usr/bin/git-lfs && \
+    test ! -e /usr/local/bin/git-lfs && \
+    ! command -v git-lfs && \
+    status=$(dpkg-query -W -f='${db:Status-Status}' git-lfs 2>/dev/null || true) && \
+    test "$status" != installed && \
+    set -- /var/lib/dpkg/info/git-lfs.* && test ! -e "$1"
 
 # Post-overlay guard for the Open MPI settings edit in runtime_full. This stage
 # starts from the base image again, where the selected Open MPI's
