@@ -4494,22 +4494,20 @@ func oneGPUDRAObjects() (*resourcev1.ResourceClaimTemplate, *resourcev1.DeviceCl
 func TestGenerateGrovePodCliqueSet_PreservesPVCWithExtraVolumes(t *testing.T) {
 	t.Log("Build the NVBug 6418068 reproducer: a service PVC mount alongside an extra ConfigMap volume")
 	dgd := &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "volume-regression", Namespace: "default"},
+		Name: "volume-regression", Namespace: "default",
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: string(BackendFrameworkVLLM),
-			PVCs:             []v1alpha1.PVC{{Name: ptr.To("shared-model-cache"), Create: ptr.To(false)}},
+			PVCs:             []v1alpha1.PVC{{Name: new("shared-model-cache"), Create: new(false)}},
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Frontend": {
 					ComponentType: commonconsts.ComponentTypeFrontend,
-					Replicas:      ptr.To(int32(1)),
+					Replicas:      new(int32(1)),
 					VolumeMounts:  []v1alpha1.VolumeMount{{Name: "shared-model-cache", MountPoint: "/opt/models"}},
 					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 						PodSpec: &corev1.PodSpec{
 							Volumes: []corev1.Volume{{
-								Name: "probe-cfg",
-								VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: "probe-cfg"},
-								}},
+								Name:      "probe-cfg",
+								ConfigMap: &corev1.ConfigMapVolumeSource{Name: "probe-cfg"},
 							}},
 							InitContainers: []corev1.Container{{
 								Name: "fix-perm", Image: "busybox:1.36", Command: []string{"sh", "-c", "true"},
@@ -4542,7 +4540,7 @@ func TestGenerateGrovePodCliqueSet_PreservesPVCWithExtraVolumes(t *testing.T) {
 	}
 	require.Len(t, volumes, 3)
 	assert.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "shared-model-cache"}, volumes["shared-model-cache"].PersistentVolumeClaim)
-	assert.Equal(t, &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "probe-cfg"}}, volumes["probe-cfg"].ConfigMap)
+	assert.Equal(t, &corev1.ConfigMapVolumeSource{Name: "probe-cfg"}, volumes["probe-cfg"].ConfigMap)
 	require.NotNil(t, volumes["shared-memory"].EmptyDir)
 	assert.Equal(t, corev1.StorageMediumMemory, volumes["shared-memory"].EmptyDir.Medium)
 
