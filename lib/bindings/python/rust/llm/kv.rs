@@ -572,8 +572,8 @@ where
     rt.block_on(selection::run_server(config.port, service))
 }
 
-/// Depythonize a prompt-carrying request dict. `token_ids` is extracted with pyo3's typed
-/// list conversion: pythonize's per-element serde path costs several times more per token,
+/// Depythonize a prompt-carrying request dict. `token_ids` is read by [`extract_token_ids`]
+/// rather than pythonize, whose per-element serde path costs several times more per token,
 /// all of it on the calling thread under the GIL.
 #[cfg(feature = "select-service")]
 fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
@@ -590,16 +590,7 @@ fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
     else {
         return depythonize(request).map_err(invalid);
     };
-    let token_ids = match tokens
-        .downcast::<pyo3::types::PyList>()
-        .ok()
-        .and_then(read_u32_list)
-    {
-        Some(token_ids) => token_ids,
-        None => tokens
-            .extract::<Vec<u32>>()
-            .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))?,
-    };
+    let token_ids = extract_token_ids(&tokens)?;
     let rest = dict.copy()?;
     rest.del_item("token_ids")?;
     let mut req: T = depythonize(rest.as_any()).map_err(invalid)?;
@@ -607,34 +598,42 @@ fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
     Ok(req)
 }
 
-/// Read a list of `int`s that fit in `u32` without iterator or refcount traffic,
-/// which costs more than the conversion itself at prompt sizes. `None` for
-/// anything else (another type, `bool`, a negative or oversized value) leaves the
-/// caller's generic extraction to accept it or raise its usual error.
+/// `token_ids` as `Vec<u32>`. An exact `list` of `int`s is read by index with borrowed
+/// items, skipping the per-element iterator and refcount work of pyo3's generic
+/// conversion, which costs more than converting the ints at prompt sizes. Everything
+/// else (list subclasses, whose `__iter__` the generic conversion honors; other
+/// sequences; any element the fast read declines) takes the generic conversion, so
+/// accepted inputs and errors are unchanged.
 #[cfg(feature = "select-service")]
-fn read_u32_list(list: &Bound<'_, pyo3::types::PyList>) -> Option<Vec<u32>> {
-    let len = list.len();
-    let mut values = Vec::with_capacity(len);
-    // SAFETY: the GIL is held throughout; borrowed items stay valid because the
-    // loop runs no Python code (only exact `int`s are converted, and
-    // `PyLong_AsUnsignedLong` does not call `__index__`).
+fn extract_token_ids(tokens: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    let generic = || {
+        tokens
+            .extract::<Vec<u32>>()
+            .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))
+    };
+    let Ok(list) = tokens.downcast_exact::<pyo3::types::PyList>() else {
+        return generic();
+    };
+    let mut token_ids = Vec::with_capacity(list.len());
+    // SAFETY: the GIL is held and the loop runs no Python code (only exact `int`s are
+    // converted, and `PyLong_AsUnsignedLong` does not call `__index__`), so the exact
+    // list cannot change, every index is in range, and the borrowed items stay valid.
     unsafe {
-        let int_type = std::ptr::addr_of_mut!(pyo3::ffi::PyLong_Type);
-        for index in 0..len {
+        for index in 0..list.len() {
             let item = pyo3::ffi::PyList_GetItem(list.as_ptr(), index as pyo3::ffi::Py_ssize_t);
-            if item.is_null() || pyo3::ffi::Py_TYPE(item) != int_type {
-                pyo3::ffi::PyErr_Clear();
-                return None;
+            if pyo3::ffi::PyLong_CheckExact(item) == 0 {
+                return generic();
             }
-            let value = pyo3::ffi::PyLong_AsUnsignedLong(item);
-            if value == std::os::raw::c_ulong::MAX && !pyo3::ffi::PyErr_Occurred().is_null() {
+            // A negative int sets OverflowError and returns `c_ulong::MAX`; both it and
+            // values past `u32::MAX` fail `try_from`, and the generic path raises.
+            let Ok(id) = u32::try_from(pyo3::ffi::PyLong_AsUnsignedLong(item)) else {
                 pyo3::ffi::PyErr_Clear();
-                return None;
-            }
-            values.push(u32::try_from(value).ok()?);
+                return generic();
+            };
+            token_ids.push(id);
         }
     }
-    Some(values)
+    Ok(token_ids)
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
