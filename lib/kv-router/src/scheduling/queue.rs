@@ -87,6 +87,35 @@ struct SelectedWorkerForRequest {
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
 }
 
+fn exclusive_affinity_eligibility<'a, C: WorkerConfigLike>(
+    request: &SchedulingRequest,
+    workers: &HashMap<WorkerId, C>,
+    mut eligibility: RoutingEligibility<'a>,
+    exclusive: bool,
+) -> RoutingEligibility<'a> {
+    if exclusive
+        && let Some(target) = request.affinity_target
+        && eligibility.affinity_target_is_eligible(workers, target)
+    {
+        eligibility = eligibility.with_affinity_target(target);
+    }
+    eligibility
+}
+
+// Only exclusive-affinity requests need this additional pre-selection snapshot.
+// Ineligible targets must fall back instead of constraining queue admission.
+fn affinity_overloaded_workers(
+    request: &SchedulingRequest,
+    exclusive: bool,
+    provider: Option<&OverloadedWorkerProvider>,
+) -> Option<HashSet<WorkerId>> {
+    if exclusive && request.affinity_target.is_some() {
+        provider.and_then(|provider| provider())
+    } else {
+        None
+    }
+}
+
 fn non_max_overlap_selection<C: WorkerConfigLike>(
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
@@ -564,6 +593,8 @@ pub struct SchedulerQueue<
     profile: PolicyProfile,
     start_time: Instant,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
+    overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    uses_exclusive_affinity_target: bool,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
@@ -691,6 +722,7 @@ impl<
                 Ok(())
             })
         };
+        let uses_exclusive_affinity_target = selector.uses_exclusive_affinity_target();
         let actor = SchedulerQueueActor {
             pending,
             cleanup: Arc::clone(&cleanup),
@@ -708,7 +740,7 @@ impl<
             prefill_load_estimator,
             overlap_scores_refresh,
             overlap_refresh_after,
-            overloaded_worker_provider,
+            overloaded_worker_provider: overloaded_worker_provider.clone(),
             available_worker_provider: available_worker_provider.clone(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
@@ -727,6 +759,8 @@ impl<
             profile,
             start_time,
             available_worker_provider,
+            overloaded_worker_provider,
+            uses_exclusive_affinity_target,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
             selection_trace,
@@ -875,14 +909,7 @@ impl<
         request: &SchedulingRequest,
         ingress_at: Instant,
     ) -> ClassifyRequest {
-        let available = self
-            .available_worker_provider
-            .as_ref()
-            .and_then(|provider| provider(request));
-        let workers = self.workers_with_configs.borrow();
-        let cached_tokens = SchedulingContext::new(request, &workers)
-            .with_available_workers(available.as_deref())
-            .best_cached_tokens();
+        let cached_tokens = self.best_queue_cached_tokens(request);
         let mut classification =
             ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
                 .with_pinned_worker(request.pinned_worker)
@@ -924,22 +951,37 @@ impl<
         let _ = ack_rx.await;
     }
 
+    fn best_queue_cached_tokens(&self, request: &SchedulingRequest) -> usize {
+        let available = self
+            .available_worker_provider
+            .as_ref()
+            .and_then(|provider| provider(request));
+        let overloaded = affinity_overloaded_workers(
+            request,
+            self.uses_exclusive_affinity_target,
+            self.overloaded_worker_provider.as_ref(),
+        );
+        let workers = self.workers_with_configs.borrow();
+        let eligibility = exclusive_affinity_eligibility(
+            request,
+            &workers,
+            request
+                .eligibility_with_overloaded(overloaded.as_ref())
+                .with_available_workers(available.as_deref()),
+            self.uses_exclusive_affinity_target,
+        );
+        SchedulingContext::new(request, &workers)
+            .with_eligibility(eligibility)
+            .best_cached_tokens()
+    }
+
     fn default_queue_metadata(
         &self,
         request: &SchedulingRequest,
         ingress_at: Instant,
     ) -> QueueMetadata {
-        let available = self
-            .available_worker_provider
-            .as_ref()
-            .and_then(|provider| provider(request));
-        let workers = self.workers_with_configs.borrow();
-        let snapshot = QueueSnapshot::new(
-            request.isl_tokens,
-            SchedulingContext::new(request, &workers)
-                .with_available_workers(available.as_deref())
-                .best_cached_tokens(),
-        );
+        let snapshot =
+            QueueSnapshot::new(request.isl_tokens, self.best_queue_cached_tokens(request));
         let class_index = self
             .profile
             .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
@@ -1311,13 +1353,24 @@ impl<
                 && (self.pending.has_backlog(class_index) || {
                     let active_tokens = self.slots.active_tokens(decay_now);
                     let configs = self.workers_with_configs.borrow();
+                    let exclusive = self.selector.uses_exclusive_affinity_target();
+                    let overloaded = affinity_overloaded_workers(
+                        &request,
+                        exclusive,
+                        self.overloaded_worker_provider.as_ref(),
+                    );
                     Self::all_workers_prefill_busy_with(
                         &active_tokens,
                         &configs,
                         class,
-                        request
-                            .eligibility()
-                            .with_available_workers(available.as_deref()),
+                        exclusive_affinity_eligibility(
+                            &request,
+                            &configs,
+                            request
+                                .eligibility_with_overloaded(overloaded.as_ref())
+                                .with_available_workers(available.as_deref()),
+                            exclusive,
+                        ),
                     )
                 });
             if !should_queue {
@@ -1490,14 +1543,25 @@ impl<
                 .as_ref()
                 .and_then(|provider| provider(&queued.request));
             let configs = self.workers_with_configs.borrow();
+            let exclusive = self.selector.uses_exclusive_affinity_target();
+            let overloaded = affinity_overloaded_workers(
+                &queued.request,
+                exclusive,
+                self.overloaded_worker_provider.as_ref(),
+            );
             !Self::all_workers_prefill_busy_with(
                 active_tokens,
                 &configs,
                 class,
-                queued
-                    .request
-                    .eligibility()
-                    .with_available_workers(available.as_deref()),
+                exclusive_affinity_eligibility(
+                    &queued.request,
+                    &configs,
+                    queued
+                        .request
+                        .eligibility_with_overloaded(overloaded.as_ref())
+                        .with_available_workers(available.as_deref()),
+                    exclusive,
+                ),
             )
         })
     }
@@ -1579,6 +1643,8 @@ impl<
             let popped = {
                 let slots = &self.slots;
                 let provider = self.available_worker_provider.as_ref();
+                let overloaded_provider = self.overloaded_worker_provider.as_ref();
+                let exclusive = self.selector.uses_exclusive_affinity_target();
                 let workers = &self.workers_with_configs;
                 self.pending.pop_next(|_, class, queued| {
                     if !class.queueing_enabled() {
@@ -1588,6 +1654,11 @@ impl<
                         active_tokens.get_or_insert_with(|| slots.active_tokens(decay_now));
                     let available = provider.and_then(|provider| provider(&queued.request));
                     let configs = workers.borrow();
+                    let overloaded = affinity_overloaded_workers(
+                        &queued.request,
+                        exclusive,
+                        overloaded_provider,
+                    );
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL policy is introduced.
@@ -1595,10 +1666,15 @@ impl<
                         active_tokens,
                         &configs,
                         class,
-                        queued
-                            .request
-                            .eligibility()
-                            .with_available_workers(available.as_deref()),
+                        exclusive_affinity_eligibility(
+                            &queued.request,
+                            &configs,
+                            queued
+                                .request
+                                .eligibility_with_overloaded(overloaded.as_ref())
+                                .with_available_workers(available.as_deref()),
+                            exclusive,
+                        ),
                     )
                 })
             };
@@ -1718,15 +1794,14 @@ impl<
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
-            let mut eligibility = request
-                .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
-                .with_available_workers(available_worker_ids.as_deref());
-            if self.selector.uses_exclusive_affinity_target()
-                && let Some(target) = request.affinity_target
-                && eligibility.affinity_target_is_eligible(&workers, target)
-            {
-                eligibility = eligibility.with_affinity_target(target);
-            }
+            let eligibility = exclusive_affinity_eligibility(
+                request,
+                &workers,
+                request
+                    .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
+                    .with_available_workers(available_worker_ids.as_deref()),
+                self.selector.uses_exclusive_affinity_target(),
+            );
             let trace = if admitted {
                 self.selection_trace.get().copied()
             } else {
@@ -2755,6 +2830,203 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test]
+    async fn exclusive_affinity_queue_cost_uses_target_cache() {
+        let (queue, _slots) = make_queue(2, 16, 64, None);
+        let a = WorkerWithDpRank::new(0, 0);
+        let b = WorkerWithDpRank::new(1, 0);
+        let (mut request, _rx) = make_request("affinity-cost", 48);
+        request.overlap.effective_cached_tokens.insert(a, 32);
+        let now = Instant::now();
+
+        // Only an eligible exclusive target removes A's otherwise reusable cache.
+        for (target, cached) in [
+            (None, 32),
+            (Some(a.into()), 32),
+            (Some(b.into()), 0),
+            (
+                Some(crate::protocols::WorkerAffinityTarget::new(1, None)),
+                0,
+            ),
+            (Some(WorkerWithDpRank::new(1, 9).into()), 32),
+            (Some(WorkerWithDpRank::new(9, 0).into()), 32),
+        ] {
+            request.affinity_target = target;
+            let metadata = queue.default_queue_metadata(&request, now);
+            assert_eq!(metadata.snapshot.cached_tokens, cached, "{target:?}");
+            assert_eq!(metadata.snapshot.scheduling_cost_tokens, 48 - cached);
+            assert_eq!(
+                queue
+                    .build_classify_request(&request, now)
+                    .scheduling_cost_tokens(),
+                48 - cached,
+            );
+        }
+
+        request.affinity_target = Some(a.into());
+        let mut classified = queue.build_classify_request(&request, now);
+        classified.set_worker_selection_target(b);
+        let metadata = queue
+            .validate_classification(&mut request, classified, now)
+            .unwrap();
+        assert_eq!(metadata.snapshot.cached_tokens, 0);
+        assert_eq!(metadata.snapshot.scheduling_cost_tokens, 48);
+    }
+
+    #[tokio::test]
+    async fn exclusive_affinity_queue_cost_matches_target_rank() {
+        let (queue, _slots, configs) = make_queue_with_sender(2, 16, 64, None, None);
+        configs.send_modify(|workers| {
+            let b = workers.get_mut(&1).unwrap();
+            b.data_parallel_start_rank = 3;
+            b.data_parallel_size = 2;
+        });
+        let (mut request, _rx) = make_request("rank-affinity", 48);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(WorkerWithDpRank::new(0, 0), 32);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(WorkerWithDpRank::new(1, 3), 48);
+        for (rank, cached) in [(Some(4), 0), (Some(3), 48), (None, 48)] {
+            request.affinity_target = Some(crate::protocols::WorkerAffinityTarget::new(1, rank));
+            assert_eq!(
+                queue
+                    .default_queue_metadata(&request, Instant::now())
+                    .snapshot
+                    .cached_tokens,
+                cached
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exclusive_affinity_queue_waits_for_target_capacity() {
+        let a = WorkerWithDpRank::new(0, 0);
+        let b = WorkerWithDpRank::new(1, 0);
+        for dp_rank in [Some(0), None] {
+            let (queue, slots) = make_queue(2, 16, 64, Some(0.5));
+            for (id, worker) in [("busy-a", a), ("busy-b", b)] {
+                let (mut request, rx) = make_request(id, 64);
+                request.pinned_worker = Some(worker);
+                queue.enqueue(request).await;
+                assert_eq!(rx.await.unwrap().unwrap().best_worker, worker);
+            }
+            let (mut subject, mut rx) = make_request("affinity-subject", 48);
+            subject.affinity_target = Some(crate::protocols::WorkerAffinityTarget::new(1, dp_rank));
+            subject.overlap.effective_cached_tokens.insert(a, 32);
+            queue.enqueue(subject).await;
+            assert_eq!(queue.pending_count(), 1);
+
+            slots.free(&"busy-a".to_string(), decay_now()).unwrap();
+            queue.update().await;
+            let early = rx.try_recv().ok().map(Result::unwrap);
+            let admitted_while_b_busy = early.is_some();
+            let pending_while_b_busy = queue.pending_count();
+
+            slots.free(&"busy-b".to_string(), decay_now()).unwrap();
+            queue.update().await;
+            let response = match early {
+                Some(response) => response,
+                None => rx.await.unwrap().unwrap(),
+            };
+            assert_eq!(response.best_worker, b);
+            assert_eq!(response.cached_tokens, 0);
+            slots
+                .free(&"affinity-subject".to_string(), decay_now())
+                .unwrap();
+            slots.assert_completely_drained(decay_now());
+            assert!(
+                !admitted_while_b_busy,
+                "idle A cannot admit a request restricted to busy B"
+            );
+            assert_eq!(pending_while_b_busy, 1);
+            assert_eq!(queue.pending_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn exclusive_affinity_queue_cost_preserves_target_fallback() {
+        let a = WorkerWithDpRank::new(0, 0);
+        let b = WorkerWithDpRank::new(1, 0);
+        let overload: OverloadedWorkerProvider = Arc::new(|| Some(HashSet::from([1])));
+        let available: WorkerAvailabilityProvider = Arc::new(|_| Some(HashSet::from([0]).into()));
+        for (overload, available) in [(Some(overload), None), (None, Some(available))] {
+            let (queue, slots) = make_queue_with_providers(2, 16, 64, overload, available);
+            let (mut request, _rx) = make_request("excluded-affinity", 48);
+            request.affinity_target = Some(b.into());
+            request.overlap.effective_cached_tokens.insert(a, 32);
+            request.overlap.effective_cached_tokens.insert(b, 48);
+            let metadata = queue.default_queue_metadata(&request, Instant::now());
+            assert_eq!(metadata.snapshot.cached_tokens, 32);
+            let selection = queue.select_without_admission(request).await.unwrap();
+            assert_eq!(selection.response.best_worker, a);
+            slots.assert_completely_drained(decay_now());
+        }
+    }
+
+    #[tokio::test]
+    async fn exclusive_affinity_queue_zero_limit_rejects_busy_target() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 32
+    request_queue_limit_per_worker: 0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(2, 16, 64, profile);
+        let b = WorkerWithDpRank::new(1, 0);
+        let (mut active, active_rx) = make_request("busy-b", 64);
+        active.pinned_worker = Some(b);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+        let (mut subject, subject_rx) = make_request("zero-limit-affinity", 48);
+        subject.affinity_target = Some(b.into());
+        queue.enqueue(subject).await;
+        let response = subject_rx.await.unwrap();
+        slots.free(&"busy-b".to_string(), decay_now()).unwrap();
+        if response.is_ok() {
+            slots
+                .free(&"zero-limit-affinity".to_string(), decay_now())
+                .unwrap();
+        }
+        slots.assert_completely_drained(decay_now());
+        assert!(matches!(response, Err(KvSchedulerError::QueueRejected(_))));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn nonexclusive_affinity_queue_keeps_other_candidates() {
+        let (queue, slots) = make_queue_with_custom_selector(
+            2,
+            16,
+            64,
+            None,
+            MinDecodeSelector { rendezvous: None },
+        );
+        let a = WorkerWithDpRank::new(0, 0);
+        let b = WorkerWithDpRank::new(1, 0);
+        let (mut request, _rx) = make_request("advisory-target", 48);
+        request.affinity_target = Some(b.into());
+        request.overlap.effective_cached_tokens.insert(a, 32);
+        let metadata = queue.default_queue_metadata(&request, Instant::now());
+        assert_eq!(metadata.snapshot.cached_tokens, 32);
+        assert_eq!(metadata.snapshot.scheduling_cost_tokens, 16);
+        let selection = queue.select_without_admission(request).await.unwrap();
+        assert_eq!(selection.response.best_worker, a);
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test]
