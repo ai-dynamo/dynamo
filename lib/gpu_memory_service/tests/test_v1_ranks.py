@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for GMS V1 per-GPU server processes."""
+"""Tests for GMS V1 per-GPU server processes and their Landlock confinement."""
 
 from __future__ import annotations
 
+import ctypes
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -16,7 +20,8 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
-from gpu_memory_service.v1 import device, ranks
+from gpu_memory_service.cli import server
+from gpu_memory_service.v1 import device, landlock, ranks
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -57,20 +62,38 @@ def test_node_gpus_lists_openable_cards_in_bus_order(node):
     ]
 
 
-def test_each_device_process_is_pinned_to_its_gpu(node, monkeypatch):
+@pytest.mark.parametrize("confine", [True, False])
+def test_each_device_process_is_pinned_to_its_gpu(node, monkeypatch, confine):
     started = []
 
     class Popen:
-        def __init__(self, command, env):
+        def __init__(self, command, env, preexec_fn):
             self.pid = len(started)
-            started.append((command, env))
+            started.append((command, env, preexec_fn))
 
     monkeypatch.setattr(ranks.subprocess, "Popen", Popen)
 
-    ranks.start_ranks(ranks.node_gpus(*node), lambda n: [f"device{n}"])
+    ranks.start_ranks(ranks.node_gpus(*node), lambda n: [f"device{n}"], confine=confine)
 
-    assert [command for command, _ in started] == [["device0"], ["device1"]]
-    assert [env["CUDA_VISIBLE_DEVICES"] for _, env in started] == ["GPU-a", "GPU-b"]
+    assert [command for command, _, _ in started] == [["device0"], ["device1"]]
+    assert [env["CUDA_VISIBLE_DEVICES"] for _, env, _ in started] == [
+        "GPU-a",
+        "GPU-b",
+    ]
+    if confine:
+        assert [fn.args for _, _, fn in started] == [(6,), (0,)]
+    else:
+        assert [fn for _, _, fn in started] == [None, None]
+
+
+def test_supervisor_without_landlock_points_to_no_isolation(monkeypatch):
+    def unavailable():
+        raise OSError(38, "Landlock: Function not implemented")
+
+    monkeypatch.setattr(landlock, "abi_version", unavailable)
+
+    with pytest.raises(SystemExit, match="--no-isolation"):
+        server._run_v1_ranks(None, confine=True)
 
 
 @pytest.mark.parametrize(
@@ -84,3 +107,37 @@ def test_cuda_ordinal_of_a_pinned_process_is_zero(monkeypatch, visible, expected
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
 
     assert device.cuda_ordinal(3) == expected
+
+
+def _landlock_available() -> bool:
+    libc = ctypes.CDLL(None, use_errno=True)
+    return libc.syscall(444, None, ctypes.c_size_t(0), ctypes.c_uint32(1)) >= 1
+
+
+@pytest.mark.skipif(not _landlock_available(), reason="kernel without Landlock")
+def test_confined_process_opens_only_its_own_gpu_node(tmp_path):
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    for name in ("nvidia0", "nvidia1", "nvidiactl", "null"):
+        (dev / name).write_text("")
+    (tmp_path / "other").write_text("")
+    script = textwrap.dedent(
+        f"""
+        from pathlib import Path
+        from gpu_memory_service.v1.landlock import confine_to_gpu
+        dev = Path({str(dev)!r})
+        confine_to_gpu(0, dev)
+        for name in ("nvidia0", "nvidiactl", "null", "../other"):
+            (dev / name).open("r+").close()
+        try:
+            (dev / "nvidia1").open("r+")
+        except PermissionError:
+            print("blocked")
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    )
+
+    assert result.stdout.strip() == "blocked"
