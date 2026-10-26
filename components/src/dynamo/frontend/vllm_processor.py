@@ -1279,6 +1279,7 @@ class VllmProcessor:
         prompt_logprobs = PromptLogprobsAccumulator(request)
         pending_terminals: dict[int, dict[str, Any]] = {}
         locally_stopped_requests: set[str] = set()
+        worker_finished_requests: set[str] = set()
 
         def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
             if usage := response_usage(
@@ -1423,6 +1424,8 @@ class VllmProcessor:
                 )
 
                 locally_stopped_requests.update(vllm_out.reqs_to_abort)
+                if raw_finish_reason:
+                    worker_finished_requests.add(output_request_id)
 
                 choices = []
                 postprocess_error = False
@@ -1513,6 +1516,17 @@ class VllmProcessor:
                     envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
+                if (
+                    locally_stopped_requests
+                    and not pending_terminals
+                    and locally_stopped_requests.union(
+                        worker_finished_requests
+                    ).issuperset(registered_request_ids)
+                ):
+                    # Every choice is done and the worker is still generating
+                    # a locally stopped one. Dropping the stream cancels the
+                    # worker instead of reading it to EOS or max_tokens.
+                    break
             else:
                 for terminal in pending_terminals.values():
                     attach_usage(terminal, finished=True)
