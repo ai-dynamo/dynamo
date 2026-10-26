@@ -26,12 +26,37 @@ pytestmark = [
 ]
 
 
-def _backend_config(argv: list[str]) -> dict:
+# A pod's GPUs in PCI bus order, and in the order CUDA numbers them.
+_BUS_ORDER = ["GPU-a", "GPU-b", "GPU-c", "GPU-d"]
+_CUDA_ORDER = ["GPU-b", "GPU-a", "GPU-c", "GPU-d"]
+
+
+def _load(argv: list[str]):
+    """The loader's load_weights call on that pod."""
+    identity = loader.device_identity
     with patch.object(loader, "init_vmm"), patch.object(
         loader, "load_weights"
-    ) as load_weights:
+    ) as load_weights, patch.object(
+        identity, "gpu_uuid", _BUS_ORDER.__getitem__
+    ), patch.object(
+        identity, "cuda_ordinal", _CUDA_ORDER.index
+    ):
         loader.main(["--checkpoint-dir", "/ckpt", *argv])
-    return load_weights.call_args.kwargs["backend_config"]
+    return load_weights.call_args
+
+
+def _backend_config(argv: list[str]) -> dict:
+    return _load(argv).kwargs["backend_config"]
+
+
+def test_device_n_loads_its_artifact_into_the_nth_gpu_in_bus_order(monkeypatch):
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/run/gms")
+
+    assert _load(["--device", "1"]).args == (
+        "/ckpt/device-1",
+        "/run/gms/gms_GPU-b_weights.sock",
+        0,
+    )
 
 
 def test_backend_config_carries_storage_backend_settings():

@@ -29,6 +29,7 @@ from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1 import landlock, ranks
 from gpu_memory_service.v1.client.session import _GMSClientSession as v1_session
 from gpu_memory_service.v1.device import get_socket_path as v1_get_socket_path
+from gpu_memory_service.v1.device import node_gpus
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,7 +98,7 @@ def _run_v1_ranks(loader_argv: list[str] | None, confine: bool) -> int:
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
     try:
-        processes.extend(ranks.start_ranks(ranks.node_gpus(), command, confine=confine))
+        processes.extend(ranks.start_ranks(node_gpus(), command, confine=confine))
         return _supervise(processes)
     finally:
         _terminate_all(processes)
@@ -155,6 +156,18 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("DYN_GMS_USE_V1=true only supports --device-type=cuda")
     if use_v1 and not args.probe_restore_ready:
         raise SystemExit(_run_v1_ranks(args.enable_loader, not args.no_isolation))
+    if use_v1:
+        for gpu in node_gpus():
+            with closing(
+                v1_session(
+                    v1_get_socket_path(gpu.uuid, "weights"),
+                    RequestedLockType.RO,
+                    connect_timeout=_PROBE_TIMEOUT_SECONDS,
+                    admission_timeout=_PROBE_TIMEOUT_SECONDS,
+                )
+            ):
+                pass
+        return
 
     init_vmm(VMMDeviceType.from_str(args.device_type))
     vmm = get_vmm()
@@ -162,20 +175,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.probe_restore_ready:
         timeout_ms = int(_PROBE_TIMEOUT_SECONDS * 1000)
         for device in devices:
-            if use_v1:
-                session = v1_session(
-                    v1_get_socket_path(device, "weights"),
-                    RequestedLockType.RO,
-                    connect_timeout=_PROBE_TIMEOUT_SECONDS,
-                    admission_timeout=_PROBE_TIMEOUT_SECONDS,
-                )
-            else:
-                session = v0_session(
+            with closing(
+                v0_session(
                     get_socket_path(device, "weights"),
                     RequestedLockType.RO,
                     timeout_ms,
                 )
-            with closing(session):
+            ):
                 pass
         return
 

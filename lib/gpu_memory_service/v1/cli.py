@@ -95,8 +95,8 @@ def main(argv: list[str] | None = None) -> None:
 
     init_vmm(VMMDeviceType.CUDA)
     vmm = get_vmm()
-    cuda_device = device_identity.cuda_ordinal(args.device)
-    gpu_uuid = device_identity.get_device_uuid(cuda_device)
+    gpu_uuid = device_identity.gpu_uuid(args.device)
+    cuda_device = device_identity.cuda_ordinal(gpu_uuid)
     with ExitStack() as stack:
         checkpoint_lifecycle = GMSCheckpointLifecycle()
         managers = {
@@ -112,13 +112,13 @@ def main(argv: list[str] | None = None) -> None:
         servers = [
             stack.enter_context(
                 GMSRPCServer(
-                    get_socket_path(args.device, domain),
+                    get_socket_path(gpu_uuid, domain),
                     managers[domain],
                 )
             )
             for domain in _DOMAINS
         ]
-        logger.info("GMS V1 server listening device=%d", args.device)
+        logger.info("GMS V1 server listening device=%d gpu=%s", args.device, gpu_uuid)
 
         def terminate(*_args) -> None:
             stop.set()

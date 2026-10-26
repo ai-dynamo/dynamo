@@ -35,8 +35,10 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
     tmp_path,
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("GMS_SOCKET_DIR", str(tmp_path))
     paths = {
-        domain: str(tmp_path / f"{domain}.sock") for domain in ("weights", "kv_cache")
+        domain: device_identity.get_socket_path("GPU-0", domain)
+        for domain in ("weights", "kv_cache")
     }
     vmms = {domain: FakeVMM(granularity=64) for domain in paths}
     with ExitStack() as stack:
@@ -48,7 +50,6 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
             stack.callback(_stop, server, thread)
 
         identity_events = []
-        physical_uuid = ["GPU-0"]
         cached_uuid = [None]
 
         def invalidate_device_uuid_cache():
@@ -58,7 +59,7 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
         def get_device_uuid(device):
             identity_events.append("lookup")
             if cached_uuid[0] is None:
-                cached_uuid[0] = physical_uuid[0]
+                cached_uuid[0] = "GPU-0"
             return cached_uuid[0]
 
         monkeypatch.setattr(
@@ -67,8 +68,8 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
             invalidate_device_uuid_cache,
         )
         monkeypatch.setattr(device_identity, "get_device_uuid", get_device_uuid)
-        weights = GMSClientMemoryManager(paths["weights"], vmms["weights"], 0)
-        kv_cache = GMSClientMemoryManager(paths["kv_cache"], vmms["kv_cache"], 0)
+        weights = GMSClientMemoryManager("weights", vmms["weights"], 0)
+        kv_cache = GMSClientMemoryManager("kv_cache", vmms["kv_cache"], 0)
         weights.connect(RequestedLockType.RW)
         kv_cache.connect(RequestedLockType.RW)
 
@@ -110,12 +111,6 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
         assert vmms["weights"].access == {weights_va: GrantedLockType.RO}
         assert vmms["kv_cache"].access == {kv_va: GrantedLockType.RW}
         assert identity_events == ["invalidate", "lookup"] * 4
-
-        weights.unmap_all_vas()
-        weights.disconnect()
-        physical_uuid[0] = "GPU-1"
-        with pytest.raises(RuntimeError, match="sidecar is on another physical GPU"):
-            weights.connect(RequestedLockType.RO)
         kv_cache.close()
 
 
@@ -129,7 +124,7 @@ def test_identity_mismatch_wins_when_session_close_fails(monkeypatch) -> None:
     monkeypatch.setattr(device_identity, "invalidate_device_uuid_cache", lambda: None)
     monkeypatch.setattr(device_identity, "get_device_uuid", lambda _device: "GPU-0")
     manager = GMSClientMemoryManager(
-        "/unused.sock",
+        "weights",
         FakeVMM(granularity=64),
         0,
         session_factory=lambda *_args: _Session(),
@@ -137,6 +132,37 @@ def test_identity_mismatch_wins_when_session_close_fails(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="sidecar is on another physical GPU"):
         manager.connect(RequestedLockType.RO)
+
+
+def test_connect_reaches_the_sockets_of_the_current_gpu(monkeypatch) -> None:
+    gpu = ["GPU-0"]
+    connected = []
+
+    class _Session:
+        def __init__(self, path, _lock_type) -> None:
+            connected.append(path)
+            self.identity = ("nonce", gpu[0])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/run/gms")
+    monkeypatch.setattr(device_identity, "invalidate_device_uuid_cache", lambda: None)
+    monkeypatch.setattr(device_identity, "get_device_uuid", lambda _device: gpu[0])
+    manager = GMSClientMemoryManager(
+        "weights", FakeVMM(granularity=64), 0, session_factory=_Session
+    )
+
+    manager.connect(RequestedLockType.RO)
+    manager.disconnect()
+    # A restore moved the device to another GPU.
+    gpu[0] = "GPU-1"
+    manager.connect(RequestedLockType.RO)
+
+    assert connected == [
+        "/run/gms/gms_GPU-0_weights.sock",
+        "/run/gms/gms_GPU-1_weights.sock",
+    ]
 
 
 def test_latched_failure_raises_fresh_exceptions(monkeypatch) -> None:
@@ -147,7 +173,7 @@ def test_latched_failure_raises_fresh_exceptions(monkeypatch) -> None:
         raise ConnectionError("boom")
 
     manager = GMSClientMemoryManager(
-        "/unused.sock",
+        "weights",
         FakeVMM(granularity=64),
         0,
         session_factory=fail_session,
@@ -163,14 +189,15 @@ def test_latched_failure_raises_fresh_exceptions(monkeypatch) -> None:
 
 @contextmanager
 def _connected_client(tmp_path, monkeypatch, *, slab_size: int):
-    path = str(tmp_path / "weights.sock")
+    monkeypatch.setenv("GMS_SOCKET_DIR", str(tmp_path))
+    path = device_identity.get_socket_path("GPU-0", "weights")
     vmm = FakeVMM(granularity=64)
     server = GMSRPCServer(path, GMSServerMemoryManager("GPU-0", vmm, 0))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     monkeypatch.setattr(device_identity, "invalidate_device_uuid_cache", lambda: None)
     monkeypatch.setattr(device_identity, "get_device_uuid", lambda _device: "GPU-0")
-    client = GMSClientMemoryManager(path, vmm, 0, slab_size=slab_size)
+    client = GMSClientMemoryManager("weights", vmm, 0, slab_size=slab_size)
     try:
         client.connect(RequestedLockType.RW)
         try:

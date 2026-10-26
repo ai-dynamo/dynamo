@@ -209,17 +209,27 @@ sequenceDiagram
     W->>KM: connect RW
     W->>KM: reallocate_all_handles, remap_all_vas
     Note over KS: fresh KV backing at preserved VAs
-    W->>WM: connect RO to configured socket
+    W->>WM: connect RO to its GPU's socket
     W->>WM: verify GPU and remap exact IDs
 ```
 
 Suspend order is weights then KV so the exclusive KV lease remains held until
 local weight memory is asleep. Resume order is KV then weights.
 
-Every connection verifies the physical GPU identity. GMS device N, the pod's
-N-th GPU, selects both the device-local socket and the `device-<N>` artifact
-directory; a predecessor server identity is not persisted. V1 does not
-reconstruct models, retain KV contents, scan raw mappings, validate
+Sockets are named by GPU UUID, and each connection reaches the sockets of the
+GPU the engine's device is on at that moment, so a restore onto other GPUs needs
+no configuration and engines may number GPUs in any order. Every connection
+verifies the physical GPU identity; a predecessor server identity is not
+persisted.
+
+GMS device N is the pod's N-th GPU in PCI bus order and names the
+`device-<N>` artifact directory. Restore relies on Dynamo Snapshot moving the
+process from the checkpoint's N-th GPU in bus order to the restoring pod's
+N-th, where GMS device N loads the `device-<N>` artifact. If a restore pairs
+GPUs differently, the engine fails to remap: the artifact holds another rank's
+allocation IDs.
+
+V1 does not reconstruct models, retain KV contents, scan raw mappings, validate
 model-specific layouts, or implement SGLang integration.
 
 ## Running V1
@@ -231,9 +241,8 @@ DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server
 ```
 
 The supervisor reads the GPUs from `/proc/driver/nvidia/gpus` without starting
-CUDA and serves GMS device N from the N-th GPU in PCI bus order, the order
-engines see with `CUDA_DEVICE_ORDER=PCI_BUS_ID`. Each device's process is pinned
-to its GPU with `CUDA_VISIBLE_DEVICES`. libcuda initializes every GPU whose
+CUDA and serves GMS device N from the N-th GPU in PCI bus order. Each device's
+process is pinned to its GPU with `CUDA_VISIBLE_DEVICES`. libcuda initializes every GPU whose
 device node it can open, so the supervisor also confines each process with
 Landlock to open only its own GPU's node, and the process brings up that GPU
 alone. This shortens start-up and keeps it from slowing other CUDA work on the

@@ -3,9 +3,8 @@
 
 """Start one GMS V1 server process per GPU of the container.
 
-GMS device N is the container's N-th GPU in PCI bus order, the order engines
-see with CUDA_DEVICE_ORDER=PCI_BUS_ID. Its process is pinned to that GPU with
-CUDA_VISIBLE_DEVICES and serves device N's sockets.
+GMS device N's process is pinned to the container's N-th GPU in PCI bus order
+(``device.node_gpus``) with CUDA_VISIBLE_DEVICES.
 """
 
 from __future__ import annotations
@@ -15,37 +14,11 @@ import logging
 import os
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
-from pathlib import Path
 
 from gpu_memory_service.v1 import landlock
+from gpu_memory_service.v1.device import Gpu
 
 logger = logging.getLogger(__name__)
-
-_PROC_GPUS = Path("/proc/driver/nvidia/gpus")
-_DEV = Path("/dev")
-
-
-@dataclass(frozen=True)
-class Gpu:
-    bus_id: str
-    minor: int
-    uuid: str
-
-
-def node_gpus(proc_gpus: Path = _PROC_GPUS, dev: Path = _DEV) -> list[Gpu]:
-    """GPUs this container can open, in PCI bus order, without starting CUDA."""
-    gpus = []
-    for entry in proc_gpus.iterdir():
-        info = dict(
-            line.split(":", 1)
-            for line in (entry / "information").read_text().splitlines()
-            if ":" in line
-        )
-        minor = int(info["Device Minor"])
-        if os.access(dev / f"nvidia{minor}", os.R_OK | os.W_OK):
-            gpus.append(Gpu(entry.name.lower(), minor, info["GPU UUID"].strip()))
-    return sorted(gpus, key=lambda gpu: gpu.bus_id)
 
 
 def start_ranks(

@@ -56,10 +56,19 @@ def node(tmp_path):
 
 
 def test_node_gpus_lists_openable_cards_in_bus_order(node):
-    assert ranks.node_gpus(*node) == [
-        ranks.Gpu("0000:18:00.0", 6, "GPU-a"),
-        ranks.Gpu("0000:29:00.0", 0, "GPU-b"),
+    assert device.node_gpus(*node) == [
+        device.Gpu("0000:18:00.0", 6, "GPU-a"),
+        device.Gpu("0000:29:00.0", 0, "GPU-b"),
     ]
+
+
+def test_gms_device_n_is_the_nth_gpu_in_bus_order(node, monkeypatch):
+    gpus = device.node_gpus(*node)
+    monkeypatch.setattr(device, "node_gpus", lambda: gpus)
+
+    assert [device.gpu_uuid(n) for n in range(2)] == ["GPU-a", "GPU-b"]
+    with pytest.raises(ValueError, match="GMS device 2 is not one of 2 GPUs"):
+        device.gpu_uuid(2)
 
 
 @pytest.mark.parametrize("confine", [True, False])
@@ -73,7 +82,9 @@ def test_each_device_process_is_pinned_to_its_gpu(node, monkeypatch, confine):
 
     monkeypatch.setattr(ranks.subprocess, "Popen", Popen)
 
-    ranks.start_ranks(ranks.node_gpus(*node), lambda n: [f"device{n}"], confine=confine)
+    ranks.start_ranks(
+        device.node_gpus(*node), lambda n: [f"device{n}"], confine=confine
+    )
 
     assert [command for command, _, _ in started] == [["device0"], ["device1"]]
     assert [env["CUDA_VISIBLE_DEVICES"] for _, env, _ in started] == [
@@ -96,17 +107,23 @@ def test_supervisor_without_landlock_points_to_no_isolation(monkeypatch):
         server._run_v1_ranks(None, confine=True)
 
 
-@pytest.mark.parametrize(
-    ("visible", "expected"),
-    [(None, 3), ("GPU-a", 0), ("3", 0), ("2,3", 3)],
-)
-def test_cuda_ordinal_of_a_pinned_process_is_zero(monkeypatch, visible, expected):
-    if visible is None:
-        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    else:
-        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+def test_cuda_ordinal_finds_the_gpu_whatever_order_cuda_uses(monkeypatch):
+    class _Cuda:
+        class CUresult:
+            CUDA_SUCCESS = 0
 
-    assert device.cuda_ordinal(3) == expected
+        @staticmethod
+        def cuDeviceGetCount():
+            return 0, 3
+
+    cuda_order = ["GPU-c", "GPU-a", "GPU-b"]
+    monkeypatch.setattr(device, "cuda", _Cuda)
+    monkeypatch.setattr(device, "cuda_ensure_initialized", lambda: None)
+    monkeypatch.setattr(device, "get_device_uuid", cuda_order.__getitem__)
+
+    assert device.cuda_ordinal("GPU-b") == 2
+    with pytest.raises(RuntimeError, match="GPU-d is not visible to CUDA"):
+        device.cuda_ordinal("GPU-d")
 
 
 def _landlock_available() -> bool:
@@ -123,12 +140,15 @@ def test_confined_process_opens_only_its_own_gpu_node(tmp_path):
     (tmp_path / "other").write_text("")
     script = textwrap.dedent(
         f"""
+        import os
         from pathlib import Path
         from gpu_memory_service.v1.landlock import confine_to_gpu
         dev = Path({str(dev)!r})
         confine_to_gpu(0, dev)
         for name in ("nvidia0", "nvidiactl", "null", "../other"):
             (dev / name).open("r+").close()
+        # The process still lists every GPU (device.node_gpus) to find its own.
+        assert os.access(dev / "nvidia1", os.R_OK | os.W_OK)
         try:
             (dev / "nvidia1").open("r+")
         except PermissionError:
