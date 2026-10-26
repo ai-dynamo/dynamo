@@ -125,7 +125,12 @@ graph after 1.5 has persisted it. Normal CI does not fetch or compile old operat
 `history/N` must come from an actual published stable upstream tag for operator N,
 not from `main` merely because its chart still reports N. `main` may already contain
 post-cut changes that no N user runs. The next-minor bump on `main` remains blocked
-until the released predecessor history has been captured and committed.
+until the released predecessor history has been captured and committed. One
+exception exists: `main` moved to 1.7 while history was still reconciled by 1.5, so
+`HISTORY_EXCEPTIONS` in `hack/generate_upgrade_fixtures.py` lets 1.7 replay 1.5
+history. Capture `history/1.6.0` from the `v1.6.0` tag before the 1.8 bump, then
+delete the exception. Regeneration always advances exactly one minor, so 1.6 must
+be captured from its own release tree before 1.7.
 
 Use a dedicated checkout of the selected release tag. Fetch the tag from upstream,
 and carry only the reviewed test harness and fixture inventory into that checkout;
@@ -191,14 +196,16 @@ Ordinary checks discover every available scenario recursively. The required
 release matrix is declared in `required-matrix.json`: 24 component/Grove cases
 (three engines × four deployment shapes × two programs), plus three supported
 multi-node disaggregated DisaggregatedSet cases. Additional scenarios are valid.
-Both regeneration and a minor `appVersion` bump relative to `--base` reject a
-missing required scenario. The initial three cases can therefore land before
+Regeneration rejects a missing required scenario. A minor `appVersion` bump
+relative to `--base` requires predecessor history, which only a complete-matrix
+regeneration produces. The initial three cases can therefore land before
 broader coverage, but cannot advance the release boundary alone. Keep #16650
 open for the complete matrix, missing-origin history and rollout safety across
 all workload programs.
 
 After the released-source capture commit is brought back to `main`, bump the operator subchart's **appVersion** to N+1. The check
-rejects premature, skipped-minor and major bumps. CI checks the PR/merge-group base
+rejects premature, skipped-minor and major bumps, apart from the one 1.7 exception
+above. CI checks the PR/merge-group base
 version as well as current consistency; pre-commit runs the inexpensive local
 consistency check. Patch/prerelease changes do not add history generations.
 Promotion derives a namespace from `history/<version>/<complete-scenario-path>`

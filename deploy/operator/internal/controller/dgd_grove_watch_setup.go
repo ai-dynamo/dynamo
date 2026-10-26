@@ -212,9 +212,7 @@ func mapPodCliqueSetToDGDRequest(pcs *grovev1alpha1.PodCliqueSet) []ctrl.Request
 	}
 
 	return []ctrl.Request{{
-		NamespacedName: types.NamespacedName{
-			Name:      pcsOwnerRef.Name,
-			Namespace: pcs.Namespace,
-		},
+		Name:      pcsOwnerRef.Name,
+		Namespace: pcs.Namespace,
 	}}
 }

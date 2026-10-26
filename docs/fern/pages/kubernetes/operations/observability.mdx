@@ -16,7 +16,7 @@ Dynamo provides four core signals for running deployments:
 - **Health status** is available through `/live` and `/health`. The operator uses these signals for
   Kubernetes health probes.
 
-The monitoring stack must already be installed. See [Install Observability](../installation/observability.md)
+The monitoring stack must already be installed. See [Install Observability](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/observability.md)
 for the Prometheus, Grafana, DCGM exporter, Loki, and Alloy setup.
 
 Use this page to:

@@ -27,6 +27,8 @@ use dynamo_runtime::config::{
 };
 use serde_json::Value;
 
+use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
+
 use super::{
     common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
     tools::{ToolChoiceError, validate_openai_tool_choice},
@@ -323,9 +325,10 @@ pub fn validate_repetition_penalty(repetition_penalty: Option<f32>) -> Result<()
     Ok(())
 }
 
-/// Checks each logit-bias entry in map order: parse its key as u32, admit a JSON
-/// number, then narrow to f32 and check [-100, 100]. None and empty maps succeed.
-/// Returns the first plain-text error without mutation; invalid keys are not echoed.
+/// Checks each logit-bias entry in map order: parse its key as u32, reject a token
+/// id given more than once, admit a JSON number, then narrow to f32 and check
+/// [-100, 100]. None and empty maps succeed. Returns the first plain-text error
+/// without mutation; invalid keys are not echoed.
 pub fn validate_logit_bias(
     logit_bias: &Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<(), anyhow::Error> {
@@ -334,10 +337,15 @@ pub fn validate_logit_bias(
         None => return Ok(()),
     };
 
+    let mut seen_ids = std::collections::HashSet::new();
     for (token, bias_value) in logit_bias {
-        token.parse::<u32>().map_err(|_| {
+        let token_id = token.parse::<u32>().map_err(|_| {
             anyhow::anyhow!("Logit bias key must be a non-negative 32-bit integer token id")
         })?;
+
+        if !seen_ids.insert(token_id) {
+            anyhow::bail!("Logit bias token id {token_id} is specified more than once");
+        }
 
         let bias = bias_value.as_f64().ok_or_else(|| {
             anyhow::anyhow!(
@@ -622,6 +630,7 @@ pub fn validate_tools(
         );
     }
 
+    let skip_strict_schema_validation = *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
     for (i, tool) in tools.iter().enumerate() {
         if tool.function.name.len() > MAX_FUNCTION_NAME_LENGTH {
             anyhow::bail!(
@@ -638,11 +647,11 @@ pub fn validate_tools(
             .function
             .name
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
         {
             anyhow::bail!(
                 "Function at index {} has an invalid name: \"{}\". \
-                 Only a-z, A-Z, 0-9, underscores, and dashes are allowed.",
+                 Only a-z, A-Z, 0-9, underscores, dashes, and dots are allowed.",
                 i,
                 tool.function.name,
             );
@@ -656,7 +665,10 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
-        super::strict_schema::validate_strict_function(&tool.function)?;
+        super::strict_schema::validate_strict_function(
+            &tool.function,
+            skip_strict_schema_validation,
+        )?;
     }
     Ok(())
 }
@@ -1005,6 +1017,27 @@ mod tests {
         for key in ["0", "50256", "4294967295"] {
             assert!(validate_logit_bias(&bias(key)).is_ok(), "key: {key}");
         }
+    }
+
+    #[test]
+    fn test_validate_logit_bias_rejects_duplicate_token_ids() {
+        for second_key in ["+18", "018"] {
+            let bias = Some(HashMap::from([
+                ("18".to_string(), json!(-100)),
+                (second_key.to_string(), json!(100)),
+            ]));
+            let msg = validate_logit_bias(&bias).unwrap_err().to_string();
+            assert_eq!(
+                msg, "Logit bias token id 18 is specified more than once",
+                "second key: {second_key}"
+            );
+        }
+
+        let distinct = Some(HashMap::from([
+            ("18".to_string(), json!(-100)),
+            ("19".to_string(), json!(100)),
+        ]));
+        assert!(validate_logit_bias(&distinct).is_ok());
     }
 
     /// A valid token ID must still reach the numeric and range checks for its

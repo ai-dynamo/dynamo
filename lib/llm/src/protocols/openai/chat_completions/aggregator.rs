@@ -2449,8 +2449,6 @@ mod tests {
                 incomplete_filtered,
                 unterminated,
             ])),
-            // DeepSeek V4.1 selects the unified adapter without the Qwen opt-in flag,
-            // so this terminal-policy regression also runs in the default test suite.
             ParsingOptions::new(
                 Some("deepseek_v41".to_string()),
                 Some("deepseek_v41".to_string()),

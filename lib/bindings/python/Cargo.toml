@@ -12,7 +12,7 @@ dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", r
 
 [package]
 name = "dynamo-py3"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
