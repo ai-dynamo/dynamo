@@ -160,7 +160,7 @@ impl GatewayRouting {
         pending.armed = false;
 
         let dp_rank = route.dp_rank.unwrap_or(0);
-        tracing::info!(
+        tracing::debug!(
             worker_id = route.worker_id,
             dp_rank,
             endpoint = %route.endpoint,

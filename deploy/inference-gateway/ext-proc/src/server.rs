@@ -125,14 +125,12 @@ impl RequestContext {
         }
     }
 
-    /// Advance the state machine and collect responses that are ready to send.
     /// The booking id handed back to the picker: its own, else the request id.
-    fn picker_booking_id(&self) -> String {
-        self.booking_id
-            .clone()
-            .unwrap_or_else(|| self.request_id.clone())
+    fn picker_booking_id(&self) -> &str {
+        self.booking_id.as_deref().unwrap_or(&self.request_id)
     }
 
+    /// Advance the state machine and collect responses that are ready to send.
     fn drain_pending_responses(&mut self) -> Vec<ProcessingResponse> {
         let mut out = Vec::new();
 
@@ -502,13 +500,13 @@ fn relay_response_progress<P: EndpointPicker>(picker: &P, ctx: &mut RequestConte
     }
     let mut events = std::mem::take(&mut ctx.response_events);
     for event in &events {
-        picker.on_response_event(&ctx.picker_booking_id(), event);
+        picker.on_response_event(ctx.picker_booking_id(), event);
     }
     events.clear();
     ctx.response_events = events;
     if ctx.response_complete && !ctx.response_end_signaled {
         ctx.response_end_signaled = true;
-        picker.on_response_end(&ctx.picker_booking_id());
+        picker.on_response_end(ctx.picker_booking_id());
     }
 }
 
@@ -650,7 +648,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             if ctx.body_routed
                                 && let Some(status) = ctx.response_status
                             {
-                                picker.on_response_headers(&ctx.picker_booking_id(), status);
+                                picker.on_response_headers(ctx.picker_booking_id(), status);
                             }
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
@@ -667,12 +665,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 && !body.body.is_empty()
                             {
                                 ctx.prefill_complete_signaled = true;
-                                // Hand back the picker's own booking id (falls
-                                // back to request_id if it booked nothing).
-                                let booking_id = ctx
-                                    .booking_id
-                                    .clone()
-                                    .unwrap_or_else(|| ctx.request_id.clone());
+                                let booking_id = ctx.picker_booking_id().to_owned();
                                 // Detach: prefill-completion is idempotent,
                                 // best-effort load bookkeeping. Awaiting it inline
                                 // would gate first-token forwarding on the router's
@@ -752,10 +745,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             // Notify the picker that this request is complete so it can free
             // router bookkeeping state.
             if ctx.body_routed && !ctx.request_id.is_empty() {
-                let booking_id = ctx
-                    .booking_id
-                    .clone()
-                    .unwrap_or_else(|| ctx.request_id.clone());
+                let booking_id = ctx.picker_booking_id().to_owned();
                 let usage = ctx.parsed_usage.take();
                 if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
                     crate::metrics::observe_cached_tokens(cached_tokens);

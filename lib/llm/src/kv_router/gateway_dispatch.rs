@@ -169,6 +169,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Gate
             token_ids: request.token_ids.to_vec(),
         };
 
+        // Unbounded because the feeder is Envoy's response path, which must not
+        // block. Growth is bounded by the response itself: at most one item per
+        // response event Envoy relays (one per generated token, plus a finish),
+        // drained concurrently by the host's response stream, and the sender
+        // is dropped when the request completes or aborts.
         let (responses, receiver) = mpsc::unbounded_channel();
         let previous = self.requests.insert(
             request_id.clone(),
