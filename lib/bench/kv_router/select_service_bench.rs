@@ -56,7 +56,7 @@ enum Flow {
     /// Atomic `POST /select_and_reserve`.
     SelectAndReserve,
     /// In-process `select_and_reserve` plus batched lifecycle events through the Ray-style
-    /// ingress host at `--ingress-socket`.
+    /// ingress hosts at `--ingress-socket`.
     Ingress,
 }
 
@@ -65,9 +65,11 @@ enum Flow {
 struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8092")]
     service_url: String,
-    /// Unix socket of `select_service_ray_ingress.py`; required by `--flow ingress`.
+    /// Unix socket of a `select_service_ray_ingress.py` replica; required by `--flow
+    /// ingress`. Repeat for several replicas: each request goes to one at random and every
+    /// lifecycle event goes to all of them, as Ray Serve LLM routes and broadcasts.
     #[arg(long)]
-    ingress_socket: Option<PathBuf>,
+    ingress_socket: Vec<PathBuf>,
     /// Mooncake-format trace with `session_id`; rows of a session are replayed in file order.
     #[arg(long)]
     trace: PathBuf,
@@ -115,6 +117,10 @@ struct Args {
     /// Do not send `session_id` with selections.
     #[arg(long)]
     no_session_id: bool,
+    /// `--flow ingress`: send no decode-progress events, like Ray Serve LLM's default
+    /// (`RAY_SERVE_LLM_ENABLE_DECODE_BLOCK_PROGRESS=0`).
+    #[arg(long)]
+    no_decode_progress: bool,
     /// Start every session at its first turn instead of a random turn for each slot's
     /// first session.
     #[arg(long)]
@@ -606,7 +612,7 @@ struct Ctx {
     workload: Workload,
     engines: Vec<LiveEngine>,
     http: reqwest::Client,
-    ingress: Option<IngressClient>,
+    ingress: Vec<IngressClient>,
     stats: Arc<Stats>,
     phase: AtomicU8,
     next_session: AtomicU64,
@@ -678,7 +684,8 @@ impl Ctx {
         session_id: &str,
         max_tokens: usize,
     ) -> Option<SelectReply> {
-        if let Some(ingress) = &self.ingress {
+        if !self.ingress.is_empty() {
+            let ingress = &self.ingress[rand::random_range(0..self.ingress.len())];
             let started = Instant::now();
             let session_id = (!self.args.no_session_id).then_some(session_id);
             let max_tokens = u32::try_from(max_tokens).unwrap_or(u32::MAX);
@@ -790,15 +797,19 @@ impl Ctx {
             let prefill_complete_path = format!("{base}/prefill_complete");
             tokio::spawn(async move {
                 while let Some(call) = lifecycle_rx.recv().await {
-                    if let Some(ingress) = &ctx.ingress {
+                    if !ctx.ingress.is_empty() {
                         let id = selection_id_owned.clone();
-                        ingress.lifecycle(match call {
+                        let event = match call {
                             Lifecycle::PrefillComplete => LifecycleEvent::PrefillComplete(id),
+                            Lifecycle::OutputBlock(_) if ctx.args.no_decode_progress => continue,
                             Lifecycle::OutputBlock(tokens) => {
                                 LifecycleEvent::DecodeProgress(id, tokens)
                             }
                             Lifecycle::Free => LifecycleEvent::Completed(id),
-                        });
+                        };
+                        for ingress in &ctx.ingress {
+                            ingress.lifecycle(event.clone());
+                        }
                         ctx.stats.add(|c| &c.lifecycle_events, 1);
                         continue;
                     }
@@ -1130,13 +1141,16 @@ async fn main() -> anyhow::Result<()> {
         .max(1);
     let ingress = match args.flow {
         Flow::Ingress => {
-            let path = args
-                .ingress_socket
-                .as_deref()
-                .context("--flow ingress needs --ingress-socket")?;
-            Some(IngressClient::connect(path, Duration::from_secs(args.ready_timeout_secs)).await?)
+            ensure!(
+                !args.ingress_socket.is_empty(),
+                "--flow ingress needs --ingress-socket"
+            );
+            futures_util::future::try_join_all(args.ingress_socket.iter().map(|path| {
+                IngressClient::connect(path, Duration::from_secs(args.ready_timeout_secs))
+            }))
+            .await?
         }
-        _ => None,
+        _ => Vec::new(),
     };
     let ctx = Arc::new(Ctx {
         args,
@@ -1149,7 +1163,7 @@ async fn main() -> anyhow::Result<()> {
         next_session: AtomicU64::new(0),
         output_block_tokens,
     });
-    if let Some(ingress) = &ctx.ingress {
+    if !ctx.ingress.is_empty() {
         let workers = (0..ctx.args.workers)
             .map(|idx| WorkerRegistration {
                 worker_id: ctx.args.worker_id_base + idx as u64,
@@ -1163,7 +1177,10 @@ async fn main() -> anyhow::Result<()> {
                 replay_endpoint: ctx.args.replay_endpoint(idx),
             })
             .collect::<Vec<_>>();
-        ingress.register(&workers).await?;
+        futures_util::future::try_join_all(
+            ctx.ingress.iter().map(|ingress| ingress.register(&workers)),
+        )
+        .await?;
     } else {
         register_workers(&ctx).await?;
     }

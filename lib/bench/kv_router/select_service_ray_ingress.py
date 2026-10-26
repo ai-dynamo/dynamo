@@ -4,16 +4,27 @@
 """In-process ``SelectionService`` host that mirrors Ray Serve LLM's KV-aware ingress.
 
 ``select_service_bench --flow ingress`` connects over a Unix socket and plays the engine
-replicas and clients; this process plays one ``LLMRouter`` ingress replica. The tracker
-below follows ``KVAwareRouter.choose_replicas`` and ``KVTokenTracker`` from
-ray-project/ray#67224 (python/ray/llm/_internal/serve/routing_policies/kv_aware/):
-one asyncio loop owns a ``dynamo.llm.SelectionService``, scores every request with
-``select_and_reserve``, and applies replica lifecycle batches with ``prefill_complete``,
-one ``add_output_block`` per crossed KV block, and ``free_reservation``. Peer-ingress
-reservation broadcasts are not emulated (single ingress replica).
+replicas and clients; this process plays one ``LLMRouter`` ingress replica. The code
+below follows ``KVAwareRouter.choose_replicas``, ``KVTokenTracker`` and
+``PeerUpdateForwarder`` from ray-project/ray#67224 at 53b9942e4f
+(python/ray/llm/_internal/serve/routing_policies/kv_aware/), on the session-binding API
+of ai-dynamo/dynamo#16969:
 
-Functions prefixed ``_ipc_`` exist only for the benchmark transport; Ray pays none of
-their cost, and the profile analysis separates them.
+- one asyncio loop owns a ``dynamo.llm.SelectionService`` built with soft session
+  affinity and a host replication writer id;
+- each request it receives is scored with ``select_and_reserve``;
+- every replica lifecycle batch (the engines broadcast them to every ingress) is applied
+  with ``prefill_complete``, ``add_output_block`` per crossed KV block when decode
+  progress is reported, and ``free_reservation``;
+- with ``--peer``, its load reservations and the bindings from
+  ``session_binding_updates()`` are broadcast to the peer ingress processes, which apply
+  them with ``create_reservation`` and ``apply_session_binding``.
+
+Ray carries the peer broadcast as ``DeploymentHandle.broadcast("on_replica_updates")``;
+here the batch is pickled once and written to each peer's Unix socket, and the sender
+waits for every peer's acknowledgement before sending the next batch, as Ray waits on
+``results_async``. Functions prefixed ``_ipc_`` (bench transport) and ``_peer_`` (the
+stand-in for Ray's RPC) are harness code; the profile analysis separates them.
 
 Wire format (little endian): frames are ``u32 len | u8 type | body``.
 """
@@ -24,20 +35,28 @@ import asyncio
 import hashlib
 import math
 import os
+import pickle
+import random
 import struct
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from dynamo.llm import SelectionService
 
 _MODEL_NAME = "default"
 _ROUTING_GROUP = "default"
 # kv_aware/constants.py
-REQUEST_TRACKING_TTL_S = 600
+REQUEST_TRACKING_TTL_S = 3600
+SESSION_AFFINITY_MODE = "soft"
+LIFECYCLE_EVENT_BROADCAST_TIMEOUT_S = 3
+LIFECYCLE_HOOKS = frozenset(
+    {"on_prefill_complete", "on_decode_progress", "on_request_completed"}
+)
 
 REGISTER, REGISTER_DONE, REGISTERED, SELECT, SELECT_REPLY, LIFECYCLE_BATCH = 1, 2, 3, 4, 5, 6
+PEER_UPDATES, PEER_ACK = 7, 8
 PREFILL_COMPLETE, DECODE_PROGRESS, COMPLETED = 1, 2, 3
 
 
@@ -69,15 +88,118 @@ class Replica:
         self.index = index
 
 
-class KVTokenTracker:
-    """The select and lifecycle paths of Ray's ``KVTokenTracker``."""
+class PeerUpdateForwarder:
+    """Ray's ``PeerUpdateForwarder``: batch pending updates into one broadcast."""
 
-    def __init__(self, svc: SelectionService, block_size: int):
+    def __init__(self, handle: "_PeerBroadcast", source_writer_id: int):
+        self._handle = handle
+        self._source_writer_id = source_writer_id
+        self._updates: asyncio.Queue = asyncio.Queue()
+        self._delivery_task: Optional[asyncio.Task] = None
+
+    def report(self, kind: str, event: Dict[str, Any]) -> None:
+        if self._delivery_task is None or self._delivery_task.done():
+            self._delivery_task = asyncio.get_running_loop().create_task(
+                self._deliver()
+            )
+        self._updates.put_nowait({"kind": kind, "event": event})
+
+    async def _deliver(self) -> None:
+        while True:
+            batch = [await self._updates.get()]
+            while not self._updates.empty():
+                batch.append(self._updates.get_nowait())
+            try:
+                results = await self._handle.broadcast(
+                    "on_replica_updates",
+                    self._source_writer_id,
+                    batch,
+                    timeout_s=LIFECYCLE_EVENT_BROADCAST_TIMEOUT_S,
+                )
+                errors = [r for r in results if isinstance(r, BaseException)]
+                if errors:
+                    print(
+                        f"KV peer broadcasts dropped on {len(errors)}/{len(results)} "
+                        f"ingress replicas: {errors[0]!r}",
+                        flush=True,
+                    )
+            except Exception as e:  # noqa: BLE001 - mirrors Ray: log and drop
+                print(f"Dropping selection service peer broadcast: {e!r}", flush=True)
+            finally:
+                for _ in batch:
+                    self._updates.task_done()
+
+
+class KVTokenTracker:
+    """The select, lifecycle and peer-update paths of Ray's ``KVTokenTracker``."""
+
+    def __init__(self, svc: SelectionService, block_size: int, writer_id: int, ttl):
         self._svc = svc
         self._block_size = block_size
+        self._session_affinity_ttl_s = ttl
         self._requests: "OrderedDict[str, RequestLifecycle]" = OrderedDict()
         self._request_ids_by_worker: Dict[int, Set[str]] = {}
         self._completed_request_ids: "OrderedDict[str, float]" = OrderedDict()
+        self._replication_writer_id = writer_id
+        self._replica_forwarder: Optional[PeerUpdateForwarder] = None
+        self._session_affinity_task: Optional[asyncio.Task] = None
+        self._replica_updates: asyncio.Queue = asyncio.Queue()
+        self._replica_apply_task: Optional[asyncio.Task] = None
+
+    def start_replica_broadcast(self, handle: "_PeerBroadcast") -> None:
+        self._replica_forwarder = PeerUpdateForwarder(handle, self._replication_writer_id)
+        if self._session_affinity_ttl_s:
+            self._session_affinity_task = asyncio.create_task(
+                self._forward_session_bindings()
+            )
+
+    async def _forward_session_bindings(self) -> None:
+        async for binding in self._svc.session_binding_updates():
+            self._replica_forwarder.report("session_affinity", binding)
+
+    async def on_replica_updates(
+        self, source_writer_id: int, updates: List[Dict[str, Any]]
+    ) -> None:
+        if source_writer_id == self._replication_writer_id:
+            return
+        if self._replica_apply_task is None or self._replica_apply_task.done():
+            self._replica_apply_task = asyncio.create_task(self._apply_replica_updates())
+        self._replica_updates.put_nowait(updates)
+
+    async def _apply_replica_updates(self) -> None:
+        while True:
+            batches = [await self._replica_updates.get()]
+            while not self._replica_updates.empty():
+                batches.append(self._replica_updates.get_nowait())
+            try:
+                await self._evict_stale_requests()
+                for update in [update for batch in batches for update in batch]:
+                    try:
+                        await self._apply_update(update)
+                    except Exception as error:  # noqa: BLE001 - mirrors Ray
+                        print(f"Failed to apply peer update: {error!r}", flush=True)
+            finally:
+                for _ in batches:
+                    self._replica_updates.task_done()
+
+    async def _apply_update(self, update: Dict[str, Any]) -> None:
+        if update["kind"] == "session_affinity":
+            await self._svc.apply_session_binding(update["event"])
+            return
+        booking = update["event"]
+        request_id = booking["selection_id"]
+        if request_id in self._requests or request_id in self._completed_request_ids:
+            return
+        await self._svc.create_reservation(booking)
+        if request_id in self._completed_request_ids:
+            await self._svc.free_reservation(request_id)
+            return
+        self._track_request_state(
+            request_id,
+            booking["worker_id"],
+            booking["isl_tokens"],
+            booking["expected_output_tokens"],
+        )
 
     async def upsert_worker(
         self, worker_id, replica_id, endpoint, replay_endpoint, max_num_batched_tokens
@@ -123,6 +245,22 @@ class KVTokenTracker:
         self._track_request_state(
             request_id, selection["worker_id"], len(token_ids), expected_output_tokens
         )
+        if self._replica_forwarder is not None:
+            self._replica_forwarder.report(
+                "load_reservation",
+                {
+                    "model_name": _MODEL_NAME,
+                    "routing_group": _ROUTING_GROUP,
+                    "selection_id": request_id,
+                    "worker_id": selection["worker_id"],
+                    "dp_rank": selection["dp_rank"],
+                    "sequence_hashes": selection["sequence_hashes"],
+                    "isl_tokens": selection["isl_tokens"],
+                    "expected_output_tokens": expected_output_tokens,
+                    "effective_prefill_tokens": selection["effective_prefill_tokens"],
+                    "lora_name": lora_name,
+                },
+            )
         return {
             "worker_id": selection["worker_id"],
             "dp_rank": selection["dp_rank"],
@@ -146,10 +284,12 @@ class KVTokenTracker:
 
     async def on_lifecycle_events(self, events) -> None:
         for hook_name, args in events:
+            if hook_name not in LIFECYCLE_HOOKS:
+                continue
             try:
                 await getattr(self, hook_name)(*args)
             except Exception as error:  # noqa: BLE001 - mirrors Ray: log and continue
-                print(f"lifecycle hook {hook_name} failed: {error}", flush=True)
+                print(f"lifecycle hook {hook_name} failed: {error!r}", flush=True)
 
     async def on_prefill_complete(self, request_id: str) -> None:
         state = self._requests.get(request_id)
@@ -173,12 +313,15 @@ class KVTokenTracker:
 
     async def on_request_completed(self, request_id: str) -> None:
         state = self._requests.pop(request_id, None)
-        self._completed_request_ids.pop(request_id, None)
-        self._completed_request_ids[request_id] = time.monotonic()
+        self._mark_request_completed(request_id)
         if state is None:
             return
         self._untrack_worker_request(request_id, state.worker_id)
         await self._svc.free_reservation(request_id)
+
+    def _mark_request_completed(self, request_id: str) -> None:
+        self._completed_request_ids.pop(request_id, None)
+        self._completed_request_ids[request_id] = time.monotonic()
 
     def _untrack_worker_request(self, request_id, worker_id):
         request_ids = self._request_ids_by_worker.get(worker_id)
@@ -224,13 +367,56 @@ async def choose_replicas(tracker, candidate_replicas, request_id, token_ids, ma
     return worker_id_to_replica[selection["worker_id"]], selection
 
 
+class _PeerBroadcast:
+    """Bench stand-in for ``DeploymentHandle.broadcast`` to the peer ingress replicas."""
+
+    def __init__(self, paths: List[str]):
+        self._paths = paths
+        self._peers = []
+
+    async def connect(self) -> None:
+        for path in self._paths:
+            while True:
+                try:
+                    reader, writer = await asyncio.open_unix_connection(path, limit=2**26)
+                    break
+                except (FileNotFoundError, ConnectionRefusedError):
+                    await asyncio.sleep(0.2)
+            self._peers.append((reader, writer))
+
+    async def broadcast(self, method, source_writer_id, batch, *, timeout_s):
+        del method  # always on_replica_updates
+        payload = pickle.dumps((source_writer_id, batch), protocol=5)
+        for _, writer in self._peers:
+            _ipc_write_frame(writer, PEER_UPDATES, payload)
+        return await asyncio.gather(
+            *(
+                asyncio.wait_for(_peer_read_ack(reader), timeout_s)
+                for reader, _ in self._peers
+            ),
+            return_exceptions=True,
+        )
+
+
+async def _peer_read_ack(reader):
+    kind, _ = await _ipc_read_frame(reader)
+    if kind != PEER_ACK:
+        raise RuntimeError(f"unexpected peer frame {kind}")
+
+
 class Ingress:
     def __init__(self, args):
         self.args = args
+        ttl = args.session_affinity_ttl_secs
+        # Ray: get_worker_id(uuid4().hex), one per ingress incarnation.
+        self.writer_id = random.getrandbits(63)
         self.svc = SelectionService(
             indexer_threads=args.indexer_threads,
-            session_affinity_ttl_secs=args.session_affinity_ttl_secs,
+            session_affinity_ttl_secs=ttl,
+            session_affinity_mode=SESSION_AFFINITY_MODE,
+            session_replication_writer_id=self.writer_id if ttl else None,
         )
+        self.peers = _PeerBroadcast(args.peer)
         self.tracker: Optional[KVTokenTracker] = None
         self.replicas: List[Replica] = []
         self.pending_registrations = []
@@ -254,9 +440,25 @@ class Ingress:
         finally:
             lifecycle_task.cancel()
 
+    async def handle_peer(self, reader, writer):
+        """Ray's ``LLMRouter.on_replica_updates`` RPC from one peer ingress."""
+        try:
+            while True:
+                kind, body = await _ipc_read_frame(reader)
+                if kind != PEER_UPDATES:
+                    continue
+                source_writer_id, updates = _peer_decode(body)
+                if self.tracker is not None:
+                    await self.tracker.on_replica_updates(source_writer_id, updates)
+                _ipc_write_frame(writer, PEER_ACK, b"")
+        except asyncio.IncompleteReadError:
+            pass
+
     async def _register_all(self, writer):
         block_size = self.pending_registrations[0][1]
-        self.tracker = KVTokenTracker(self.svc, block_size)
+        self.tracker = KVTokenTracker(
+            self.svc, block_size, self.writer_id, self.args.session_affinity_ttl_secs
+        )
         for index, (_, _, max_batched, endpoint, replay_endpoint) in enumerate(
             self.pending_registrations
         ):
@@ -271,8 +473,13 @@ class Ingress:
             )
         while self.svc.ready().get("schedulable_workers", 0) < len(self.replicas):
             await asyncio.sleep(0.2)
+        await self.peers.connect()
+        self.tracker.start_replica_broadcast(self.peers)
         _ipc_write_frame(writer, REGISTERED, struct.pack("<I", len(self.replicas)))
-        print(f"registered {len(self.replicas)} workers", flush=True)
+        print(
+            f"registered {len(self.replicas)} workers; {len(self.args.peer)} peers",
+            flush=True,
+        )
 
     async def _select(self, writer, body):
         request_id, session_id, max_tokens, token_ids = _ipc_decode_select(body)
@@ -292,6 +499,10 @@ class Ingress:
         while True:
             body = await self.lifecycle_queue.get()
             await self.tracker.on_lifecycle_events(_ipc_decode_lifecycle(body))
+
+
+def _peer_decode(body):
+    return pickle.loads(body)
 
 
 async def _ipc_read_frame(reader):
@@ -355,14 +566,27 @@ async def main():
     parser.add_argument("--socket", required=True)
     parser.add_argument("--indexer-threads", type=int, default=4)
     parser.add_argument("--session-affinity-ttl-secs", type=float, default=None)
+    parser.add_argument(
+        "--peer-socket",
+        help="Unix socket this ingress accepts peer broadcasts on (multi-ingress runs).",
+    )
+    parser.add_argument(
+        "--peer",
+        action="append",
+        default=[],
+        help="Peer ingress --peer-socket to broadcast to; repeat once per peer.",
+    )
     args = parser.parse_args()
     ingress = Ingress(args)
-    if os.path.exists(args.socket):
-        os.unlink(args.socket)
-    server = await asyncio.start_unix_server(ingress.handle, path=args.socket, limit=2**26)
+    servers = []
+    for path, handler in ((args.socket, ingress.handle), (args.peer_socket, ingress.handle_peer)):
+        if path is None:
+            continue
+        if os.path.exists(path):
+            os.unlink(path)
+        servers.append(await asyncio.start_unix_server(handler, path=path, limit=2**26))
     print(f"ingress listening on {args.socket}", flush=True)
-    async with server:
-        await server.serve_forever()
+    await asyncio.gather(*(server.serve_forever() for server in servers))
 
 
 if __name__ == "__main__":

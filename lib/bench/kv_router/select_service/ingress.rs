@@ -31,6 +31,7 @@ const COMPLETED: u8 = 3;
 
 const MAX_LIFECYCLE_BATCH: usize = 4096;
 
+#[derive(Clone)]
 pub enum LifecycleEvent {
     PrefillComplete(String),
     /// Cumulative output tokens generated so far.
