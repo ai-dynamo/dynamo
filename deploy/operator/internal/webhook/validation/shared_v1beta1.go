@@ -1516,11 +1516,17 @@ func (v *sharedValidation) validateGroveSpecUpdate(
 	)}
 }
 
-// validateObjectMeta checks shared creation provenance. objectMeta and fldPath are non-nil.
-func (v *sharedValidation) validateObjectMeta(objectMeta *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
+// validateObjectMeta checks creation provenance, preserving unchanged legacy DCD origins.
+// objectMeta and fldPath are non-nil. A nil oldObjectMeta disables legacy-value ratcheting.
+func (v *sharedValidation) validateObjectMeta(objectMeta, oldObjectMeta *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 	annotationsPath := fldPath.Child("annotations")
-	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+	var oldOrigin string
+	var hasOldOrigin bool
+	if oldObjectMeta != nil {
+		oldOrigin, hasOldOrigin = oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	}
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists && (!hasOldOrigin || value != oldOrigin) {
 		if _, err := semver.NewVersion(value); err != nil {
 			allErrs = append(allErrs, field.Invalid(
 				annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),

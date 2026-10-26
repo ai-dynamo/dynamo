@@ -18,6 +18,7 @@
 # Floor them so the --no-deps install refreshes the bundled copies in place to
 # the current patch releases (see also mistune/soupsieve/tornado below).
 aiohttp>=3.14.3
+certifi==2026.10.23
 gitpython>=3.1.58
 
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
@@ -32,9 +33,9 @@ mistune>=3.3.0  # JupyterLab stack; see note above jupyter-server
 # does not need this).
 msgspec>=0.19.0
 # NIXL is unpinned here; trtllm_runtime.Dockerfile installs it from NIXL_REF.
-# Bundled by the upstream image at an older patch release; floor keeps it on
-# the current patch line.
-pillow>=12.3.0
+# Bundled by the upstream image at an older release; floor keeps it on the
+# current release line.
+pillow>=13.0.0,<14
 # NVDEC hardware decode for H.264/H.265 video input (dynamo common.multimodal.
 # nvdec_decoder). The TRT-LLM base ships 2.1.0, which bundles a full FFmpeg
 # including a libavcodec the codec gate rejects. This image carries two copies --
@@ -44,6 +45,7 @@ pillow>=12.3.0
 # "video". Pinned exactly -- see the note in requirements.vllm.txt. Keep the
 # specifier in step with requirements.{vllm,sglang}.txt;
 # tests/dependencies/test_pynvvideocodec_spec.py enforces that.
+pip==26.2.2
 PyNvVideoCodec==2.2.3
 # Dynamo installs with --no-deps, so the shared image-cache client must be
 # installed explicitly even though the cache is disabled by default.

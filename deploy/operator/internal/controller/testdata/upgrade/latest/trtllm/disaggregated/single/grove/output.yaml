@@ -101,6 +101,13 @@ spec:
               periodSeconds: 10
               timeoutSeconds: 3
             resources: {}
+            startupProbe:
+              failureThreshold: 30
+              httpGet:
+                path: /live
+                port: http
+              periodSeconds: 10
+              timeoutSeconds: 1
             volumeMounts:
             - mountPath: /dev/shm
               name: shared-memory

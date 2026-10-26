@@ -2082,6 +2082,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		tests = append(tests, dcdAdmissionTestCase{name: fmt.Sprintf("origin alpha=%t CREATE overwrites authored origin", alpha), deployment: submitted, wantOriginVersion: new("1.6.0")})
 		for _, origin := range []struct{ name, old, new string }{
 			{"legacy unrelated update", "", ""},
+			{"legacy invalid origin unrelated update", "custom-build", "custom-build"},
+			{"cannot repair legacy invalid origin", "custom-build", "1.7.0"},
+			{"cannot remove legacy invalid origin", "custom-build", ""},
 			{"cannot backfill origin", "", "1.7.0"},
 			{"cannot change origin", "1.6.0", "1.7.0"},
 			{"cannot remove origin", "1.6.0", ""},

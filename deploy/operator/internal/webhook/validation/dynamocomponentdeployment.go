@@ -161,10 +161,12 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
 	var oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec
+	var oldMeta *metav1.ObjectMeta
 	if oldDCD != nil {
 		oldSpec = &oldDCD.Spec
+		oldMeta = &oldDCD.ObjectMeta
 	}
-	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, field.NewPath("metadata"))
+	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
 	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))...)
 }
 

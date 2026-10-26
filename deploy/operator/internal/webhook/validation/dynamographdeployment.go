@@ -255,7 +255,7 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
-	allErrs = append(allErrs, v.sharedValidation.validateObjectMeta(objectMeta, fldPath)...)
+	allErrs = append(allErrs, v.sharedValidation.validateObjectMeta(objectMeta, nil, fldPath)...)
 	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(objectMeta.Annotations); invalid {
 		allErrs = append(allErrs, field.Invalid(
 			annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
