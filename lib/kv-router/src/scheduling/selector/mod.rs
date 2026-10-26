@@ -241,7 +241,6 @@ impl<'a> MaterializedSelectionInput<'a> {
         }
     }
 
-    /// The source the selected worker fetches from.
     fn selected_kv_transfer_source<C: WorkerConfigLike>(
         &self,
         workers: &HashMap<WorkerId, C>,
