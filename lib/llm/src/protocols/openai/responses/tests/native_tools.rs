@@ -326,3 +326,89 @@ fn native_and_legacy_names_reach_muse_parser_with_verbatim_custom_input() {
         assert_eq!(serde_json::to_value(output).unwrap()["input"], input);
     }
 }
+
+#[test]
+fn python_adapter_preserves_native_catalog_and_engine_identities() {
+    let input = json!([
+        {"type":"function_call","call_id":"c1","namespace":"fs","name":"read","arguments":"{}"},
+        {"type":"function_call_output","call_id":"c1","output":"ok"},
+        {"role":"user","content":"Read again"}
+    ]);
+    let chat: NvCreateChatCompletionRequest = request(namespace(true), input).try_into().unwrap();
+    let python = chat
+        .python_chat_processor_request_json(&Default::default())
+        .unwrap();
+    let native = &python["responses_native_tools"];
+    assert_eq!(native["template_tools"][0]["type"], "namespace");
+    assert_eq!(native["template_tools"][0]["defer_loading"], true);
+    assert_eq!(native["tools"][0]["function"]["name"], "fs.read");
+    assert_eq!(
+        native["messages"][0]["tool_calls"][0]["function"]["name"],
+        "fs.read"
+    );
+    assert_eq!(python["tools"][0]["function"]["name"], "read");
+    let wire = serde_json::to_value(&chat).unwrap();
+    assert!(wire.get("responses_native_tools").is_none());
+    let mut spoofed = wire;
+    spoofed["responses_native_tools"] = native.clone();
+    let decoded: NvCreateChatCompletionRequest = serde_json::from_value(spoofed).unwrap();
+    assert!(
+        decoded
+            .python_chat_processor_request_json(&Default::default())
+            .unwrap()
+            .get("responses_native_tools")
+            .is_none()
+    );
+}
+
+#[test]
+fn responses_tool_kinds_are_validated_before_function_conversion() {
+    let function = json!({"type":"function","name":"run","parameters":{"type":"object"}});
+    let custom = json!({"type":"custom","name":"run"});
+    for (tools, choice) in [
+        (
+            json!([function.clone()]),
+            json!({"type":"custom","name":"run"}),
+        ),
+        (
+            json!([custom.clone()]),
+            json!({"type":"function","name":"run"}),
+        ),
+        (json!([function.clone(), custom.clone()]), json!("auto")),
+        (json!([custom.clone(), function.clone()]), json!("auto")),
+        (
+            json!([{"type":"namespace","name":"fs","description":"Files","tools":[function.clone(),custom.clone()]}]),
+            json!("auto"),
+        ),
+    ] {
+        let mut req = request(tools.clone(), json!("hi"));
+        req.inner.tool_choice = Some(serde_json::from_value(choice.clone()).unwrap());
+        let result = NvCreateChatCompletionRequest::try_from(req);
+        assert!(
+            result.is_err(),
+            "invalid registry/choice accepted: {tools} {choice}"
+        );
+    }
+    for (tools, choice) in [
+        (
+            json!([function.clone()]),
+            json!({"type":"function","name":"run"}),
+        ),
+        (
+            json!([custom.clone()]),
+            json!({"type":"custom","name":"run"}),
+        ),
+        (
+            json!([function.clone(),{"type":"namespace","name":"fs","description":"Files","tools":[custom.clone()]}]),
+            json!({"type":"custom","name":"fs.run"}),
+        ),
+        (
+            json!([{"type":"namespace","name":"fs","description":"Files","tools":[function]}, {"type":"namespace","name":"shell","description":"Shell","tools":[custom]}]),
+            json!("auto"),
+        ),
+    ] {
+        let mut req = request(tools, json!("hi"));
+        req.inner.tool_choice = Some(serde_json::from_value(choice).unwrap());
+        NvCreateChatCompletionRequest::try_from(req).unwrap();
+    }
+}

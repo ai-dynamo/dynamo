@@ -131,6 +131,12 @@ fn is_muse_spark_parser(parser_name: Option<&str>) -> bool {
     matches!(parser_name, Some("muse_spark_open" | "muse_spark"))
 }
 
+// Spark's unified parser can be selected through either parser slot. Its
+// forced-tool grammar must use that same family when only reasoning is set.
+fn structural_tag_parser<'a>(tool: Option<&'a str>, reasoning: Option<&'a str>) -> Option<&'a str> {
+    tool.or_else(|| reasoning.filter(|parser| is_muse_spark_parser(Some(parser))))
+}
+
 fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
     // K2/Muse Spark forced calls and K3 named calls cannot use the generic JSON-schema
     // fallback because both families emit native, marker-delimited formats.
@@ -227,6 +233,7 @@ pub(crate) fn structural_tag_decision(
     // Validate before any mode or family gate. Kimi K3 required requests use a
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
+    let parser_name = structural_tag_parser(parser_name, reasoning_parser);
 
     // A native Harmony handoff stops vLLM after the first call. Required parallel
     // calls instead share one guided JSON array, parsed as GuidedJsonRequired.
@@ -354,7 +361,10 @@ impl OpenAIPreprocessor {
         response_format: Option<&ResponseFormat>,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
-        let parser_name = self.tool_call_parser.as_deref();
+        let parser_name = structural_tag_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
         let explicit_config = self.runtime_config.structural_tag.as_ref();
 
         let config = explicit_config.cloned().unwrap_or_default();
@@ -805,6 +815,46 @@ mod tests {
         assert!(error.to_string().contains(
             "structural_tag.reasoning_boundary=structural_tag conflicts with the backend"
         ));
+    }
+
+    #[test]
+    fn reasoning_only_spark_forced_choice_installs_native_grammar() {
+        for parser in ["muse_spark", "muse_spark_open"] {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            mdc.runtime_config.tool_call_parser = None;
+            mdc.runtime_config.reasoning_parser = Some(parser.into());
+            let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            for choice in [
+                serde_json::json!("required"),
+                serde_json::json!({"type":"function","function":{"name":"get_weather"}}),
+            ] {
+                let chat:crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest=serde_json::from_value(serde_json::json!({
+                    "model":"m","messages":[{"role":"user","content":"Weather"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}}],"tool_choice":choice,"parallel_tool_calls":false
+                })).unwrap();
+                let mut request = preprocessed_request();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&chat, &mut request, false)
+                    .unwrap();
+                assert!(
+                    matches!(
+                        constraint,
+                        crate::protocols::openai::GuidedToolConstraint::StructuralTag
+                    ),
+                    "{parser}: {constraint:?}"
+                );
+                let guidance = request.sampling_options.guided_decoding.unwrap();
+                assert!(
+                    guidance
+                        .structural_tag
+                        .unwrap()
+                        .to_string()
+                        .contains("atem:invoke")
+                );
+                assert!(guidance.json.is_none());
+            }
+        }
     }
 
     #[test]

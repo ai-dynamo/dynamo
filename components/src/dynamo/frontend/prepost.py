@@ -37,7 +37,7 @@ from dynamo.frontend.vllm_protocol import (
 )
 from dynamo.llm.exceptions import InvalidArgument
 
-from .responses_history import responses_history_template
+from .responses_history import responses_history_template, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -604,6 +604,21 @@ def _prepare_request(
         messages_for_render: Messages to pass as first arg to render_messages.
         chat_params: ChatParams for render_messages / render_messages_async.
     """
+    resolved_responses_template = None
+    if isinstance(request, dict) and request.get("responses_native_tools"):
+        # Resolve using the legacy function view so variant/override precedence
+        # is unchanged, then switch the whole in-process view together.
+        resolved_responses_template = resolve_chat_template(
+            tokenizer,
+            request.get("chat_template"),
+            request.get("tools"),
+            model_config=model_config,
+        )
+        selected_request = responses_tools_request(request, resolved_responses_template)
+        if selected_request is not request:
+            request = selected_request
+            validated_request = None
+
     request_for_sampling = (
         validated_request
         if validated_request is not None
@@ -714,10 +729,14 @@ def _prepare_request(
         else request_for_sampling.messages
     )
 
+    if tool_dicts and isinstance(request, dict):
+        tool_dicts = request.get("responses_template_tools", tool_dicts)
+
     chat_template = responses_history_template(
-        request_for_sampling.chat_template,
+        resolved_responses_template or request_for_sampling.chat_template,
         request.get("responses_history_phases") if isinstance(request, dict) else None,
-        lambda: resolve_chat_template(
+        lambda: resolved_responses_template
+        or resolve_chat_template(
             tokenizer,
             request_for_sampling.chat_template,
             tool_dicts,

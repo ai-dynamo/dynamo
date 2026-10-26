@@ -1215,6 +1215,23 @@ impl ResponseStreamConverter {
         &self,
         event: &ResponseStreamEvent,
     ) -> Result<String, serde_json::Error> {
+        // Only lifecycle events serialize the response object. Ordinary deltas
+        // must not clone the tool catalog on every generated token.
+        let (sequence_number, response) = match event {
+            ResponseStreamEvent::ResponseCreated(event) => (event.sequence_number, &event.response),
+            ResponseStreamEvent::ResponseInProgress(event) => {
+                (event.sequence_number, &event.response)
+            }
+            ResponseStreamEvent::ResponseCompleted(event) => {
+                (event.sequence_number, &event.response)
+            }
+            ResponseStreamEvent::ResponseFailed(event) => (event.sequence_number, &event.response),
+            ResponseStreamEvent::ResponseIncomplete(event) => {
+                (event.sequence_number, &event.response)
+            }
+            ResponseStreamEvent::ResponseQueued(event) => (event.sequence_number, &event.response),
+            _ => return serde_json::to_string(event),
+        };
         let echoed_tools = self.params.echoed_tools();
         let spec = ResponseSpecFields {
             template_tools: echoed_tools.as_deref(),
@@ -1223,58 +1240,12 @@ impl ResponseStreamConverter {
             frequency_penalty: self.params.frequency_penalty.unwrap_or(0.0),
             store: self.params.store.unwrap_or(false),
         };
-
-        match event {
-            ResponseStreamEvent::ResponseCreated(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.created",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseInProgress(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.in_progress",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseCompleted(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.completed",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseFailed(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.failed",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseIncomplete(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.incomplete",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            ResponseStreamEvent::ResponseQueued(event) => {
-                serde_json::to_string(&ResponseEventForSpec::new(
-                    "response.queued",
-                    event.sequence_number,
-                    &event.response,
-                    spec,
-                ))
-            }
-            _ => serde_json::to_string(event),
-        }
+        serde_json::to_string(&ResponseEventForSpec::new(
+            get_event_type(event),
+            sequence_number,
+            response,
+            spec,
+        ))
     }
 }
 

@@ -1532,3 +1532,26 @@ async fn tool_name_limit_is_shared_across_protocols() {
     })
     .await;
 }
+
+#[tokio::test]
+#[serial]
+async fn responses_rejects_custom_kind_mismatch_before_dispatch() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc=HarnessService::start([]).await;
+        let function=json!({"type":"function","name":"run","parameters":{"type":"object"}});
+        let custom=json!({"type":"custom","name":"run"});
+        for stream in [false,true] {
+            for (tools,choice) in [
+                (json!([function.clone()]),json!({"type":"custom","name":"run"})),
+                (json!([custom.clone()]),json!({"type":"function","name":"run"})),
+                (json!([function.clone(),custom.clone()]),json!("auto")),
+                (json!([custom.clone(),function.clone()]),json!("auto"))
+            ] {
+                let response=post_json(&svc,"/v1/responses",json!({"model":MODEL,"input":"hi","tools":tools,"tool_choice":choice,"stream":stream})).await;
+                assert_eq!(response.status(),reqwest::StatusCode::BAD_REQUEST,"kind mismatch dispatched");
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    }).await;
+}

@@ -6355,3 +6355,61 @@ class TestThinkingControlParity:  # FRONTEND.10
             reasoning_parser_name=None,
         )
         assert result.request.get("chat_template_kwargs", {}) == case.expected
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+def test_preprocess_preserves_responses_native_tools(native):
+    seen = []
+
+    class CapturingTokenizer:
+        chat_template = (
+            "{% set deferred_render_mode = deferred_render_mode | default('tool_name_only') %}"
+            if native
+            else ""
+        ) + "{{ tools | tojson }}"
+
+        def get_chat_template(self, **kwargs):
+            return self.chat_template
+
+        def apply_chat_template(self, messages, **kwargs):
+            seen.append(kwargs["tools"])
+            return [1]
+
+    function = {"name": "read", "parameters": {"type": "object"}}
+    catalog = [
+        {
+            "type": "namespace",
+            "name": "fs",
+            "description": "Files",
+            "defer_loading": True,
+            "tools": [function],
+        }
+    ]
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Read a file"}],
+        "tool_choice": "auto",
+        "tools": [{"type": "function", "function": function}],
+    }
+    request["responses_native_tools"] = {
+        "tools": [{"type": "function", "function": {**function, "name": "fs.read"}}],
+        "template_tools": catalog,
+        "messages": request["messages"],
+        "tool_choice": "auto",
+    }
+    result = preprocess_chat_request(
+        request,
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+    )
+    assert result.request["tools"][0]["function"]["name"] == (
+        "fs.read" if native else "read"
+    )
+    if native:
+        assert seen[0] == catalog
+    else:
+        assert seen[0][0]["type"] == "function"
+        assert seen[0][0]["function"]["name"] == "read"
+    assert request["tools"][0]["function"]["name"] == "read"

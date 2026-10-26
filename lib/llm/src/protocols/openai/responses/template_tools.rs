@@ -406,6 +406,25 @@ impl NvCreateChatCompletionRequest {
     ) -> Result<serde_json::Value, serde_json::Error> {
         let mut value = serde_json::to_value(self)?;
         if let Some(context) = &self.responses_tools {
+            if let Some(template_tools) = self.native_template_tools() {
+                // This catalog is renderer-only: Python chooses it after resolving
+                // the active template. Keep worker serialization unchanged and
+                // switch engine names, selected choice and history as one view.
+                let mut native = self.clone();
+                native.normalize_responses_history_phases(
+                    runtime_config.preserves_response_message_phases(),
+                );
+                native
+                    .normalize_responses_tools(true)
+                    .map_err(serde::ser::Error::custom)?;
+                let native = serde_json::to_value(native)?;
+                value["responses_native_tools"] = serde_json::json!({
+                    "template_tools": template_tools,
+                    "tools": native["tools"],
+                    "tool_choice": native["tool_choice"],
+                    "messages": native["messages"],
+                });
+            }
             let history = if runtime_config.preserves_response_message_phases() {
                 context.phase_history.as_ref()
             } else {

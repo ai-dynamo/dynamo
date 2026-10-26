@@ -457,3 +457,51 @@ fn python_history_defaults_to_legacy_coalescing_before_model_selection() {
         );
     }
 }
+
+#[test]
+fn unary_boundaries_preserve_aggregate_reasoning_and_refusal() {
+    use crate::protocols::openai::chat_completions::{MessageBoundary, ResponseOutputEvent};
+    for ordered_reasoning in [false, true] {
+        let mut chat: NvCreateChatCompletionResponse=serde_json::from_value(json!({
+            "id":"chat-r","object":"chat.completion","created":0,"model":"m",
+            "choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"Aggregate thought","content":"Cannot comply.","refusal":"Unsafe request"},"finish_reason":"stop","logprobs":null}]
+        })).unwrap();
+        if ordered_reasoning {
+            chat.response_events
+                .push(ResponseOutputEvent::Reasoning("Ordered thought".into()));
+        }
+        chat.response_events.extend([
+            ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::FinalAnswer)),
+            ResponseOutputEvent::Text("Cannot comply.".into()),
+            ResponseOutputEvent::Boundary(MessageBoundary::End),
+        ]);
+        let params = ResponseParams {
+            reasoning: Some(serde_json::from_value(json!({"summary":"auto"})).unwrap()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(chat_completion_to_response(chat, &params, None).unwrap())
+            .unwrap();
+        let items = value["output"].as_array().unwrap();
+        let thoughts: Vec<_> = items.iter().filter(|i| i["type"] == "reasoning").collect();
+        assert_eq!(thoughts.len(), 1, "reasoning lost or duplicated: {value}");
+        assert_eq!(
+            thoughts[0]["content"][0]["text"],
+            if ordered_reasoning {
+                "Ordered thought"
+            } else {
+                "Aggregate thought"
+            }
+        );
+        let message = items.iter().find(|i| i["type"] == "message").unwrap();
+        assert_eq!(message["phase"], "final_answer");
+        assert_eq!(message["content"][0]["text"], "Cannot comply.");
+        assert!(
+            items
+                .iter()
+                .filter(|i| i["type"] == "message")
+                .flat_map(|i| i["content"].as_array().unwrap())
+                .any(|c| c["refusal"] == "Unsafe request"),
+            "refusal lost: {value}"
+        );
+    }
+}

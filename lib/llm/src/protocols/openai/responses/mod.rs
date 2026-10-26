@@ -942,6 +942,82 @@ fn allowed_function_names(
     Ok(allowed)
 }
 
+// The function-template adapter erases custom kinds. Validate identities before
+// conversion so declaration order cannot change a call's public response type.
+fn validate_response_tool_kinds(
+    tools: &[Tool],
+    choice: Option<&RequestToolChoiceParam>,
+    names: &ToolNameMap,
+) -> anyhow::Result<()> {
+    let mut kinds = HashMap::new();
+    let mut register = |namespace: Option<&str>, name: &str, custom: bool| {
+        let identity = (namespace.map(str::to_owned), name.to_owned());
+        if kinds
+            .insert(identity, custom)
+            .is_some_and(|previous| previous != custom)
+        {
+            return Err(ResponsesConversionError::InvalidArgument(format!(
+                "Responses tool '{name}' is declared as both custom and function in the same namespace"
+            )));
+        }
+        Ok(())
+    };
+    for tool in tools {
+        match tool {
+            Tool::Function(function) => register(None, &function.name, false)?,
+            Tool::Custom(custom) => register(None, &custom.name, true)?,
+            Tool::Namespace(namespace) => {
+                for member in &namespace.tools {
+                    match member {
+                        NamespaceToolParamTool::Function(function) => {
+                            register(Some(&namespace.name), &function.name, false)?
+                        }
+                        NamespaceToolParamTool::Custom(custom) => {
+                            register(Some(&namespace.name), &custom.name, true)?
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let validate = |namespace: Option<&str>, name: &str, custom: bool| -> anyhow::Result<()> {
+        let resolved = names.resolve_choice(namespace, name)?;
+        let (namespace, leaf) = names.decode(&resolved);
+        // Unknown names retain the existing tool-choice validation path.
+        if kinds
+            .get(&(namespace.map(str::to_owned), leaf.to_owned()))
+            .is_some_and(|declared| *declared != custom)
+        {
+            return Err(ResponsesConversionError::InvalidArgument(format!(
+                "Responses tool_choice selects {} tool '{name}', but that kind is not present in tools",
+                if custom { "custom" } else { "function" }
+            )).into());
+        }
+        Ok(())
+    };
+    match choice {
+        Some(RequestToolChoiceParam::Custom(tool)) => validate(None, &tool.name, true)?,
+        Some(RequestToolChoiceParam::Function(tool)) => validate(None, &tool.name, false)?,
+        Some(RequestToolChoiceParam::AllowedTools(choice)) => {
+            for tool in &choice.tools {
+                if let (Some(kind @ ("function" | "custom")), Some(name)) = (
+                    tool.get("type").and_then(serde_json::Value::as_str),
+                    tool.get("name").and_then(serde_json::Value::as_str),
+                ) {
+                    validate(
+                        tool.get("namespace").and_then(serde_json::Value::as_str),
+                        name,
+                        kind == "custom",
+                    )?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Convert tools and tool choice together so an `allowed_tools` subset cannot
 /// be separated from the tool definitions it constrains.
 fn convert_tools_and_choice(
@@ -953,6 +1029,7 @@ fn convert_tools_and_choice(
     Option<Vec<ChatCompletionTool>>,
     Option<ChatCompletionToolChoiceOption>,
 )> {
+    validate_response_tool_kinds(tools.unwrap_or_default(), tool_choice, names)?;
     let mut converted_tools = tools
         .map(|tools| convert_tools(tools, names))
         .transpose()?
@@ -1523,8 +1600,11 @@ pub fn chat_completion_to_response(
                 logprobs: Some(vec![]),
             }));
         }
-        if let Some(refusal) = choice.message.refusal.filter(|refusal| !refusal.is_empty()) {
-            content.push(OutputMessageContent::Refusal(RefusalContent { refusal }));
+        let refusal = choice.message.refusal.filter(|refusal| !refusal.is_empty());
+        if let Some(refusal) = &refusal {
+            content.push(OutputMessageContent::Refusal(RefusalContent {
+                refusal: refusal.clone(),
+            }));
         }
         if !content.is_empty() {
             output.push(OutputItem::Message(OutputMessage {
@@ -1537,9 +1617,16 @@ pub fn chat_completion_to_response(
         }
 
         if !response_events.is_empty() {
-            // Keep the optional reasoning summary, then reconstruct the visible turn
-            // from parser-owned boundaries and call identities in generation order.
-            output.clear();
+            // Batch parsing can supply boundaries without ordered reasoning
+            // events. Preserve its aggregate reasoning in that case; explicit
+            // ordered events are authoritative and must not duplicate it.
+            let ordered_reasoning = response_events.iter().any(|event| {
+                matches!(
+                    event,
+                    super::chat_completions::ResponseOutputEvent::Reasoning(_)
+                )
+            });
+            output.retain(|item| !ordered_reasoning && matches!(item, OutputItem::Reasoning(_)));
             let mut phase = None;
             let mut text = String::new();
             let mut open = false;
@@ -1637,6 +1724,30 @@ pub fn chat_completion_to_response(
                 },
                 &mut open,
             );
+            // Refusals have no parser boundary event. Retain them on the final
+            // visible message rather than dropping them during reconstruction.
+            if let Some(refusal) = refusal {
+                let target = output.iter_mut().rev().find_map(|item| match item {
+                    OutputItem::Message(message)
+                        if message.phase != Some(MessagePhase::Commentary) =>
+                    {
+                        Some(message)
+                    }
+                    _ => None,
+                });
+                let refusal = OutputMessageContent::Refusal(RefusalContent { refusal });
+                if let Some(message) = target {
+                    message.content.push(refusal);
+                } else {
+                    output.push(OutputItem::Message(OutputMessage {
+                        id: message_id.clone(),
+                        role: AssistantRole::Assistant,
+                        status: OutputStatus::Completed,
+                        phase: Some(MessagePhase::FinalAnswer),
+                        content: vec![refusal],
+                    }));
+                }
+            }
         }
 
         if output.is_empty() {

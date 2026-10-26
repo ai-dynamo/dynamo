@@ -148,3 +148,57 @@ def test_phase_metadata_is_request_local(tokenizer):
     assert "assistant to=user<|message|>Checking.<|eot|>" in render(
         tokenizer, messages, None
     )
+
+
+def test_selected_deferred_tool_is_eager_and_replay_names_match(tokenizer):
+    from dynamo.frontend.responses_history import responses_tools_request
+
+    function = {
+        "type": "function",
+        "function": {
+            "name": "fs.read",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+            },
+        },
+    }
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "fs.read", "arguments": {"path": "a"}},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        {"role": "user", "content": "Read again"},
+    ]
+    request = {
+        "responses_native_tools": {
+            "tools": [function],
+            "messages": messages,
+            "tool_choice": {"type": "function", "function": {"name": "fs.read"}},
+            "template_tools": [
+                {"type": "namespace", "name": "fs", "defer_loading": True}
+            ],
+        }
+    }
+    before = deepcopy(request)
+    selected = responses_tools_request(request, TEMPLATE)
+    prompt = tokenizer.apply_chat_template(
+        selected["messages"],
+        chat_template=TEMPLATE,
+        tools=selected["responses_template_tools"],
+        tokenize=False,
+        current_date="2026-10-06",
+    )
+    assert '"path"' in prompt
+    assert '"name": "fs.read"' in prompt
+    assert "assistant to=fs.read<|message|>" in prompt
+    assert "tool fs.read<|message|>" in prompt
+    assert "[deferred:" not in prompt
+    assert request == before

@@ -33,7 +33,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
-from .responses_history import responses_history_recipients
+from .responses_history import responses_history_recipients, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -900,6 +900,12 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
+    resolved_responses_template = None
+    if request.get("responses_native_tools"):
+        resolved_responses_template = tokenizer.get_chat_template(
+            chat_template=request.get("chat_template"), tools=request.get("tools")
+        )
+        request = responses_tools_request(request, resolved_responses_template)
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
@@ -976,8 +982,12 @@ def preprocess_chat_request(
             "add_generation_prompt": True,
             "tokenize": True,
         }
+        if resolved_responses_template is not None:
+            template_kwargs["chat_template"] = resolved_responses_template
         if template_tools:
-            template_kwargs["tools"] = template_tools
+            template_kwargs["tools"] = request.get(
+                "responses_template_tools", template_tools
+            )
 
         chat_template_kwargs = (
             request.get("chat_template_kwargs")
