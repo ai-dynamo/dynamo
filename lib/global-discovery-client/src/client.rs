@@ -33,7 +33,8 @@ pub enum DiscoveryClientError {
         body: String,
     },
     /// The body is not in the shape this client expects, for example a
-    /// renamed field or a router URL that does not parse.
+    /// renamed field, a router URL that does not parse, or an invalid
+    /// [`Lease`].
     #[error("{url} returned a body this client cannot parse")]
     Decode {
         url: Url,

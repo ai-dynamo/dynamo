@@ -6,8 +6,8 @@
 //! ([`GlobalDiscoveryClient::register_pool`]). A Global Router lists every
 //! pool ([`GlobalDiscoveryClient::pools`]).
 //!
-//! The crate also defines the read-side types that the client and the service
-//! share: the router replica types and the list-and-watch events.
+//! The crate also defines the router replica types and the list-and-watch
+//! events.
 
 mod client;
 mod replicas;

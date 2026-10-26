@@ -1,11 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! List-and-watch events, shared by the Global Discovery Service and its
-//! clients.
-//!
-//! A watch starts with one `Added` per current item, then one `Resync` with the
-//! same set, then changes. A `Resync` replaces all earlier state.
+//! List-and-watch events. A `Resync` replaces all earlier state.
 
 #[derive(Clone, Debug)]
 pub enum WatchEvent<T, K> {
