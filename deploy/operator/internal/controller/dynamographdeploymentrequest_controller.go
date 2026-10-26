@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"reflect"
 	"sort"
 	"strings"
@@ -449,6 +450,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		}
 		logger.Error(err, "Failed to get DGDR")
 		return ctrl.Result{}, err
+	}
+
+	// A v1beta2 request is stored as a v1beta1 envelope carrier. Until its
+	// reconciler exists, leave that carrier and its children untouched.
+	if dgdr.Spec.V1Beta2 != nil {
+		return ctrl.Result{}, nil
 	}
 
 	// Handle finalizer using common function
@@ -988,9 +995,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	// Build labels (start with generated DGD's labels)
 	labels := make(map[string]string)
 	if generatedDGD.Labels != nil {
-		for k, v := range generatedDGD.Labels {
-			labels[k] = v
-		}
+		maps.Copy(labels, generatedDGD.Labels)
 	}
 	// Add/override with managed labels
 	labels[nvidiacomv1beta1.LabelDGDRName] = dgdr.Name
@@ -1000,21 +1005,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	// Build annotations (start with generated DGD's annotations)
 	annotations := make(map[string]string)
 	if generatedDGD.Annotations != nil {
-		for k, v := range generatedDGD.Annotations {
-			annotations[k] = v
-		}
+		maps.Copy(annotations, generatedDGD.Annotations)
 	}
 	annotations[AnnotationDGDRUID] = string(dgdr.UID)
 
 	// Create DGD from generated deployment
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        dgdName,
-			Namespace:   dgdNamespace,
-			Labels:      labels,
-			Annotations: annotations,
-		},
-		Spec: generatedDGD.Spec,
+		Name:        dgdName,
+		Namespace:   dgdNamespace,
+		Labels:      labels,
+		Annotations: annotations,
+		Spec:        generatedDGD.Spec,
 	}
 
 	// Note: We don't set owner reference on DGD
@@ -1626,10 +1627,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Name: "HUGGING_FACE_HUB_TOKEN",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "hf-token-secret",
-						},
-						Key: "HF_TOKEN",
+						Name: "hf-token-secret",
+						Key:  "HF_TOKEN",
 					},
 				},
 			},
@@ -1746,18 +1745,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			logger.Info("Using PVC for profiling output (from v1alpha1 compatibility fields)", "pvc", outputPVC)
 			profilingOutputVolume = corev1.Volume{
 				Name: VolumeNameProfilingOutput,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: outputPVC,
-					},
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: outputPVC,
 				},
 			}
 		} else {
 			profilingOutputVolume = corev1.Volume{
-				Name: VolumeNameProfilingOutput,
-				VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{},
-				},
+				Name:     VolumeNameProfilingOutput,
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			}
 		}
 		volumes := []corev1.Volume{profilingOutputVolume}
@@ -1766,11 +1761,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		if modelCachePVC != "" {
 			volumes = append(volumes, corev1.Volume{
 				Name: VolumeNameModelCache,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: modelCachePVC,
-						ReadOnly:  true,
-					},
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: modelCachePVC,
+					ReadOnly:  true,
 				},
 			})
 		}
@@ -1783,16 +1776,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}
 			volumes = append(volumes, corev1.Volume{
 				Name: VolumeNameProfilingConfig,
-				VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: cmRef.Name,
-						},
-						Items: []corev1.KeyToPath{{
-							Key:  cmKey,
-							Path: ProfilingConfigDefaultKey,
-						}},
-					},
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					Name: cmRef.Name,
+					Items: []corev1.KeyToPath{{
+						Key:  cmKey,
+						Path: ProfilingConfigDefaultKey,
+					}},
 				},
 			})
 		}
@@ -1805,7 +1794,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			ServiceAccountName: ServiceAccountProfilingJob,
 			RestartPolicy:      corev1.RestartPolicyNever,
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: ptr.To(true),
+				RunAsNonRoot: new(true),
 				RunAsUser:    ptr.To[int64](1000),
 				RunAsGroup:   ptr.To[int64](1000),
 				FSGroup:      ptr.To[int64](1000),
@@ -1818,14 +1807,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		job := &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      jobName,
-				Namespace: dgdr.Namespace,
-				Labels: map[string]string{
-					nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
-					nvidiacomv1beta1.LabelDGDR:      dgdr.Name,
-					nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
-				},
+			Name:      jobName,
+			Namespace: dgdr.Namespace,
+			Labels: map[string]string{
+				nvidiacomv1beta1.LabelApp:       nvidiacomv1beta1.LabelValueDynamoProfiler,
+				nvidiacomv1beta1.LabelDGDR:      dgdr.Name,
+				nvidiacomv1beta1.LabelManagedBy: nvidiacomv1beta1.LabelValueDynamoOperator,
 			},
 			Spec: batchv1.JobSpec{
 				BackoffLimit: &backoffLimit,
@@ -2055,7 +2042,10 @@ func restoredAlphaProfilingConfig(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRe
 	if err := alpha.ConvertFrom(dgdr); err != nil {
 		return dgdv1alpha1.ProfilingConfigSpec{}, err
 	}
-	return alpha.Spec.ProfilingConfig, nil
+	if alpha.Spec.ProfilingConfig == nil {
+		return dgdv1alpha1.ProfilingConfigSpec{}, nil
+	}
+	return *alpha.Spec.ProfilingConfig, nil
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed
@@ -2585,10 +2575,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 					return nil
 				}
 				return []ctrl.Request{{
-					NamespacedName: types.NamespacedName{
-						Name:      dgdrName,
-						Namespace: dgdrNamespace,
-					},
+					Name:      dgdrName,
+					Namespace: dgdrNamespace,
 				}}
 			}),
 		).
@@ -2604,10 +2592,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 					return nil
 				}
 				return []ctrl.Request{{
-					NamespacedName: types.NamespacedName{
-						Name:      dgdrName,
-						Namespace: dgdrNamespace,
-					},
+					Name:      dgdrName,
+					Namespace: dgdrNamespace,
 				}}
 			}),
 			builder.WithPredicates(predicate.Funcs{

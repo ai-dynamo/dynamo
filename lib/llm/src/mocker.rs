@@ -27,8 +27,8 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent, RawKvEventSink,
-    ReplayRequestContext,
+    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
+    RawKvEventSink, ReplayRequestContext,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -62,7 +62,7 @@ use self::handoff::{
     HandoffControl, SourceHandoffManager, SourceRegistration, cancel_destination,
     live_handoff_boundary, order_for_engine, run_destination_session,
 };
-use self::metrics::NativeMockerMetrics;
+use self::metrics::{DynamoLabelValues, NativeMockerMetrics};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -325,8 +325,17 @@ enum StartupState {
 impl MockerExecutionContext {
     fn new(engine_args: MockerConfig) -> Self {
         let (startup_state, _) = watch::channel(StartupState::Starting);
-        let native_metrics = NativeMockerMetrics::new(engine_args.backend, engine_args.dp_size)
-            .expect("mocker native metrics collectors should be valid");
+        // SGLang labels its metrics with the worker's disaggregation role.
+        let sglang_engine_type = if engine_args.is_prefill() {
+            "prefill"
+        } else if engine_args.is_decode() {
+            "decode"
+        } else {
+            "unified"
+        };
+        let native_metrics =
+            NativeMockerMetrics::new(engine_args.backend, engine_args.dp_size, sglang_engine_type)
+                .expect("mocker native metrics collectors should be valid");
         let response_replay_table = engine_args
             .runtime
             .response_replay_trace_path
@@ -367,6 +376,14 @@ impl MockerExecutionContext {
     fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> u32 {
         if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
             return dp_rank;
+        }
+
+        // SGLang's default auto policy follows the bootstrap room on prefill workers.
+        if self.engine_args.backend == EngineType::Sglang
+            && self.engine_args.is_prefill()
+            && let Some(bootstrap_info) = request.bootstrap_info.as_ref()
+        {
+            return (bootstrap_info.bootstrap_room % u64::from(self.engine_args.dp_size)) as u32;
         }
 
         self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
@@ -429,8 +446,12 @@ impl MockerExecutionContext {
         );
     }
 
-    async fn start(self: Arc<Self>, endpoint: dynamo_runtime::component::Endpoint) -> Result<()> {
-        let result = Arc::clone(&self).start_inner(endpoint).await;
+    async fn start(
+        self: Arc<Self>,
+        endpoint: dynamo_runtime::component::Endpoint,
+        model_name: String,
+    ) -> Result<()> {
+        let result = Arc::clone(&self).start_inner(endpoint, model_name).await;
         match &result {
             Ok(()) => {
                 self.startup_state.send_replace(StartupState::Ready);
@@ -445,6 +466,7 @@ impl MockerExecutionContext {
     async fn start_inner(
         self: Arc<Self>,
         endpoint: dynamo_runtime::component::Endpoint,
+        model_name: String,
     ) -> Result<()> {
         let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
@@ -452,8 +474,17 @@ impl MockerExecutionContext {
         // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
         // primary_token() is only cancelled in Phase 3, after waiting for inflight requests.
         let primary_token = component.drt().primary_token();
-        self.native_metrics
-            .register(component.get_metrics_registry())?;
+        let dynamo_labels = DynamoLabelValues {
+            namespace: component.namespace().name(),
+            component: component.name().to_string(),
+            endpoint: endpoint.name().to_string(),
+            worker_id: format!("{:x}", component.drt().connection_id()),
+        };
+        self.native_metrics.register(
+            component.get_metrics_registry(),
+            &model_name,
+            &dynamo_labels,
+        )?;
 
         // Simulate engine startup time if configured
         if let Some(startup_time_secs) = self.engine_args.startup_time {
@@ -659,6 +690,8 @@ impl MockerExecutionContext {
                     {
                         Ok(sink) => {
                             let source_config = Some(KvEventSourceConfig::Zmq {
+                                liveness: None,
+                                expected_rank: None,
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
                                 topic: String::new(),
                                 image_token_id: None,
@@ -913,10 +946,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .map_or(max_output_tokens, |max_model_len| {
                     max_output_tokens.min(max_model_len.saturating_sub(request.token_ids.len()))
                 });
-        let native_timing = self
-            .native_metrics
-            .request_timing(&request.model, dp_rank, is_prefill, request_start)
-            .await;
+        let native_timing = self.native_metrics.request_timing(dp_rank, request_start);
 
         let prompt_tokens_count = request.token_ids.len();
         // Convert PreprocessedRequest to DirectRequest for scheduler
@@ -1221,7 +1251,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                native_timing.record_token();
                                 None
                             };
 
@@ -1297,7 +1327,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                native_timing.record_token();
                             } else {
                                 let mut final_output = LLMEngineOutput::length();
                                 if let Some(cached) = cached_prefix_tokens {
@@ -1318,7 +1348,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             if !send_response(&stream_tx, output, &async_context) {
                                 break;
                             }
-                            native_timing.record_tokens(1);
+                            native_timing.record_token();
                         }
                     }
 
@@ -1361,11 +1391,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     }
 }
 
-/// Create a mocker engine as ExecutionContext
+/// Create a mocker engine as ExecutionContext. `model_name` is the served model name its native
+/// engine metrics are labelled with.
 pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
     endpoint_id: dynamo_runtime::protocols::EndpointId,
     args: MockerConfig,
+    model_name: String,
 ) -> Result<ExecutionContext, Error> {
     tracing::info!("Creating mocker engine with config: {args:?}");
     let engine = Arc::new(MockerExecutionContext::new(args));
@@ -1396,7 +1428,7 @@ pub async fn make_mocker_engine(
 
         tracing::debug!("Component service is now available, starting mocker engine");
         let endpoint = component.endpoint(endpoint_id.name);
-        if let Err(error) = startup_engine.start(endpoint).await {
+        if let Err(error) = startup_engine.start(endpoint, model_name).await {
             tracing::error!("Failed to start mocker engine: {error}");
         }
     });
@@ -1478,6 +1510,74 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    fn dp_rank_engine(
+        backend: EngineType,
+        worker_type: WorkerType,
+        dp_size: u32,
+    ) -> MockerExecutionContext {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "dp_size": dp_size,
+            "engine": { "backend": backend, "worker_type": worker_type }
+        }))
+        .unwrap();
+        MockerExecutionContext::new(args)
+    }
+
+    fn dp_rank_request(room: Option<u64>, rank: Option<u32>) -> PreprocessedRequest {
+        use crate::protocols::common::preprocessor::{BootstrapInfo, RoutingHints};
+
+        let mut request = prefill_request();
+        request.routing = Some(RoutingHints {
+            dp_rank: rank,
+            ..Default::default()
+        });
+        request.bootstrap_info = room.map(|bootstrap_room| BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 0,
+            bootstrap_room,
+            handoff_id: None,
+        });
+
+        request
+    }
+
+    #[test]
+    fn sglang_prefill_dp_rank_follows_bootstrap_room() {
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 3);
+        for (room, expected) in [(0, 0), ((1_u64 << 32) + 2, 0), (i64::MAX as u64, 1)] {
+            assert_eq!(
+                engine.resolve_dp_rank(&dp_rank_request(Some(room), None)),
+                expected,
+                "room={room}"
+            );
+        }
+    }
+
+    #[test]
+    fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
+        assert_eq!(
+            engine.resolve_dp_rank(&dp_rank_request(Some(10), Some(3))),
+            3
+        );
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 0);
+    }
+
+    #[test]
+    fn dp_rank_other_backends_and_roles_keep_round_robin() {
+        for (backend, worker_type) in [
+            (EngineType::Sglang, WorkerType::Decode),
+            (EngineType::Vllm, WorkerType::Prefill),
+        ] {
+            let engine = dp_rank_engine(backend, worker_type, 4);
+            let ranks: Vec<_> = [6, 10, 15, 19, 6]
+                .into_iter()
+                .map(|room| engine.resolve_dp_rank(&dp_rank_request(Some(room), None)))
+                .collect();
+            assert_eq!(ranks, [0, 1, 2, 3, 0], "{backend:?} {worker_type:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

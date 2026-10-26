@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::indexer::{KvIndexerMetrics, LocalKvIndexer};
@@ -80,6 +80,10 @@ pub enum KvEventSourceConfig {
         /// Model video-placeholder token id. `None` leaves video runs on the
         /// engine's native hashing path.
         video_token_id: Option<u32>,
+        /// Source rank when this socket is dedicated to one DP rank.
+        expected_rank: Option<u32>,
+        /// Expected source rank and negotiated heartbeat timeout.
+        liveness: Option<(u32, std::time::Duration)>,
         /// Opt-in replay recovery that gates readiness on verified continuity.
         recovery: Option<ZmqRecoveryConfig>,
     },
@@ -140,6 +144,8 @@ impl KvEventSource {
                 topic,
                 image_token_id,
                 video_token_id,
+                expected_rank,
+                liveness,
                 recovery,
             } => {
                 let listener_handle =
@@ -157,6 +163,8 @@ impl KvEventSource {
                             next_event_id,
                             image_token_id,
                             video_token_id,
+                            expected_rank,
+                            liveness,
                             recovery,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
@@ -251,6 +259,9 @@ pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<PublisherInput>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
+    /// Local pipeline initialization, independent of remote source activity.
+    startup: Option<oneshot::Receiver<()>>,
+    /// Locked only because `stop_and_wait` runs through shared `Arc` handles.
     processor_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -408,6 +419,7 @@ impl KvEventPublisher {
 
         tracing::info!("Using event plane for KV event publishing");
         let endpoint_clone = endpoint.clone();
+        let (startup_tx, startup) = oneshot::channel();
         let processor_handle = component.drt().runtime().secondary().spawn(async move {
             let event_publisher =
                 match dynamo_runtime::transports::event_plane::EventPublisher::for_endpoint_id(
@@ -494,6 +506,7 @@ impl KvEventPublisher {
                 }
             };
 
+            let _ = startup_tx.send(());
             start_event_processor(
                 EventPlanePublisher(event_publisher),
                 worker_id,
@@ -526,8 +539,43 @@ impl KvEventPublisher {
             worker_id,
             tx,
             next_event_id,
+            startup: Some(startup),
             processor_handle: tokio::sync::Mutex::new(Some(processor_handle)),
         })
+    }
+
+    /// Wait for local publication and discovery initialization, not a remote event.
+    pub async fn ready(&mut self) -> Result<()> {
+        if let Some(startup) = self.startup.take() {
+            tokio::select! {
+                result = startup => result.map_err(|_| anyhow::anyhow!("KV event publisher initialization failed"))?,
+                _ = self.cancellation_token.cancelled() => anyhow::bail!("KV event listener stopped during initialization"),
+            }
+        }
+        let stopped = self
+            .processor_handle
+            .get_mut()
+            .as_ref()
+            .is_none_or(|handle| handle.is_finished());
+        anyhow::ensure!(
+            !self.cancellation_token.is_cancelled() && !stopped,
+            "KV event publisher stopped during initialization"
+        );
+        Ok(())
+    }
+
+    /// Observe fatal termination. Ordinary gaps and heartbeat expiry keep listening.
+    pub async fn terminated(&mut self) {
+        let processor = self.processor_handle.get_mut();
+        let Some(handle) = processor.as_mut() else {
+            return;
+        };
+        tokio::select! {
+            _ = handle => {
+                processor.take();
+            }
+            _ = self.cancellation_token.cancelled() => {}
+        }
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {

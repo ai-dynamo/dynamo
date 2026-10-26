@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
@@ -12,6 +11,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::grpc::service::dispatch_error_status;
+// Re-exported so the old per-module path keeps resolving for outside users.
+pub use crate::grpc::service::grpc_monitor_for_disconnects;
 use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::types::Annotated;
 
@@ -20,9 +21,8 @@ use super::kserve;
 use validator::Validate;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::metrics::InflightGuard;
 use crate::http::service::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
+    disconnect::create_connection_monitor,
     metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
 };
 
@@ -108,7 +108,7 @@ pub async fn tensor_response_stream(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = inflight_guard.response_collector();
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -175,47 +175,6 @@ pub async fn tensor_response_stream(
     connection_handle.disarm();
 
     Ok(stream)
-}
-
-/// This method will consume an AsyncEngineStream and monitor for disconnects or context cancellation.
-/// This is gRPC variant of `monitor_for_disconnects` as that implementation has SSE specific handling.
-/// Should decouple and reuse `monitor_for_disconnects`
-///
-/// Uses `tokio::select!` to choose between receiving responses from the source stream or detecting when
-/// the context is stopped. If the context is stopped, we break the stream. If the source stream ends
-/// naturally, we mark the request as successful and send the final `[DONE]` event.
-pub fn grpc_monitor_for_disconnects<T>(
-    stream: impl Stream<Item = Annotated<T>>,
-    context: Arc<dyn AsyncEngineContext>,
-    mut inflight_guard: InflightGuard,
-    mut stream_handle: ConnectionHandle,
-) -> impl Stream<Item = Annotated<T>> {
-    stream_handle.arm();
-    async_stream::stream! {
-        tokio::pin!(stream);
-        loop {
-            tokio::select! {
-                event = stream.next() => {
-                    match event {
-                        Some(response) => {
-                            yield response;
-                        }
-                        None => {
-                            // Stream ended normally
-                            inflight_guard.mark_ok();
-                            stream_handle.disarm();
-                            break;
-                        }
-                    }
-                }
-                // todo - test request cancellation with kserve frontend and tensor-based models
-                _ = context.stopped() => {
-                    tracing::trace!("Context stopped; breaking stream");
-                    break;
-                }
-            }
-        }
-    }
 }
 
 /// Get the request ID from a primary source, or lastly create a new one if not present

@@ -571,6 +571,8 @@ mod socket_tests {
                 Arc::new(AtomicU64::new(0)),
                 None,
                 None,
+                None,
+                None,
                 Some(ZmqRecoveryConfig {
                     replay_endpoint: replay.get_socket().get_last_endpoint().unwrap().unwrap(),
                     dp_rank: 0,

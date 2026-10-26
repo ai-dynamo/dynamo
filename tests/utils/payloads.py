@@ -219,9 +219,9 @@ class HttpCancellationPayload(BasePayload):
             response.raise_for_status()
             deadline = time.monotonic() + self.timeout
             content = ""
-            # Read only the first generated fragment, without buffering a full
-            # response. Closing an unread requests stream closes its connection.
-            for line in response.iter_lines(chunk_size=1):
+            # Keep the stream iterator alive until the explicit response.close().
+            lines = response.iter_lines(chunk_size=1)
+            for line in lines:
                 assert time.monotonic() < deadline, "No content before cancellation"
                 if not line.startswith(b"data:"):
                     continue
@@ -523,7 +523,7 @@ class _KvRoutingPayload(ChatPayload):
         while time.monotonic() < deadline:
             try:
                 response = requests.get(
-                    f"http://{self.host}:{self.port}/health", timeout=5
+                    f"http://{self.host}:{self.port}/health?instances=true", timeout=5
                 )
                 if response.status_code == 200:
                     health = response.json()
@@ -1685,6 +1685,35 @@ class ImagesPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return ImagesPayload.extract_image(response)
+
+
+@dataclass
+class ImagesAccountingPayload(ImagesPayload):
+    """Image-generation payload that also checks the accounting the sample
+    diffusion engine reports: every requested image in ``data``, null token
+    ``usage``, and ``nvext.usage`` counting the images returned and echoing
+    the step count the request asked for."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        requested = int(self.body.get("n", 1))
+        assert (
+            len(result["data"]) == requested
+        ), f"Expected {requested} images in 'data': {len(result['data'])}"
+        assert (
+            result.get("usage") is None
+        ), f"Token usage must stay null without backend token counts: {result['usage']!r}"
+        assert result.get("size") == "1x1", f"Unexpected size: {result.get('size')!r}"
+        assert (
+            result.get("output_format") == "png"
+        ), f"Unexpected output_format: {result.get('output_format')!r}"
+        expected = {"output_images": requested, "input_images": 0}
+        requested_steps = (self.body.get("nvext") or {}).get("num_inference_steps")
+        if requested_steps is not None:
+            expected["num_inference_steps"] = requested_steps
+        accounting = (result.get("nvext") or {}).get("usage")
+        assert accounting == expected, f"Unexpected nvext.usage: {accounting!r}"
 
 
 @dataclass

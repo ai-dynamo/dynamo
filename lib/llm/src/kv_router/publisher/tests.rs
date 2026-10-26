@@ -20,6 +20,39 @@ mod test_event_processing {
     use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_router::zmq_wire::StoredBlockOptions;
 
+    #[tokio::test]
+    async fn publisher_readiness_and_fatal_termination_are_observable_when_idle() {
+        for startup_succeeds in [false, true] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (startup_tx, startup) = oneshot::channel();
+            let (finish_tx, finish_rx) = oneshot::channel::<()>();
+            let processor_task = tokio::spawn(async move {
+                if startup_succeeds {
+                    let _ = startup_tx.send(());
+                    let _ = finish_rx.await;
+                }
+            });
+            let mut publisher = KvEventPublisher {
+                kv_block_size: 1,
+                source: None,
+                cancellation_token: CancellationToken::new(),
+                worker_id: 7,
+                tx,
+                next_event_id: Arc::new(AtomicU64::new(0)),
+                startup: Some(startup),
+                processor_handle: tokio::sync::Mutex::new(Some(processor_task)),
+            };
+            let result = tokio::time::timeout(Duration::from_secs(1), publisher.ready())
+                .await
+                .expect("readiness must complete without data events");
+            assert_eq!(result.is_ok(), startup_succeeds);
+            drop(finish_tx);
+            tokio::time::timeout(Duration::from_secs(1), publisher.terminated())
+                .await
+                .expect("fatal termination must be observable");
+        }
+    }
+
     #[test]
     fn test_publish_batch_preserves_optional_session_ids() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PublisherInput>();
@@ -30,6 +63,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
             processor_handle: tokio::sync::Mutex::new(None),
         };
         publisher
@@ -76,6 +110,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
             processor_handle: tokio::sync::Mutex::new(None),
         };
 
@@ -117,6 +152,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
             processor_handle: tokio::sync::Mutex::new(None),
         };
         drop(rx);
@@ -153,6 +189,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
             processor_handle: tokio::sync::Mutex::new(None),
         };
 
@@ -1304,8 +1341,11 @@ mod tests_startup_helpers {
     //--------------------------------------------------------------------
     // Test start_zmq_listener with a real ZMQ publisher
     //--------------------------------------------------------------------
+    #[rstest::rstest]
+    #[case::legacy(false)]
+    #[case::heartbeat_source(true)]
     #[tokio::test]
-    async fn test_start_zmq_listener_pushes_to_channel() {
+    async fn test_start_zmq_listener_pushes_to_channel(#[case] heartbeat_source: bool) {
         #[derive(serde::Serialize)]
         #[serde(tag = "type")]
         enum MapKvEvent {
@@ -1350,6 +1390,8 @@ mod tests_startup_helpers {
                 next_event_id,
                 None,
                 None,
+                Some(0),
+                heartbeat_source.then_some((0, std::time::Duration::from_millis(500))),
                 None,
             )
         });
@@ -1379,7 +1421,7 @@ mod tests_startup_helpers {
             },
         ];
 
-        let batch = (0.0, events, Some(1_i32));
+        let batch = (0.0, events, Some(0_i32));
 
         let payload = Bytes::from(rmps::to_vec_named(&batch).unwrap());
 
@@ -1439,6 +1481,71 @@ mod tests_startup_helpers {
         };
         assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(42)]);
 
+        // The first accepted batch confirms the subscription is established.
+        // Neither another rank nor an unlabeled batch may reach this rank-zero
+        // source (unlabeled batches otherwise default to rank zero).
+        for rank in [Some(1_i32), None] {
+            send_multipart(
+                &pub_socket,
+                vec![
+                    Vec::new(),
+                    (seq + 1).to_be_bytes().to_vec(),
+                    rmps::to_vec_named(&(
+                        0.0,
+                        vec![MapKvEvent::BlockRemoved {
+                            block_hashes: vec![999],
+                        }],
+                        rank,
+                    ))
+                    .unwrap(),
+                ],
+            )
+            .await
+            .expect("failed to send foreign-rank ZMQ test event");
+        }
+
+        // Heartbeat-aware sources invalidate residency on a transport gap;
+        // legacy advisory streams continue with the received events.
+        let gap_frames = vec![
+            Bytes::from("").to_vec(),
+            Bytes::from((seq + 2).to_be_bytes().to_vec()).to_vec(),
+            payload.to_vec(),
+        ];
+        send_multipart(&pub_socket, gap_frames)
+            .await
+            .expect("failed to send gapped ZMQ test event");
+        let recovery = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for gap recovery")
+            .expect("listener channel closed")
+            .into_events();
+        let offset = usize::from(heartbeat_source);
+        assert_eq!(recovery.len(), 2 + offset);
+        if heartbeat_source {
+            assert!(matches!(recovery[0].event.data, KvCacheEventData::Cleared));
+        }
+        assert!(matches!(
+            recovery[offset].event.data,
+            KvCacheEventData::Stored(_)
+        ));
+        assert!(matches!(
+            recovery[offset + 1].event.data,
+            KvCacheEventData::Removed(_)
+        ));
+        for (index, event) in recovery.iter().enumerate() {
+            assert_eq!(event.event.event_id, 2 + index as u64);
+            assert_eq!(event.event.dp_rank, 0);
+        }
+
+        if heartbeat_source {
+            let expired = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("heartbeat expiry must clear residency")
+                .expect("listener channel closed")
+                .into_events();
+            assert!(matches!(expired[0].event.data, KvCacheEventData::Cleared));
+        }
+
         // Stop the listener
         token.cancel();
         let _ = listener_handle.await;
@@ -1480,6 +1587,8 @@ mod tests_startup_helpers {
                 token,
                 4,
                 Arc::new(AtomicU64::new(0)),
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -1583,6 +1692,8 @@ mod tests_startup_helpers {
                 None,
                 None,
                 None,
+                None,
+                None,
             )
         });
 
@@ -1673,6 +1784,8 @@ mod tests_startup_helpers {
                 token,
                 4,
                 next_event_id,
+                None,
+                None,
                 None,
                 None,
                 None,

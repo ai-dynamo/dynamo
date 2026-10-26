@@ -59,6 +59,11 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 	ctx context.Context,
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
+	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
+	if request.Spec.V1Beta2 != nil {
+		return nil, nil
+	}
+
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
 	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
@@ -70,6 +75,11 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
+	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
+	if newRequest.Spec.V1Beta2 != nil {
+		return nil, nil
+	}
+
 	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
 	validation.warnDeprecatedDGDOverrideTargets(&newRequest.Spec)
@@ -171,7 +181,7 @@ func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedDGDOverrideTarget
 			return
 		}
 		for _, value := range components {
-			component, ok := value.(map[string]interface{})
+			component, ok := value.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -204,7 +214,7 @@ func (v *dynamoGraphDeploymentRequestValidation) warnDeprecatedDGDOverrideTarget
 
 func rawExtensionToUnstructured(extension *k8sruntime.RawExtension) (*unstructured.Unstructured, bool) {
 	if len(extension.Raw) > 0 {
-		object := map[string]interface{}{}
+		object := map[string]any{}
 		if err := json.Unmarshal(extension.Raw, &object); err != nil {
 			return nil, false
 		}

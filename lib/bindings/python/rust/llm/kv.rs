@@ -32,10 +32,11 @@ use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
-    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest, warn_for_unserved_worker_selection_policies,
+    self, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
+    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
+    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
+    warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -43,7 +44,7 @@ use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
-use tracing;
+use tracing::Instrument;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
@@ -571,6 +572,34 @@ where
     rt.block_on(selection::run_server(config.port, service))
 }
 
+/// Depythonize a prompt-carrying request dict. `token_ids` is extracted with pyo3's typed
+/// list conversion: pythonize's per-element serde path costs several times more per token,
+/// all of it on the calling thread under the GIL.
+#[cfg(feature = "select-service")]
+fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
+    request: &Bound<'_, PyAny>,
+    prompt: impl FnOnce(&mut T) -> &mut PromptRequest,
+) -> PyResult<T> {
+    let invalid = |e: pythonize::PythonizeError| PyValueError::new_err(e.to_string());
+    let Ok(dict) = request.downcast::<pyo3::types::PyDict>() else {
+        return depythonize(request).map_err(invalid);
+    };
+    let Some(tokens) = dict
+        .get_item("token_ids")?
+        .filter(|tokens| !tokens.is_none())
+    else {
+        return depythonize(request).map_err(invalid);
+    };
+    let token_ids = tokens
+        .extract::<Vec<u32>>()
+        .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))?;
+    let rest = dict.copy()?;
+    rest.del_item("token_ids")?;
+    let mut req: T = depythonize(rest.as_any()).map_err(invalid)?;
+    prompt(&mut req).token_ids = Some(token_ids);
+    Ok(req)
+}
+
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
 /// `ValueError`, anything else a `SelectionServiceError` carrying `kind` and
 /// `status_code`.
@@ -793,8 +822,9 @@ impl SelectionService {
 
     /// Per-worker KV-overlap scores for a prompt (dict, see `OverlapScoresRequest`).
     fn overlap_scores<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: OverlapScoresRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<OverlapScoresRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.overlap_scores(req).await.map_err(selection_to_pyerr)?;
@@ -804,8 +834,8 @@ impl SelectionService {
 
     /// Select the best worker by KV-overlap + load, no booking (dict, see `SelectRequest`).
     fn select<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req =
+            depythonize_prompt_request::<SelectRequest>(request.bind(py), |req| &mut req.prompt)?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.select(req).await.map_err(selection_to_pyerr)?;
@@ -819,8 +849,9 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectAndReserveRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<SelectAndReserveRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -838,8 +869,9 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: ReservationRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<ReservationRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -904,8 +936,9 @@ impl SelectionService {
 
     /// Per-worker potential loads for a prompt, without booking (dict, see `PotentialLoadsRequest`).
     fn potential_loads<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: PotentialLoadsRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<PotentialLoadsRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -1294,6 +1327,8 @@ impl KvEventPublisher {
         video_token_id: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
+            liveness: None,
+            expected_rank: None,
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
@@ -2114,13 +2149,17 @@ impl KvRouter {
     fn process_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
+        dispatch_span: tracing::Span,
     ) -> PyResult<Bound<'p, PyAny>> {
         crate::future_into_py(py, async move {
-            let single_in = SingleIn::new(request);
-            let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+            let stream = inner
+                .generate(request)
+                .instrument(dispatch_span)
+                .await
+                .map_err(to_pyerr)?;
             let (tx, rx) =
                 tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
 
@@ -2188,17 +2227,23 @@ impl KvRouter {
     fn dispatch_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_mode: ResponseBufferMode,
+        dispatch_span: tracing::Span,
     ) -> PyResult<Bound<'p, PyAny>> {
         match response_buffer_mode {
             ResponseBufferMode::Rendezvous => {
-                demand_driven::process_request_to_stream(py, inner, request, tracker)
+                demand_driven::process_request_to_stream(py, inner, request, tracker, dispatch_span)
             }
-            ResponseBufferMode::Buffered(capacity) => {
-                Self::process_request_to_stream(py, inner, request, tracker, capacity)
-            }
+            ResponseBufferMode::Buffered(capacity) => Self::process_request_to_stream(
+                py,
+                inner,
+                request,
+                tracker,
+                capacity,
+                dispatch_span,
+            ),
         }
     }
 }
@@ -2402,18 +2447,22 @@ impl KvRouter {
         Self::dispatch_request_to_stream(
             py,
             self.inner.clone(),
-            request,
+            SingleIn::new(request),
             Some(tracker),
             response_buffer_size,
+            tracing::Span::none(),
         )
     }
 
-    #[pyo3(signature = (request, response_buffer_size=100))]
+    /// Generate from a preprocessed request while optionally preserving its
+    /// parent Python context across the PyO3 task boundary.
+    #[pyo3(signature = (request, response_buffer_size=100, context=None))]
     fn generate_from_request<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         response_buffer_size: isize,
+        context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the request directly into PreprocessedRequest
@@ -2429,6 +2478,11 @@ impl KvRouter {
                 t
             }
         };
+        let request = crate::create_request_context(request, &context);
+        let dispatch_span = context
+            .as_ref()
+            .map(|context| crate::get_span_for_context(context, "kv_router.generate_from_request"))
+            .unwrap_or_else(tracing::Span::none);
 
         // Use the helper method to process the request
         Self::dispatch_request_to_stream(
@@ -2437,6 +2491,7 @@ impl KvRouter {
             request,
             Some(tracker),
             response_buffer_size,
+            dispatch_span,
         )
     }
 
