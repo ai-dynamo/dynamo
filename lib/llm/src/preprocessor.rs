@@ -3242,6 +3242,24 @@ impl OpenAIPreprocessor {
         self.builder_with_lora(request, None)
     }
 
+    fn validate_model_request<R: OAIChatLikeRequest>(&self, request: &R) -> Result<()> {
+        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) == Some("gpt_oss")
+            && request
+                .chat_template_args()
+                .and_then(|args| args.get("reasoning_effort"))
+                .and_then(serde_json::Value::as_str)
+                == Some("none")
+        {
+            return Err(invalid_argument_error(
+                "GPT-OSS does not support reasoning_effort=none; use low, medium, or high",
+            ));
+        }
+        Ok(())
+    }
+
     fn builder_with_lora<
         R: OAIChatLikeRequest
             + MediaRequestExt
@@ -3257,6 +3275,7 @@ impl OpenAIPreprocessor {
     ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
+        self.validate_model_request(request)?;
 
         let mut stop_conditions = request.extract_stop_conditions()?;
         let eos_token_ids = self.model_info.eos_token_ids();

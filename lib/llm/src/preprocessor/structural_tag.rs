@@ -65,17 +65,22 @@ pub(crate) enum SelectedStructuralTagBuilder {
 
 impl SelectedStructuralTagBuilder {
     fn for_parser(parser_name: &str, reasoning_parser: Option<&str>) -> Option<Self> {
-        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            Some(parser_name),
-            reasoning_parser,
-        )
-        .is_some()
-            && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
-        {
-            return Some(Self::V2(builder));
+        if let Some((_, builder)) = Self::for_unified_parser(Some(parser_name), reasoning_parser) {
+            return Some(builder);
         }
 
         v1::StructuralTagBuilder::for_parser(parser_name).map(Self::V1)
+    }
+
+    pub(super) fn for_unified_parser(
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> Option<(&'static str, Self)> {
+        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            tool_call_parser,
+            reasoning_parser,
+        )?;
+        v2::StructuralTagBuilder::for_parser(family).map(|builder| (family, Self::V2(builder)))
     }
 
     fn build(
@@ -159,8 +164,22 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
     exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
 }
 
-/// Whether a request is entitled to use a structural tag, bundled with proof the
-/// parser registry can actually build one.
+pub(super) fn uses_gpt_oss_required_array(
+    (parser_name, reasoning_parser): (Option<&str>, Option<&str>),
+    tool_choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+) -> bool {
+    crate::protocols::openai::chat_completions::unified_parser::selected_family(
+        parser_name,
+        reasoning_parser,
+    ) == Some("gpt_oss")
+        && matches!(tool_choice, ToolChoice::Required)
+        && parallel_tool_calls != Some(false)
+}
+
+/// Whether a request uses a native tool-call structural tag, bundled with proof
+/// the parser registry can actually build one. Required GPT-OSS arrays keep their
+/// guided-JSON parser mode even when their JSON payload has a structural envelope.
 ///
 /// This is the single owner of "is a structural tag applicable and available" —
 /// covering model-family/tool-choice intrinsic eligibility, the configured
@@ -208,6 +227,16 @@ pub(crate) fn structural_tag_decision(
     // Validate before any mode or family gate. Kimi K3 required requests use a
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
+
+    // A native Harmony handoff stops vLLM after the first call. Required parallel
+    // calls instead share one guided JSON array, parsed as GuidedJsonRequired.
+    if uses_gpt_oss_required_array(
+        (parser_name, reasoning_parser),
+        tool_choice,
+        parallel_tool_calls,
+    ) {
+        return Ok(StructuralTagDecision::NotApplicable);
+    }
 
     if config.is_none() && !requires_intrinsic_structural_tag(parser_name, tool_choice) {
         return Ok(StructuralTagDecision::NotApplicable);
@@ -277,6 +306,44 @@ pub(crate) fn structural_tag_decision(
 }
 
 impl OpenAIPreprocessor {
+    pub(super) fn apply_structured_output_tag(
+        &self,
+        parser_name: &str,
+        builder: SelectedStructuralTagBuilder,
+        schema: &serde_json::Value,
+        starts_in_reasoning: bool,
+        request: &mut PreprocessedRequest,
+    ) -> Result<bool, DynamoError> {
+        let config = self
+            .runtime_config
+            .structural_tag
+            .clone()
+            .unwrap_or_default();
+        let applied = apply_structural_tag(
+            parser_name,
+            builder.build(&StructuralTagBuildRequest {
+                tool_choice: &ToolChoice::None,
+                tools: &[],
+                parallel_tool_calls: None,
+                schema_mode: config.schema,
+                exclude_special_tokens: config.exclude_special_tokens,
+                reasoning_boundary: ResolvedReasoningBoundary::StructuralTag,
+                tool_arguments_any_order: false,
+                starts_in_reasoning,
+                structured_output_schema: Some(schema),
+            }),
+            request,
+        )?;
+        if applied {
+            request
+                .sampling_options
+                .guided_decoding
+                .get_or_insert_default()
+                .json = None;
+        }
+        Ok(applied)
+    }
+
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
         &self,
@@ -465,6 +532,15 @@ pub(super) fn validate_runtime_config(
     let backend_excludes_reasoning = match runtime_config
         .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
     {
+        // GPT-OSS's native reasoner is a Harmony stub, not a delayed grammar gate.
+        Ok(_)
+            if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                runtime_config.tool_call_parser.as_deref(),
+                runtime_config.reasoning_parser.as_deref(),
+            ) == Some("gpt_oss") =>
+        {
+            false
+        }
         Ok(value) => value.unwrap_or(false),
         Err(error) if runtime_config.structural_tag.is_none() => {
             tracing::warn!(
@@ -1275,9 +1351,21 @@ mod tests {
             ("qwen3_coder", None),
             ("glm47", Some("glm45")),
             ("qwen3_coder", Some("deepseek_r1")),
+            ("harmony", Some("gpt_oss")),
+            ("gpt_oss", None),
+            ("harmony", Some("deepseek_r1")),
         ] {
             let compatible = reasoning != Some("deepseek_r1");
             let uses_v2 = version != "1" && compatible;
+            assert_eq!(
+                uses_gpt_oss_required_array((Some(tool), reasoning), &ToolChoice::Required, None),
+                uses_v2 && matches!(tool, "harmony" | "gpt_oss")
+            );
+            assert!(!uses_gpt_oss_required_array(
+                (Some(tool), reasoning),
+                &ToolChoice::Required,
+                Some(false),
+            ));
             assert_eq!(
                 matches!(
                     SelectedStructuralTagBuilder::for_parser(tool, reasoning),

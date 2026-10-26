@@ -93,16 +93,12 @@ pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
         .iter()
         .find_map(|(alias, family)| (*alias == parser).then_some(*family))
         .unwrap_or(parser);
-    let family = dynamo_parsers_v2::canonical_unified_family(parser)?;
-    // These models still rely on Dynamo's split-decoder framing and EOF rules.
-    // A newer crate registry must not silently switch their existing paths.
-    (!matches!(family, "gpt_oss" | "nemotron_v3")).then_some(family)
+    dynamo_parsers_v2::canonical_unified_family(parser)
 }
 
 pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     let mut names = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.to_vec();
     names.extend(DYNAMO_FAMILY_ALIASES.iter().map(|(alias, _)| *alias));
-    names.retain(|name| canonical_family(name).is_some());
     names.sort_unstable();
     names.dedup();
     names
@@ -733,6 +729,7 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 _ => UnifiedParserStartingState::None,
             },
         ),
+        "gpt_oss" => Ok(UnifiedParserStartingState::None),
         "muse_glimmer" | "muse_spark" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
@@ -1602,9 +1599,8 @@ impl ChoiceState {
     ) -> anyhow::Result<Self> {
         let prefill = prefill.into();
         let mut parser = create_unified_parser_for_family(family, tools)?;
-        // `prompt_token_ids` stays empty: this path establishes the starting state from
-        // the rendered prompt text (see `stream_prefill` / `detect_prefill`), not from
-        // token IDs, which the preprocessor has already consumed by this point.
+        // Harmony needs the consumed assistant header to recognize a generated
+        // `to=` recipient. Other families infer their state from the rendered text.
         //
         // Streaming guided calls commit per call once the name and argument object opener
         // are unambiguous. A committed fragment cannot later be rejected or recovered as
@@ -1615,7 +1611,14 @@ impl ChoiceState {
         // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
         // guided state at all.
         parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids: Vec::new(),
+            prompt_token_ids: if family == "gpt_oss"
+                && matches!(&tool_output_mode, UnifiedToolOutputMode::Native)
+                && prefill.starting_state == UnifiedParserStartingState::None
+            {
+                dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+            } else {
+                Vec::new()
+            },
             starting_state: if prefill.prefix.is_some() {
                 UnifiedParserStartingState::None
             } else {
@@ -2367,6 +2370,14 @@ fn parse_complete_in_mode(
     .flatten();
     let content = &content[..incomplete_start.unwrap_or(content.len())];
     parser.initialize_request(UnifiedParserInit {
+        prompt_token_ids: if family == "gpt_oss"
+            && matches!(&effective_mode, UnifiedToolOutputMode::Native)
+            && content.trim_start().starts_with("to=")
+        {
+            dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+        } else {
+            Vec::new()
+        },
         starting_state: policy.batch_starting_state(family, content)?,
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
@@ -3017,8 +3028,13 @@ where
                 }
             }
 
+            // A finished choice cannot reopen its parser; preserve envelope metadata below.
+            chat.inner.choices.retain(|choice| {
+                !records.get(&choice.index).is_some_and(|record| record.finished)
+            });
+
             if chat.inner.choices.is_empty() {
-                // A usage-only chunk. OpenAI stream ordering requires every choice's
+                // A metadata-only chunk. OpenAI stream ordering requires every choice's
                 // terminal finish_reason to precede it, so flush first.
                 if chat.inner.usage.is_some()
                     && let Some(template) = &template {
@@ -4068,6 +4084,143 @@ pub(crate) mod tests {
     }
 
     // --- tool_choice -> UnifiedToolOutputMode ------------------------------------
+
+    #[test]
+    fn gpt_oss_aliases_select_the_unified_route_unless_v1() {
+        use dynamo_runtime::config::ParserVersion;
+
+        for (tool, reasoning) in [
+            (Some("harmony"), Some("gpt_oss")),
+            (Some("harmony"), None),
+            (None, Some("gpt_oss")),
+        ] {
+            let family = configured_family(tool, reasoning);
+            assert_eq!(family, Some("gpt_oss"));
+            for (version, expected) in [
+                (ParserVersion::Auto, Some("gpt_oss")),
+                (ParserVersion::V1, None),
+                (ParserVersion::V2, Some("gpt_oss")),
+            ] {
+                assert_eq!(selected_family_for_selection(family, version), expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_consumed_headers_and_guided_calls_match_batch_at_every_split() {
+        for (input, constraint, reasoning) in [
+            (
+                " to=functions.get_weather<|channel|>analysis<|message|>{\"city\":\"Tokyo\"}<|call|>",
+                GuidedToolConstraint::None,
+                "",
+            ),
+            (
+                "<|channel|>analysis<|message|>plan<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{\"city\":\"Tokyo\"}<|call|>",
+                GuidedToolConstraint::StructuralTag,
+                "plan",
+            ),
+            (
+                r#"[{"name":"get_weather","parameters":{"city":"Tokyo"}}]"#,
+                GuidedToolConstraint::GuidedJsonRequired,
+                "",
+            ),
+            (
+                "<|channel|>analysis<|message|>plan<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Tokyo\"}}]<|return|>",
+                GuidedToolConstraint::GuidedJsonRequired,
+                "plan",
+            ),
+            (
+                r#"{"city":"Tokyo"}"#,
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".to_string(),
+                },
+                "",
+            ),
+        ] {
+            let batch = parse_complete("gpt_oss", input, &constraint, &weather_tools()).unwrap();
+            assert!(batch.text.is_empty(), "{:?}", batch.text);
+            assert_eq!(batch.reasoning, reasoning);
+            assert_eq!(batch.tool_calls.len(), 1);
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city":"Tokyo"})
+            );
+            for split in 0..=input.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([chunk(&input[..split], false), chunk(&input[split..], true)]),
+                    Some(weather_tools()),
+                    constraint.clone(),
+                    UnifiedParserStartingState::None,
+                    "gpt_oss",
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(output.iter().all(|response| !response.is_error()));
+                let events = logical_events(&output);
+                assert_stream_calls_match_batch(&events, &batch, &format!("split={split}"));
+                let streamed_reasoning: String = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LogicalEvent::Reasoning(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(streamed_reasoning, reasoning, "split={split}");
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, LogicalEvent::Text(text) if !text.is_empty())),
+                    "split={split}: {events:?}"
+                );
+                assert_eq!(
+                    collect_choices(&output).last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_stranded_final_reaches_stream_and_batch_at_stop_and_eof() {
+        let input = "<|channel|>analysis<|message|>thought<|end|><|start|>assistant<|channel|>final*)__Hello!";
+        let batch = parse_complete("gpt_oss", input, &GuidedToolConstraint::None, &[]).unwrap();
+        assert_eq!(batch.text, "*)__Hello!");
+        assert_eq!(batch.reasoning, "thought");
+        assert!(batch.tool_calls.is_empty());
+        for terminal in [false, true] {
+            for split in 0..=input.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([
+                        chunk(&input[..split], false),
+                        chunk(&input[split..], terminal),
+                    ]),
+                    None,
+                    GuidedToolConstraint::None,
+                    UnifiedParserStartingState::None,
+                    "gpt_oss",
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(output.iter().all(|response| !response.is_error()));
+                assert_eq!(
+                    logical_events(&output),
+                    vec![
+                        LogicalEvent::Reasoning("thought".into()),
+                        LogicalEvent::Text("*)__Hello!".into()),
+                    ],
+                    "terminal={terminal} split={split}"
+                );
+                assert_eq!(
+                    collect_choices(&output).last().unwrap().finish_reason,
+                    terminal.then_some(FinishReason::Stop)
+                );
+            }
+        }
+    }
 
     #[test]
     fn maps_tool_choice_onto_the_output_mode() {
@@ -8230,6 +8383,94 @@ pub(crate) mod tests {
             "the already-explicitly-finished choice must not be finished a second \
              time by the EOF backstop"
         );
+    }
+
+    #[tokio::test]
+    async fn finished_choices_keep_other_choices_and_late_metadata() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let mut first = chunk("A", true);
+        let mut active = empty_choice(1);
+        active.delta.content = Some(ChatCompletionMessageContent::Text("B".into()));
+        first.data.as_mut().unwrap().inner.choices.push(active);
+
+        let mut mixed = chunk("<think>late</think>", false);
+        let mut terminal = empty_choice(1);
+        terminal.delta.content = Some(ChatCompletionMessageContent::Text("C".into()));
+        terminal.delta.reasoning_content = Some("r".into());
+        terminal.finish_reason = Some(FinishReason::Stop);
+        mixed.data.as_mut().unwrap().inner.choices.push(terminal);
+
+        let mut late = chunk("late raw payload", false);
+        late.id = Some("late-metadata".into());
+        let data = late.data.as_mut().unwrap();
+        let mut parsed = empty_choice(1);
+        parsed.delta.reasoning_content = Some("late parsed payload".into());
+        parsed.finish_reason = Some(FinishReason::Stop);
+        data.inner.choices.push(parsed);
+        data.inner.usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3
+            }))
+            .unwrap(),
+        );
+        data.nvext = Some(serde_json::json!({"completion_token_ids": [42]}));
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            chunk_tokens: 2,
+            ..Default::default()
+        });
+
+        let responses: Vec<_> = apply_stream(
+            stream::iter([first, mixed, late]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect()
+        .await;
+        let payloads: Vec<_> = collect_choices(&responses)
+            .into_iter()
+            .map(|choice| {
+                let text = match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                };
+                (
+                    choice.index,
+                    text,
+                    choice.delta.reasoning_content.as_deref(),
+                    choice.finish_reason,
+                )
+            })
+            .collect();
+        assert_eq!(
+            payloads,
+            [
+                (0, Some("A"), None, Some(FinishReason::Stop)),
+                (1, Some("B"), None, None),
+                (1, Some("C"), Some("r"), Some(FinishReason::Stop)),
+            ]
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .filter(|data| data.inner.usage.is_some())
+                .count(),
+            1
+        );
+        let tail = responses.last().unwrap();
+        assert_eq!(tail.id.as_deref(), Some("late-metadata"));
+        let metadata = tail.data.as_ref().unwrap();
+        assert!(metadata.inner.choices.is_empty());
+        assert_eq!(metadata.inner.usage.as_ref().unwrap().total_tokens, 3);
+        assert_eq!(
+            metadata.nvext,
+            Some(serde_json::json!({"completion_token_ids": [42]}))
+        );
+        assert_eq!(metadata.llm_metrics.as_ref().unwrap().chunk_tokens, 2);
     }
 
     #[tokio::test]

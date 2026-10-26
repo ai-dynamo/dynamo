@@ -386,12 +386,19 @@ The output directory contains:
 ```text
 aisimulate-output/
 ├── prediction.json
-└── requests.jsonl
+├── requests.jsonl
+├── resource-runtime.json
+├── execution-events.jsonl
+└── resource-plan.json
 ```
 
 `prediction.json` preserves the Dynamo runner report, including summary metrics and available
-Planner diagnostics. `requests.jsonl` is present only with `--capture-per-request`. `--format`
-changes standard output but not durable files.
+Planner diagnostics. `requests.jsonl` is present only with `--capture-per-request`.
+`resource-runtime.json` records the supervised execution: its status, resource budget,
+`peak_observed_rss_bytes`, and wall time. `execution-events.jsonl` records the execution's progress
+events, starting with its resource plan. `resource-plan.json` is written only when the run is
+refused for resources before it starts. `--format` changes standard output but not durable files.
 
 The command exits with `0` on success, `1` for execution failure, `2` for CLI or configuration
-errors, and `130` when interrupted.
+errors, `3` when the run is refused or stopped by its `execution.resources` limits, `124` when
+execution start-up or shutdown times out, and `130` when interrupted.

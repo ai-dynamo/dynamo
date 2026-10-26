@@ -1814,7 +1814,7 @@ mod tests {
     // Unregistered families stay on their existing route.
     #[test]
     fn unified_family_returns_none_for_other_families() {
-        for other in ["harmony", "nemotron_deci"] {
+        for other in ["hermes", "nemotron_deci"] {
             assert_eq!(unified_family(Some(other), None), None, "{other} tool");
             assert_eq!(unified_family(None, Some(other)), None, "{other} reasoning");
         }
