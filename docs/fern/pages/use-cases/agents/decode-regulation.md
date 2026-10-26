@@ -191,7 +191,7 @@ Two choices matter for the agents' cost. A fixed per-token target (`DYN_DECODE_R
 - vLLM only. SGLang and TensorRT-LLM need their own adapters.
 - One deadline per worker. Requests cannot set their own deadline.
 - An interactive request that is already past its deadline keeps the target at its tightest until it finishes.
-- Not supported with pipeline parallelism or speculative decoding. Not verified with the vLLM V2 model runner.
+- Not supported with pipeline parallelism or speculative decoding.
 - The decision runs in Python on every step. It costs about 1.3 µs per running request, under 1% of step time on the reference deployment.
 
 ## Related Pages

@@ -45,11 +45,6 @@ class DecodeRegulationScheduler(DecodeRegulationMixin, InstrumentedScheduler):
             unsupported.append(
                 "speculative decoding (skipped requests keep draft placeholders)"
             )
-        if getattr(self, "use_v2_model_runner", False):
-            # Not verified: the V2 runner's persistent state for unscheduled requests.
-            logger.warning(
-                "decode_regulation: the V2 model runner is not verified with decode skips"
-            )
         model = getattr(
             getattr(vllm_config, "model_config", None), "served_model_name", ""
         )
