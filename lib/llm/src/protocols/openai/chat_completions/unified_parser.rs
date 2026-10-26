@@ -3,12 +3,12 @@
 
 //! Ordered reasoning, text, and tool-call parsing through one state machine.
 //!
-//! Qwen3 is gated behind
-//! [`DYN_PARSER_VERSION`](dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION).
+//! Compatible configured families use this path by default; `DYN_PARSER_VERSION=1`
+//! selects the legacy parsers when available.
 //!
 //! # What this replaces
 //!
-//! Dynamo serves a Qwen3 turn today by chaining two independent parsers: the reasoning
+//! The legacy Qwen3 route chains two independent parsers: the reasoning
 //! parser strips `<think>...</think>` across the whole stream into one assembled
 //! `reasoning_content`, and the tool-call jail then scans whatever is left. That chain
 //! cannot represent WHERE a thought happened. Given
@@ -134,8 +134,15 @@ pub(crate) fn selected_family(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected =
-        selected_family_for_selection(configured, selection, tool_call_parser, reasoning_parser);
+    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax.
+    let selected = if tool_call_parser.is_none()
+        && reasoning_parser == Some("qwen3")
+        && selection == dynamo_runtime::config::ParserVersion::Auto
+    {
+        None
+    } else {
+        selected_family_for_selection(configured, selection)
+    };
     tracing::debug!(
         target: "dynamo_unified",
         ?tool_call_parser,
@@ -150,99 +157,27 @@ pub(crate) fn selected_family(
 fn selected_family_for_selection(
     configured: Option<&'static str>,
     selection: dynamo_runtime::config::ParserVersion,
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     match selection {
-        dynamo_runtime::config::ParserVersion::Auto => configured.filter(|family| {
-            *family == DEEPSEEK_V41_UNIFIED_FAMILY
-                && tool_call_parser == Some(DEEPSEEK_V41_UNIFIED_FAMILY)
-                && reasoning_parser == Some(DEEPSEEK_V41_UNIFIED_FAMILY)
-        }),
+        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2 => {
+            configured
+        }
         dynamo_runtime::config::ParserVersion::V1 => None,
-        dynamo_runtime::config::ParserVersion::V2 => configured,
     }
 }
 
-/// Whether the configured unified family is needed to decode content even when
-/// request-level routing may keep tool calls on the legacy path. Muse's auto
-/// route is request-mode dependent, but its decoder must remain available for
-/// reasoning-only streams and when tool-call output is suppressed.
 pub(crate) fn selected_content_decoder_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_family(tool_call_parser, reasoning_parser);
-    let selection = super::tool_parser_v2::selected_version()
-        .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected = selected_batch_family_for_selection(
-        configured,
-        selection,
-        tool_call_parser,
-        reasoning_parser,
-    );
-    tracing::debug!(
-        target: "dynamo_unified",
-        ?tool_call_parser,
-        ?reasoning_parser,
-        ?configured,
-        ?selection,
-        ?selected,
-        "unified content decoder decision"
-    );
-    selected
-}
-
-fn selected_batch_family_for_selection(
-    configured: Option<&'static str>,
-    selection: dynamo_runtime::config::ParserVersion,
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    match selection {
-        dynamo_runtime::config::ParserVersion::Auto if configured == Some("muse_glimmer") => {
-            configured
-        }
-        _ => {
-            selected_family_for_selection(configured, selection, tool_call_parser, reasoning_parser)
-        }
-    }
-}
-
-/// The configured family eligible to own raw aggregate text.
-///
-/// Return the compatible unified family configured on the model card, before applying
-/// the process-wide generation policy. Batch requests that suppress calls still need
-/// the unified decoder to strip native markup before the calls are discarded.
-pub(crate) fn configured_batch_family(
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    configured_family(tool_call_parser, reasoning_parser)
+    selected_family(tool_call_parser, reasoning_parser)
 }
 
 pub(crate) fn selected_batch_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_batch_family(tool_call_parser, reasoning_parser);
-    let selection = super::tool_parser_v2::selected_version()
-        .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected = selected_batch_family_for_selection(
-        configured,
-        selection,
-        tool_call_parser,
-        reasoning_parser,
-    );
-    tracing::debug!(
-        target: "dynamo_unified",
-        ?tool_call_parser,
-        ?reasoning_parser,
-        ?configured,
-        ?selection,
-        "unified batch parser path decision"
-    );
-    selected
+    selected_family(tool_call_parser, reasoning_parser)
 }
 
 pub(crate) fn selected_request_family(
@@ -777,6 +712,7 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 _ => UnifiedParserStartingState::None,
             },
         ),
+        "gpt_oss" => Ok(UnifiedParserStartingState::None),
         "muse_glimmer" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
@@ -1645,9 +1581,8 @@ impl ChoiceState {
     ) -> anyhow::Result<Self> {
         let prefill = prefill.into();
         let mut parser = create_unified_parser_for_family(family, tools)?;
-        // `prompt_token_ids` stays empty: this path establishes the starting state from
-        // the rendered prompt text (see `stream_prefill` / `detect_prefill`), not from
-        // token IDs, which the preprocessor has already consumed by this point.
+        // Harmony needs the consumed assistant header to recognize a generated
+        // `to=` recipient. Other families infer their state from the rendered text.
         //
         // Streaming guided calls commit per call once the name and argument object opener
         // are unambiguous. A committed fragment cannot later be rejected or recovered as
@@ -1658,7 +1593,14 @@ impl ChoiceState {
         // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
         // guided state at all.
         parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids: Vec::new(),
+            prompt_token_ids: if family == "gpt_oss"
+                && matches!(&tool_output_mode, UnifiedToolOutputMode::Native)
+                && prefill.starting_state == UnifiedParserStartingState::None
+            {
+                dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+            } else {
+                Vec::new()
+            },
             starting_state: if prefill.prefix.is_some() {
                 UnifiedParserStartingState::None
             } else {
@@ -2391,6 +2333,14 @@ fn parse_complete_in_mode(
     .flatten();
     let content = &content[..incomplete_start.unwrap_or(content.len())];
     parser.initialize_request(UnifiedParserInit {
+        prompt_token_ids: if family == "gpt_oss"
+            && matches!(&effective_mode, UnifiedToolOutputMode::Native)
+            && content.trim_start().starts_with("to=")
+        {
+            dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+        } else {
+            Vec::new()
+        },
         starting_state: policy.batch_starting_state(family, content)?,
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
@@ -3017,8 +2967,13 @@ where
                 }
             }
 
+            // A finished choice cannot reopen its parser; preserve envelope metadata below.
+            chat.inner.choices.retain(|choice| {
+                !records.get(&choice.index).is_some_and(|record| record.finished)
+            });
+
             if chat.inner.choices.is_empty() {
-                // A usage-only chunk. OpenAI stream ordering requires every choice's
+                // A metadata-only chunk. OpenAI stream ordering requires every choice's
                 // terminal finish_reason to precede it, so flush first.
                 if chat.inner.usage.is_some()
                     && let Some(template) = &template {
@@ -4022,41 +3977,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn selected_family_needs_the_env_flag() {
-        // The env flag is process-wide and read once, so this asserts the relationship
-        // between the two functions rather than mutating the environment: whatever the
-        // flag says, `selected_family` never selects a pair `configured_family` rejects,
-        // and it agrees with `configured_family` exactly when the flag is on.
-        let pair = (Some("qwen3_coder"), Some("qwen3"));
-        assert_eq!(
-            configured_family(pair.0, pair.1),
-            Some(QWEN3_UNIFIED_FAMILY)
-        );
-        if parsers_v2_selected() {
-            assert_eq!(
-                selected_family(pair.0, pair.1),
-                Some(QWEN3_UNIFIED_FAMILY),
-                "flag on: the configured pair must be selected"
-            );
-        } else {
-            assert_eq!(
-                selected_family(pair.0, pair.1),
-                None,
-                "flag off: the configured pair must NOT be selected"
-            );
-        }
-        // Never selected regardless of the flag.
-        assert_eq!(
-            selected_family(Some("qwen3_coder"), None),
-            parsers_v2_selected().then_some(QWEN3_UNIFIED_FAMILY)
-        );
-        assert_eq!(
-            selected_family(None, Some("qwen3")),
-            parsers_v2_selected().then_some(QWEN3_UNIFIED_FAMILY)
-        );
-    }
-
-    #[test]
     fn batch_routing_uses_the_configured_pair_for_every_output_mode() {
         let pair = (Some("qwen3_coder"), Some("qwen3"));
         assert_eq!(
@@ -4067,6 +3987,143 @@ pub(crate) mod tests {
     }
 
     // --- tool_choice -> UnifiedToolOutputMode ------------------------------------
+
+    #[test]
+    fn gpt_oss_aliases_select_the_unified_route_unless_v1() {
+        use dynamo_runtime::config::ParserVersion;
+
+        for (tool, reasoning) in [
+            (Some("harmony"), Some("gpt_oss")),
+            (Some("harmony"), None),
+            (None, Some("gpt_oss")),
+        ] {
+            let family = configured_family(tool, reasoning);
+            assert_eq!(family, Some("gpt_oss"));
+            for (version, expected) in [
+                (ParserVersion::Auto, Some("gpt_oss")),
+                (ParserVersion::V1, None),
+                (ParserVersion::V2, Some("gpt_oss")),
+            ] {
+                assert_eq!(selected_family_for_selection(family, version), expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_consumed_headers_and_guided_calls_match_batch_at_every_split() {
+        for (input, constraint, reasoning) in [
+            (
+                " to=functions.get_weather<|channel|>analysis<|message|>{\"city\":\"Tokyo\"}<|call|>",
+                GuidedToolConstraint::None,
+                "",
+            ),
+            (
+                "<|channel|>analysis<|message|>plan<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{\"city\":\"Tokyo\"}<|call|>",
+                GuidedToolConstraint::StructuralTag,
+                "plan",
+            ),
+            (
+                r#"[{"name":"get_weather","parameters":{"city":"Tokyo"}}]"#,
+                GuidedToolConstraint::GuidedJsonRequired,
+                "",
+            ),
+            (
+                "<|channel|>analysis<|message|>plan<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Tokyo\"}}]<|return|>",
+                GuidedToolConstraint::GuidedJsonRequired,
+                "plan",
+            ),
+            (
+                r#"{"city":"Tokyo"}"#,
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".to_string(),
+                },
+                "",
+            ),
+        ] {
+            let batch = parse_complete("gpt_oss", input, &constraint, &weather_tools()).unwrap();
+            assert!(batch.text.is_empty(), "{:?}", batch.text);
+            assert_eq!(batch.reasoning, reasoning);
+            assert_eq!(batch.tool_calls.len(), 1);
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city":"Tokyo"})
+            );
+            for split in 0..=input.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([chunk(&input[..split], false), chunk(&input[split..], true)]),
+                    Some(weather_tools()),
+                    constraint.clone(),
+                    UnifiedParserStartingState::None,
+                    "gpt_oss",
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(output.iter().all(|response| !response.is_error()));
+                let events = logical_events(&output);
+                assert_stream_calls_match_batch(&events, &batch, &format!("split={split}"));
+                let streamed_reasoning: String = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LogicalEvent::Reasoning(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(streamed_reasoning, reasoning, "split={split}");
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, LogicalEvent::Text(text) if !text.is_empty())),
+                    "split={split}: {events:?}"
+                );
+                assert_eq!(
+                    collect_choices(&output).last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_stranded_final_reaches_stream_and_batch_at_stop_and_eof() {
+        let input = "<|channel|>analysis<|message|>thought<|end|><|start|>assistant<|channel|>final*)__Hello!";
+        let batch = parse_complete("gpt_oss", input, &GuidedToolConstraint::None, &[]).unwrap();
+        assert_eq!(batch.text, "*)__Hello!");
+        assert_eq!(batch.reasoning, "thought");
+        assert!(batch.tool_calls.is_empty());
+        for terminal in [false, true] {
+            for split in 0..=input.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([
+                        chunk(&input[..split], false),
+                        chunk(&input[split..], terminal),
+                    ]),
+                    None,
+                    GuidedToolConstraint::None,
+                    UnifiedParserStartingState::None,
+                    "gpt_oss",
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(output.iter().all(|response| !response.is_error()));
+                assert_eq!(
+                    logical_events(&output),
+                    vec![
+                        LogicalEvent::Reasoning("thought".into()),
+                        LogicalEvent::Text("*)__Hello!".into()),
+                    ],
+                    "terminal={terminal} split={split}"
+                );
+                assert_eq!(
+                    collect_choices(&output).last().unwrap().finish_reason,
+                    terminal.then_some(FinishReason::Stop)
+                );
+            }
+        }
+    }
 
     #[test]
     fn maps_tool_choice_onto_the_output_mode() {
@@ -8202,6 +8259,94 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn finished_choices_keep_other_choices_and_late_metadata() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let mut first = chunk("A", true);
+        let mut active = empty_choice(1);
+        active.delta.content = Some(ChatCompletionMessageContent::Text("B".into()));
+        first.data.as_mut().unwrap().inner.choices.push(active);
+
+        let mut mixed = chunk("<think>late</think>", false);
+        let mut terminal = empty_choice(1);
+        terminal.delta.content = Some(ChatCompletionMessageContent::Text("C".into()));
+        terminal.delta.reasoning_content = Some("r".into());
+        terminal.finish_reason = Some(FinishReason::Stop);
+        mixed.data.as_mut().unwrap().inner.choices.push(terminal);
+
+        let mut late = chunk("late raw payload", false);
+        late.id = Some("late-metadata".into());
+        let data = late.data.as_mut().unwrap();
+        let mut parsed = empty_choice(1);
+        parsed.delta.reasoning_content = Some("late parsed payload".into());
+        parsed.finish_reason = Some(FinishReason::Stop);
+        data.inner.choices.push(parsed);
+        data.inner.usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3
+            }))
+            .unwrap(),
+        );
+        data.nvext = Some(serde_json::json!({"completion_token_ids": [42]}));
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            chunk_tokens: 2,
+            ..Default::default()
+        });
+
+        let responses: Vec<_> = apply_stream(
+            stream::iter([first, mixed, late]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect()
+        .await;
+        let payloads: Vec<_> = collect_choices(&responses)
+            .into_iter()
+            .map(|choice| {
+                let text = match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                };
+                (
+                    choice.index,
+                    text,
+                    choice.delta.reasoning_content.as_deref(),
+                    choice.finish_reason,
+                )
+            })
+            .collect();
+        assert_eq!(
+            payloads,
+            [
+                (0, Some("A"), None, Some(FinishReason::Stop)),
+                (1, Some("B"), None, None),
+                (1, Some("C"), Some("r"), Some(FinishReason::Stop)),
+            ]
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .filter(|data| data.inner.usage.is_some())
+                .count(),
+            1
+        );
+        let tail = responses.last().unwrap();
+        assert_eq!(tail.id.as_deref(), Some("late-metadata"));
+        let metadata = tail.data.as_ref().unwrap();
+        assert!(metadata.inner.choices.is_empty());
+        assert_eq!(metadata.inner.usage.as_ref().unwrap().total_tokens, 3);
+        assert_eq!(
+            metadata.nvext,
+            Some(serde_json::json!({"completion_token_ids": [42]}))
+        );
+        assert_eq!(metadata.llm_metrics.as_ref().unwrap().chunk_tokens, 2);
+    }
+
+    #[tokio::test]
     async fn three_consecutive_already_parsed_gaps_then_eof_finishes_once() {
         let tool_call = concat!(
             "<tool_call>\n<function=get_weather>\n",
@@ -9246,7 +9391,9 @@ pub(crate) mod tests {
             ("kimi-k3", "kimi-k3", KIMI_K3_UNIFIED_FAMILY),
         ] {
             assert_eq!(configured_family(Some(tool), Some(reason)), Some(family));
-            let selected = parsers_v2_selected().then_some(family);
+            let selected = (super::super::tool_parser_v2::selected_version().unwrap()
+                != dynamo_runtime::config::ParserVersion::V1)
+                .then_some(family);
             assert_eq!(
                 selected_request_family(
                     Some(tool),
@@ -11233,81 +11380,70 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn muse_content_decoder_preserves_auto_routing_without_changing_v1() {
-        let muse = configured_family(Some("muse_glimmer"), None);
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::Auto,
-                Some("muse_glimmer"),
-                None,
-            ),
-            Some("muse_glimmer")
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::V1,
-                Some("muse_glimmer"),
-                None,
-            ),
-            None
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::V2,
-                Some("muse_glimmer"),
-                None,
-            ),
-            Some("muse_glimmer")
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                configured_family(Some("qwen3"), None),
-                dynamo_runtime::config::ParserVersion::Auto,
-                Some("qwen3"),
-                None,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn family_defaults_keep_deepseek_v41_on_v2_and_muse_on_original_modes() {
-        const CHILD: &str = "DYNAMO_PARSER_FAMILY_DEFAULTS_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let output = crate::test_utils::isolated_command(
-                "protocols::openai::chat_completions::unified_parser::tests::family_defaults_keep_deepseek_v41_on_v2_and_muse_on_original_modes",
-            )
-            .arg("--test-threads=1")
-            .env(CHILD, "1")
-            .env_remove(dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION)
-            .env_remove(
-                dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
-            )
-            .output()
-            .expect("run isolated family-default routing test");
-            crate::test_utils::assert_isolated_success(&output);
+    fn default_v2_routing_in_isolated_processes() {
+        use dynamo_runtime::config::environment_names::llm::{
+            DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, DYN_PARSER_VERSION,
+        };
+        const CHILD: &str = "DYNAMO_DEFAULT_V2_ROUTING_CHILD";
+        let Ok(selection) = std::env::var(CHILD) else {
+            for selection in ["unset", "auto", "1", "2", "deprecated_false"] {
+                let mut command = crate::test_utils::isolated_command(
+                    "protocols::openai::chat_completions::unified_parser::tests::default_v2_routing_in_isolated_processes",
+                );
+                command.env(CHILD, selection);
+                match selection {
+                    "unset" => {}
+                    "deprecated_false" => {
+                        command.env(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "false");
+                    }
+                    value => {
+                        command.env(DYN_PARSER_VERSION, value);
+                    }
+                }
+                let output = command.output().expect("run isolated routing regression");
+                crate::test_utils::assert_isolated_success(&output);
+            }
             return;
-        }
-
-        let (tool, reasoning) = (Some("deepseek_v41"), Some("deepseek_v41"));
-        let expected = configured_family(tool, reasoning);
-        assert!(expected.is_some());
-        assert_eq!(selected_family(tool, reasoning), expected);
-        assert_eq!(selected_batch_family(tool, reasoning), expected);
-        for (tool, reasoning) in [(Some("muse_glimmer"), None), (None, Some("muse_glimmer"))] {
-            assert!(configured_family(tool, reasoning).is_some());
-            assert_eq!(selected_family(tool, reasoning), None);
-            assert_eq!(selected_batch_family(tool, reasoning), Some("muse_glimmer"));
+        };
+        // Qwen3 was previously left on V1 by both unset and auto.
+        let expected = (selection != "1").then_some(QWEN3_UNIFIED_FAMILY);
+        assert_eq!(
+            selected_family(Some("qwen3_coder"), Some("qwen3")),
+            expected
+        );
+        assert_eq!(
+            selected_family(None, Some("qwen3")),
+            (selection == "2").then_some(QWEN3_UNIFIED_FAMILY)
+        );
+        for &parser in FAMILY_NAMES.iter() {
+            let family = canonical_family(parser).unwrap();
+            for (tool, reasoning) in [
+                (Some(parser), Some(family)),
+                (Some(parser), None),
+                (None, Some(parser)),
+            ] {
+                let reasoning_only_qwen3 = tool.is_none() && reasoning == Some("qwen3");
+                let expected = (selection != "1" && (selection == "2" || !reasoning_only_qwen3))
+                    .then_some(family);
+                assert_eq!(
+                    selected_family(tool, reasoning),
+                    expected,
+                    "{selection} {tool:?} {reasoning:?}"
+                );
+                assert_eq!(selected_batch_family(tool, reasoning), expected);
+                assert_eq!(selected_content_decoder_family(tool, reasoning), expected);
+            }
         }
         for (tool, reasoning) in [
-            (Some("qwen3_coder"), Some("qwen3")),
-            (Some("deepseek_v41"), None),
+            (Some("qwen3_coder"), Some("glm47")),
+            (Some("qwen3_coder"), Some("deepseek_r1")),
+            (Some("hermes"), None),
+            (None, Some("deepseek_r1")),
+            (None, None),
         ] {
             assert_eq!(selected_family(tool, reasoning), None);
             assert_eq!(selected_batch_family(tool, reasoning), None);
+            assert_eq!(selected_content_decoder_family(tool, reasoning), None);
         }
     }
 

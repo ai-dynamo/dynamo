@@ -962,6 +962,19 @@ class AudioFormatter:
                 return None
             return self._error_response(request_id, "No audio generated")
 
+        # DELTA output drains the audio key but can retain sample-rate metadata.
+        # It is not a media result or a failure. Aggregate completion and health
+        # probes still require nonempty audio elsewhere in the response stream.
+        if (
+            isinstance(mm_output, Mapping)
+            and set(mm_output) == {"sr"}
+            and (
+                stream_state is not None
+                or (aggregate_state is not None and not aggregate_state.cumulative)
+            )
+        ):
+            return None
+
         response_format = ctx.get("response_format")
         output_format = ctx.get("output_format")
         speed = ctx.get("speed", 1.0)

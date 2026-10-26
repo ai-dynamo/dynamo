@@ -129,7 +129,7 @@ runs:
         RUN_COMPLIANCE=""
         case "${{ inputs.component }}" in
           operator)
-            BASELINE_STEM="go@63303112"
+            BASELINE_STEM="go@9ef7b9ac"
             [[ -z "${{ inputs.target }}" ]] && RUN_COMPLIANCE="true" ;;
         esac
         echo "baseline_stem=${BASELINE_STEM}" >> $GITHUB_OUTPUT

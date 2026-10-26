@@ -1096,6 +1096,42 @@ class TestAudioFormatterFormat:
         assert response is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_delta_metadata_does_not_fail_valid_audio(self, streaming):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState() if streaming else AudioAggregateState()
+        context = {
+            "audio_stream_state" if streaming else "audio_aggregate_state": state,
+            "output_format": "pcm",
+        }
+        # DELTA output can retain sr after the engine drains the audio key.
+        assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        response = await formatter.format(
+            {"audio": np.asarray([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
+            "req-1",
+            **context,
+        )
+        assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        if not streaming:
+            response = await formatter.finish_aggregate(
+                "req-1", state, output_format="pcm"
+            )
+        assert response["status"] == "completed"
+        assert len(base64.b64decode(response["data"][0]["b64_json"])) == 3 * 2
+
+    @pytest.mark.asyncio
+    async def test_delta_metadata_alone_cannot_complete_audio(self):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioAggregateState()
+        assert (
+            await formatter.format({"sr": 24000}, "req-1", audio_aggregate_state=state)
+            is None
+        )
+        response = await formatter.finish_aggregate("req-1", state)
+        assert response["status"] == "failed"
+        assert "No audio generated" in response["error"]
+
+    @pytest.mark.asyncio
     async def test_streaming_cumulative_chunks_emit_only_new_audio(self):
         formatter = AudioFormatter("test", None, None)
         state = AudioStreamState()
