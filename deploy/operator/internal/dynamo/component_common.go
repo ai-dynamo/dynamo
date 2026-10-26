@@ -12,7 +12,6 @@ import (
 	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 // ComponentDefaults interface defines how defaults should be provided
@@ -83,7 +82,7 @@ func (b *BaseComponentDefaults) GetBasePodSpec(context ComponentContext) (corev1
 
 func (b *BaseComponentDefaults) getCommonPodSpec() corev1.PodSpec {
 	return corev1.PodSpec{
-		TerminationGracePeriodSeconds: ptr.To(int64(60)),
+		TerminationGracePeriodSeconds: new(int64(60)),
 		RestartPolicy:                 corev1.RestartPolicyAlways,
 	}
 }
