@@ -13,8 +13,8 @@ This page documents current behavior and known coverage limits.
 
 The diagrams focus on Kubernetes deployments. The aggregated view includes
 etcd as an alternative discovery source. Operator deployments use Kubernetes
-discovery. Local deployments use the same application layers, but rely on a
-process supervisor instead of Kubernetes to restore failed processes.
+discovery. Local deployments use the same application layers. Restoring a
+failed local process requires an externally configured process supervisor.
 
 ## Diagram Legend
 
@@ -202,7 +202,7 @@ Current mechanisms can be combined without forming one shared recovery policy.
 | --- | --- | --- | --- | --- | --- |
 | Request cannot connect to a worker | Request-plane error | Transport or backend client | Frontend or calling runtime client | Frontend migrator, when enabled | A qualifying failure temporarily inhibits the endpoint. The request retries only when migration is enabled and the error and request are eligible |
 | Worker fails during generation | Stream error or termination | Backend or connection | Frontend and runtime. Kubernetes observes Pod state separately | Frontend handles the request. Kubernetes restores capacity | Eligible requests migrate when migration is enabled. New routing follows the runtime discovery view |
-| Planned worker termination | `SIGTERM` or `SIGINT` | Kubernetes or process supervisor | Worker process and Kubernetes | Worker attempts to drain and unregister. Kubernetes completes the rollout or scale-down | New work stops before admitted work drains |
+| Planned worker termination | `SIGTERM` or `SIGINT` | Kubernetes or process supervisor | Worker process and Kubernetes | Worker unregisters from discovery, waits through the grace period, then invalidates its endpoints and drains accepted work. Kubernetes completes the rollout or scale-down | After discovery removal propagates, updated clients stop routing new work, but clients with stale discovery information can still send work during the grace period. Endpoint invalidation later stops new admission while accepted work drains |
 | etcd registration becomes stale | Registration lease revocation or expiry | etcd | Runtime etcd discovery client | Distributed runtime | The endpoint leaves routing after the lease change propagates to the client view |
 | Kubernetes endpoint becomes stale | Pod, EndpointSlice, worker metadata, or readiness change | Kubernetes API and controllers | Runtime Kubernetes discovery client | Distributed runtime | The endpoint leaves routing after the membership or readiness change propagates to the client view |
 | Active health canary fails | Inference request timeout or error | Worker-local inference path | Worker-local runtime `HealthCheckManager` | Worker runtime sets endpoint health to `NotReady` | Routing removal depends on the configured readiness and discovery propagation path |
