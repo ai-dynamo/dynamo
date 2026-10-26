@@ -424,6 +424,31 @@ def summary_script(namespace, label):
     )
 
 
+def ping_script(targets, count):
+    """Round-trip times from a node to each pod IP in ``targets`` (name -> IP):
+    ICMP ping, and the TCP handshake to the frontend's port 8000, which is the
+    path the Global Ingress uses and works where ICMP is filtered."""
+    return f"""python3 - <<'PY'
+import json, re, socket, statistics, subprocess, time
+out = {{}}
+for name, ip in {json.dumps(targets)}.items():
+    ping = subprocess.run(["ping", "-c", "{count}", "-i", "0.2", "-q", ip],
+                          capture_output=True, text=True)
+    match = re.search(r"= ([0-9.]+)/([0-9.]+)/([0-9.]+)", ping.stdout)
+    connect = []
+    for _ in range({count}):
+        start = time.perf_counter()
+        with socket.create_connection((ip, 8000), timeout=5):
+            connect.append((time.perf_counter() - start) * 1000)
+    out[name] = {{
+        "icmp_ms_min_avg_max": [float(v) for v in match.groups()] if match else None,
+        "tcp_connect_ms_p50": round(statistics.median(connect), 2),
+        "tcp_connect_ms_min": round(min(connect), 2),
+    }}
+print("BENCH_PING " + json.dumps(out, sort_keys=True))
+PY"""
+
+
 # Results ----------------------------------------------------------------------------
 
 
@@ -499,9 +524,49 @@ def main():
     commands.add_parser("hub")
     table = commands.add_parser("table")
     table.add_argument("--label", required=True)
+    ping = commands.add_parser(
+        "ping", help="round trip from each region to every region's pool frontend"
+    )
+    ping.add_argument("--count", type=int, default=20)
     args = parser.parse_args()
 
     cfg = json.loads(args.config.read_text())
+    if args.command == "ping":
+        pool = cfg["pools"][0]["stem"]
+        targets = {}
+        for member in cfg["regions"]:
+            pods = cluster.read(member, "pods", cfg["namespace"], "", ".items", args.evidence)
+            targets[member["short"]] = next(
+                pod["status"]["podIP"]
+                for pod in pods
+                if pod["metadata"]["name"].startswith(f"{pool}-frontend-")
+                and pod["status"].get("podIP")
+            )
+        script = ping_script(targets, args.count)
+        sent = {
+            member["short"]: (member, node, ssm_send(member, [node], script, 600))
+            for member in cfg["regions"]
+            for node in bench_nodes(member)[:1]
+        }
+        matrix = {}
+        for source, (member, node, command_id) in sent.items():
+            result = ssm_output(member, command_id, node)
+            line = next(
+                (
+                    line
+                    for line in result["StandardOutputContent"].splitlines()
+                    if line.startswith("BENCH_PING ")
+                ),
+                None,
+            )
+            if line is None:
+                sys.exit(f"{source}: {result['StandardErrorContent'][-800:]}")
+            matrix[source] = json.loads(line.removeprefix("BENCH_PING "))
+        out = args.evidence / "results" / "ping.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"targets": targets, "from": matrix}, indent=2))
+        print(json.dumps(matrix, indent=2))
+        return
     if args.command == "hub":
         members = [member["site"] for member in cfg["regions"]]
         stems = [pool["stem"] for pool in cfg["pools"]]
