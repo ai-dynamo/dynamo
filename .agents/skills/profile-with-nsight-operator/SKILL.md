@@ -2,8 +2,8 @@
 name: profile-with-nsight-operator
 description: >-
   Profiles chosen components of a Dynamo DynamoGraphDeployment on Kubernetes with Nsight Systems (nsys) through
-  NVIDIA Nsight Operator, using kubectl and Nsight's nsight_operator.py CLI, and verifies that every expected pod
-  produced a report. Use when someone asks to profile, trace, or run nsys on a Dynamo frontend, router,
+  NVIDIA Nsight Operator, using kubectl, Nsight's Dynamo helper nsight_operator_dynamo.py, and Nsight's
+  nsight_operator.py CLI, and verifies that every expected pod produced a report. Use when someone asks to profile, trace, or run nsys on a Dynamo frontend, router,
   aggregated worker, or prefill or decode worker on a cluster that runs Nsight Operator. Use deploy-dynamo-recipe for
   bring-up and troubleshoot-dynamo for failed deployments.
 license: Apache-2.0
@@ -27,8 +27,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Profile the Dynamo components a user names with `nsys`, in one capture window, and prove that every expected pod
 produced a report. Nsight Operator adds `nsys` to selected pods when they are created; this skill chooses the
-selectors, writes the per-test profile config, runs the window with Nsight's CLI, and checks completeness. It does
-not wrap or replace `nsight_operator.py`.
+selectors, configures profiling with Nsight's Dynamo helper or its own profile config, runs the window with Nsight's
+CLI, and checks completeness. It does not wrap or replace `nsight_operator_dynamo.py` or `nsight_operator.py`.
 
 Read `docs/fern/pages/kubernetes/operations/nsight-operator-profiling.mdx` first. It holds the profile-config
 template, the label table, the per-component `nsys` arguments and NVTX settings, and the pitfalls. This skill does
@@ -40,7 +40,8 @@ not repeat them.
   or created by the namespace admin). For S3 reports, a `NsightCloudStorageConfig` in the namespace.
 - `kubectl` rights in the namespace to create `NsightOperatorProfileConfig` and `DynamoGraphDeployment` objects, list
   pods, and port-forward.
-- `nsight_operator.py` from the NGC "Nsight Operator Resources" of the same release as the operator.
+- `nsight_operator.py`, and `nsight_operator_dynamo.py` for the helper path, from the NGC "Nsight Operator Resources"
+  of the same release as the operator. The helper writes that release's profile-config field names.
 - Never print, copy, or log secrets. `autoconfigure` writes the gateway's storage key to `~/.nsight-cloud.conf`;
   where the user allows it, use `configure` and read reports with the user's own credentials instead.
 
@@ -62,13 +63,41 @@ not repeat them.
   `nsightTags`, and `processIncludePatterns` on each rule; 26.2 has `objectSelector` or `matchConditions` on the rule
   and `nsightTag` and `injectionIncludePatterns` on the tool config. Use the names the server accepts.
 - List existing profile configs in the namespace. Do not reuse or overwrite another test's config, tool-config, or rule
-  names, and never write a config named `dynamo-profile-config`.
-- Run `python3 nsight_operator.py --tag <dgd> status` to see whether the tag already holds a session. A tag holds one
-  session at a time.
+  names. `dynamo-profile-config` belongs to Nsight's helper; never write it by hand.
+- Run `python3 nsight_operator.py --tag <tag> status` to see whether the tag already holds a session. A tag holds one
+  session at a time. `<tag>` is `default` on the helper path and the DGD name on the own-config path.
 
-### 2. Write The Profile Config
+### 2. Configure Profiling
 
-Start from the page's template. Then:
+Choose one path and tell the user which one and why.
+
+#### 2a. Nsight's Dynamo Helper
+
+Use the helper when the operator runs with auto-provisioning, in-cluster storage is enough, and no one else profiles in
+the namespace with the helper. Its `configure` command applies one profile config named `dynamo-profile-config`, with
+a coordinator tool config, on the `default` tag. A second `configure` in the same namespace replaces it.
+
+```bash
+python3 nsight_operator_dynamo.py -n <namespace> configure \
+    --deployment-name <dgd> \
+    --components <type> [<type> ...] \
+    --nsys-profile-args "-t cuda,nvtx,osrt --python-sampling=true"
+```
+
+- `-n` goes before the subcommand.
+- Pass lowercase component types, such as `frontend`, `worker`, `prefill`, or `decode`. The helper compares them with
+  `nvidia.com/dynamo-component-type`, so `Frontend` or `Backend` selects no pod.
+- Always pass `--deployment-name`. Without it the helper selects every Dynamo pod in the namespace. It matches pods
+  whose name contains the string, so check that no other DGD's name contains it.
+- Always pass `--nsys-profile-args`. The default adds `--pytorch=autograd-nvtx`.
+- Never pass `--gpu-metrics`; it applies a DaemonSet whose pods run privileged. Never run the helper's `install` or
+  `uninstall`; they install or remove the operator for the whole cluster, which is the cluster admin's job.
+- Read the profile config the helper prints, then continue at step 3 with `<tag>` = `default`.
+
+#### 2b. Your Own Profile Config
+
+Use your own config for S3 reports, a tag per DGD, process patterns per component, or when the helper's config would
+collide with someone else's. Start from the page's template. Then:
 
 - Add one rule per requested component. Select on `nvidia.com/dynamo-graph-deployment-name: <dgd>` plus the component
   label from the page's table, for example `nvidia.com/dynamo-component-type: decode`. To record only decode workers,
@@ -79,7 +108,7 @@ Start from the page's template. Then:
   rules.
 - Write process patterns with `[.]`, never a backslash.
 - Leave out `--pytorch=autograd-nvtx`, `--gpu-metrics`, and `--trace-fork-before-exec`.
-- Validate with `kubectl apply --dry-run=server -f <file>`, then apply it.
+- Validate with `kubectl apply --dry-run=server -f <file>`, then apply it. Use `<tag>` = the DGD name in later steps.
 
 ### 3. Get Fresh Pods
 
@@ -93,7 +122,7 @@ Only pods created after the config exists are profiled.
 
 - Derive the expected pods from the DGD and the selectors (`kubectl get pods -l ...`), never from the agents that
   happened to register.
-- `python3 nsight_operator.py --tag <dgd> status` must list one collection agent per expected pod. Ignore
+- `python3 nsight_operator.py --tag <tag> status` must list one collection agent per expected pod. Ignore
   `otlp-converter-*` entries; they are Nsight's OpenTelemetry converter.
 - If a pod is missing, follow Nsight's sidecar injection checks, check the pod's init containers and its
   `nsight-profile.nvidia.com/profiles` annotation, and set `logOutput` on the rule for the process hook's log. Hand
@@ -105,21 +134,25 @@ Only pods created after the config exists are profiled.
 - Run:
 
   ```bash
-  python3 nsight_operator.py --tag <dgd> session-begin --title <dgd>
-  python3 nsight_operator.py --tag <dgd> profiler-start --delay <warm-up seconds> --duration <seconds>
+  python3 nsight_operator.py --tag <tag> session-begin --title <dgd>
+  python3 nsight_operator.py --tag <tag> profiler-start --delay <warm-up seconds> --duration <seconds>
   ```
 
-- Never open windows with `kubectl exec ... nsys start` in injected pods; those reports are not uploaded.
+- Use `nsight_operator.py` windows by default. A window started with `kubectl exec ... nsys start` in one injected pod
+  also works, but its report stays only inside that pod's `main` container: it is not uploaded, `ls` does not list it,
+  and it is lost if the container restarts. Use it only when the user asks for one exact pod, and copy the report out
+  as the docs page shows.
 
 ### 6. Collect And Verify
 
-- Poll `python3 nsight_operator.py --tag <dgd> ls` in a bounded loop until every expected pod has a report. Reports
+- Poll `python3 nsight_operator.py --tag <tag> ls` in a bounded loop until every expected pod has a report. Reports
   appear only after the delay, the window, report generation, and the upload, so allow several minutes.
 - Run `session-end`, then `download -o <dir>`, or read the reports from the bucket with the user's credentials.
 - Check completeness: every expected pod has a report, and every GPU worker report contains kernel rows
   (`nsys stats --report cuda_gpu_kern_sum <file>`). Report a missing pod or a GPU report without kernels as an
   incomplete capture; do not present partial results as complete.
-- Only then delete the test's profile config, and the DGD if the user created it only for this test.
+- Only then remove the profile config (`python3 nsight_operator_dynamo.py -n <namespace> unconfigure` on the helper
+  path, `kubectl delete` of your own config otherwise), and the DGD if the user created it only for this test.
 
 ### 7. Hand Off Analysis
 
@@ -145,7 +178,7 @@ Report:
 
 ## References
 
-- `docs/fern/pages/kubernetes/operations/nsight-operator-profiling.mdx`: template, labels, settings, and pitfalls.
-- `docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx`: the "Pod Labels" section.
+- `docs/fern/pages/kubernetes/operations/nsight-operator-profiling.mdx`: the helper, template, labels, settings, and
+  pitfalls.
 - [Nsight Operator documentation](https://docs.nvidia.com/nsight-operator/), including the multitenant quickstart and
   the CLI reference.

@@ -16,6 +16,20 @@
       ]
     },
     {
+      "id": "helper-quick-look",
+      "question": "Nsight Operator with auto-provisioning is already running on our cluster. I just want a quick nsys look at the frontend and aggregated workers of my DGD qwen-agg in namespace demo, using Nsight's Dynamo helper.",
+      "expected_skill": "profile-with-nsight-operator",
+      "ground_truth": "Run nsight_operator_dynamo.py -n demo configure with --deployment-name qwen-agg, --components frontend worker in lowercase, and --nsys-profile-args without --pytorch=autograd-nvtx; do not pass --gpu-metrics or run install. Recreate the pods after asking, confirm one agent per pod on the default tag, capture with nsight_operator.py --tag default, and run unconfigure when done.",
+      "expected_behavior": [
+        "Use the helper's configure subcommand with -n before the subcommand",
+        "Pass --deployment-name and lowercase component types",
+        "Override --nsys-profile-args to leave out --pytorch=autograd-nvtx",
+        "Do not pass --gpu-metrics and do not run the helper's install or uninstall",
+        "Use the default tag with nsight_operator.py and verify every expected pod has a report",
+        "Remove the helper's config with unconfigure after the reports are verified"
+      ]
+    },
+    {
       "id": "helper-selects-nothing",
       "question": "I ran Nsight's Dynamo helper with --components Frontend Backend and none of my Dynamo pods got injected. Why?",
       "expected_skill": "profile-with-nsight-operator",
