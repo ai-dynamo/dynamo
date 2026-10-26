@@ -14,10 +14,14 @@ import inspect
 from typing import TYPE_CHECKING, Optional, Protocol, TypeGuard, runtime_checkable
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.core.types import WorkerCounts
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 if TYPE_CHECKING:
-    from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
+    from dynamo.planner.monitoring.dgd_services import (
+        ComponentGPUShape,
+        ComponentPowerConfig,
+    )
 
 
 class WorkerInfoProvider(Protocol):
@@ -46,11 +50,12 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
 
     A clean return is not proof of the outcome. ``validate_deployment`` inspects
     the deployment only under Kubernetes and is a no-op in the other two modes.
-    ``get_gpu_counts`` yields ``(None, None)`` from ``VirtualConnector`` always
+    ``get_gpu_shapes`` yields ``(None, None)`` from ``VirtualConnector`` always
     and from ``GlobalPlannerConnector`` when it holds no pool-local Kubernetes
-    connector, while the Kubernetes implementation narrows the return to
-    ``tuple[int, int]`` and raises ``DeploymentValidationError`` rather than
-    reporting an unknown shape. ``get_model_name`` can return the placeholder
+    connector, while the Kubernetes implementation raises
+    ``DeploymentValidationError`` rather than reporting an unknown shape.
+    ``get_gpu_counts`` remains a compatibility view of per-engine width.
+    ``get_model_name`` can return the placeholder
     ``"managed-remotely"`` under a global planner.
     ``set_component_replicas`` may log and return without scaling when the
     deployment is not ready or the global planner rejects the request, though all
@@ -95,6 +100,13 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
     ) -> tuple[Optional[int], Optional[int]]:
         pass
 
+    def get_gpu_shapes(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
+        pass
+
     async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
@@ -106,6 +118,33 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
         self, target_replicas: list[TargetReplica], blocking: bool = True
     ) -> None:
         pass
+
+
+@runtime_checkable
+class StartupAwareConnector(Protocol):
+    """Optional inventory that distinguishes pending startup from other scaling."""
+
+    async def get_worker_inventory(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> Optional[WorkerCounts]:
+        """Return serving counts and verified pending startup counts by role.
+
+        Return None when optional startup reads are forbidden. The caller may
+        use legacy inventory, or power-aware inventory when power checks apply.
+        Names select the DGD components; an omitted name excludes that role.
+        ``WorkerCounts.pending_num_*`` may be positive only after ruling out
+        drain, rollout, and unobserved spec changes across the deployment.
+        A connector that also implements ``PowerAwareConnector`` must provide
+        the same rollout and terminating-Pod guarantees as its power-aware
+        counts, using the same snapshot for serving and pending inventory.
+        """
+        ...
+
+
+def is_startup_aware_connector(obj: object) -> TypeGuard[StartupAwareConnector]:
+    return callable(inspect.getattr_static(obj, "get_worker_inventory", None))
 
 
 @runtime_checkable
@@ -176,6 +215,8 @@ def is_power_aware_connector(obj: object) -> TypeGuard[PowerAwareConnector]:
 __all__ = [
     "PlannerConnector",
     "PowerAwareConnector",
+    "StartupAwareConnector",
     "WorkerInfoProvider",
     "is_power_aware_connector",
+    "is_startup_aware_connector",
 ]

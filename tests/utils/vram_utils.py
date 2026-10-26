@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import tempfile
+from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
@@ -90,6 +91,38 @@ def auto_worker_count(
     return len(gpus) * workers_per_gpu
 
 
+def _cgroup_cpu_budget(
+    cgroup_root: str | os.PathLike[str] = "/sys/fs/cgroup",
+) -> int | None:
+    """Return the cgroup CPU quota, or ``None`` when no quota is detectable.
+
+    Check cgroup v2 ``cpu.max`` before the cgroup v1 CPU controller files.
+    """
+    root = Path(cgroup_root)
+    try:
+        with (root / "cpu.max").open() as cpu_max:
+            quota_s, period_s = cpu_max.read().split()[:2]
+        if quota_s != "max":
+            quota = int(quota_s)
+            period = int(period_s)
+            if quota > 0 and period > 0:
+                # Floor at 1: fractional --cpus must not fall through to the
+                # host CPU count. This behavior matches cgroup v1 below.
+                return max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    try:
+        with (root / "cpu" / "cpu.cfs_quota_us").open() as quota_file:
+            quota = int(quota_file.read())
+        with (root / "cpu" / "cpu.cfs_period_us").open() as period_file:
+            period = int(period_file.read())
+        if quota > 0 and period > 0:
+            return max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def effective_cpu_budget() -> int:
     """Best estimate of the CPUs actually available to this container/process.
 
@@ -97,38 +130,27 @@ def effective_cpu_budget() -> int:
     HOST core count and ignore Docker ``--cpus`` (which is a CFS quota, not an
     affinity mask). xdist resolves ``-n auto`` from ``os.cpu_count()``, so on a
     many-core host limited to a few CPUs it overshoots badly (e.g. 32 slots
-    under ``--cpus=4``). Resolve the real budget, in order:
+    under ``--cpus=4``).
 
-      1. ``NUM_CPUS`` env (CI sets it to the container's ``--cpus``),
-      2. cgroup v2 ``cpu.max`` quota (``quota period``; reflects ``--cpus``),
-      3. cgroup v1 ``cpu.cfs_quota_us`` / ``cpu.cfs_period_us``,
-      4. ``os.cpu_count()`` (no container limit detectable).
+    Prefer the cgroup quota when present and otherwise use the host CPU count.
+    ``NUM_CPUS`` may request a lower ceiling, but it must never override a
+    smaller detected quota.
     """
+    detected_budget = _cgroup_cpu_budget() or os.cpu_count() or 1
     env = os.environ.get("NUM_CPUS")
     if env:
         try:
-            n = int(float(env))
-            if n > 0:
-                return n
-        except ValueError:
+            requested_budget = int(float(env))
+            if requested_budget > 0:
+                return min(requested_budget, detected_budget)
+        except (OverflowError, ValueError):
             pass
-    try:
-        quota_s, period_s = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
-        if quota_s != "max":
-            # Floor at 1: fractional --cpus (e.g. 0.5 -> int 0) must not fall
-            # through to the host os.cpu_count() and defeat the cap. Matches the
-            # cgroup-v1 branch below.
-            return max(1, int(int(quota_s) / int(period_s)))
-    except (OSError, ValueError, ZeroDivisionError):
-        pass
-    try:
-        quota = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
-        period = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
-        if quota > 0 and period > 0:
-            return max(1, quota // period)
-    except (OSError, ValueError):
-        pass
-    return os.cpu_count() or 1
+        _logger.warning(
+            "Ignoring invalid NUM_CPUS=%r; using detected CPU budget %d",
+            env,
+            detected_budget,
+        )
+    return detected_budget
 
 
 def write_test_meta(items, dest_dir: str | None = None) -> None:

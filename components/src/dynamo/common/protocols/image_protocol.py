@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel
 
@@ -33,10 +33,15 @@ class ImageNvExt(BaseModel):
 
 
 class NvCreateImageRequest(BaseModel):
-    """Request for image generation (/v1/images/generations endpoint).
+    """Request for image generation or editing endpoints.
 
     Matches the flattened Rust NvCreateImageRequest in lib/llm/src/protocols/openai/images.rs
     """
+
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
 
     prompt: str
     """The text prompt for image generation."""
@@ -49,6 +54,12 @@ class NvCreateImageRequest(BaseModel):
 
     quality: Optional[str] = None
     """Image quality: standard, hd, high, medium, low, auto."""
+
+    background: Optional[str] = None
+    """Image background: transparent, opaque, or auto."""
+
+    output_format: Optional[str] = None
+    """Output image encoding: png, jpeg, or webp."""
 
     response_format: Optional[str] = None
     """Response format: url or b64_json."""
@@ -88,6 +99,34 @@ class ImageData(BaseModel):
     """Revised prompt, when the model rewrites the original prompt."""
 
 
+class ImageAccounting(BaseModel):
+    """Per-request accounting in image units.
+
+    Matches Rust ImageAccounting in lib/llm/src/protocols/openai/images/nvext.rs,
+    which states the rules.
+    """
+
+    output_images: int
+    """Images generated and returned in ``data``, not the requested ``n``."""
+
+    input_images: int = 0
+    """Reference images the request consumed: 0 for text-to-image, 1 for an
+    ``input_reference`` or ``/v1/images/edits`` request."""
+
+    num_inference_steps: Optional[int] = None
+    """The step count the backend ran. ``None`` when the backend does not know it."""
+
+
+class ImagesResponseNvExt(BaseModel):
+    """NVIDIA extensions to the image response.
+
+    Matches Rust ImagesResponseNvExt in lib/llm/src/protocols/openai/images/nvext.rs.
+    """
+
+    usage: Optional[ImageAccounting] = None
+    """Image-based accounting for models without token usage."""
+
+
 class NvImagesResponse(BaseModel):
     """Response structure for image generation.
 
@@ -99,3 +138,21 @@ class NvImagesResponse(BaseModel):
 
     data: list[ImageData] = []
     """List of generated images."""
+
+    background: Optional[str] = None
+    """Background of the generation: transparent or opaque."""
+
+    output_format: Optional[str] = None
+    """Output format of the generated images: png, webp, or jpeg."""
+
+    size: Optional[str] = None
+    """Size of the generated images in WxH format."""
+
+    quality: Optional[str] = None
+    """Quality of the generated images: low, medium, or high."""
+
+    usage: Optional[Dict[str, Any]] = None
+    """Token usage of the generation, when the model reports it."""
+
+    nvext: Optional[ImagesResponseNvExt] = None
+    """NVIDIA response extensions. The frontend omits the key when unset."""

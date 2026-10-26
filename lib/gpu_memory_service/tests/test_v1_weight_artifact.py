@@ -8,8 +8,16 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-import msgspec
 import pytest
+from _deps import HAS_GMS
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
+import msgspec
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.snapshot import disk as snapshot_disk
@@ -208,6 +216,8 @@ def test_weight_artifact_round_trip_preserves_exact_ids_and_bytes(
     with _server(socket_path, target_vmm):
         weight_artifact.load_weights(str(artifact), socket_path, 0)
         reader = _GMSClientSession(socket_path, RequestedLockType.RO)
+        # A restarted loader must not wait for RW behind the reader's lease.
+        weight_artifact.load_weights(str(artifact), socket_path, 0)
         assert weight_artifact._list_allocations(reader) == records
         restored = [
             _map(reader, record, target_vmm, GrantedLockType.RO) for record in records

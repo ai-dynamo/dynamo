@@ -65,8 +65,11 @@ impl GrpcTuningConfig {
     }
 }
 
+use crate::grpc::service::dispatch_error_status;
 use crate::grpc::service::openai::completion_response_stream;
-use crate::grpc::service::tensor::{ExtendedNvCreateTensorResponse, tensor_response_stream};
+use crate::grpc::service::tensor::{
+    ExtendedNvCreateTensorResponse, kserve_metadata_shape, tensor_response_stream,
+};
 use std::convert::{TryFrom, TryInto};
 use tonic::{Request, Response, Status, transport::Server};
 
@@ -187,6 +190,14 @@ pub struct KserveServiceConfig {
     #[builder(default = "None")]
     http_cancel_token: Option<CancellationToken>,
 
+    /// Distributed runtime used to publish frontend load to the KV DC Relay.
+    #[builder(default = "None")]
+    runtime: Option<dynamo_runtime::DistributedRuntime>,
+
+    /// Exact Dynamo namespace the frontend was configured with (`--namespace`).
+    #[builder(default = "None")]
+    namespace: Option<String>,
+
     /// gRPC server tuning configuration.
     /// Default: GrpcTuningConfig::from_env() - reads from environment variables with fallback to defaults.
     #[builder(default = "GrpcTuningConfig::from_env()")]
@@ -261,14 +272,21 @@ impl KserveService {
 impl KserveServiceConfigBuilder {
     pub fn build(self) -> Result<KserveService, anyhow::Error> {
         let config: KserveServiceConfig = self.build_internal()?;
+        anyhow::ensure!(
+            !dynamo_runtime::config::env_is_truthy("DYN_ENABLE_RL"),
+            "RL worker discovery is not supported by the KServe gRPC frontend"
+        );
 
         // Create HTTP service with only non-inference endpoints (metrics, health, models list)
-        // This provides the metrics endpoint and shared metrics object
+        // This provides the metrics endpoint, the shared metrics object, and the
+        // frontend load publisher.
         let http_service = http_service::HttpService::builder()
             .port(config.http_metrics_port)
             .host(config.http_metrics_host.clone())
             .metrics_prefix(config.metrics_prefix)
             .cancel_token(config.http_cancel_token)
+            .runtime(config.runtime)
+            .namespace(config.namespace)
             // Disable all inference endpoints - only use for metrics/health
             .enable_chat_endpoints(false)
             .enable_cmpl_endpoints(false)
@@ -434,7 +452,7 @@ impl InferRequest {
                         .await
                         .map_err(|e| {
                             tracing::error!("Failed to fold completions stream: {:?}", e);
-                            Status::internal(format!("Failed to fold completions stream: {}", e))
+                            dispatch_error_status(e.as_ref(), "Failed to fold completions stream")
                         })?,
                     set_raw_output_contents,
                 };
@@ -455,7 +473,7 @@ impl InferRequest {
                         .await
                         .map_err(|e| {
                             tracing::error!("Failed to fold completions stream: {:?}", e);
-                            Status::internal(format!("Failed to fold completions stream: {}", e))
+                            dispatch_error_status(&e, "Failed to fold completions stream")
                         })?;
                 completion_response.try_into().map_err(|e| {
                     Status::invalid_argument(format!("Failed to parse response: {}", e))
@@ -560,7 +578,7 @@ impl InferRequest {
                                     "Failed to fold completions stream: {:?}",
                                     e
                                 );
-                                Status::internal(format!("Failed to fold completions stream: {}", e))
+                                dispatch_error_status(&e, "Failed to fold completions stream")
                             })?;
 
                         let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
@@ -680,11 +698,15 @@ impl GrpcInferenceService for KserveService {
                                 .iter()
                                 .map(|input| inference::model_metadata_response::TensorMetadata {
                                     name: input.name.clone(),
-                                    datatype: match inference::DataType::try_from(input.data_type) {
-                                        Ok(dt) => dt.as_str_name().to_string(),
-                                        Err(_) => "TYPE_INVALID".to_string(),
-                                    },
-                                    shape: input.dims.clone(),
+                                    datatype: inference::DataType::try_from(input.data_type)
+                                        .ok()
+                                        .and_then(|dt| dt.oip_name())
+                                        .unwrap_or("TYPE_INVALID")
+                                        .to_string(),
+                                    shape: kserve_metadata_shape(
+                                        &input.dims,
+                                        model_config.max_batch_size,
+                                    ),
                                 })
                                 .collect(),
                             outputs: model_config
@@ -693,13 +715,15 @@ impl GrpcInferenceService for KserveService {
                                 .map(
                                     |output| inference::model_metadata_response::TensorMetadata {
                                         name: output.name.clone(),
-                                        datatype: match inference::DataType::try_from(
-                                            output.data_type,
-                                        ) {
-                                            Ok(dt) => dt.as_str_name().to_string(),
-                                            Err(_) => "TYPE_INVALID".to_string(),
-                                        },
-                                        shape: output.dims.clone(),
+                                        datatype: inference::DataType::try_from(output.data_type)
+                                            .ok()
+                                            .and_then(|dt| dt.oip_name())
+                                            .unwrap_or("TYPE_INVALID")
+                                            .to_string(),
+                                        shape: kserve_metadata_shape(
+                                            &output.dims,
+                                            model_config.max_batch_size,
+                                        ),
                                     },
                                 )
                                 .collect(),

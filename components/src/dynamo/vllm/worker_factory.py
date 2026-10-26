@@ -22,10 +22,12 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
+    register_image_loader_metrics,
 )
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint
@@ -34,23 +36,60 @@ from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .dp_topology import get_dp_range_for_worker
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
     PrefillWorkerHandler,
-    get_dp_range_for_worker,
 )
 from .health_check import (
     VllmEmbeddingHealthCheckPayload,
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
 )
-from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
+from .instrumented_scheduler import (
+    ENV_FPM_BENCHMARK_OUTPUT_PATH,
+    ENV_FPM_WORKER_ID,
+    InstrumentedScheduler,
+    benchmark_content_point_key,
+)
 from .multimodal_handlers import EncodeWorkerHandler
 from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
-from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
+from .realtime import RealtimeHandler, RealtimeTextHandler, RealtimeTranscriptionHandler
+from .state_agent import StateAgentLifecycle, state_agent_settings
+
+
+def _register_request_cache_metrics(
+    endpoint: Endpoint,
+    handler: Any,
+    config: Config,
+) -> None:
+    """Register cache metrics owned by a vLLM request handler."""
+    model_name = config.served_model_name or config.model
+
+    embedding_cache = getattr(handler, "embedding_cache_manager", None)
+    if embedding_cache is not None:
+        register_embedding_cache_metrics(
+            endpoint=endpoint,
+            cache=embedding_cache,
+            model_name=model_name,
+            component_name=config.component,
+        )
+
+    if not config.enable_multimodal:
+        return
+    request_processor = getattr(handler, "_multimodal_request_processor", None)
+    image_loader = getattr(request_processor, "image_loader", None)
+    if image_loader is not None:
+        register_image_loader_metrics(
+            endpoint=endpoint,
+            loader=image_loader,
+            model_name=model_name,
+            component_name=config.component,
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +99,104 @@ logger = logging.getLogger(__name__)
 # and scheduler-loop slack before failing closed.
 BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 
-# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
+# Bound for the post-benchmark worker GC stop RPC. Restoring GC in a healthy
+# worker is sub-second; a longer wait means the engine is gone, and neither
+# serving nor error propagation may hang on it.
+WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
+
+# Bound for the post-benchmark RPC that turns vLLM's cudagraph_metrics back
+# off in the model workers. It shares the restore budget bounded by
+# WORKER_GC_STOP_TIMEOUT_SECONDS, so it stays well below it; setting one
+# attribute is immediate in a healthy worker.
+CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS = 10.0
+
+# Bound for the post-benchmark engine provenance probe. It reads attributes
+# off already-built layers, so a healthy worker answers immediately; a longer
+# wait means the engine is gone and provenance must not hold up teardown.
+ENGINE_PROBE_TIMEOUT_SECONDS = 30.0
+
+# Schema name of the sidecar the post-benchmark probe writes next to the
+# merged artifact; the rank and merged artifacts keep their startup engine block.
+WORKER_PROBE_SIDECAR_SCHEMA = "dynamo.fpm.benchmark_worker_probe"
+
+# (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
+SnapshotEngineSetupResult = tuple[EngineSetupResult, StatLoggerFactory]
+
+# Utility installed on EngineCore by instrumented_scheduler; retargets a
+# snapshot-restored child whose FPM worker id was baked as "".
+FPM_SET_WORKER_ID_METHOD_NAME = "set_fpm_worker_id"
+
+# call_utility_async() has no deadline of its own (as of vLLM 0.30.0);
+# under DP it fans out to every rank, so this bounds the slowest one.
+FPM_SET_WORKER_ID_TIMEOUT_SECONDS = 30.0
+
+
+def _snapshot_uses_instrumented_scheduler(vllm_config: VllmConfig) -> bool:
+    """Whether the snapshot's EngineCore runs an InstrumentedScheduler.
+
+    False only for a user-supplied ``--scheduler-cls``, which has no FPM publisher.
+    Resolution errors propagate: the EngineCore already resolved the same class.
+    """
+    scheduler_cls = vllm_config.scheduler_config.get_scheduler_cls()
+    return isinstance(scheduler_cls, type) and issubclass(
+        scheduler_cls, InstrumentedScheduler
+    )
+
+
+async def _sync_fpm_worker_id(
+    engine_client: AsyncLLM, vllm_config: VllmConfig, new_worker_id: str
+) -> None:
+    """Push ``new_worker_id`` into a restored EngineCore's FPM publisher.
+
+    Raises on failure: a replica publishing an empty id is invisible to the planner.
+    """
+    if not _snapshot_uses_instrumented_scheduler(vllm_config):
+        return
+
+    try:
+        await asyncio.wait_for(
+            engine_client.engine_core.call_utility_async(
+                FPM_SET_WORKER_ID_METHOD_NAME, new_worker_id
+            ),
+            timeout=FPM_SET_WORKER_ID_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"Timed out after {FPM_SET_WORKER_ID_TIMEOUT_SECONDS}s setting FPM "
+            f"worker_id {new_worker_id} on the restored engine; an EngineCore rank "
+            f"is not answering utility RPCs"
+        ) from exc
+    except Exception as exc:
+        # vLLM surfaces a failed utility as a bare Exception(failure_message).
+        raise RuntimeError(
+            f"Failed to set FPM worker_id {new_worker_id} on the restored engine; "
+            f"this replica would publish an empty worker id and stay invisible to "
+            f"the planner"
+        ) from exc
+
+
+async def _sync_fpm_worker_id_or_shutdown(
+    engine_client: AsyncLLM, vllm_config: VllmConfig, new_worker_id: str
+) -> None:
+    """``_sync_fpm_worker_id``, shutting the engine down on failure.
+
+    For realtime and prefill, which have no lifecycle owning the engine yet.
+    """
+    try:
+        await _sync_fpm_worker_id(engine_client, vllm_config, new_worker_id)
+    except BaseException:
+        try:
+            engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
+        except Exception:
+            logger.exception(
+                "Failed to shut down the restored engine after the FPM worker_id "
+                "sync failed"
+            )
+        raise
 
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
@@ -78,6 +210,12 @@ def _benchmark_merged_path(base_path: Path, dp_start: int) -> Path:
     stem, ext = os.path.splitext(str(base_path))
     rank_suffix = "" if dp_start == 0 else f"_dp{dp_start}"
     return Path(f"{stem}{rank_suffix}_merged{ext}")
+
+
+def _benchmark_worker_probe_path(merged_path: Path) -> Path:
+    """Sidecar next to the merged artifact that holds the post-run worker probe."""
+    stem, ext = os.path.splitext(str(merged_path))
+    return Path(f"{stem}_worker_probe{ext}")
 
 
 def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
@@ -147,6 +285,215 @@ def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
     return status
 
 
+def _benchmark_engine_identity(data: dict) -> Optional[dict]:
+    """The part of a rank artifact's ``engine`` block that every DP rank of a
+    run must agree on.
+
+    ``parallel.data_parallel_rank`` legitimately differs per rank, and
+    Worker observations are written after collection, so they do not
+    participate in the startup identity comparison.
+    """
+    engine = data.get("engine")
+    if not isinstance(engine, dict):
+        return None
+    identity = copy.deepcopy(engine)
+    identity.pop("resolved", None)
+    identity.pop("resolution", None)
+    identity.pop("resolved_scope", None)
+    identity.pop("worker_probe", None)
+    attention = identity.get("attention")
+    if isinstance(attention, dict):
+        for field in ("backend_resolved", "mla_prefill_backend_resolved", "resolution"):
+            attention.pop(field, None)
+    parallel = identity.get("parallel")
+    if isinstance(parallel, dict):
+        parallel.pop("data_parallel_rank", None)
+    return identity
+
+
+def _engine_degraded(engine_block: Any) -> bool:
+    """True when a rank's ``engine`` block cannot be trusted for an identity
+    comparison: no block at all, or the capture itself failed partway
+    through (``_bench_capture_engine`` still emits whatever sub-blocks it
+    built before the exception, alongside ``capture_error``).
+    """
+    return not isinstance(engine_block, dict) or "capture_error" in engine_block
+
+
+def _validate_execution_measurement(
+    fpm: dict, measurement: dict, previous_forward_index: int
+) -> int:
+    """Check raw observations against their declared point/rank and timing."""
+    rank = measurement["dp_rank"]
+    benchmark_id = fpm["counter_id"]
+
+    def invalid(reason: str) -> RuntimeError:
+        return RuntimeError(
+            "Self-benchmark execution evidence is invalid: "
+            f"rank={rank} benchmark_id={benchmark_id}: {reason}"
+        )
+
+    raw = measurement.get("raw_fpms")
+    expected = measurement.get("expected_internal_samples")
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or type(expected) is not int
+        or expected < len(raw)
+        or "benchmark_sample" in fpm
+    ):
+        raise invalid("missing raw samples or contradictory retained observation")
+    for index, sample_fpm in enumerate(raw):
+        if not isinstance(sample_fpm, dict) or (
+            type(sample_fpm.get("counter_id")) is not int
+            or sample_fpm["counter_id"] != benchmark_id
+            or type(sample_fpm.get("dp_rank")) is not int
+            or sample_fpm["dp_rank"] != rank
+            or sample_fpm.get("worker_id") != fpm.get("worker_id")
+        ):
+            raise invalid(f"raw sample {index} has a different point/rank identity")
+        sample = sample_fpm.get("benchmark_sample")
+        if (
+            not isinstance(sample, dict)
+            or type(sample.get("sample_index")) is not int
+            or sample["sample_index"] != index
+            or type(sample.get("forward_index")) is not int
+            or sample["forward_index"] <= previous_forward_index
+        ):
+            raise invalid(f"raw sample {index} has an invalid sample/forward index")
+        previous_forward_index = sample["forward_index"]
+        timing = sample.get("timing")
+        if not isinstance(timing, dict) or timing.get("basis") not in {
+            "schedule_to_output",
+            "inter_output",
+        }:
+            raise invalid(f"raw sample {index} has no timing interval")
+        start, end = timing.get("start_monotonic"), timing.get("end_monotonic")
+        wall = sample_fpm.get("wall_time")
+        if (
+            end is None
+            or type(end) not in (int, float)
+            or not math.isfinite(end)
+            or wall is None
+            or type(wall) not in (int, float)
+            or not math.isfinite(wall)
+            or wall < 0
+            or (
+                start is not None
+                and (
+                    type(start) not in (int, float)
+                    or not math.isfinite(start)
+                    or start > end
+                    or not math.isclose(end - start, wall, rel_tol=1e-9, abs_tol=1e-9)
+                )
+            )
+        ):
+            raise invalid(f"raw sample {index} contradicts its timing interval")
+        graph = sample.get("cudagraph")
+        if not isinstance(graph, dict):
+            raise invalid(f"raw sample {index} has no graph observation status")
+        mode = graph.get("runtime_mode")
+        unpadded, padded = (
+            graph.get("num_unpadded_tokens"),
+            graph.get("num_padded_tokens"),
+        )
+        paddings = graph.get("num_paddings")
+        if graph.get("status") == "observed":
+            if (
+                not isinstance(mode, str)
+                or not mode
+                or type(unpadded) is not int
+                or type(padded) is not int
+                or unpadded < 0
+                or padded < unpadded
+                or type(paddings) is not int
+                or paddings != padded - unpadded
+            ):
+                raise invalid(f"raw sample {index} has invalid observed graph data")
+        elif graph.get("status") != "unavailable" or any(
+            value is not None for value in (mode, unpadded, padded, paddings)
+        ):
+            raise invalid(
+                f"raw sample {index} contradicts its graph observation status"
+            )
+    estimate = measurement.get("estimate")
+    if not isinstance(estimate, dict):
+        raise invalid("missing reduction inputs")
+    indices = estimate.get("raw_sample_indices")
+    if (
+        not isinstance(indices, list)
+        or not indices
+        or any(type(index) is not int or not 0 <= index < len(raw) for index in indices)
+        or indices != sorted(set(indices))
+    ):
+        raise invalid("invalid reduction sample indices")
+    method = estimate.get("method")
+    if (
+        (method == "single_step" and (len(raw) != 1 or indices != [0]))
+        or (method == "last_step" and indices != [len(raw) - 1])
+        or (method == "adjacent_upper_median" and indices != list(range(1, len(raw))))
+        or method not in {"single_step", "last_step", "adjacent_upper_median"}
+    ):
+        raise invalid("reduction inputs contradict the reduction method")
+    walls = sorted(raw[index]["wall_time"] for index in indices)
+    if not math.isclose(
+        fpm["wall_time"], walls[len(walls) // 2], rel_tol=1e-9, abs_tol=1e-12
+    ):
+        raise invalid("retained wall time contradicts the raw reduction inputs")
+    return previous_forward_index
+
+
+def _validate_warmup_evidence(data: dict, rank: int) -> dict:
+    """Require a ledger status; an unavailable history must remain unknown."""
+    ledger = data.get("warmup_evidence")
+    if (
+        not isinstance(ledger, dict)
+        or ledger.get("status") not in {"recorded", "unavailable"}
+        or not isinstance(ledger.get("records"), list)
+        or (ledger["status"] == "unavailable" and ledger["records"])
+    ):
+        raise RuntimeError(f"Self-benchmark warmup evidence is invalid: rank={rank}")
+    for record in ledger["records"]:
+        if (
+            not isinstance(record, dict)
+            or record.get("status") not in {"running", "completed", "failed"}
+            or not isinstance(record.get("validation"), dict)
+            or record["validation"].get("status")
+            not in {"passed", "failed", "not_performed"}
+            or (
+                record["validation"]["status"] == "passed"
+                and record["status"] != "completed"
+            )
+            or (
+                record["validation"]["status"] == "failed"
+                and record["status"] != "failed"
+            )
+        ):
+            raise RuntimeError(
+                f"Self-benchmark warmup evidence is invalid: rank={rank}"
+            )
+        start, end = record.get("forward_index_start"), record.get("forward_index_end")
+        if (
+            (start is not None and (type(start) is not int or start < 0))
+            or (end is not None and (type(end) is not int or end < 0))
+            or (start is not None and end is not None and end < start)
+            or (record["status"] == "completed" and end is None)
+        ):
+            raise RuntimeError(
+                f"Self-benchmark warmup forward range is invalid: rank={rank}"
+            )
+        count = record.get("observed_forward_count")
+        if count is not None and (
+            type(count) is not int
+            or count < 0
+            or (start is not None and end is not None and count != end - start)
+        ):
+            raise RuntimeError(
+                f"Self-benchmark warmup forward count is invalid: rank={rank}"
+            )
+    return ledger
+
+
 def _merge_benchmark_rank_results(
     rank_data: list[tuple[int, Path, dict]],
     merged_path: Path,
@@ -156,6 +503,9 @@ def _merge_benchmark_rank_results(
         raise RuntimeError("No self-benchmark rank results were loaded")
 
     source_ranks = [rank for rank, _, _ in rank_data]
+    # Row-level KV seed provenance travels from each rank artifact into the
+    # merged artifact unchanged (per rank, per benchmark id).
+    regimes: dict[tuple[int, int], object] = {}
     reference_rank, reference_path, reference = rank_data[0]
     run_id = reference.get("run_id")
     grid_digest = reference.get("grid_digest")
@@ -163,6 +513,75 @@ def _merge_benchmark_rank_results(
         raise RuntimeError("Self-benchmark rank results are missing run_id")
     if not isinstance(grid_digest, str) or not grid_digest:
         raise RuntimeError("Self-benchmark rank results are missing grid_digest")
+    has_measurement_protocol = "measurement_protocol" in reference
+    measurement_protocol = reference.get("measurement_protocol")
+    if has_measurement_protocol and (
+        not isinstance(measurement_protocol, dict)
+        or measurement_protocol.get("schema_version") != 1
+    ):
+        raise RuntimeError("Self-benchmark results have invalid measurement protocol")
+    for _, path, data in rank_data:
+        if ("measurement_protocol" in data) != has_measurement_protocol or data.get(
+            "measurement_protocol"
+        ) != measurement_protocol:
+            raise RuntimeError(
+                f"Self-benchmark measurement protocol mismatch at {path}: "
+                "every contributing rank must record the same protocol"
+            )
+    execution_evidence = (
+        measurement_protocol.get("execution_evidence")
+        if isinstance(measurement_protocol, dict)
+        else None
+    )
+    has_execution_evidence = (
+        isinstance(measurement_protocol, dict)
+        and "execution_evidence" in measurement_protocol
+    )
+    if has_execution_evidence and (
+        not isinstance(execution_evidence, dict)
+        or execution_evidence.get("schema_version") != 1
+        or execution_evidence.get("sample_field") != "benchmark_sample"
+        or execution_evidence.get("warmup_field") != "warmup_evidence"
+    ):
+        raise RuntimeError(
+            "Self-benchmark results have invalid execution evidence contract"
+        )
+    warmup_ledgers = {}
+    for rank, _, data in rank_data:
+        if has_execution_evidence:
+            warmup_ledgers[rank] = _validate_warmup_evidence(data, rank)
+        elif "warmup_evidence" in data:
+            raise RuntimeError(
+                "Self-benchmark execution evidence has no declared contract"
+            )
+    # A rank is "degraded" when its engine capture failed or is missing while
+    # at least one other rank has one: it cannot be trusted for an identity
+    # comparison, so it is excluded below and carried into the merged
+    # document's engine.capture_errors instead. A run where NO rank ever
+    # captured an engine block (e.g. a pre-Task-1 artifact) is not degraded
+    # -- it simply carries no engine provenance, so the merge stays
+    # byte-for-byte backward compatible (no engine key, no warning).
+    any_engine_present = any(isinstance(d.get("engine"), dict) for _, _, d in rank_data)
+    engine_capture_errors: dict[str, str] = {}
+    reference_engine: Optional[dict] = None
+    reference_engine_block: Optional[dict] = None
+    reference_engine_rank: Optional[int] = None
+    if any_engine_present:
+        for rank, _, data in rank_data:
+            engine_block = data.get("engine")
+            if _engine_degraded(engine_block):
+                engine_capture_errors[str(rank)] = (
+                    str(engine_block["capture_error"])
+                    if isinstance(engine_block, dict)
+                    else "missing engine block"
+                )
+            elif reference_engine is None:
+                # The first rank whose capture succeeded is the identity
+                # reference; a rank that comes first in rank_data but was
+                # itself degraded is not eligible to be the reference.
+                reference_engine = _benchmark_engine_identity(data)
+                reference_engine_block = engine_block
+                reference_engine_rank = rank
 
     reference_status = _validate_benchmark_rank_payload(reference, reference_path)
 
@@ -193,6 +612,7 @@ def _merge_benchmark_rank_results(
         )
 
     groups_by_id: dict[int, dict] = {}
+    previous_forward_indices: dict[int, int] = {}
     for group in reference_groups:
         benchmark_id = group.get("benchmark_id")
         if not isinstance(benchmark_id, int) or benchmark_id < 1:
@@ -232,6 +652,11 @@ def _merge_benchmark_rank_results(
             )
 
         wall_times: list[float] = []
+        measurement_point_key = (
+            benchmark_content_point_key(group["point"])
+            if has_measurement_protocol
+            else None
+        )
         for rank_result in rank_results:
             dp_rank = rank_result["dp_rank"]
             fpms = rank_result.get("fpms")
@@ -251,6 +676,84 @@ def _merge_benchmark_rank_results(
                 raise RuntimeError(
                     "Self-benchmark FPM rank mismatch: "
                     f"result_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                )
+            measurement = fpm.get("benchmark_measurement")
+            if has_measurement_protocol:
+                if (
+                    not isinstance(measurement, dict)
+                    or measurement.get("schema_version") != 1
+                    or measurement.get("dp_rank") != dp_rank
+                ):
+                    raise RuntimeError(
+                        "Self-benchmark measurement evidence missing or invalid: "
+                        f"rank={dp_rank} benchmark_id={benchmark_id}"
+                    )
+                point_key = measurement.get("point_key")
+                preparation = measurement.get("preparation")
+                if (
+                    not isinstance(point_key, str)
+                    or not point_key
+                    or not isinstance(preparation, dict)
+                    or preparation.get("grid_digest") != grid_digest
+                    or point_key != measurement_point_key
+                ):
+                    raise RuntimeError(
+                        "Self-benchmark measurement identity mismatch: "
+                        f"rank={dp_rank} benchmark_id={benchmark_id}"
+                    )
+                if has_execution_evidence:
+                    previous_forward_indices[dp_rank] = _validate_execution_measurement(
+                        fpm, measurement, previous_forward_indices.get(dp_rank, -1)
+                    )
+                    warmups_before = preparation.get("warmup_records_before")
+                    ledger = warmup_ledgers.get(dp_rank)
+                    if (
+                        (
+                            warmups_before is not None
+                            and (type(warmups_before) is not int or warmups_before < 0)
+                        )
+                        or (
+                            ledger is not None
+                            and ledger["status"] == "recorded"
+                            and (
+                                warmups_before is None
+                                or warmups_before > len(ledger["records"])
+                            )
+                        )
+                        or (
+                            ledger is not None
+                            and ledger["status"] == "unavailable"
+                            and warmups_before is not None
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"Self-benchmark warmup reference is invalid: rank={dp_rank} benchmark_id={benchmark_id}"
+                        )
+                    if ledger is not None and ledger["status"] == "recorded":
+                        first_forward = measurement["raw_fpms"][0]["benchmark_sample"][
+                            "forward_index"
+                        ]
+                        if any(
+                            record["status"] == "running"
+                            or (
+                                record.get("forward_index_end") is not None
+                                and record["forward_index_end"] > first_forward
+                            )
+                            for record in ledger["records"][:warmups_before]
+                        ):
+                            raise RuntimeError(
+                                f"Self-benchmark warmup reference overlaps measurement: rank={dp_rank} benchmark_id={benchmark_id}"
+                            )
+                elif any(
+                    "benchmark_sample" in raw for raw in measurement.get("raw_fpms", [])
+                ):
+                    raise RuntimeError(
+                        "Self-benchmark execution evidence has no declared contract"
+                    )
+            elif "benchmark_measurement" in fpm:
+                raise RuntimeError(
+                    "Self-benchmark measurement evidence has no shared protocol: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id}"
                 )
             wall_times.append(float(fpm.get("wall_time", 0.0)))
         expected_wall_time = max(wall_times, default=0.0)
@@ -302,6 +805,26 @@ def _merge_benchmark_rank_results(
                 f"Self-benchmark grid mismatch at {path}: "
                 f"expected={grid_digest} actual={data.get('grid_digest')}"
             )
+        if reference_engine is not None and not _engine_degraded(data.get("engine")):
+            data_engine_identity = _benchmark_engine_identity(data) or {}
+            if data_engine_identity != reference_engine:
+                mismatched = sorted(
+                    key
+                    for key in set(data_engine_identity) | set(reference_engine)
+                    if data_engine_identity.get(key) != reference_engine.get(key)
+                )
+                # The two dicts can differ (`!=`) even when every key's
+                # .get() agrees, e.g. a top-level key present-with-None on
+                # one rank and absent on the other: .get() returns None
+                # either way, so no single key explains it. Name the whole
+                # block instead of indexing into a possibly empty list.
+                field = mismatched[0] if mismatched else "<top-level key set>"
+                raise RuntimeError(
+                    f"Self-benchmark engine provenance mismatch at {path}: "
+                    f"field={field} "
+                    f"reference_rank={reference_engine_rank}: the ranks of "
+                    "one run must share an engine configuration"
+                )
         recorded_rank = data.get("dp", {}).get("rank")
         if recorded_rank != dp_rank:
             raise RuntimeError(
@@ -361,6 +884,8 @@ def _merge_benchmark_rank_results(
         for result in data.get("results", []):
             point = result.get("point", {})
             benchmark_id = point.get("benchmark_id")
+            if "kv_seed_regime" in result:
+                regimes[(dp_rank, benchmark_id)] = result["kv_seed_regime"]
             if benchmark_id in results_by_id:
                 raise RuntimeError(
                     f"Self-benchmark rank {dp_rank} has duplicate "
@@ -415,9 +940,39 @@ def _merge_benchmark_rank_results(
             fpms = copy.deepcopy(rank_result["fpms"])
             point = copy.deepcopy(canonical_point)
             point["dp_rank"] = dp_rank
-            flattened_results.append({"point": point, "fpms": fpms})
+            entry: dict = {"point": point, "fpms": fpms}
+            if (dp_rank, benchmark_id) in regimes:
+                entry["kv_seed_regime"] = regimes[(dp_rank, benchmark_id)]
+            flattened_results.append(entry)
 
     merged = copy.deepcopy(reference)
+    if any_engine_present:
+        if (
+            _engine_degraded(reference.get("engine"))
+            and reference_engine_block is not None
+        ):
+            # The reference rank's own capture failed or was absent, but
+            # another rank's did not: reseed the merged block from that rank
+            # instead of losing the provenance the run did capture.
+            merged["engine"] = copy.deepcopy(reference_engine_block)
+        merged_engine = merged.get("engine")
+        if isinstance(merged_engine, dict) and isinstance(
+            merged_engine.get("parallel"), dict
+        ):
+            # The merged document describes every rank, so a single rank's
+            # own DP rank would be a lie here.
+            merged_engine["parallel"]["data_parallel_rank"] = None
+        if engine_capture_errors:
+            logger.warning(
+                "Self-benchmark engine provenance capture failed or was "
+                "absent on rank(s) %s; the merged artifact's engine "
+                "provenance is unverified across ranks",
+                ", ".join(sorted(engine_capture_errors, key=int)),
+            )
+            if not isinstance(merged_engine, dict):
+                merged_engine = {}
+                merged["engine"] = merged_engine
+            merged_engine["capture_errors"] = engine_capture_errors
     merged["artifact_type"] = "merged"
     merged["dp"] = {
         "ranks": global_ranks,
@@ -427,8 +982,29 @@ def _merge_benchmark_rank_results(
     }
     merged["rank_files"] = [str(path) for _, path, _ in rank_data]
     merged["merged_output_path"] = str(merged_path)
+    if isinstance(merged.get("engine"), dict):
+        # The post-run worker probe (_attach_engine_resolved) writes its replies
+        # to a sidecar instead of rewriting the artifacts. Its path sits next to
+        # merged_output_path, outside the engine block, which stays free of
+        # per-run paths.
+        merged["worker_probe_path"] = str(_benchmark_worker_probe_path(merged_path))
     merged["results"] = flattened_results
     merged["iteration_groups"] = copy.deepcopy(reference_groups)
+    if has_execution_evidence:
+        merged.pop("warmup_evidence", None)
+        merged["rank_warmup_evidence"] = {
+            str(rank): copy.deepcopy(
+                warmup_ledgers.get(
+                    rank,
+                    {
+                        "status": "unavailable",
+                        "records": [],
+                        "reason": "rank_artifact_not_loaded",
+                    },
+                )
+            )
+            for rank in global_ranks
+        }
     _, slowest_timing = max(
         rank_timings,
         key=lambda item: float(item[1]["benchmark_elapsed_seconds"]),
@@ -458,6 +1034,365 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     os.replace(tmp_path, path)
 
 
+def _worker_probe_responses(results: Any) -> list[dict]:
+    """Keep every reply, including malformed or duplicate worker evidence."""
+    responses = []
+    identities: dict[tuple[int, int], list[int]] = {}
+    # A malformed top-level result is itself evidence; it is not an empty RPC.
+    for index, result in enumerate(results if isinstance(results, list) else [results]):
+        issues = []
+        try:
+            response = json.loads(json.dumps(result, allow_nan=False))
+        except (TypeError, ValueError) as error:
+            response = {
+                "unserializable_type": type(result).__name__,
+                "repr": repr(result),
+            }
+            issues.append(f"non-JSON response: {type(error).__name__}")
+        if not isinstance(result, dict):
+            issues.append("response is not an object")
+        else:
+            for field in ("dp_rank", "worker_rank", "tp_rank"):
+                if type(result.get(field)) is not int or result[field] < 0:
+                    issues.append(f"missing or invalid {field}")
+            for field in ("pp_rank", "pcp_rank"):
+                local_rank = result.get(field)
+                if local_rank is not None and (
+                    type(local_rank) is not int or local_rank < 0
+                ):
+                    issues.append(f"invalid {field}")
+            backends = result.get("attention_backends")
+            if not isinstance(backends, dict) or any(
+                not isinstance(layer, str) or not isinstance(name, str) or not name
+                for layer, name in backends.items()
+            ):
+                issues.append("invalid attention_backends")
+            for field in ("mla_prefill_backend", "cudagraph_mode_resolved"):
+                if result.get(field) is not None and not isinstance(result[field], str):
+                    issues.append(f"invalid {field}")
+            sizes = result.get("cudagraph_capture_sizes_resolved")
+            if not isinstance(sizes, list) or any(
+                type(size) is not int or size < 1 for size in sizes
+            ):
+                issues.append("invalid cudagraph_capture_sizes_resolved")
+            if not issues:
+                identity = (result["dp_rank"], result["worker_rank"])
+                identities.setdefault(identity, []).append(index)
+        responses.append({"rpc_index": index, "response": response, "issues": issues})
+    for indices in identities.values():
+        if len(indices) > 1:
+            for index in indices:
+                responses[index]["issues"].append("duplicate (dp_rank, worker_rank)")
+    return responses
+
+
+def _apply_engine_resolved(
+    document: dict, responses: list[dict], failure: str | None
+) -> None:
+    """Attach labelled post-run evidence without extending the RPC's scope."""
+    engine = document.get("engine")
+    if not isinstance(engine, dict):
+        return
+    parallel = engine.get("parallel") or {}
+    dp = document.get("dp") or {}
+    rank = dp.get("rank", parallel.get("data_parallel_rank"))
+    expected_ranks = [rank] if type(rank) is int else dp.get("ranks")
+    if not isinstance(expected_ranks, list):
+        expected_ranks = None
+    tp_size = parallel.get("tensor_parallel_size")
+    pp_size = parallel.get("pipeline_parallel_size")
+    pcp_size = parallel.get("prefill_context_parallel_size")
+    topology: tuple[int, int, int] | None = None
+    if (
+        type(tp_size) is int
+        and tp_size > 0
+        and type(pp_size) is int
+        and pp_size > 0
+        and type(pcp_size) is int
+        and pcp_size > 0
+    ):
+        topology = (tp_size, pcp_size, pp_size)
+    expected_workers_per_dp = math.prod(topology) if topology is not None else None
+    scoped_responses = copy.deepcopy(responses)
+    workers = []
+    slots: dict[tuple[int, int, int, int], list[dict]] = {}
+    for entry in scoped_responses:
+        response = entry["response"]
+        if entry["issues"]:
+            continue
+        if expected_ranks is not None and response["dp_rank"] not in expected_ranks:
+            continue
+        if topology is not None:
+            tp_size, pcp_size, pp_size = topology
+            worker_rank = response["worker_rank"]
+            expected_tp = worker_rank % tp_size
+            expected_pcp = (worker_rank // tp_size) % pcp_size
+            expected_pp = (worker_rank // (tp_size * pcp_size)) % pp_size
+            if (
+                response["tp_rank"] != expected_tp
+                or response.get("pp_rank") != expected_pp
+                or response.get("pcp_rank") != expected_pcp
+            ):
+                entry["issues"].append("worker ranks disagree with TP/PCP/PP topology")
+                continue
+            slot = (response["dp_rank"], expected_tp, expected_pcp, expected_pp)
+            slots.setdefault(slot, []).append(entry)
+        workers.append(entry)
+    for entries in slots.values():
+        if len(entries) > 1:
+            for entry in entries:
+                entry["issues"].append(
+                    "duplicate (dp_rank, tp_rank, pcp_rank, pp_rank)"
+                )
+    workers = [entry for entry in workers if not entry["issues"]]
+    observed = [entry["response"] for entry in workers]
+    observed_ranks = sorted({response["dp_rank"] for response in observed})
+    complete = (
+        expected_ranks is not None
+        and expected_workers_per_dp is not None
+        and len(observed) == len(expected_ranks) * expected_workers_per_dp
+        and not any(entry["issues"] for entry in scoped_responses)
+        and not any(response.get("capture_errors") for response in observed)
+    )
+    disagreements = []
+    # PP stages own different layers. Only compare backend choices for a
+    # layer that more than one worker actually observed.
+    layer_backends: dict[str, set[str]] = {}
+    for response in observed:
+        for layer, name in response["attention_backends"].items():
+            layer_backends.setdefault(layer, set()).add(name)
+    if any(len(names) > 1 for names in layer_backends.values()):
+        disagreements.append("attention_backends")
+    for field in (
+        "mla_prefill_backend",
+        "cudagraph_mode_resolved",
+        "cudagraph_capture_sizes_resolved",
+    ):
+        values = [
+            response[field] for response in observed if response.get(field) is not None
+        ]
+        if values and any(value != values[0] for value in values[1:]):
+            disagreements.append(field)
+    if failure:
+        resolution = failure
+    elif not observed:
+        resolution = "worker_probe_unobserved"
+    elif disagreements:
+        resolution = "worker_probe_mixed"
+    else:
+        resolution = "worker_probe" if complete else "worker_probe_partial"
+    engine["worker_probe"] = {
+        "schema_version": 1,
+        "scope": "post_collection_collective_rpc",
+        "responses": scoped_responses,
+        "coverage": {
+            "scope": "artifact_workers",
+            "expected_dp_ranks": expected_ranks,
+            "expected_workers_per_dp": expected_workers_per_dp,
+            "observed_workers": [
+                {
+                    key: response.get(key)
+                    for key in (
+                        "dp_rank",
+                        "worker_rank",
+                        "tp_rank",
+                        "pp_rank",
+                        "pcp_rank",
+                    )
+                }
+                for response in observed
+            ],
+            "missing_dp_ranks": (
+                sorted(set(expected_ranks) - set(observed_ranks))
+                if expected_ranks is not None
+                else None
+            ),
+            "complete": complete,
+        },
+        "disagreements": disagreements,
+        "error": failure,
+    }
+    # Keep the legacy field as a representative, explicitly labelled with
+    # its actual worker identity. It never substitutes for an unobserved DP rank.
+    engine["resolved"] = copy.deepcopy(observed[0]) if observed else None
+    engine["resolved_scope"] = "representative_worker" if observed else None
+    engine["resolution"] = resolution
+    attention = engine.get("attention")
+    if not isinstance(attention, dict):
+        return
+    names = sorted(
+        {
+            name
+            for response in observed
+            for name in response["attention_backends"].values()
+        }
+    )
+    attention["backend_resolved"] = names[0] if len(names) == 1 else None
+    prefill_names = {response.get("mla_prefill_backend") for response in observed}
+    attention["mla_prefill_backend_resolved"] = (
+        next(iter(prefill_names)) if len(prefill_names) == 1 else None
+    )
+    attention["resolution"] = "worker_probe_mixed" if len(names) > 1 else resolution
+
+
+def _engine_probe_view(engine: dict) -> dict:
+    """The fields ``_apply_engine_resolved`` sets on one ``engine`` block."""
+    view = {
+        field: engine.get(field)
+        for field in ("resolved", "resolved_scope", "resolution", "worker_probe")
+    }
+    attention = engine.get("attention")
+    if isinstance(attention, dict):
+        view["attention"] = {
+            field: attention.get(field)
+            for field in (
+                "backend_resolved",
+                "mla_prefill_backend_resolved",
+                "resolution",
+            )
+        }
+    return view
+
+
+def _worker_probe_sidecar(
+    merged: dict, responses: list[dict], failure: str | None
+) -> dict:
+    """Probe evidence for the merged artifact and for each contributing rank.
+
+    A rank's view is what ``_apply_engine_resolved`` would record for that
+    rank, built without reading its artifact. The merge verified that the
+    non-degraded ranks' startup ``engine`` blocks match except for the DP
+    rank, so the merged block with that rank's DP rank stands in for each of
+    them. A rank listed in ``engine.capture_errors`` uses the merged block's
+    TP/PP/PCP sizes, which every DP rank of one launcher shares; the
+    per-reply topology check rejects replies that contradict them. A rank's
+    view never claims another DP rank's observation.
+    """
+    engine = merged["engine"]
+    parallel = engine.get("parallel")
+    source_ranks = (merged.get("dp") or {}).get("source_ranks") or []
+    ranks: dict[str, dict] = {}
+    for dp_rank, rank_file in zip(source_ranks, merged.get("rank_files") or []):
+        rank_engine: dict = {
+            "parallel": {
+                **(parallel if isinstance(parallel, dict) else {}),
+                "data_parallel_rank": dp_rank,
+            }
+        }
+        if isinstance(engine.get("attention"), dict):
+            rank_engine["attention"] = {}
+        # "ranks" keeps the DP filter on this rank even if dp_rank is not an int.
+        _apply_engine_resolved(
+            {"engine": rank_engine, "dp": {"rank": dp_rank, "ranks": [dp_rank]}},
+            responses,
+            failure,
+        )
+        ranks[str(dp_rank)] = {
+            "rank_file": rank_file,
+            **_engine_probe_view(rank_engine),
+        }
+    return {
+        "schema": WORKER_PROBE_SIDECAR_SCHEMA,
+        "schema_version": 1,
+        "run_id": merged.get("run_id"),
+        "merged_output_path": merged.get("merged_output_path"),
+        "rank_files": list(merged.get("rank_files") or []),
+        "merged": _engine_probe_view(engine),
+        "ranks": ranks,
+    }
+
+
+def _warn_provenance_write_failed(path: object) -> None:
+    logger.warning("Could not record engine provenance in %s", path, exc_info=True)
+
+
+async def _attach_engine_resolved(
+    merged: dict,
+    engine_client: AsyncLLM,
+    *,
+    worker_extension_installed: bool = True,
+    user_worker_extension_cls: str | None = None,
+) -> None:
+    """Keep all answers to one bounded, post-collection worker probe.
+
+    The probe is ``FpmBenchmarkWorkerExtension.fpm_engine_probe``, called by
+    name in every model worker. The workers have it only when they load one of
+    Dynamo's extension classes (``worker_extension_installed``): under a
+    user's own ``--worker-extension-cls`` the RPC is not sent and the skip is
+    recorded instead. The RPC may cover only one DP engine. Missing workers
+    are unobserved, never inferred from another worker's configuration. The
+    answers update the in-memory merged document (served by
+    ``get_perf_metrics``) and are written to one sidecar next to the merged
+    artifact; the rank and merged artifacts on disk are neither read nor
+    rewritten. Probe, sidecar, and recording errors are logged, never raised:
+    they must not discard the valid measurements already on disk or keep the
+    launcher from restoring the workers.
+    """
+    if not isinstance(merged.get("engine"), dict):
+        return
+
+    def record(responses: list[dict], failure: str | None) -> None:
+        _apply_engine_resolved(merged, responses, failure)
+        merged_output_path = merged.get("merged_output_path")
+        if not merged_output_path:
+            return
+        sidecar_path: Path | None = None
+        try:
+            sidecar_path = _benchmark_worker_probe_path(Path(merged_output_path))
+            _write_json_atomic(
+                sidecar_path, _worker_probe_sidecar(merged, responses, failure)
+            )
+        except Exception:
+            # Name the sidecar once its path is known, else the value that broke it.
+            _warn_provenance_write_failed(sidecar_path or merged_output_path)
+
+    try:
+        if not worker_extension_installed:
+            # The call would fail in every worker, and vLLM logs each failure at ERROR.
+            logger.warning(
+                "Skipping the engine provenance probe of the model workers after "
+                "the self-benchmark: --worker-extension-cls is %s, not a Dynamo "
+                "worker extension; the worker probe sidecar records no resolved "
+                "worker configuration",
+                user_worker_extension_cls,
+            )
+            record(
+                [],
+                "probe_skipped: worker extension not installed "
+                f"({user_worker_extension_cls})",
+            )
+            return
+        # Bounded here too: collective_rpc's timeout only covers the engine core's
+        # wait for the workers, not ours for the engine core.
+        results = await asyncio.wait_for(
+            engine_client.collective_rpc(
+                "fpm_engine_probe", timeout=ENGINE_PROBE_TIMEOUT_SECONDS
+            ),
+            timeout=ENGINE_PROBE_TIMEOUT_SECONDS,
+        )
+        responses = _worker_probe_responses(results)
+        failure = None
+        if not responses or all(entry["issues"] for entry in responses):
+            failure = "probe_failed: no valid worker probe responses"
+        record(responses, failure)
+    except Exception as error:
+        # Not re-raised: provenance is best effort and must not block the
+        # restore. The catch is broad because vLLM raises a bare Exception when
+        # a worker call fails.
+        # A bare TimeoutError's str() is empty, and it is the single most
+        # likely production failure (a dead or wedged engine) -- the
+        # exception type name keeps the recorded reason from being useless.
+        resolution = f"probe_failed: {type(error).__name__}: {error}"
+        logger.warning("Engine provenance probe failed: %s", resolution, exc_info=True)
+        try:
+            record([], resolution)
+        except Exception:
+            # Best effort: the launcher must still get to restore the workers.
+            logger.warning(
+                "Could not record the engine provenance probe failure", exc_info=True
+            )
+
+
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
     """Wait for benchmark result files and aggregate across DP ranks."""
     base_path = Path(
@@ -470,10 +1405,13 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     dp_ranks = list(range(dp_start, dp_start + dp_size))
     rank_paths = [_benchmark_rank_path(base_path, dp_rank) for dp_rank in dp_ranks]
     merged_path = _benchmark_merged_path(base_path, dp_start)
-    try:
-        merged_path.unlink()
-    except FileNotFoundError:
-        pass
+    # The merged artifact written below names the probe sidecar's path, so a
+    # sidecar left by an earlier run must not survive to pass for this run's.
+    for stale_path in (merged_path, _benchmark_worker_probe_path(merged_path)):
+        try:
+            stale_path.unlink()
+        except FileNotFoundError:
+            pass
 
     logger.info(
         "Waiting for benchmark to complete (files: %s, timeout: %ds)...",
@@ -534,21 +1472,241 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     return merged
 
 
+async def _stop_worker_gc_policy(engine_client: AsyncLLM) -> None:
+    """Restore worker-process GC once the self-benchmark has finished.
+
+    Model workers auto-start the FPM freeze policy when
+    ``worker_extension_cls`` resolves (importing ``dynamo.vllm.gc_policy``
+    starts it), while ``InstrumentedScheduler`` only restores the
+    engine-core process. Without this symmetric stop the workers would keep
+    serving real traffic with automatic gen2 collection disabled and the
+    freeze daemon alive, so cyclic garbage would never be reclaimed.
+    Awaiting the RPC holds serving until every worker has restored its
+    thresholds and collected the previously frozen heap; both normal
+    completion and benchmark abort funnel through the same benchmark-wait
+    call sites. A failure here must propagate: serving on a worker that is
+    not GC-equivalent to a never-benchmarked one is worse than failing
+    startup.
+    """
+    if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() != "freeze":
+        return
+    await engine_client.collective_rpc("fpm_gc_stop")
+    logger.info("FPM GC policy stopped in all model workers")
+
+
+def _disable_engine_client_cudagraph_metrics(engine_client: Any) -> tuple[int, bool]:
+    """Turn cudagraph_metrics off in the engine client's process.
+
+    Independent steps, each logging its own WARNING when it fails, so a
+    failure in one never skips the others, and none raises. First drops the
+    graph-dispatch logging of the stat loggers vLLM built at startup, which is
+    what stops the collection; each stat logger is handled on its own, so one
+    that refuses does not leave the rest collecting. Then clears the flag on
+    the client's own config so a stat logger vLLM builds later (it rebuilds
+    them on an elastic-EP scale-up) builds none. Returns the number of stat
+    loggers whose graph logging was dropped and whether every step worked.
+    """
+    cleared = 0
+    complete = True
+    pending: list[Any] = []
+    try:
+        logger_manager = getattr(engine_client, "logger_manager", None)
+        pending = list(getattr(logger_manager, "stat_loggers", None) or [])
+    except Exception:
+        # Not re-raised: serving does not depend on this reset.
+        complete = False
+        logger.warning(
+            "Could not turn vLLM cudagraph_metrics off in the stat loggers of "
+            "the engine client after the self-benchmark; they may keep "
+            "collecting CUDA graph dispatch statistics while serving",
+            exc_info=True,
+        )
+    while pending:
+        stat_logger = pending.pop(0)
+        try:
+            # A per-engine adapter holds one LoggingStatLogger per DP engine.
+            per_engine = getattr(stat_logger, "per_engine_stat_loggers", None)
+            if isinstance(per_engine, dict):
+                pending.extend(per_engine.values())
+            if getattr(stat_logger, "cudagraph_logging", None) is not None:
+                stat_logger.cudagraph_logging = None
+                cleared += 1
+        except Exception:
+            # Not re-raised: third-party stat loggers can fail any way; serving goes on.
+            complete = False
+            logger.warning(
+                "Could not turn vLLM cudagraph_metrics off in one of the stat "
+                "loggers of the engine client (%s) after the self-benchmark; "
+                "it may keep collecting CUDA graph dispatch statistics while "
+                "serving",
+                type(stat_logger).__name__,
+                exc_info=True,
+            )
+    try:
+        vllm_config = getattr(engine_client, "vllm_config", None)
+        observability_config = getattr(vllm_config, "observability_config", None)
+        if observability_config is not None and hasattr(
+            observability_config, "cudagraph_metrics"
+        ):
+            observability_config.cudagraph_metrics = False
+    except Exception:
+        # Not re-raised: serving does not depend on this reset.
+        complete = False
+        logger.warning(
+            "Could not turn vLLM cudagraph_metrics off in the config of the "
+            "engine client after the self-benchmark; stat loggers vLLM builds "
+            "later may collect CUDA graph dispatch statistics",
+            exc_info=True,
+        )
+    return cleared, complete
+
+
+async def _restore_cudagraph_metrics(bench_cfg: dict, engine_client: AsyncLLM) -> None:
+    """Turn cudagraph_metrics back off before serving if Dynamo turned it on.
+
+    Benchmark mode enables the option so each benchmark sample records its
+    CUDA graph dispatch (``update_engine_config_with_dynamo``). Left on, the
+    model workers keep attaching dispatch statistics to every step and
+    vLLM's default stat logger keeps collecting them, without bound when
+    periodic stat logging is off, and logs them. The model workers are
+    reached by method name (``FpmBenchmarkWorkerExtension``), which only
+    Dynamo's own extension classes have: under a user's own
+    ``--worker-extension-cls`` they are not called. An option the user
+    enabled is left alone. Fail-soft: serving does not depend on this.
+    """
+    if not bench_cfg.get("cudagraph_metrics_auto_enabled", False):
+        return
+    cleared, client_complete = _disable_engine_client_cudagraph_metrics(engine_client)
+    if not bench_cfg.get("worker_extension_installed", True):
+        # The call would fail in every worker, and vLLM logs each failure at ERROR.
+        logger.warning(
+            "Not turning vLLM cudagraph_metrics off in the model workers after "
+            "the self-benchmark: --worker-extension-cls is %s, not a Dynamo "
+            "worker extension; they keep recording CUDA graph dispatch "
+            "statistics while serving",
+            bench_cfg.get("user_worker_extension_cls"),
+        )
+        return
+    try:
+        # Bounded here: this runs in the restore's ``finally`` chain, where the
+        # caller's wait_for no longer applies once it has fired, and ``timeout``
+        # only bounds the engine core's wait for the workers, not ours for it.
+        replies = await asyncio.wait_for(
+            engine_client.collective_rpc(
+                "fpm_disable_cudagraph_metrics",
+                timeout=CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
+            ),
+            timeout=CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
+        )
+        # What FpmBenchmarkWorkerExtension.fpm_disable_cudagraph_metrics returns.
+        unconfirmed = [
+            reply for reply in replies if reply != {"cudagraph_metrics": False}
+        ]
+    except Exception:
+        # Not re-raised: vLLM raises a bare Exception on a failed call; serving goes on.
+        logger.warning(
+            "Could not turn vLLM cudagraph_metrics off in the model workers "
+            "after the self-benchmark; they keep recording CUDA graph "
+            "dispatch statistics while serving",
+            exc_info=True,
+        )
+        return
+    if unconfirmed:
+        logger.warning(
+            "The model workers did not confirm turning vLLM cudagraph_metrics "
+            "off after the self-benchmark (replies: %s); they may keep "
+            "recording CUDA graph dispatch statistics while serving",
+            unconfirmed,
+        )
+        return
+    if client_complete:
+        logger.info(
+            "Turned vLLM cudagraph_metrics off after the self-benchmark "
+            "(model workers: %s; stat loggers cleared: %d)",
+            replies,
+            cleared,
+        )
+
+
+async def _restore_benchmark_workers(bench_cfg: dict, engine_client: AsyncLLM) -> None:
+    try:
+        if bench_cfg.get("randomize_kda_state", False):
+            await engine_client.collective_rpc("finish_benchmark_kda_state")
+    finally:
+        try:
+            await _stop_worker_gc_policy(engine_client)
+        finally:
+            # Last, so the GC stop never waits behind it; it is fail-soft.
+            await _restore_cudagraph_metrics(bench_cfg, engine_client)
+
+
+async def _await_benchmark_then_restore_workers(
+    bench_cfg: dict, vllm_config: VllmConfig, engine_client: AsyncLLM
+) -> dict:
+    """Wait for the self-benchmark and restore worker state and GC on every exit path.
+
+    The worker stop must not depend on the wait succeeding: ``_bench_abort``
+    publishes ``status="failed"`` artifacts, so an aborted benchmark makes
+    ``_wait_and_load_benchmark`` raise during validation, and the workers
+    would otherwise keep automatic gen2 collection disabled through teardown
+    or, if a caller survives the error, into serving. On the success path a
+    stop failure fails closed; on the failure path it is logged and the
+    original error propagates unchanged.
+    """
+    try:
+        results = await _wait_and_load_benchmark(bench_cfg, vllm_config)
+    except BaseException:
+        # The failure may be the engine dying; an unbounded RPC would then
+        # hang the launcher on the very path that is supposed to surface the
+        # error, so the cleanup stop is time-boxed and the original error
+        # always wins.
+        try:
+            await asyncio.wait_for(
+                _restore_benchmark_workers(bench_cfg, engine_client),
+                timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
+            )
+        except BaseException:
+            logger.exception(
+                "Failed to restore model workers while "
+                "handling a self-benchmark failure"
+            )
+        raise
+    await _attach_engine_resolved(
+        results,
+        engine_client,
+        worker_extension_installed=bench_cfg.get("worker_extension_installed", True),
+        user_worker_extension_cls=bench_cfg.get("user_worker_extension_cls"),
+    )
+    await asyncio.wait_for(
+        _restore_benchmark_workers(bench_cfg, engine_client),
+        timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
+    )
+    return results
+
+
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
 SetupKvEventPublisherFn = Callable[..., Optional[Any]]
+SetupKvStateAttachmentOwnerFn = Callable[..., Awaitable[Optional[Any]]]
 RegisterVllmModelFn = Callable[..., Awaitable[None]]
 SetupFpmRelayFn = Callable[..., Optional[list]]
 SetupMetricsCollectionFn = Callable[..., None]
 
 
 @dataclass
-class _DecodeWorkerLifecycle:
+class _WorkerLifecycle:
+    """Owns the engine and handler of a prefill, decode, or aggregated worker.
+
+    On exit it shuts the vLLM EngineCore down explicitly. EngineCore is a
+    non-daemon child, so leaving it to interpreter exit can block the main
+    process forever in multiprocessing's exit-time join.
+    """
+
     engine_client: Optional[AsyncLLM] = None
     vllm_config: Optional[VllmConfig] = None
     handler: Optional[BaseWorkerHandler] = None
     shutdown_event: asyncio.Event | None = None
 
-    def __enter__(self) -> "_DecodeWorkerLifecycle":
+    def __enter__(self) -> "_WorkerLifecycle":
         return self
 
     def __exit__(
@@ -562,13 +1720,11 @@ class _DecodeWorkerLifecycle:
         except Exception:
             if original_error is None:
                 raise
-            logger.exception(
-                "Failed to clean up decode worker after an earlier failure"
-            )
+            logger.exception("Failed to clean up worker after an earlier failure")
 
     def cleanup(self) -> None:
         """Release resources in reverse construction order."""
-        logger.debug("Cleaning up decode worker")
+        logger.debug("Cleaning up worker")
         if self.shutdown_event is not None:
             self.shutdown_event.set()
         try:
@@ -589,12 +1745,51 @@ class WorkerFactory:
         register_vllm_model_fn: RegisterVllmModelFn,
         setup_fpm_relay_fn: SetupFpmRelayFn,
         setup_metrics_collection_fn: SetupMetricsCollectionFn,
+        setup_kv_state_attachment_owner_fn: SetupKvStateAttachmentOwnerFn | None = None,
+        state_agent_lifecycle: StateAgentLifecycle | None = None,
     ):
         self.setup_vllm_engine = setup_vllm_engine_fn
         self.setup_kv_event_publisher = setup_kv_event_publisher_fn
+        self.setup_kv_state_attachment_owner = setup_kv_state_attachment_owner_fn
         self.register_vllm_model = register_vllm_model_fn
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
+        self.state_agent_lifecycle = state_agent_lifecycle or StateAgentLifecycle()
+
+    async def _setup_kv_routing(
+        self,
+        config: Config,
+        generate_endpoint: Endpoint,
+        vllm_config: VllmConfig,
+        *,
+        consolidator_enabled: bool,
+        consolidator_port: int | None,
+    ) -> Optional[Any]:
+        if state_agent_settings(config) is None:
+            return self.setup_kv_event_publisher(
+                config,
+                generate_endpoint,
+                vllm_config,
+                consolidator_enabled=consolidator_enabled,
+                consolidator_port=consolidator_port,
+            )
+
+        # NOTE: Source mode is immutable for one worker lifecycle. An opted-in
+        # worker never falls back to, or concurrently starts, the ordinary KV
+        # publisher; setup failure disables KV routing while serving continues.
+        try:
+            if self.setup_kv_state_attachment_owner is None:
+                raise RuntimeError("KV state-agent attachment setup is unavailable")
+            owner = await self.setup_kv_state_attachment_owner(
+                config, generate_endpoint, vllm_config
+            )
+            if owner is not None:
+                await self.state_agent_lifecycle.install(owner)
+        except Exception:
+            logger.exception(
+                "KV state-agent attachment setup failed; KV routing remains disabled"
+            )
+        return None
 
     async def create(
         self,
@@ -602,7 +1797,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
@@ -664,7 +1859,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Initialize an aggregated vLLM realtime worker."""
         del shutdown_event  # Connection cancellation is carried by Dynamo Context.
@@ -676,17 +1871,19 @@ class WorkerFactory:
 
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
+            engine_setup, factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 _default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
-            ) = snapshot_engine
+                _component_gauges,
+            ) = engine_setup
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
-            factory = StatLoggerFactory(
-                endpoint=generate_endpoint,
-                component_gauges=component_gauges,
+            factory.bind_endpoint(generate_endpoint)
+
+            await _sync_fpm_worker_id_or_shutdown(
+                engine_client, vllm_config, fpm_worker_id
             )
         else:
             factory = StatLoggerFactory(endpoint=generate_endpoint)
@@ -695,7 +1892,7 @@ class WorkerFactory:
                 vllm_config,
                 _default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
+                _component_gauges,
             ) = self.setup_vllm_engine(
                 config,
                 factory,
@@ -711,15 +1908,26 @@ class WorkerFactory:
         factory.init_publish()
 
         model_name = config.served_model_name or config.model
-        handler = RealtimeHandler(
-            {
-                "transcription": RealtimeTranscriptionHandler.from_engine(
-                    engine_client=engine_client,
-                    model_name=model_name,
-                    model_path=config.model,
-                )
-            }
-        )
+        supported_tasks = await engine_client.get_supported_tasks()
+        handlers: dict[str, RealtimeTextHandler | RealtimeTranscriptionHandler] = {}
+        if "generate" in supported_tasks:
+            handlers["realtime"] = RealtimeTextHandler.from_engine(
+                engine_client=engine_client,
+                model_name=model_name,
+                model_path=config.model_source_path,
+                chat_template_path=config.custom_jinja_template,
+            )
+        if "realtime" in supported_tasks:
+            handlers["transcription"] = RealtimeTranscriptionHandler.from_engine(
+                engine_client=engine_client,
+                model_name=model_name,
+                model_path=config.model_source_path,
+            )
+        if not handlers:
+            raise ValueError(
+                f"Model {model_name!r} does not support realtime text or transcription"
+            )
+        handler = RealtimeHandler(handlers)
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
         await self.register_vllm_model(
@@ -771,8 +1979,16 @@ class WorkerFactory:
         handler = EncodeWorkerHandler(
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
+            enable_frontend_decoding=config.frontend_decoding,
+            embedding_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
         )
         await handler.async_init(runtime)
+        register_image_loader_metrics(
+            endpoint=generate_endpoint,
+            loader=handler.image_loader,
+            model_name=config.served_model_name or config.model,
+            component_name=config.component,
+        )
 
         # Encode workers register a model card so the frontend's
         # serving-readiness gate can count them. The card carries no OpenAI
@@ -869,7 +2085,7 @@ class WorkerFactory:
             engine_client,
             vllm_config,
             _default_sampling_params,
-            _prometheus_temp_dir,
+            engine_cleanup_resource,
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
@@ -894,7 +2110,11 @@ class WorkerFactory:
                     health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
-                    ModelInput.Text,
+                    (
+                        ModelInput.Tokens
+                        if config.embedding_frontend_tokenization
+                        else ModelInput.Text
+                    ),
                     ModelType.Embedding,
                     generate_endpoint,
                     config,
@@ -912,6 +2132,18 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+            # Attached multi-client AsyncLLMs do not own EngineCore. Close all
+            # clients first, then let the parent cleanup resource terminate
+            # child endpoints and finally the shared EngineCore.
+            try:
+                engine_client.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down embedding AsyncLLM client")
+            if engine_cleanup_resource is not None:
+                try:
+                    engine_cleanup_resource.cleanup()
+                except Exception:
+                    logger.exception("Failed to clean up embedding engine resources")
 
     async def _create_classify_worker(
         self,
@@ -1017,37 +2249,20 @@ class WorkerFactory:
         failover_metrics=None,
     ) -> bool:
         # Shadow mode: sleep → probe → block on lock → wake. True only for a real
-        # (contended) failover, not the initial bootup.
+        # (contended) failover, not the initial bootup. The election itself is
+        # shared with the snapshot restore path, which arrives already paused;
+        # a cold-start engine is awake, so it sleeps here first.
         if config.gms_shadow_mode is not True:
             return False
 
         await handler._pause_controller.pause(1)
-        if failover_metrics is not None:
-            failover_metrics.set_state("standby")
-
-        runtime.set_health_status(True)
-        logger.info(
-            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        lock = await elect_and_wake(
+            handler._pause_controller,
+            runtime,
+            lock_path=os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock"),
+            failover_metrics=failover_metrics,
         )
-
-        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
-        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
-        engine_id = os.environ.get("ENGINE_ID", "0")
-        lock = FlockFailoverLock(lock_path)
-        await lock.acquire(engine_id=f"engine-{engine_id}")
-        was_failover = lock.was_contended
-        logger.info("[Shadow] Lock acquired, waking engine")
-        if failover_metrics is not None:
-            failover_metrics.set_state("waking")
-            if was_failover:
-                # Only a contended acquire is a failover; a bootup is not a switch.
-                failover_metrics.record_switch_attempt()
-
-        await handler._pause_controller.resume()
-        handler._pause_controller.mark_resumed()
-        logger.info("[Shadow] Engine awake, registering with discovery")
-        return was_failover
+        return lock is not None and lock.was_contended
 
     async def _create_decode_worker(
         self,
@@ -1055,20 +2270,23 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """
         Instantiate and serve
         """
-        with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
-            await self._run_decode_worker(
-                runtime,
-                config,
-                shutdown_event,
-                shutdown_endpoints,
-                snapshot_engine=snapshot_engine,
-                lifecycle=lifecycle,
-            )
+        with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            try:
+                await self._run_decode_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    snapshot_engine=snapshot_engine,
+                    lifecycle=lifecycle,
+                )
+            finally:
+                await self.state_agent_lifecycle.close()
 
     async def _run_decode_worker(
         self,
@@ -1076,8 +2294,8 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult],
-        lifecycle: _DecodeWorkerLifecycle,
+        snapshot_engine: Optional[SnapshotEngineSetupResult],
+        lifecycle: _WorkerLifecycle,
     ) -> None:
         """Initialize and serve a decode worker."""
 
@@ -1128,19 +2346,16 @@ class WorkerFactory:
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
+            engine_setup, factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
-            ) = snapshot_engine
+                _component_gauges,
+            ) = engine_setup
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
-            # Factory is created after unpack so component_gauges is available
-            factory = StatLoggerFactory(
-                endpoint=generate_endpoint,
-                component_gauges=component_gauges,
-            )
+            factory.bind_endpoint(generate_endpoint)
         else:
             # Factory is created without component_gauges; setup_vllm_engine() will
             # create the gauges after setup_multiprocess_prometheus() and set them
@@ -1153,10 +2368,13 @@ class WorkerFactory:
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
+                _component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        # Sync after the lifecycle owns the engine, so a failure shuts it down.
         lifecycle.engine_client = engine_client
         lifecycle.vllm_config = vllm_config
+        if snapshot_engine is not None:
+            await _sync_fpm_worker_id(engine_client, vllm_config, fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
@@ -1206,7 +2424,7 @@ class WorkerFactory:
 
         # Set up KV event publisher for prefix caching if enabled
         # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
+        kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
@@ -1216,23 +2434,9 @@ class WorkerFactory:
         if kv_publishers:
             handler.kv_publishers = kv_publishers
 
-        # Set up forward pass metrics relay (child ZMQ -> event plane).
-        # In checkpoint mode the engine was created before the runtime, so
-        # ForwardPassMetrics.worker_id will be empty (relay still works).
-        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
-        if fpm_relays:
-            handler.fpm_relays = fpm_relays
-
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
-        embedding_cache = getattr(handler, "embedding_cache_manager", None)
-        if embedding_cache is not None:
-            register_embedding_cache_metrics(
-                endpoint=generate_endpoint,
-                cache=embedding_cache,
-                model_name=config.served_model_name or config.model,
-                component_name=config.component,
-            )
+        _register_request_cache_metrics(generate_endpoint, handler, config)
 
         # Register engine routes
         self.register_engine_routes(
@@ -1257,15 +2461,23 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler, runtime, config, failover_metrics
-        )
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
+
+        # A sleeping shadow has no discovery card; relay only after it is elected.
+        # Snapshot restore already elected and synchronized the child's worker ID.
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
+        if fpm_relays:
+            handler.fpm_relays = fpm_relays
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
-            handler._benchmark_results = await _wait_and_load_benchmark(
-                bench_cfg, vllm_config
+            handler._benchmark_results = await _await_benchmark_then_restore_workers(
+                bench_cfg, vllm_config, handler.engine_client
             )
 
         # Model-serving-readiness role.
@@ -1283,6 +2495,10 @@ class WorkerFactory:
         if config.route_to_encoder:
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
+        handler._first_token_source = await generate_endpoint.first_token_source(
+            worker_type
+        )
 
         await self.register_vllm_model(
             model_input,
@@ -1380,12 +2596,31 @@ class WorkerFactory:
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
-        shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
-        """
-        Instantiate and serve
-        """
+        with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            try:
+                await self._run_prefill_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    snapshot_engine=snapshot_engine,
+                    lifecycle=lifecycle,
+                )
+            finally:
+                await self.state_agent_lifecycle.close()
+
+    async def _run_prefill_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+        snapshot_engine: Optional[SnapshotEngineSetupResult],
+        lifecycle: _WorkerLifecycle,
+    ) -> None:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
@@ -1417,27 +2652,42 @@ class WorkerFactory:
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
+            engine_setup, factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
-            ) = snapshot_engine
-            # TODO: The scheduler in the child process still has worker_id=""
-            # because the engine was forked before the runtime existed.
-            # Propagating the new ID to the child requires shared memory or
-            # a restart of the EngineCore process.
+            ) = engine_setup
+            factory.bind_endpoint(generate_endpoint)
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+
+            await _sync_fpm_worker_id_or_shutdown(
+                engine_client, vllm_config, fpm_worker_id
+            )
         else:
+            factory = StatLoggerFactory(endpoint=generate_endpoint)
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
-            ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
+            ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        # Owned only after the snapshot sync, which shuts the engine down itself
+        # on failure; from here on any exit shuts it down through the lifecycle.
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = vllm_config
         await configure_kv_event_block_size(engine_client, vllm_config)
+
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
+        factory.init_publish()
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config
@@ -1457,6 +2707,7 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -1473,7 +2724,7 @@ class WorkerFactory:
 
         # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
         # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
+        kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
@@ -1483,23 +2734,9 @@ class WorkerFactory:
         if kv_publishers:
             handler.kv_publishers = kv_publishers
 
-        # Set up forward pass metrics relay (child ZMQ -> event plane).
-        # In checkpoint mode the engine was created before the runtime, so
-        # ForwardPassMetrics.worker_id will be empty (relay still works).
-        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
-        if fpm_relays:
-            handler.fpm_relays = fpm_relays
-
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
-        embedding_cache = getattr(handler, "embedding_cache_manager", None)
-        if embedding_cache is not None:
-            register_embedding_cache_metrics(
-                endpoint=generate_endpoint,
-                cache=embedding_cache,
-                model_name=config.served_model_name or config.model,
-                component_name=config.component,
-            )
+        _register_request_cache_metrics(generate_endpoint, handler, config)
 
         # Register engine routes
         self.register_engine_routes(
@@ -1509,15 +2746,23 @@ class WorkerFactory:
             lora_enabled=config.engine_args.enable_lora,
         )
 
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler, runtime, config, failover_metrics
-        )
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
+
+        # A sleeping shadow has no discovery card; relay only after it is elected.
+        # Snapshot restore already elected and synchronized the child's worker ID.
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
+        if fpm_relays:
+            handler.fpm_relays = fpm_relays
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
-            handler._benchmark_results = await _wait_and_load_benchmark(
-                bench_cfg, vllm_config
+            handler._benchmark_results = await _await_benchmark_then_restore_workers(
+                bench_cfg, vllm_config, handler.engine_client
             )
 
         perf_endpoint = runtime.endpoint(
@@ -1625,9 +2870,6 @@ class WorkerFactory:
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
             raise
-        finally:
-            logger.debug("Cleaning up prefill worker")
-            handler.cleanup()
 
     async def _maybe_get_encode_worker_client(
         self, runtime: DistributedRuntime, config: Config
@@ -1665,6 +2907,7 @@ class WorkerFactory:
         runtime.register_engine_route(
             "control/scale_elastic_ep", handler.scale_elastic_ep
         )
+        runtime.register_engine_route("control/ep_capacity", handler.get_ep_capacity)
 
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
@@ -1678,6 +2921,7 @@ class WorkerFactory:
             "init_weights_update_group": handler.init_weights_update_group,
             "destroy_weights_update_group": handler.destroy_weights_update_group,
             "get_weight_version": handler.get_weight_version,
+            "set_weight_version": handler.set_weight_version,
         }
 
         if lora_enabled:
@@ -1700,7 +2944,8 @@ class WorkerFactory:
 
         logger.info(
             "Registered engine routes: control/sleep, control/wake_up, "
-            "control/scale_elastic_ep, control/start_profile, control/stop_profile, "
+            "control/scale_elastic_ep, control/ep_capacity, "
+            "control/start_profile, control/stop_profile, "
             "and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",

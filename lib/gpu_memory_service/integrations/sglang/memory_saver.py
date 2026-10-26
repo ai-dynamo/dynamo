@@ -28,6 +28,7 @@ from gpu_memory_service.client.torch.allocator import (
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
+from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common.utils import finalize_gms_write
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class GMSMemorySaverImpl:
         mode=None,
         ro_connect_timeout_ms=None,
     ):
-        self._device = torch.device("cuda", device_index)
+        self._device = torch.device(get_vmm_device_type().value, device_index)
         self.imported_weights_bytes = 0
         self.preloaded_weights_bytes = 0
         self.ro_connect_timeout_ms = ro_connect_timeout_ms
@@ -96,11 +97,11 @@ class GMSMemorySaverImpl:
         )
 
     @contextmanager
-    def region(self, tag: str, enable_cpu_backup: bool):
+    def region(self, tag: str, enable_cpu_backup: bool, **backup_options):
         """Use the tag's RW pool and publish pending weights after clean exit."""
-        if enable_cpu_backup:
+        if enable_cpu_backup or any(backup_options.values()):
             raise ValueError(
-                "SGLang with GMS does not support CPU backup for allocations."
+                "SGLang with GMS does not support CPU or disk backup for allocations."
             )
 
         if tag not in _TAG_LOCK_TYPES:
@@ -159,6 +160,7 @@ class GMSMemorySaverImpl:
         capture_error_mode,
         tag: str,
         enable_cpu_backup: bool,
+        **kwargs,
     ):
         # The old hybrid path could delegate this to torch_memory_saver, but
         # strict GMS mode has no compatible pauseable CUDA-graph allocator hook.
@@ -178,7 +180,10 @@ class GMSMemorySaverImpl:
             # the VA reservation alive for the next resume().
             self.allocators[target_tag].abort()
         gc.collect()
-        torch.cuda.empty_cache()
+        if self._device.type == "xpu":
+            torch.xpu.empty_cache()
+        else:
+            torch.cuda.empty_cache()
 
     def resume(self, tag: Optional[str] = None) -> None:
         for target_tag in _pause_resume_tags(tag):

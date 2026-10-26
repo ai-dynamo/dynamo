@@ -5,11 +5,6 @@ title: Sweeper
 subtitle: Experimental backend-neutral configuration search
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/overview.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning. Its API, configuration schema, search behavior, and output may change without a
@@ -45,8 +40,9 @@ config = SmartSearchConfig.from_yaml("sweep.yaml")
 candidates = Sweeper(runner_factory=my_runner_factory).run(config)
 ```
 
-The standalone `python -m aisimulate.sweeper` command validates configuration but deliberately does
-not choose a replay implementation.
+For the public YAML contract and stack discovery, use `aisimulate recommend --config
+recommendation.yaml`. The `Sweeper` class remains available for callers that need the legacy Python
+SDK configuration and an explicitly injected runtime.
 
 ## Compatibility
 
@@ -54,5 +50,5 @@ not choose a replay implementation.
 - The runner advertises supported `ReplaySpec` versions, backend/topology pairs, and runtime hooks
   before a study starts.
 - Every `Sweeper.run` call owns fresh optimizer studies, result caches, runners, and worker pools.
-- KVBM search fields are rejected. Native G2 replaces that path; Sweeper does not forward the old
-  host or disk offload settings.
+- KVBM search fields are rejected. The AISimulate engine and replay path do not support those
+  fields and provide no adapter migration for the old host or disk offload settings.

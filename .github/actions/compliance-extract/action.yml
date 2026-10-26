@@ -20,8 +20,12 @@ inputs:
   target:
     description: 'Target docker stage (runtime, frontend, planner)'
     required: true
+  dockerfile:
+    description: 'Existing Dockerfile with compliance_artifact support. Empty renders the standard framework Dockerfile.'
+    required: false
+    default: ''
   platform:
-    description: 'Single platform string, e.g. linux/amd64'
+    description: 'Platform string, e.g. linux/amd64, or a comma-separated list for multi-platform builds'
     required: true
   cuda_version:
     description: 'CUDA version string (e.g. 12.9, 13.0); empty for non-CUDA targets'
@@ -50,7 +54,7 @@ inputs:
     required: false
     default: ''
   epp_image:
-    description: 'EPP image reference (frontend only) — must equal what the build passed as EPP_IMAGE so the epp stage resolves the freshly-built ECR image instead of the rendered default upstream staging tag (which gets garbage-collected). Empty for non-frontend targets, which have no epp stage.'
+    description: 'EPP image reference (frontend only) — must equal what the build passed as EPP_IMAGE so the epp stage resolves the freshly-built ECR image rather than the released tag rendered from container/context.yaml. The compliance stages read /epp''s SBOM and license texts out of this stage, so a mismatch would attribute a different build of the binary than the one shipped. Empty for non-frontend targets, which have no epp stage.'
     required: false
     default: ''
   sccache_bucket:
@@ -95,7 +99,7 @@ runs:
   using: 'composite'
   steps:
     - name: Render Dockerfile
-      id: render
+      if: ${{ inputs.dockerfile == '' }}
       shell: bash
       run: |
         RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform ${{ inputs.platform }}"
@@ -109,13 +113,9 @@ runs:
         if [ "${{ inputs.make_efa }}" == "true" ]; then
           RENDER_ARGS+=" --make-efa"
         fi
-        # render.py prints an "INFO: Generated Dockerfile written to ..." line
-        # to stdout, so we can't capture its output as the path. With
-        # --output-short-filename the file is always written to
-        # container/rendered.Dockerfile (see render.py:render()), so just
-        # hardcode that path here.
+        # --output-short-filename writes container/rendered.Dockerfile, which
+        # the extraction steps use when no explicit Dockerfile was supplied.
         python3 container/render.py ${RENDER_ARGS} --output-short-filename
-        echo "rendered=container/rendered.Dockerfile" >> $GITHUB_OUTPUT
 
     # Unified compliance tree — flat NOTICES-<Eco>.txt + osrb-deps.csv +
     # osrb.cdx.json. FROM scratch stage; export bounded by these files' size
@@ -124,12 +124,12 @@ runs:
     - name: Extract /compliance/ (NOTICES + CSV + CycloneDX)
       shell: bash
       env:
+        DOCKERFILE_PATH: ${{ inputs.dockerfile || 'container/rendered.Dockerfile' }}
         SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
         SCCACHE_REGION: ${{ inputs.sccache_region }}
         GIT_SHA: ${{ inputs.git_sha }}
         EPP_IMAGE: ${{ inputs.epp_image }}
       run: |
-        mkdir -p /tmp/compliance
         # Reuse the warm cache the build just populated by matching ALL the
         # cache-key-affecting build-args the build passed. Otherwise the shared
         # stages rebuild here instead of cache-hitting:
@@ -158,6 +158,14 @@ runs:
             echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
           fi
         fi
+        if [ -n "${PIP_INDEX_URL:-}" ] \
+          && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+          && [ -n "${NETRC:-}" ] \
+          && [ -f "${NETRC}" ]; then
+          SECRET_ARGS+=" --secret id=pip-index-url,env=PIP_INDEX_URL"
+          SECRET_ARGS+=" --secret id=uv-default-index,env=UV_DEFAULT_INDEX"
+          SECRET_ARGS+=" --secret id=pypi-netrc,src=${NETRC}"
+        fi
         # Forward the freshly-built ECR EPP image the build used, so the epp
         # stage (pre_frontend COPY --from=epp) cache-hits instead of resolving
         # the rendered default upstream staging tag, which gets GC'd. Empty for
@@ -165,7 +173,8 @@ runs:
         # --build-arg (it would clear the ARG and reintroduce the failure).
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
-        docker buildx build \
+        bash "${{ github.action_path }}/extract-with-retry.sh" /tmp/compliance \
+            docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
             --target compliance_artifact \
@@ -174,9 +183,8 @@ runs:
             --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
             $EPP_IMAGE_ARG \
-            --output type=local,dest=/tmp/compliance \
             --progress=plain \
-            -f ${{ steps.render.outputs.rendered }} \
+            -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \
             .
 
@@ -342,12 +350,12 @@ runs:
       if: ${{ inputs.archive_sources == 'true' }}
       shell: bash
       env:
+        DOCKERFILE_PATH: ${{ inputs.dockerfile || 'container/rendered.Dockerfile' }}
         SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
         SCCACHE_REGION: ${{ inputs.sccache_region }}
         GIT_SHA: ${{ inputs.git_sha }}
         EPP_IMAGE: ${{ inputs.epp_image }}
       run: |
-        mkdir -p /tmp/sources
         # ENABLE_SOURCE_ARCHIVAL=true to actually run sources_collect; the other
         # build-args match the build so this shares the warm cache (same reason
         # as the compliance_artifact extract above). Same IRSA secrets too, so a
@@ -362,12 +370,21 @@ runs:
             echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
           fi
         fi
+        if [ -n "${PIP_INDEX_URL:-}" ] \
+          && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+          && [ -n "${NETRC:-}" ] \
+          && [ -f "${NETRC}" ]; then
+          SECRET_ARGS+=" --secret id=pip-index-url,env=PIP_INDEX_URL"
+          SECRET_ARGS+=" --secret id=uv-default-index,env=UV_DEFAULT_INDEX"
+          SECRET_ARGS+=" --secret id=pypi-netrc,src=${NETRC}"
+        fi
         # Same EPP image forwarding as the compliance_artifact extract: this
         # target also descends pre_frontend -> epp, so without it the epp stage
         # resolves the GC'd default staging tag. Empty for non-frontend targets.
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
-        docker buildx build \
+        bash "${{ github.action_path }}/extract-with-retry.sh" /tmp/sources \
+            docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
             --target sources_archive \
@@ -377,9 +394,8 @@ runs:
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
             --build-arg ENABLE_SOURCE_ARCHIVAL=true \
             $EPP_IMAGE_ARG \
-            --output type=local,dest=/tmp/sources \
             --progress=plain \
-            -f ${{ steps.render.outputs.rendered }} \
+            -f "${DOCKERFILE_PATH}" \
             $SECRET_ARGS \
             .
 

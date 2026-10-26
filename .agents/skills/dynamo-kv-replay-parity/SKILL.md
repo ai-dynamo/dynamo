@@ -1,6 +1,6 @@
 ---
 name: dynamo-kv-replay-parity
-description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across native vLLM and SGLang configurations, including forced scheduler-pressure lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
+description: Runs deterministic byte-parity and paired performance campaigns for Dynamo offline KV-aware replay across native-G1 vLLM and SGLang configurations, including forced scheduler-pressure and disaggregated handoff lifecycles. It is used when validating replay refactors, routing changes, scheduler-event changes, or performance-sensitive offline simulation changes against a baseline revision.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -30,14 +30,16 @@ Resolve and record before running anything:
 - Rust toolchain, build profile, flags, and host characteristics;
 - each artifact's exact Cargo features from the relevant manifests;
 - Mooncake trace path, SHA-256 checksum, and deterministic slice rule;
-- engine, topology, concurrency, worker counts, block sizes, and G1 capacities;
+- engine, topology, concurrency, worker counts, block sizes, and native G1 capacities;
 - the canonical-report exclusion allowlist; and
 - the performance run-order seed, CPU placement, timing scope, and invalidation rules.
 
 Use the project root `.venv/bin/python` for Python analysis and `uv pip` for any approved
 installation. Do not compare against moving branches or reuse a binary after changing its
 checkout. Do not describe the configuration as "all features"; record explicit feature
-names. Feature names can differ between `dynamo-mocker` and `dynamo-bench`.
+names. Feature names can differ between `dynamo-mocker` and `dynamo-bench`. The current
+campaign is native-G1-only; do not add removed KVBM replay features or runtime arguments
+to make a historical command line build.
 
 ## Stage 1: Pin revisions and artifacts
 
@@ -45,13 +47,14 @@ names. Feature names can differ between `dynamo-mocker` and `dynamo-bench`.
 2. Create isolated checkouts for both revisions using the same host and toolchain.
 3. Apply any temporary determinism correction identically to both revisions. Keep it out
    of the measured semantic delta and record its patch checksum.
-4. For the current `dynamo-bench` harness, build one release artifact per revision with
-   exactly `replay-bench` and no default features. `--canonical-reports-jsonl` requires
-   `replay-bench`, which also selects the seeded router.
-5. Reuse that artifact across all native correctness and performance rows. Do not build
-   separate topology or production-routing artifacts. If the named manifest feature no
-   longer exists, stop and report that this protocol needs updating rather than guessing a
-   replacement matrix.
+4. For the current `dynamo-bench` harness on Linux, build one release artifact per
+   revision with exactly `replay-bench` and no default features.
+   `--canonical-reports-jsonl` requires `replay-bench`, which also selects the seeded
+   router.
+5. Reuse that artifact across all native-G1 correctness and performance rows. Do not
+   build separate engine, topology, or production-routing artifacts. If the named manifest
+   feature or runtime contract no longer exists, stop and report that this protocol needs
+   updating rather than guessing a replacement matrix.
 6. Copy the artifacts to a temporary campaign directory. Record exact features, binary
    SHA-256, binary size, and `.text` size.
 7. Return each checkout to its original branch after extracting the binaries.
@@ -177,12 +180,15 @@ secondary parity coverage for the corresponding engine semantics.
 
 | Engine semantics | Topology | Memory path | Routing |
 | --- | --- | --- | --- |
-| vLLM pass-start | Aggregated | Native G1 | KV-aware |
-| vLLM pass-start | Disaggregated | Native G1 | KV-aware |
+| vLLM pass-end | Aggregated | Native G1 | KV-aware |
+| vLLM pass-end | Disaggregated | Native G1 | KV-aware |
 | SGLang pass-end | Aggregated | Native G1 | KV-aware |
 | SGLang pass-end | Disaggregated | Native G1 | KV-aware |
 
-For each row:
+KVBM G2-G4 replay was removed from the current mocker. It is not an unsupported row in
+this matrix and must not be emulated with ignored flags. A campaign that needs historical
+KVBM parity must pin a historical revision together with the matching historical skill
+protocol. For each current row:
 
 1. Produce canonical baseline and candidate outputs with the frozen configuration.
 2. Compare their bytes or SHA-256 digests exactly.

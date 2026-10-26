@@ -24,6 +24,13 @@ const (
 	ConfigKey = "epp-config-dynamo.yaml"
 )
 
+// IsLegacyGoEPP reports whether the component still uses the deprecated Go EPP
+// Pod contract. Presence of eppConfig is the explicit signal: clearing it
+// starts migration to the native Rust EPP.
+func IsLegacyGoEPP(eppConfig *v1beta1.EPPConfig) bool {
+	return eppConfig != nil
+}
+
 // GenerateConfigMap generates a ConfigMap for EPP configuration
 // Returns nil if ConfigMapRef is used (user provides their own ConfigMap)
 // Returns error if neither ConfigMapRef nor Config is provided
@@ -52,14 +59,12 @@ func GenerateConfigMap(
 	configMapName := GetConfigMapName(dgd.Name)
 
 	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      configMapName,
-			Namespace: dgd.Namespace,
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-				consts.KubeLabelDynamoComponent:           componentName,
-				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
-			},
+		Name:      configMapName,
+		Namespace: dgd.Namespace,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoComponent:           componentName,
+			consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
 		},
 		Data: map[string]string{
 			ConfigKey: configYAML,
@@ -106,16 +111,12 @@ func GetConfigMapVolumeMount(dgdName string, eppConfig *v1beta1.EPPConfig) (core
 
 	volume := corev1.Volume{
 		Name: "epp-config",
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: configMapName,
-				},
-				Items: []corev1.KeyToPath{
-					{
-						Key:  configKey,
-						Path: ConfigKey, // Always mount to the same path regardless of source key
-					},
+		ConfigMap: &corev1.ConfigMapVolumeSource{
+			Name: configMapName,
+			Items: []corev1.KeyToPath{
+				{
+					Key:  configKey,
+					Path: ConfigKey, // Always mount to the same path regardless of source key
 				},
 			},
 		},

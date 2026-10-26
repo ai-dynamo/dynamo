@@ -28,9 +28,9 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -39,6 +39,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -47,17 +49,20 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const (
-	reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
-	reasonFailedToMigrateWorkerHash    Reason = "failed_to_migrate_worker_hash"
-	reasonNoMultinodeOrchestrator      Reason = "no_multinode_orchestrator_available"
-	reasonFailedToReconcileResources   Reason = "failed_to_reconcile_the_resources"
-	reasonRollingUpdateFailed          Reason = "rolling_update_failed"
-	reasonWaitingForCheckpoint         Reason = "waiting_for_checkpoint"
+	reasonFailedToInitializeWorkerHash        Reason = "failed_to_initialize_worker_hash"
+	reasonFailedToMigrateWorkerHash           Reason = "failed_to_migrate_worker_hash"
+	reasonNoMultinodeOrchestrator             Reason = "no_multinode_orchestrator_available"
+	reasonFailedToReconcileResources          Reason = "failed_to_reconcile_the_resources"
+	reasonRollingUpdateFailed                 Reason = "rolling_update_failed"
+	reasonWaitingForCheckpoint                Reason = "waiting_for_checkpoint"
+	reasonSelectedWorkloadProviderUnavailable Reason = "selected_workload_provider_unavailable"
+	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"
 
 	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
@@ -75,7 +80,6 @@ type DynamoGraphDeploymentReconciler struct {
 	RestConfig            *rest.Config
 	Recorder              events.EventRecorder
 	DockerSecretRetriever DockerSecretRetriever
-	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
 	RBACManager           rbacManager
 }
@@ -90,10 +94,12 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=disaggregatedset.x-k8s.io,resources=disaggregatedsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch;create;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -123,16 +129,47 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// Finalize deleting resources before validating their now-immutable live configuration.
 	if !dynamoDeployment.GetDeletionTimestamp().IsZero() {
 		_, err = commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
+		if errors.Is(err, errAutomaticSnapshotCleanupPending) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		if err != nil {
 			logger.Error(err, "failed to handle the finalizer")
 		}
 		return ctrl.Result{}, err
 	}
 
+	// Reject stored LPX graphs before provider selection or any workload writes.
+	if dynamoDeployment.HasLPXComponent() && !r.RuntimeConfig.Gate.Enabled(features.LPX) {
+		programResult := newWorkloadProgramResult(dynamoDeployment)
+		programResult.Fail(dynamoDeployment.Generation, "lpx_disabled", errors.New("LPX integration is disabled"))
+		return programResult.Result, r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult)
+	}
+
+	// Lock in the provider before allowing any other reconciliation effects.
+	provider, err := r.ensureWorkloadProvider(ctx, dynamoDeployment)
+
+	// Keep adoption and patch failures retryable while making an invalid stored selection terminal.
+	if err != nil {
+		if !errors.Is(err, errUnsupportedWorkloadProvider) {
+			return ctrl.Result{}, err
+		}
+
+		// Persist the invalid selection diagnosis before suppressing automatic retries.
+		programResult := newWorkloadProgramResult(dynamoDeployment)
+		programResult.Fail(dynamoDeployment.Generation, reasonUnsupportedWorkloadProvider, err)
+		if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+			return programResult.Result, statusErr
+		}
+		return programResult.Result, reconcile.TerminalError(err)
+	}
+
 	// Reject unsupported stored configurations before any primary-resource mutation.
 	var compatibilityErrs []error
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
+		if snapshotFailoverErr := dynamo.ValidateSnapshotFailover(component, field.NewPath("spec", "components").Index(i), dynamoDeployment.Spec.BackendFramework).ToAggregate(); snapshotFailoverErr != nil {
+			compatibilityErrs = append(compatibilityErrs, snapshotFailoverErr)
+		}
 		for _, compatibilityErr := range checkpoint.ValidateCheckpointCompatibility(component.Experimental) {
 			compatibilityErrs = append(
 				compatibilityErrs,
@@ -161,10 +198,25 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	program := r.selectWorkloadProgram(dynamoDeployment)
+	program, err := r.selectWorkloadProgram(provider)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	programResult, programErr := program.Reconcile(ctx, workloadProgramRequest{
 		DGD: dynamoDeployment,
 	})
+	ownershipConflictCondition, ownershipConflictTransition := applyOwnershipConflict(
+		programResult.Status.Conditions,
+		dynamoDeployment.Generation,
+		programErr,
+	)
+	if ownershipConflictCondition != nil {
+		meta.SetStatusCondition(&programResult.Status.Conditions, *ownershipConflictCondition)
+	}
+	if ownershipConflictTransition == ownershipConflictRaised {
+		programResult.Eventf(corev1.EventTypeWarning, ownershipConflictCondition.Reason,
+			"Refusing to reconcile a resource with conflicting controller ownership: %s", ownershipConflictCondition.Message)
+	}
 	result = programResult.Result
 	if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
 		logger.Error(statusErr, "unable to persist workload program status")
@@ -196,11 +248,6 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	return r.RuntimeConfig.Gate.Enabled(features.Grove) && (dgd.Annotations == nil ||
-		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
-}
-
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	syncer := newDGDResourceSyncer(r.Client, r.Recorder)
 	return newDGDCheckpointsReconciler(
@@ -209,6 +256,19 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 		r.RuntimeConfig,
 		r.DockerSecretRetriever,
 	).deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
+}
+
+func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
+	oldDGD, oldOK := update.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	newDGD, newOK := update.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	if !oldOK || !newOK {
+		return false
+	}
+	annotationValue := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, key string) string {
+		return strings.ToLower(dgd.GetAnnotations()[key])
+	}
+	return annotationValue(oldDGD, consts.KubeAnnotationEnableDisaggregatedSet) != annotationValue(newDGD, consts.KubeAnnotationEnableDisaggregatedSet) ||
+		annotationValue(oldDGD, consts.KubeAnnotationEnableGrove) != annotationValue(newDGD, consts.KubeAnnotationEnableGrove)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -222,29 +282,30 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		return fmt.Errorf("register DGD component Pod index: %w", err)
 	}
 
+	// Index native PodSnapshot references so dependency events can find affected DGDs.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := mgr.GetFieldIndexer().IndexField(
+			context.Background(),
+			&nvidiacomv1beta1.DynamoGraphDeployment{},
+			dgdPodSnapshotRefIndex,
+			dgdPodSnapshotRefIndexValues,
+		); err != nil {
+			return fmt.Errorf("register DGD PodSnapshot reference index: %w", err)
+		}
+	}
+
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			generationOrDeletionChangedPredicate(),
+			dgdPrimaryPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
-		Watches(
-			&nvidiacomv1alpha1.DynamoCheckpoint{},
-			handler.EnqueueRequestsFromMapFunc(r.mapAutoCheckpointToDGDRequests),
-			builder.WithPredicates(predicate.Funcs{
-				CreateFunc:  func(ce event.CreateEvent) bool { return false },
-				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
-				GenericFunc: func(ge event.GenericEvent) bool { return true },
-			}),
-		).
 		Watches(
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
 			builder.WithPredicates(dgdWorkerPodEventPredicate()),
 		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
-			// ignore creation cause we don't want to be called again after we create the deployment
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			CreateFunc:  func(ce event.CreateEvent) bool { return true },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
@@ -263,7 +324,48 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
+		// Deleting a component or elastic-EP leader Service must bring it back: without
+		// this watch the discovery endpoint stays absent until some unrelated watched
+		// resource happens to trigger a reconcile.
+		Owns(&corev1.Service{}, builder.WithPredicates(predicate.Funcs{
+			// ignore creation cause we don't want to be called again after we create the service
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+
+	// Restore owned pools after deletion or spec drift without requiring GAIE on every cluster.
+	_, poolMappingErr := mgr.GetRESTMapper().RESTMapping(epp.InferencePoolGVK.GroupKind(), epp.InferencePoolGVK.Version)
+	if poolMappingErr != nil && !meta.IsNoMatchError(poolMappingErr) {
+		return fmt.Errorf("discover InferencePool API for DGD watch: %w", poolMappingErr)
+	}
+	if poolMappingErr == nil {
+		ctrlBuilder = ctrlBuilder.Owns(&gaiev1.InferencePool{}, builder.WithPredicates(
+			predicate.GenerationChangedPredicate{},
+		))
+	}
+
+	// Watch standalone Snapshot resources only when their external APIs were detected.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		ctrlBuilder = ctrlBuilder.
+			Watches(
+				&snapshotv1alpha1.SnapshotJob{},
+				handler.EnqueueRequestsFromMapFunc(r.mapAutoSnapshotJobToDGDRequests),
+				builder.WithPredicates(predicate.Funcs{
+					CreateFunc:  func(ce event.CreateEvent) bool { return false },
+					DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+					UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+					GenericFunc: func(ge event.GenericEvent) bool { return true },
+				}),
+			).
+			Watches(
+				&snapshotv1alpha1.PodSnapshot{},
+				handler.EnqueueRequestsFromMapFunc(r.mapPodSnapshotToDGDRequests),
+				builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			)
+	}
 	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
 		ctrlBuilder = ctrlBuilder.Watches(
 			&resourcev1.ResourceClaim{},
@@ -287,12 +389,21 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
 	}
+	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		ctrlBuilder = newDisaggregatedSetWatchSetup(mgr.GetClient()).addTo(ctrlBuilder)
+	}
+
+	// LPX child status can wake the DGD only when its controller is enabled.
+	if r.RuntimeConfig.Gate.Enabled(features.LPX) {
+		ctrlBuilder = ctrlBuilder.Owns(&nvidiacomv1alpha1.LPXGraphDeployment{})
+	}
+
+	// Register Grove-owned workload watches only when the Grove feature is enabled.
 	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
 		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
 	}
-	// Wrap with metrics collection
-	observedReconciler := observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeployment)
-	return ctrlBuilder.Complete(observedReconciler)
+
+	return ctrlBuilder.Complete(r)
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
@@ -304,10 +415,12 @@ func isDGDManagedWorkerPod(obj client.Object) bool {
 	if !ok || pod == nil {
 		return false
 	}
+
+	// Native LWS pods carry a worker hash instead of the DCD selector.
 	labels := pod.GetLabels()
 	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
 		labels[consts.KubeLabelDynamoComponent] != "" &&
-		labels[consts.KubeLabelDynamoSelector] != "" &&
+		(labels[consts.KubeLabelDynamoSelector] != "" || labels[consts.KubeLabelDynamoWorkerHash] != "") &&
 		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
 }
 
@@ -332,7 +445,7 @@ func dgdComponentPodIndexValue(dgdName, componentName string) string {
 }
 
 // dgdWorkerPodEventPredicate admits only events that can change whether a
-// Recreate rollout is blocked by an old pod. Creation and deletion change pod
+// worker rollout is blocked by an old pod. Creation and deletion change pod
 // membership; updates matter only when membership or terminality changes. A
 // deletion timestamp alone leaves the pod non-terminal and does not enqueue.
 func dgdWorkerPodEventPredicate() predicate.Predicate {
@@ -356,7 +469,8 @@ func dgdWorkerPodEventPredicate() predicate.Predicate {
 			newPod := e.ObjectNew.(*corev1.Pod)
 			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
 				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
-				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
+				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] ||
+				oldPod.Labels[consts.KubeLabelDynamoWorkerHash] != newPod.Labels[consts.KubeLabelDynamoWorkerHash] {
 				return true
 			}
 			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)
@@ -372,23 +486,23 @@ func mapDGDWorkerPodToRequests(_ context.Context, obj client.Object) []ctrl.Requ
 		return nil
 	}
 	dgdName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: dgdName}}}
+	return []ctrl.Request{{Namespace: obj.GetNamespace(), Name: dgdName}}
 }
 
-func (r *DynamoGraphDeploymentReconciler) mapAutoCheckpointToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {
-	ckpt, ok := obj.(*nvidiacomv1alpha1.DynamoCheckpoint)
-	if !ok || ckpt == nil {
+func (r *DynamoGraphDeploymentReconciler) mapAutoSnapshotJobToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	snapshotJob, ok := obj.(*snapshotv1alpha1.SnapshotJob)
+	if !ok || snapshotJob == nil {
 		return nil
 	}
-	if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+	if snapshotJob.Annotations == nil || snapshotJob.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
 		return nil
 	}
-	if ckpt.Labels == nil {
+	if snapshotJob.Labels == nil {
 		return nil
 	}
-	dgdName := ckpt.Labels[consts.KubeLabelDynamoGraphDeploymentName]
+	dgdName := snapshotJob.Labels[consts.KubeLabelDynamoGraphDeploymentName]
 	if dgdName == "" {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: ckpt.Namespace, Name: dgdName}}}
+	return []ctrl.Request{{Namespace: snapshotJob.Namespace, Name: dgdName}}
 }

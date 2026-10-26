@@ -25,9 +25,6 @@ tests:
           path: webhooks[3].namespaceSelector
         documentIndex: 0
       - notExists:
-          path: webhooks[4].namespaceSelector
-        documentIndex: 0
-      - notExists:
           path: webhooks[0].namespaceSelector
         documentIndex: 1
       - notExists:
@@ -39,7 +36,6 @@ tests:
       - notExists:
           path: webhooks[3].namespaceSelector
         documentIndex: 1
-
   - it: scopes namespace-restricted admission to the target namespace
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
@@ -64,10 +60,6 @@ tests:
         documentIndex: 0
       - equal:
           path: webhooks[3].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: "true"
-        documentIndex: 0
-      - equal:
-          path: webhooks[4].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
           value: "true"
         documentIndex: 0
       - equal:

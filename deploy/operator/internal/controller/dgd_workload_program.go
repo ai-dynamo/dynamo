@@ -73,19 +73,25 @@ type workloadProgram interface {
 }
 
 func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) workloadProgram {
-	if r.isGrovePathway(dgd) {
-		return r.newGroveProgram()
+	provider workloadProvider,
+) (workloadProgram, error) {
+	// Dispatch each durable provider value to its complete workload program.
+	switch provider {
+	case workloadProviderGrove:
+		return r.newGroveProgram(), nil
+	case workloadProviderDisaggregatedSet:
+		return r.newDisaggregatedSetProgram(), nil
+	case workloadProviderComponent:
+		return r.newComponentProgram(), nil
+	default:
+		return nil, fmt.Errorf("unsupported workload provider %q", provider)
 	}
-	return r.newComponentProgram()
 }
 
 func newWorkloadProgramResult(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) workloadProgramResult {
-	status := dgd.DeepCopy().Status
-	return workloadProgramResult{Status: status}
+	return workloadProgramResult{Status: *dgd.Status.DeepCopy()}
 }
 
 func (r *workloadProgramResult) Eventf(
@@ -137,7 +143,7 @@ func (r *workloadProgramResult) applyReconcileResult(
 ) {
 	r.Status.State = result.State
 	r.Status.Components = result.ComponentStatus
-	if rollingUpdateInProgress(r.Status.RollingUpdate) {
+	if result.State != nvidiacomv1beta1.DGDStateFailed && rollingUpdateInProgress(r.Status.RollingUpdate) {
 		r.Status.State = nvidiacomv1beta1.DGDStatePending
 	}
 	meta.SetStatusCondition(&r.Status.Conditions, readyCondition(generation, r.Status, result))
@@ -149,7 +155,7 @@ func readyCondition(
 	status nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 	workloads ReconcileResult,
 ) metav1.Condition {
-	if rollingUpdateInProgress(status.RollingUpdate) {
+	if workloads.State != nvidiacomv1beta1.DGDStateFailed && rollingUpdateInProgress(status.RollingUpdate) {
 		return metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,

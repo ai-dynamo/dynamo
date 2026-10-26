@@ -14,6 +14,64 @@ pub(crate) struct RoutePicker {
     round_robin_cursor: AtomicU64,
 }
 
+/// Concurrent picker for first-party routing policies.
+///
+/// This exposes the same first-party policy implementations used by
+/// [`PushRouter`](crate::pipeline::PushRouter) without coupling policy hosts to
+/// transport dispatch.
+#[derive(Debug)]
+pub struct BuiltinRoutePicker {
+    inner: RoutePicker,
+}
+
+impl BuiltinRoutePicker {
+    pub const fn round_robin() -> Self {
+        Self {
+            inner: RoutePicker::new(RoutePolicy::RoundRobin),
+        }
+    }
+
+    pub const fn random() -> Self {
+        Self {
+            inner: RoutePicker::new(RoutePolicy::Random),
+        }
+    }
+
+    pub const fn power_of_two_choices() -> Self {
+        Self {
+            inner: RoutePicker::new(RoutePolicy::PowerOfTwoChoices),
+        }
+    }
+
+    pub const fn least_loaded() -> Self {
+        Self {
+            inner: RoutePicker::new(RoutePolicy::LeastLoaded),
+        }
+    }
+
+    /// Select one worker and advance any policy state.
+    pub fn select_worker(&self, worker_ids: &[u64], load: impl Fn(u64) -> u64) -> Option<u64> {
+        self.inner
+            .select(
+                CandidateView::Workers(worker_ids),
+                RouteContext::default(),
+                load,
+            )
+            .map(|decision| decision.target.worker_id)
+    }
+
+    /// Inspect the next worker without advancing round-robin state.
+    pub fn peek_worker(&self, worker_ids: &[u64], load: impl Fn(u64) -> u64) -> Option<u64> {
+        self.inner
+            .peek(
+                CandidateView::Workers(worker_ids),
+                RouteContext::default(),
+                load,
+            )
+            .map(|decision| decision.target.worker_id)
+    }
+}
+
 impl RoutePicker {
     pub(crate) const fn new(policy: RoutePolicy) -> Self {
         Self {
@@ -33,9 +91,6 @@ impl RoutePicker {
         context: RouteContext,
         load: impl Fn(u64) -> u64,
     ) -> Option<RouteDecision> {
-        if self.policy == RoutePolicy::Random {
-            return random_decision(candidates);
-        }
         let mut samples = RandomSamples;
         self.choose_with_samples(candidates, context, &load, false, &mut samples)
     }
@@ -47,11 +102,35 @@ impl RoutePicker {
         context: RouteContext,
         load: impl Fn(u64) -> u64,
     ) -> Option<RouteDecision> {
-        if self.policy == RoutePolicy::Random {
-            return random_decision(candidates);
-        }
         let mut samples = RandomSamples;
         self.choose_with_samples(candidates, context, &load, true, &mut samples)
+    }
+
+    #[inline(always)]
+    fn choose_stateless_index(
+        &self,
+        candidate_count: usize,
+        commit: bool,
+        samples: &mut impl SampleSource,
+    ) -> Option<usize> {
+        if candidate_count == 0 {
+            return None;
+        }
+
+        match self.policy {
+            RoutePolicy::RoundRobin => {
+                let cursor = if commit {
+                    self.round_robin_cursor.fetch_add(1, Ordering::Relaxed)
+                } else {
+                    self.round_robin_cursor.load(Ordering::Relaxed)
+                };
+                Some(cursor as usize % candidate_count)
+            }
+            RoutePolicy::Random => Some(samples.index(candidate_count)),
+            RoutePolicy::PowerOfTwoChoices
+            | RoutePolicy::LeastLoaded
+            | RoutePolicy::DeviceAwareWeighted => None,
+        }
     }
 
     #[inline(always)]
@@ -68,19 +147,12 @@ impl RoutePicker {
         }
 
         match self.policy {
-            RoutePolicy::RoundRobin => {
-                let cursor = if commit {
-                    self.round_robin_cursor.fetch_add(1, Ordering::Relaxed)
-                } else {
-                    self.round_robin_cursor.load(Ordering::Relaxed)
-                };
-                Some(RouteDecision {
-                    target: candidates.target(cursor as usize % candidates.len()),
-                    admission: AdmissionKind::None,
-                })
-            }
-            RoutePolicy::Random => Some(RouteDecision {
-                target: candidates.target(samples.index(candidates.len())),
+            RoutePolicy::RoundRobin | RoutePolicy::Random => Some(RouteDecision {
+                target: candidates.target(self.choose_stateless_index(
+                    candidates.len(),
+                    commit,
+                    samples,
+                )?),
                 admission: AdmissionKind::None,
             }),
             RoutePolicy::PowerOfTwoChoices => {
@@ -132,23 +204,6 @@ impl SampleSource for RandomSamples {
     fn index(&mut self, upper: usize) -> usize {
         fastrand::usize(..upper)
     }
-}
-
-#[inline(always)]
-fn random_decision(candidates: CandidateView<'_>) -> Option<RouteDecision> {
-    let upper = candidates.len();
-    if upper == 0 {
-        return None;
-    }
-    let index = fastrand::usize(..upper);
-    let target = match candidates {
-        CandidateView::Workers(workers) => RouteTarget::worker(workers[index]),
-        CandidateView::DeviceAware(candidates) => candidates[index].target,
-    };
-    Some(RouteDecision {
-        target,
-        admission: AdmissionKind::None,
-    })
 }
 
 #[inline(always)]

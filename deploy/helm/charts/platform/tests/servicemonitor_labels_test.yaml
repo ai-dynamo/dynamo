@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: operator ServiceMonitor labels
+templates:
+  - charts/dynamo-operator/templates/operator-servicemonitor.yaml
+tests:
+  - it: should keep the default release label
+    set:
+      dynamo-operator.metricsService.enabled: true
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: metadata.labels.release
+          value: prometheus
+  - it: should apply configured metricsService.labels
+    set:
+      dynamo-operator.metricsService.enabled: true
+      dynamo-operator.metricsService.labels:
+        release: kube-prometheus-stack
+    asserts:
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack

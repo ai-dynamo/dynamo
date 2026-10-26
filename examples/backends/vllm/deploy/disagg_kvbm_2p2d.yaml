@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Requires Dynamo <= 1.6.x: later releases no longer ship KVBM.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -15,7 +16,7 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -26,7 +27,7 @@ spec:
           - decode
           - --disable-hybrid-kv-cache-manager
           - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           - --max-model-len
           - "32000"
           - --enforce-eager
@@ -45,7 +46,7 @@ spec:
           workingDir: /workspace/examples/backends/vllm
     replicas: 2
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:
@@ -59,7 +60,7 @@ spec:
           - "32000"
           - --enforce-eager
           - --kv-transfer-config
-          - '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}'
+          - '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_producer"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}'
           command:
           - python3
           - -m

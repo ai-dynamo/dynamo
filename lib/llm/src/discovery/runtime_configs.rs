@@ -62,7 +62,16 @@ fn base_runtime_config_watch(
                     if id.model_suffix.is_some() || card.lora.is_some() {
                         continue;
                     }
-                    configs.insert(id.instance_id, card.runtime_config);
+                    if let Err(error) = card.runtime_config.data_parallel_rank_range() {
+                        tracing::warn!(
+                            instance_id = id.instance_id,
+                            %error,
+                            "Ignoring base model runtime config with invalid data-parallel rank range"
+                        );
+                        configs.remove(&id.instance_id);
+                    } else {
+                        configs.insert(id.instance_id, card.runtime_config);
+                    }
                 }
                 Ok(DiscoveryEvent::ModelTaintsUpdated(update)) => {
                     if update.id.model_suffix.is_some() {
@@ -87,6 +96,7 @@ fn base_runtime_config_watch(
                     }
                 }
                 Ok(DiscoveryEvent::Removed(_)) => continue,
+                Ok(DiscoveryEvent::Resync(_)) => continue,
                 Err(error) => {
                     tracing::error!(%error, "Base model runtime-config discovery stream failed");
                     continue;
@@ -270,6 +280,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_data_parallel_ranges_are_ignored_before_runtime_config_watch() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream: DiscoveryStream =
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+        let mut configs = base_runtime_config_watch(stream, CancellationToken::new());
+        let mut zero_size = ModelDeploymentCard::default();
+        zero_size.runtime_config.data_parallel_size = 0;
+        let mut oversized = ModelDeploymentCard::default();
+        oversized.runtime_config.data_parallel_size = 4097;
+        let mut overflowing = ModelDeploymentCard::default();
+        overflowing.runtime_config.data_parallel_start_rank = u32::MAX;
+        let valid = ModelDeploymentCard::default();
+
+        for (instance_id, card) in [(6, &zero_size), (7, &oversized), (8, &overflowing)] {
+            tx.send(Ok(DiscoveryEvent::Added(model_instance(
+                instance_id,
+                None,
+                card,
+            ))))
+            .unwrap();
+        }
+        tx.send(Ok(DiscoveryEvent::Added(model_instance(9, None, &valid))))
+            .unwrap();
+
+        configs.changed().await.unwrap();
+        assert!(!configs.borrow().contains_key(&6));
+        assert!(!configs.borrow().contains_key(&7));
+        assert!(!configs.borrow().contains_key(&8));
+        assert_eq!(configs.borrow().get(&9).unwrap().data_parallel_size, 1);
+    }
+
+    #[tokio::test]
     async fn scoped_taint_updates_replace_only_known_base_worker_taints() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let stream: DiscoveryStream =
@@ -282,9 +324,18 @@ mod tests {
             unreachable!()
         };
 
-        tx.send(Ok(DiscoveryEvent::Added(base_instance))).unwrap();
+        tx.send(Ok(DiscoveryEvent::Added(base_instance.clone())))
+            .unwrap();
         configs.changed().await.unwrap();
         configs.borrow_and_update();
+
+        tx.send(Ok(DiscoveryEvent::Resync(vec![base_instance])))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), configs.changed())
+                .await
+                .is_err()
+        );
 
         let updated_taints = vec!["blue".to_string(), "gpu".to_string()];
         tx.send(Ok(DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {

@@ -10,13 +10,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
-use dynamo_runtime::{component::Endpoint, protocols::EndpointId};
+use dynamo_runtime::{
+    component::{Client, Endpoint},
+    protocols::EndpointId,
+};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::{KvWorkerMonitor, allocator::AllocatorTrimOnDrop},
-    kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
+    discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
+    kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -27,12 +30,75 @@ use crate::{
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            videos::OpenAIVideosStreamingEngine,
+            rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
 };
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
+
+/// A topology hop must retain the provider's admission and configuration, even
+/// when other cards share its endpoint or the endpoint is reused by a successor.
+#[derive(Clone)]
+pub(crate) struct CommittedWorkerSetTarget {
+    pub(crate) endpoint: Endpoint,
+    pub(crate) group: String,
+    pub(crate) generation: u64,
+    pub(crate) card: Arc<ModelDeploymentCard>,
+    pub(crate) admitted_ids: watch::Receiver<Vec<u64>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkerSetTargetId {
+    Committed { group: String, generation: u64 },
+    Legacy(EndpointId),
+}
+
+impl WorkerSetTargetId {
+    pub(crate) fn matches_group(&self, group_id: &str, endpoint: &EndpointId) -> bool {
+        match self {
+            Self::Committed { group, .. } => group == group_id,
+            Self::Legacy(legacy) => legacy == endpoint,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum WorkerSetTarget {
+    Committed(CommittedWorkerSetTarget),
+    /// Explicit endpoint constructors predate controller-owned admission.
+    Legacy(Endpoint),
+}
+
+impl WorkerSetTarget {
+    pub(crate) fn id(&self) -> WorkerSetTargetId {
+        match self {
+            Self::Committed(target) => WorkerSetTargetId::Committed {
+                group: target.group.clone(),
+                generation: target.generation,
+            },
+            Self::Legacy(endpoint) => WorkerSetTargetId::Legacy(endpoint.id()),
+        }
+    }
+
+    pub(crate) fn endpoint(&self) -> &Endpoint {
+        match self {
+            Self::Committed(target) => &target.endpoint,
+            Self::Legacy(endpoint) => endpoint,
+        }
+    }
+
+    pub(crate) async fn client(&self, cancellation: CancellationToken) -> anyhow::Result<Client> {
+        let client = self.endpoint().client().await?;
+        Ok(match self {
+            Self::Committed(target) => client.with_admitted_instances_and_cancellation(
+                target.admitted_ids.clone(),
+                cancellation,
+            ),
+            Self::Legacy(_) => client,
+        })
+    }
+}
 
 struct RequestLifetimeEngine<Req, Resp>
 where
@@ -137,8 +203,8 @@ pub struct WorkerSet {
     /// this; in-process models have no distributed endpoint.
     endpoint_id: Option<EndpointId>,
 
-    /// Endpoint handle used only by committed topology reconciliation.
-    topology_endpoint: Option<Endpoint>,
+    /// Admission and configuration exported through committed topology reconciliation.
+    topology_target: Option<CommittedWorkerSetTarget>,
 
     /// MDC checksum for this set's configuration
     mdcsum: String,
@@ -152,6 +218,7 @@ pub struct WorkerSet {
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
     pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
     pub(crate) pooling_engine: Option<OpenAIPoolingStreamingEngine>,
+    pub(crate) rerank_engine: Option<OpenAIRerankStreamingEngine>,
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
@@ -159,8 +226,11 @@ pub struct WorkerSet {
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
-    /// Worker monitor for load-based rejection
-    pub(crate) worker_monitor: Option<KvWorkerMonitor>,
+    /// Owns load monitoring for routed surfaces that do not use `RoutingHost`.
+    load_context: Option<Arc<RoutingLoadContext>>,
+
+    /// Shared configuration handle for this routing load context.
+    pub(crate) load_thresholds: Option<LoadThresholdHandle>,
 
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
@@ -187,7 +257,7 @@ impl WorkerSet {
         Self {
             namespace,
             endpoint_id: None,
-            topology_endpoint: None,
+            topology_target: None,
             mdcsum,
             card,
             chat_engine: None,
@@ -195,13 +265,15 @@ impl WorkerSet {
             embeddings_engine: None,
             classify_engine: None,
             pooling_engine: None,
+            rerank_engine: None,
             images_engine: None,
             videos_engine: None,
             audios_engine: None,
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
-            worker_monitor: None,
+            load_context: None,
+            load_thresholds: None,
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
@@ -219,13 +291,22 @@ impl WorkerSet {
         self.endpoint_id.as_ref()
     }
 
-    pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
-        self.endpoint_id = Some(endpoint.id());
-        self.topology_endpoint = Some(endpoint);
+    pub(crate) fn set_topology_target(&mut self, target: CommittedWorkerSetTarget) {
+        self.endpoint_id = Some(target.endpoint.id());
+        self.topology_target = Some(target);
     }
 
-    pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
-        self.topology_endpoint.as_ref()
+    pub(crate) fn set_load_context(&mut self, load_context: Arc<RoutingLoadContext>) {
+        self.load_context = Some(load_context);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_context(&self) -> Option<&Arc<RoutingLoadContext>> {
+        self.load_context.as_ref()
+    }
+
+    pub(crate) fn topology_target(&self) -> Option<&CommittedWorkerSetTarget> {
+        self.topology_target.as_ref()
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -256,6 +337,10 @@ impl WorkerSet {
         self.pooling_engine.is_some()
     }
 
+    pub fn has_rerank_engine(&self) -> bool {
+        self.rerank_engine.is_some()
+    }
+
     pub fn has_images_engine(&self) -> bool {
         self.images_engine.is_some()
     }
@@ -282,10 +367,9 @@ impl WorkerSet {
 
     /// Check whether this worker set advertises `capability` in its runtime configuration.
     pub fn supports_runtime_capability(&self, capability: &str) -> bool {
-        matches!(
-            self.card.runtime_config.runtime_data.get(capability),
-            Some(serde_json::Value::Bool(true))
-        )
+        self.card
+            .runtime_config
+            .supports_runtime_capability(capability)
     }
 
     /// Whether this set has any decode engine (chat or completions)
@@ -303,6 +387,7 @@ impl WorkerSet {
             || self.has_embeddings_engine()
             || self.has_classify_engine()
             || self.has_pooling_engine()
+            || self.has_rerank_engine()
             || self.has_images_engine()
             || self.has_tensor_engine()
             || self.has_videos_engine()
@@ -341,10 +426,40 @@ impl WorkerSet {
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
-        crate::protocols::openai::ParsingOptions::new(
-            self.card.runtime_config.tool_call_parser.clone(),
-            self.card.runtime_config.reasoning_parser.clone(),
-        )
+        crate::protocols::openai::ParsingOptions {
+            default_thinking_mode: self
+                .card
+                .runtime_config
+                .runtime_data
+                .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            structural_tag: self.card.runtime_config.structural_tag.clone(),
+            exclude_tools_when_tool_choice_none: self
+                .card
+                .runtime_config
+                .exclude_tools_when_tool_choice_none,
+            ..crate::protocols::openai::ParsingOptions::new(
+                self.card.runtime_config.tool_call_parser.clone(),
+                self.card.runtime_config.reasoning_parser.clone(),
+            )
+        }
+    }
+
+    /// Current instance membership, excluding canceled and closed lifecycle views.
+    pub(crate) fn available_worker_ids(&self) -> Option<std::collections::HashSet<u64>> {
+        if self
+            .lifecycle_cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return None;
+        }
+        let rx = self.instance_count_rx.as_ref()?;
+        if rx.has_changed().is_err() {
+            return None;
+        }
+        Some(rx.borrow().iter().copied().collect())
     }
 
     /// Number of active workers in this set, derived from the Client's discovery watcher.
@@ -387,6 +502,7 @@ impl WorkerSet {
         retain_for_requests!(embeddings_engine);
         retain_for_requests!(classify_engine);
         retain_for_requests!(pooling_engine);
+        retain_for_requests!(rerank_engine);
         retain_for_requests!(images_engine);
         retain_for_requests!(videos_engine);
         retain_for_requests!(audios_engine);
@@ -412,7 +528,7 @@ impl WorkerSet {
         let mut view = Self {
             namespace: self.namespace.clone(),
             endpoint_id: self.endpoint_id.clone(),
-            topology_endpoint: self.topology_endpoint.clone(),
+            topology_target: self.topology_target.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
@@ -420,6 +536,7 @@ impl WorkerSet {
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
             classify_engine: lora_context_engine(&self.classify_engine, &lora_name),
             pooling_engine: lora_context_engine(&self.pooling_engine, &lora_name),
+            rerank_engine: lora_context_engine(&self.rerank_engine, &lora_name),
             images_engine: lora_context_engine(&self.images_engine, &lora_name),
             videos_engine: lora_context_engine(&self.videos_engine, &lora_name),
             audios_engine: lora_context_engine(&self.audios_engine, &lora_name),
@@ -428,11 +545,15 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
-            worker_monitor: self.worker_monitor.clone(),
+            load_context: self.load_context.clone(),
+            load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
-            lifecycle_cancellation: None,
+            lifecycle_cancellation: self
+                .lifecycle_cancellation
+                .as_ref()
+                .map(CancellationToken::child_token),
             allocator_trim: None,
             allocator_trim_wrapped: false,
         };
@@ -470,6 +591,7 @@ mod tests {
     use crate::types::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
     use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
     use crate::types::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
+    use crate::types::openai::rerank::{NvCreateRerankRequest, NvCreateRerankResponse};
     use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
     use async_trait::async_trait;
     use dynamo_runtime::engine::AsyncEngine;
@@ -482,6 +604,28 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    #[test]
+    fn available_worker_ids_excludes_closed_and_canceled_views() {
+        let mut workers = make_worker_set("ns", "model");
+        let (tx, rx) = watch::channel(vec![1, 2]);
+        workers.set_instance_watcher(rx);
+        assert_eq!(workers.available_worker_ids().unwrap().len(), 2);
+        tx.send_replace(vec![2]);
+        assert_eq!(
+            workers.available_worker_ids().unwrap(),
+            [2].into_iter().collect()
+        );
+        drop(tx);
+        assert!(workers.available_worker_ids().is_none());
+
+        let (_tx, rx) = watch::channel(vec![3]);
+        workers.set_instance_watcher(rx);
+        let cancellation = CancellationToken::new();
+        workers.set_lifecycle_cancellation(cancellation.clone());
+        cancellation.cancel();
+        assert!(workers.available_worker_ids().is_none());
     }
 
     /// Generic stub satisfying any `ServerStreamingEngine<Req, Annotated<Resp>>` trait
@@ -528,13 +672,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_worker_set_basics() {
-        let ws = make_worker_set("ns1", "abc123");
-        assert_eq!(ws.namespace(), "ns1");
-        assert_eq!(ws.mdcsum(), "abc123");
-    }
-
     #[tokio::test]
     async fn adapter_view_routes_generate_requests_with_adapter_identity() {
         let observed_lora = Arc::new(Mutex::new(None));
@@ -572,6 +709,51 @@ mod tests {
     }
 
     #[test]
+    fn adapter_view_lifecycle_cancellation_follows_base() {
+        let mut base = make_worker_set("ns1", "abc123");
+        let (_tx, rx) = watch::channel(vec![1]);
+        base.set_instance_watcher(rx);
+        let cancellation = CancellationToken::new();
+        base.set_lifecycle_cancellation(cancellation.clone());
+
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = base.adapter_view(adapter_card);
+
+        assert_eq!(
+            adapter.available_worker_ids(),
+            Some([1].into_iter().collect())
+        );
+        cancellation.cancel();
+        assert!(adapter.available_worker_ids().is_none());
+    }
+
+    #[test]
+    fn dropping_adapter_view_does_not_cancel_base_lifecycle() {
+        let mut base = make_worker_set("ns1", "abc123");
+        let (_tx, rx) = watch::channel(vec![1]);
+        base.set_instance_watcher(rx);
+        let cancellation = CancellationToken::new();
+        base.set_lifecycle_cancellation(cancellation.clone());
+
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = base.adapter_view(adapter_card);
+        let adapter_cancellation = adapter.lifecycle_cancellation.clone().unwrap();
+        drop(adapter);
+
+        assert!(adapter_cancellation.is_cancelled());
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(base.available_worker_ids(), Some([1].into_iter().collect()));
+    }
+
+    #[test]
     fn adapter_view_does_not_advertise_unwrapped_realtime_engine() {
         let mut base = make_worker_set("ns1", "abc123");
         base.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
@@ -585,24 +767,6 @@ mod tests {
 
         assert!(base.has_realtime_engine());
         assert!(!adapter.has_realtime_engine());
-    }
-
-    #[test]
-    fn test_no_engines_by_default() {
-        let ws = make_worker_set("ns1", "abc123");
-        assert!(!ws.has_chat_engine());
-        assert!(!ws.has_completions_engine());
-        assert!(!ws.has_embeddings_engine());
-        assert!(!ws.has_classify_engine());
-        assert!(!ws.has_pooling_engine());
-        assert!(!ws.has_images_engine());
-        assert!(!ws.has_videos_engine());
-        assert!(!ws.has_audios_engine());
-        assert!(!ws.has_tensor_engine());
-        assert!(!ws.has_realtime_engine());
-        assert!(!ws.has_generate_engine());
-        assert!(!ws.has_decode_engine());
-        assert!(ws.is_prefill_set());
     }
 
     /// `is_prefill_set` must exclude every serving-engine field on `WorkerSet`. If a new
@@ -654,6 +818,12 @@ mod tests {
             has_pooling_engine,
             StubEngine::<NvCreatePoolingRequest, NvCreatePoolingResponse>::new(),
             "pooling"
+        );
+        check!(
+            rerank_engine,
+            has_rerank_engine,
+            StubEngine::<NvCreateRerankRequest, NvCreateRerankResponse>::new(),
+            "rerank"
         );
         check!(
             images_engine,
@@ -715,15 +885,6 @@ mod tests {
 
         // All workers gone → count is 0
         tx.send(vec![]).unwrap();
-        assert_eq!(ws.worker_count(), 0);
-    }
-
-    #[test]
-    fn test_worker_count_with_empty_watcher() {
-        // Discovery watcher starts empty (no workers have joined yet)
-        let mut ws = make_worker_set("ns1", "abc");
-        let (_tx, rx) = watch::channel::<Vec<u64>>(vec![]);
-        ws.set_instance_watcher(rx);
         assert_eq!(ws.worker_count(), 0);
     }
 

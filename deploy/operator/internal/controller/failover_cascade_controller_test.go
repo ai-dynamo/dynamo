@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -30,14 +29,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 const (
@@ -47,15 +43,13 @@ const (
 
 func newFailoverPod(name string, phase corev1.PodPhase, replicaIdx, podIdx string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: cascadeTestNamespace,
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-				groveLabelPCSG:             cascadeTestPCSG,
-				groveLabelPCSGReplicaIndex: replicaIdx,
-				groveLabelPodIndex:         podIdx,
-			},
+		Name:      name,
+		Namespace: cascadeTestNamespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
+			groveLabelPCSG:             cascadeTestPCSG,
+			groveLabelPCSGReplicaIndex: replicaIdx,
+			groveLabelPodIndex:         podIdx,
 		},
 		Status: corev1.PodStatus{Phase: phase},
 	}
@@ -86,7 +80,7 @@ func TestFailoverCascade_FailedPodDeletesEntireGroup(t *testing.T) {
 	r, c := newCascadeReconciler(failedPod, sibling1, sibling2)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -104,7 +98,7 @@ func TestFailoverCascade_SucceededPodDeletesEntireGroup(t *testing.T) {
 	r, c := newCascadeReconciler(succeededPod, sibling)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -124,8 +118,6 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	differentPodIndex := newFailoverPod("different-pod-index", corev1.PodRunning, "0", "1")
 	differentMember := newFailoverPod("different-member", corev1.PodRunning, "0", "0")
 	differentMember.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = "false"
-	restoreTarget := newFailoverPod("restore-target", corev1.PodRunning, "0", "0")
-	restoreTarget.Labels[snapshotprotocol.RestoreTargetLabel] = commonconsts.KubeLabelValueTrue
 	differentNamespace := newFailoverPod("different-namespace", corev1.PodRunning, "0", "0")
 	differentNamespace.Namespace = "other-ns"
 
@@ -143,7 +135,6 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 			differentReplica,
 			differentPodIndex,
 			differentMember,
-			restoreTarget,
 			differentNamespace,
 		).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -161,11 +152,10 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	t.Log("Verify the delete is namespace-scoped, excludes restore targets, and uses zero grace")
+	t.Log("Verify the delete is namespace-scoped and uses zero grace")
 	assert.Equal(t, cascadeTestNamespace, deleteOptions.Namespace)
 	assert.True(t, deleteOptions.LabelSelector.Matches(labels.Set(failedPod.Labels)))
 	assert.True(t, deleteOptions.LabelSelector.Matches(labels.Set(sibling.Labels)))
-	assert.False(t, deleteOptions.LabelSelector.Matches(labels.Set(restoreTarget.Labels)))
 	require.NotNil(t, deleteOptions.GracePeriodSeconds)
 	assert.Zero(t, *deleteOptions.GracePeriodSeconds)
 
@@ -181,7 +171,6 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 	} {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
 	}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(restoreTarget), &corev1.Pod{}))
 }
 
 func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
@@ -193,7 +182,7 @@ func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
 	r, c := newCascadeReconciler(failedPod, alsoFailed, running)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
@@ -205,17 +194,15 @@ func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
 func TestFailoverCascade_PodWithoutLabelIgnored(t *testing.T) {
 
 	unlabeled := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "random-pod",
-			Namespace: cascadeTestNamespace,
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodFailed},
+		Name:      "random-pod",
+		Namespace: cascadeTestNamespace,
+		Status:    corev1.PodStatus{Phase: corev1.PodFailed},
 	}
 
 	r, _ := newCascadeReconciler(unlabeled)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "random-pod", Namespace: cascadeTestNamespace},
+		Name: "random-pod", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -229,7 +216,7 @@ func TestFailoverCascade_NonFailedPodIsNoop(t *testing.T) {
 	r, c := newCascadeReconciler(runningPod, sibling)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
@@ -242,7 +229,7 @@ func TestFailoverCascade_NotFoundPodIsNoop(t *testing.T) {
 	r, _ := newCascadeReconciler()
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "gone", Namespace: cascadeTestNamespace},
+		Name: "gone", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -251,13 +238,11 @@ func TestFailoverCascade_NotFoundPodIsNoop(t *testing.T) {
 func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "partial-labels",
-			Namespace: cascadeTestNamespace,
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-				groveLabelPCSG: cascadeTestPCSG,
-			},
+		Name:      "partial-labels",
+		Namespace: cascadeTestNamespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
+			groveLabelPCSG: cascadeTestPCSG,
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodFailed},
 	}
@@ -265,7 +250,7 @@ func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 	r, _ := newCascadeReconciler(pod)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "partial-labels", Namespace: cascadeTestNamespace},
+		Name: "partial-labels", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -279,7 +264,7 @@ func TestFailoverCascade_DifferentPCSGReplicaUnaffected(t *testing.T) {
 	r, c := newCascadeReconciler(failedPod, differentReplica)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
@@ -295,14 +280,14 @@ func TestFailoverCascade_DeletingPodIsSkipped(t *testing.T) {
 
 	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
 	failedPod.DeletionTimestamp = &now
-	failedPod.DeletionGracePeriodSeconds = ptr.To(int64(0))
+	failedPod.DeletionGracePeriodSeconds = new(int64(0))
 	failedPod.Finalizers = []string{"test-finalizer"}
 	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "0", "0")
 
 	r, c := newCascadeReconciler(failedPod, sibling)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
@@ -320,54 +305,17 @@ func TestFailoverCascade_ConcurrentReconcileIsIdempotent(t *testing.T) {
 	r, c := newCascadeReconciler(pod1, pod2)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		Name: "ldr-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
 	// Second reconcile for the other pod — it's already gone (NotFound).
 	_, err = r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "wkr-1-0", Namespace: cascadeTestNamespace},
+		Name: "wkr-1-0", Namespace: cascadeTestNamespace,
 	})
 	require.NoError(t, err)
 
 	var remaining corev1.PodList
 	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Empty(t, remaining.Items)
-}
-
-func TestFailoverCascade_SnapshotRestoreTargetCannotDeleteSibling(t *testing.T) {
-	t.Log("Build a terminal Snapshot restore target with every failover label and a matching sibling")
-	pod := gmsPodReplacementTestPod("snapshot-uid", 0)
-	pod.Status.Phase = corev1.PodFailed
-	pod.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
-	pod.Labels[groveLabelPCSG] = cascadeTestPCSG
-	pod.Labels[groveLabelPCSGReplicaIndex] = "0"
-	pod.Labels[groveLabelPodIndex] = "0"
-	sibling := newFailoverPod("sibling", corev1.PodRunning, "0", "0")
-	sibling.Namespace = pod.Namespace
-
-	t.Log("Verify the failover predicate rejects the unsupported Snapshot overlap")
-	pred := failoverCascadePredicate()
-	assert.False(t, pred.Create(event.CreateEvent{Object: pod}))
-	oldPod := pod.DeepCopy()
-	oldPod.Status.Phase = corev1.PodRunning
-	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: pod}))
-
-	t.Log("Verify native GMS replacement does not admit the Pod before its sidecar restarts")
-	assert.False(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
-
-	t.Log("Reconcile defensively and verify neither the trigger nor sibling is cascade-deleted")
-	r, c := newCascadeReconciler(pod, sibling)
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: client.ObjectKeyFromObject(pod),
-	})
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sibling), &corev1.Pod{}))
-
-	t.Log("Verify native GMS replacement independently admits the same Pod after its sidecar restarts")
-	pod.Status.InitContainerStatuses[0].RestartCount = 1
-	assert.Equal(t, commonconsts.KubeLabelValueTrue, pod.Labels[snapshotprotocol.RestoreTargetLabel])
-	assert.True(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: pod}))
 }

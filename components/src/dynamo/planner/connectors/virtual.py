@@ -10,6 +10,7 @@ from dynamo._core import VirtualConnectorCoordinator
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector, WorkerInfoProvider
 from dynamo.planner.errors import EmptyTargetReplicasError
+from dynamo.planner.monitoring.dgd_services import ComponentGPUShape
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -259,5 +260,14 @@ class VirtualConnector(PlannerConnector):
         require_decode: bool = True,
     ) -> tuple[Optional[int], Optional[int]]:
         """Virtual deployments do not expose GPU shape through the coordinator."""
+        del require_prefill, require_decode
+        return None, None
+
+    def get_gpu_shapes(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
+        """Virtual deployments have no Kubernetes GPU allocation shape."""
         del require_prefill, require_decode
         return None, None

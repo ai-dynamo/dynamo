@@ -3,7 +3,12 @@
 
 //! Command-line arguments for the SGLang sidecar.
 
+use std::num::NonZeroUsize;
+
 use dynamo_sidecar_common::SidecarArgs;
+
+pub(crate) const DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES: NonZeroUsize =
+    NonZeroUsize::new(512 * 1024 * 1024).unwrap();
 
 /// Parsed sidecar arguments.
 #[derive(clap::Parser, Debug, Clone)]
@@ -15,10 +20,6 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
-    /// `host:port` (or URL) of SGLang's native `sglang.runtime.v1` service.
-    #[arg(long, visible_alias = "grpc-endpoint", env = "SGLANG_GRPC_ENDPOINT")]
-    pub sglang_endpoint: String,
-
     /// Reachable host that decode workers use to connect to a prefill worker's
     /// SGLang disaggregation bootstrap port. By default this is derived from
     /// SGLang's concrete `host`, then `dist_init_addr`, then a routable local
@@ -26,4 +27,13 @@ pub struct Args {
     /// wildcard addresses.
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
+
+    /// Maximum size, in bytes, of one event line in SGLang's native `/generate`
+    /// stream. Each in-flight request may buffer up to this much.
+    #[arg(
+        long,
+        env = "DYN_SGLANG_NATIVE_HTTP_MAX_EVENT_BYTES",
+        default_value_t = DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES
+    )]
+    pub native_http_max_event_bytes: NonZeroUsize,
 }

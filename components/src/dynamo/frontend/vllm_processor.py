@@ -6,17 +6,19 @@
 #
 
 import asyncio
+import inspect
 import json
 import logging
 import os
 import time
 from argparse import Namespace
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -35,18 +37,31 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 )
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
+from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .structural_tag_policy import (
+    runtime_structural_tag_excludes_reasoning,
+    runtime_structural_tag_options,
+)
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
+    PromptLogprobsAccumulator,
+    as_error_envelope,
+    backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
+    nvext_extra_field_requested,
     random_uuid,
     resolve_chat_template,
 )
+from .vllm_protocol import load_chat_template
 
 logger = logging.getLogger(__name__)
 
@@ -55,17 +70,350 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
     "length": FinishReason.LENGTH,
-    "error": FinishReason.ERROR,
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
 
 
-def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
+def _sampling_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
+    """Map OpenAI chat logprobs onto vLLM ``SamplingParams.logprobs``.
+
+    ``SamplingParams.logprobs`` is an integer count of extra alternatives.
+    When ``logprobs`` is true, the count comes from ``top_logprobs``. An
+    omitted ``top_logprobs`` is ``0``: the sampled token, with an empty
+    alternative list. ``0`` is a real count, so callers must distinguish it
+    from ``None``.
+    """
+    if logprobs is not True:
+        return None
+    if top_logprobs is None:
+        return 0
+    if (
+        isinstance(top_logprobs, int)
+        and not isinstance(top_logprobs, bool)
+        and top_logprobs >= 0
+    ):
+        return top_logprobs
+    return None
+
+
+def _reject_unsupported_chat_logprobs(logprobs: Any, top_logprobs: Any) -> None:
+    """Validate chat logprob options before preprocessing.
+
+    ``parse_logprob_options`` ignores every negative count, so forwarding one
+    returns HTTP 200 with the logprobs omitted. Chat ``logprobs`` is a
+    boolean; an integer belongs on ``/v1/completions``, which stays on the
+    Rust preprocessor.
+    """
+    if isinstance(logprobs, int) and not isinstance(logprobs, bool):
+        raise HttpError(
+            400,
+            "Validation: `logprobs` on /v1/chat/completions must be a boolean.",
+        )
+    if isinstance(top_logprobs, int) and not isinstance(top_logprobs, bool):
+        if top_logprobs < 0:
+            raise HttpError(
+                400,
+                "Validation: `top_logprobs` must be an integer >= 0, got "
+                f"{top_logprobs}. A negative count is dropped by the worker "
+                "and the logprobs would be omitted from the response.",
+            )
+        if top_logprobs > 0 and logprobs is not True:
+            raise HttpError(
+                400,
+                "Validation: when using `top_logprobs`, "
+                "`logprobs` must be set to true.",
+            )
+        return
+    if logprobs is True and top_logprobs is not None:
+        raise HttpError(
+            400,
+            "Validation: `top_logprobs` must be an integer >= 0.",
+        )
+
+
+def _utf8_bytes(token: str | None) -> list[int] | None:
+    if not token:
+        return None
+    return list(token.encode("utf-8"))
+
+
+def _chat_choice_logprobs(
+    records: list[dict[str, Any]],
+    top_count: int | None,
+    tokenizer: TokenizerLike,
+    return_tokens_as_token_ids: bool = False,
+) -> dict[str, Any] | None:
+    """Build OpenAI ``choices[].logprobs`` from normalized worker records.
+
+    Each record has ``token_id``, ``logprob``, and ``top``. ``top`` is the
+    raw per-position list of ``{rank, token_id, token, logprob, bytes}``,
+    including the sampled token. The content entry keeps the sampled token.
+    ``top_logprobs`` on the entry is the rank-sorted prefix of length
+    ``top_count``. ``0`` is an empty list. ``token_id`` is omitted.
+    ``return_tokens_as_token_ids`` formats every token and its bytes as
+    ``token_id:<id>``.
+    """
+    if not records:
+        return None
+    content: list[dict[str, Any]] = []
+    for record in records:
+        token_id = record["token_id"]
+        selected_logprob = record["logprob"]
+        raw_position = record["top"]
+        ranked_position = sorted(
+            (entry for entry in raw_position if isinstance(entry, dict)),
+            key=lambda entry: (
+                rank
+                if isinstance(rank := entry.get("rank"), int)
+                and not isinstance(rank, bool)
+                else 10**9
+            ),
+        )
+        top_entries: list[dict[str, Any]] = []
+        selected_token = None
+        selected_bytes = None
+        for raw_entry in ranked_position:
+            if "logprob" not in raw_entry:
+                continue
+            token = raw_entry.get("token") or ""
+            if not isinstance(token, str):
+                token = str(token)
+            try:
+                entry_logprob = float(raw_entry["logprob"])
+            except (TypeError, ValueError):
+                continue
+            raw_token_id = raw_entry.get("token_id")
+            entry_token_id = (
+                raw_token_id
+                if isinstance(raw_token_id, int) and not isinstance(raw_token_id, bool)
+                else None
+            )
+            if return_tokens_as_token_ids:
+                if entry_token_id is None:
+                    continue
+                token = f"token_id:{entry_token_id}"
+                entry_bytes = _utf8_bytes(token)
+            else:
+                if raw_entry.get("token") is None and entry_token_id is not None:
+                    token = tokenizer.decode(entry_token_id)
+                entry_bytes = raw_entry.get("bytes")
+                if not isinstance(entry_bytes, list):
+                    entry_bytes = _utf8_bytes(token)
+            if (
+                isinstance(top_count, int)
+                and not isinstance(top_count, bool)
+                and top_count > 0
+                and len(top_entries) < top_count
+            ):
+                top_entries.append(
+                    {
+                        "token": token,
+                        "logprob": entry_logprob,
+                        "bytes": entry_bytes,
+                    }
+                )
+            if (
+                not return_tokens_as_token_ids
+                and entry_token_id is not None
+                and entry_token_id == token_id
+                and selected_token is None
+            ):
+                selected_token = token
+                selected_bytes = entry_bytes
+        if return_tokens_as_token_ids:
+            selected_token = f"token_id:{token_id}"
+            selected_bytes = _utf8_bytes(selected_token)
+        elif selected_token is None:
+            selected_token = tokenizer.decode(token_id)
+            selected_bytes = list(selected_token.encode("utf-8", errors="replace"))
+        content.append(
+            {
+                "token": selected_token,
+                "logprob": selected_logprob,
+                "bytes": selected_bytes,
+                "top_logprobs": top_entries,
+            }
+        )
+    return {"content": content}
+
+
+def _append_worker_logprobs(
+    pending: list[dict[str, Any]],
+    token_ids: list[int],
+    log_probs: Any,
+    top_logprobs: Any,
+) -> None:
+    """Append one worker chunk. A misaligned chunk is left out entirely."""
+    if (
+        not isinstance(log_probs, list)
+        or not token_ids
+        or len(log_probs) != len(token_ids)
+    ):
+        return
+    positions = top_logprobs if isinstance(top_logprobs, list) else []
+    records: list[dict[str, Any]] = []
+    for index, token_id in enumerate(token_ids):
+        try:
+            selected = float(log_probs[index])
+            token_id_int = int(token_id)
+        except (TypeError, ValueError):
+            return
+        raw_position = (
+            positions[index]
+            if index < len(positions) and isinstance(positions[index], list)
+            else []
+        )
+        records.append(
+            {"token_id": token_id_int, "logprob": selected, "top": raw_position}
+        )
+    pending.extend(records)
+
+
+def _take_emitted_logprobs(
+    pending: list[dict[str, Any]],
+    emitted_ids: list[int],
+) -> list[dict[str, Any]] | None:
+    """Consume the pending prefix that matches ids the output processor emitted.
+
+    Returns None without consuming when the prefix does not match. The caller
+    drops the remainder so a leftover record cannot sit at the front of the
+    next chunk.
+    """
+    if len(pending) < len(emitted_ids):
+        return None
+    for index, token_id in enumerate(emitted_ids):
+        if pending[index]["token_id"] != token_id:
+            return None
+    taken = pending[: len(emitted_ids)]
+    del pending[: len(emitted_ids)]
+    return taken
+
+
+def _apply_choice_logprobs(
+    choice: dict[str, Any] | None,
+    post: Any,
+    output: Any,
+    pending: list[dict[str, Any]],
+    emitted_ids: list[int],
+    top_count: int | None,
+    return_tokens_as_token_ids: bool = False,
+) -> None:
+    """Attach logprobs for the token ids this output processor yield exposed.
+
+    Worker chunks land in ``pending`` before the processor emits. A missing
+    choice (tool parsing, JSON fallback, empty plain-text deltas) keeps both
+    buffers. ``emitted_ids`` is the processor's own token ids since the
+    previous emitted choice. ``previous_token_ids`` is parser history and is
+    not this cursor.
+
+    Once a choice is emitted, anything left in ``pending`` is dropped. That
+    covers a trimmed stop token and a prefix that does not match, so the next
+    chunk can align again. Hidden reasoning drops both buffers. An emitted
+    choice with nothing to attach sets ``logprobs`` to None.
+    """
+    if top_count is None or post._suppress_reasoning_output:
+        pending.clear()
+        emitted_ids.clear()
+        if choice is not None:
+            choice["logprobs"] = None
+        return
+
+    for token_id in getattr(output, "token_ids", None) or []:
+        try:
+            emitted_ids.append(int(token_id))
+        except (TypeError, ValueError):
+            if choice is not None:
+                choice["logprobs"] = None
+            pending.clear()
+            emitted_ids.clear()
+            return
+    if choice is None:
+        return
+
+    taken = _take_emitted_logprobs(pending, emitted_ids)
+    emitted_ids.clear()
+    pending.clear()
+    if taken is None or not taken:
+        choice["logprobs"] = None
+        return
+    choice["logprobs"] = _chat_choice_logprobs(
+        taken,
+        top_count,
+        tokenizer=post.tokenizer,
+        return_tokens_as_token_ids=return_tokens_as_token_ids,
+    )
+
+
+class _ReasoningUsageAnnotator:
+    """Report reasoning-token usage on the PYTHON chat-processor path.
+
+    NVBug 6678449b. dynamo #12181 added this, but only to the RUST OpenAIPreprocessor
+    (lib/llm/src/preprocessor.rs). `--dyn-chat-processor vllm` selects this Python path,
+    which bypasses that code entirely -- and the worker's _build_completion_usage()
+    emits no `completion_tokens_details` key at all, so `reasoning_tokens` is ABSENT
+    (not null) from usage.
+
+    The count is NOT derived here. Each StreamingPostProcessor accumulates
+    `reasoning_token_total` where the reasoning parser CLASSIFIES its output; this
+    class only sums those totals and annotates usage. Deriving it here -- from the
+    choices this path emits -- is what reported zero whenever the response projection
+    dropped or deferred the reasoning (include_reasoning=false, and the non-streaming
+    tool path's terminal-delta buffering).
+
+    Streaming classification stays chunk-granular, matching the Rust: a chunk carrying
+    both reasoning and visible content counts entirely as reasoning. The non-streaming
+    tool path has no per-chunk classification, so it counts the parsed reasoning text
+    exactly; that is more precise than the Rust rather than divergent from it.
+    A positive backend-supplied count stays authoritative.
+    """
+
+    __slots__ = ("_post_processors",)
+
+    def __init__(self, post_processors: dict[int, StreamingPostProcessor]) -> None:
+        self._post_processors = post_processors
+
+    @property
+    def total(self) -> int:
+        return sum(
+            post.reasoning_token_total for post in self._post_processors.values()
+        )
+
+    def annotate(self, usage: dict[str, Any]) -> dict[str, Any]:
+        """Return a COPY of usage carrying reasoning_tokens; never mutates the input."""
+        annotated = dict(usage)
+        details = dict(annotated.get("completion_tokens_details") or {})
+        # Only a POSITIVE backend count is authoritative. Missing, zero and
+        # negative all fall back to our own tally -- a negative would otherwise
+        # survive, since -1 is truthy.
+        backend = details.get("reasoning_tokens")
+        if not isinstance(backend, int) or backend <= 0:
+            details["reasoning_tokens"] = self.total
+        annotated["completion_tokens_details"] = details
+        return annotated
+
+
+def _finish_reason_error_message(
+    raw_reason: str | dict[str, Any] | None,
+) -> str | None:
+    """Extract a backend error before OpenAI finish-reason projection."""
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        return error_message if isinstance(error_message, str) else None
+    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
+        _, separator, detail = raw_reason.partition(":")
+        return detail.strip() if separator and detail.strip() else raw_reason
+    return None
+
+
+def map_finish_reason(
+    raw_reason: str | dict[str, Any] | None,
+) -> FinishReason | None:
     if raw_reason is None:
         return None
-    if raw_reason.startswith("error"):
-        return FinishReason.ERROR
+    if isinstance(raw_reason, dict):
+        logger.warning("Malformed error finish_reason from router")
+        return None
     if raw_reason.startswith("abort"):
         return FinishReason.ABORT
     if raw_reason.startswith("content_filter"):
@@ -86,19 +434,6 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
-
-
-def _runtime_config_structural_tag_options(
-    mdc: ModelDeploymentCard,
-) -> tuple[str, str, str]:
-    runtime_config = mdc.runtime_config()
-    if not isinstance(runtime_config, dict):
-        return "off", "auto", "auto"
-    return (
-        runtime_config.get("structural_tag_mode", "off"),
-        runtime_config.get("structural_tag_scope", "auto"),
-        runtime_config.get("structural_tag_schema", "auto"),
-    )
 
 
 def _ensure_chat_template(
@@ -175,27 +510,109 @@ def _single_transfer_modality(mm_features: list[Any]) -> str | None:
     return next(iter(modalities))
 
 
+@dataclass(frozen=True)
+class _ReasoningParserMetadata:
+    """Keep engine scheduling hints separate from response parser state."""
+
+    engine_reasoning_ended: bool | None
+    response_reasoning_ended: bool | None
+    parser_kwargs: dict[str, Any] | None
+
+
+def _ensure_reasoning_parser_output_capable(
+    parser_name: str,
+    parser_class: type[ReasoningParser],
+    tokenizer: TokenizerLike,
+    chat_template_kwargs: dict[str, Any],
+    model_config: Any,
+) -> None:
+    # vLLM ships boundary-only parsers (e.g. GptOssReasoningParser) that raise
+    # NotImplementedError from every output-parsing method, while this
+    # processor calls extract_reasoning_streaming per request. Probe once here
+    # so the combination is rejected at engine setup instead of failing every
+    # request with a 500 (issue #14936). The probe constructor mirrors the
+    # production construction sites (chat_template_kwargs, model_config).
+    probe = parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    try:
+        inspect.signature(probe.extract_reasoning_streaming).bind(
+            "", "", "", [], [], []
+        )
+    except TypeError as e:
+        raise RuntimeError(
+            f"reasoning_parser {parser_name!r} ({parser_class.__name__}) has an "
+            f"extract_reasoning_streaming signature this processor cannot call: {e}"
+        ) from e
+    try:
+        probe.extract_reasoning_streaming("", "", "", [], [], [])
+    except NotImplementedError as e:
+        msg = (
+            f"reasoning_parser {parser_name!r} ({parser_class.__name__}) only "
+            "provides boundary detection; this processor needs a parser that "
+            "implements extract_reasoning_streaming (issue #14936)"
+        )
+        if parser_name == "openai_gptoss":
+            msg += (
+                "; gpt-oss output parsing requires HarmonyParser, which this "
+                "processor does not support yet"
+            )
+        raise RuntimeError(msg) from e
+    except Exception as e:
+        # Parsers are not contracted to accept empty input; the probe only
+        # proves the method is implemented, so log and accept.
+        logger.debug(
+            "reasoning_parser %r probe raised %r on empty input; accepting",
+            parser_name,
+            e,
+        )
+
+
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
     chat_template_kwargs: dict[str, Any],
     request_for_sampling: Any,
     prompt_token_ids: list[int],
-) -> tuple[bool | None, dict[str, Any] | None]:
+    model_config: Any = None,
+) -> _ReasoningParserMetadata:
     if reasoning_parser_class is None:
-        return None, None
+        return _ReasoningParserMetadata(None, None, None)
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
-    if not getattr(request_for_sampling, "include_reasoning", True):
-        return True, parser_kwargs
+    if chat_template_kwargs.get("enable_thinking") is False:
+        return _ReasoningParserMetadata(True, True, parser_kwargs)
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
-        return True, parser_kwargs
+        return _ReasoningParserMetadata(True, True, parser_kwargs)
 
+    # Same construction as the other two sites. is_reasoning_end() does not read
+    # model_config, but constructing this one differently is exactly the drift that
+    # let the missing model_config go unnoticed at the adjust_request() site.
+    #
+    # Deliberately NOT added to parser_kwargs: that dict goes on the wire as
+    # dynamo_preproc["reasoning_parser_kwargs"], and ModelConfig is not
+    # serializable -- the worker builds its own.
     reasoning_parser = reasoning_parser_class(
         tokenizer,
         chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
     )
-    return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
+    response_reasoning_ended = reasoning_parser.is_reasoning_end(prompt_token_ids)
+    # include_reasoning controls response projection, not whether the model may
+    # emit reasoning tags. The engine still needs its vLLM scheduling hint, while
+    # the response parser must remain active until the generated tags are parsed.
+    engine_reasoning_ended = (
+        True
+        if not getattr(request_for_sampling, "include_reasoning", True)
+        else response_reasoning_ended
+    )
+    return _ReasoningParserMetadata(
+        engine_reasoning_ended,
+        response_reasoning_ended,
+        parser_kwargs,
+    )
 
 
 def _inject_routing_metadata(
@@ -265,6 +682,21 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
                 image_url["detail"] = "auto"
 
 
+def _disabled_as_unset(value: Any, requested: Any) -> Any:
+    """Send a disabled top_k or min_p as unset unless the client disabled it.
+
+    vLLM disables top_k at 0 or -1 and min_p at 0. vllm-proto 0.3 also uses 0
+    for "unset", so the vLLM gRPC sidecar rejects these values. If the client
+    did not disable the control, it is disabled here only because
+    generation_config does not enable it or because greedy sampling reset it.
+    A backend that reads the same generation_config then samples the same way.
+    A backend override of generation_config now applies instead of this 0.
+    """
+    if value <= 0 and (requested is None or requested > 0):
+        return None
+    return value
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -281,6 +713,7 @@ class VllmProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        structural_tag_excludes_reasoning: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -296,20 +729,27 @@ class VllmProcessor:
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
+        self.structural_tag_excludes_reasoning = structural_tag_excludes_reasoning
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
         self._sender: MmKwargsSender | None = None
         # Set DYNAMO_DISABLE_NIXL_MM=1 to disable mm_kwargs transfer entirely.
         # Set DYNAMO_MM_TRANSFER to choose transfer mode:
-        #   shm (default): shared memory. Same-node only (~2ms). If the
-        #     backend can't read the segment (cross-node), it falls back to
-        #     normal processing (backend runs HF processor).
+        #   shm (default): shared memory. The frontend and worker must share an
+        #     IPC namespace. A failed read uses raw-media fallback only when the
+        #     request already carries it; otherwise the worker fails closed.
         #   nixl: NIXL RDMA. Works cross-node via IB.
         self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
         transfer_mode = os.environ.get("DYNAMO_MM_TRANSFER", "shm").lower()
         self.use_shm_transfer = transfer_mode == "shm"
         logger.info("[mm-routing] Transfer mode: %s", transfer_mode)
+        if self.nixl_mm_enabled and self.use_shm_transfer:
+            logger.info(
+                "[mm-routing] SHM transfer requires the frontend and worker to "
+                "share /dev/shm; use DYNAMO_MM_TRANSFER=nixl for separate "
+                "pods or nodes"
+            )
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -330,6 +770,7 @@ class VllmProcessor:
         self,
         vllm_preproc: EngineCoreRequest,
         dynamo_preproc: dict[str, Any],
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> tuple[dict | None, list, bool]:
         """Extract MM routing info and prepare mm_kwargs transfer.
 
@@ -356,10 +797,19 @@ class VllmProcessor:
             return None, cleanup_items, nixl_transferred
 
         if vllm_preproc.mm_features:
-            mm_routing_info = build_mm_routing_info_from_features(
-                vllm_preproc.mm_features,
-                prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-            )
+            if mm_processor_kwargs:
+                # vLLM rehashes supplied UUIDs when processor kwargs are
+                # present. Fall back to text-prefix routing so the router and
+                # worker cannot publish different cache keys.
+                logger.debug(
+                    "[mm-routing] Exact MM routing disabled because "
+                    "mm_processor_kwargs is non-empty"
+                )
+            else:
+                mm_routing_info = build_mm_routing_info_from_features(
+                    vllm_preproc.mm_features,
+                    prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+                )
             (
                 mm_hashes_list,
                 mm_placeholders_list,
@@ -368,11 +818,15 @@ class VllmProcessor:
             ) = _group_mm_feature_metadata(vllm_preproc.mm_features)
             if "extra_args" not in dynamo_preproc:
                 dynamo_preproc["extra_args"] = {}
-            dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+            # Forward hashes only when this frontend built the matching exact
+            # routing sequence. Their presence is the worker's request-time
+            # readiness signal; transfer-only metadata is deliberately separate.
+            if mm_routing_info is not None:
+                dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+                dynamo_preproc["extra_args"][
+                    "mm_hashes_by_modality"
+                ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
-            dynamo_preproc["extra_args"][
-                "mm_hashes_by_modality"
-            ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"][
                 "mm_placeholders_by_modality"
             ] = mm_placeholders_by_modality
@@ -411,8 +865,8 @@ class VllmProcessor:
             # Transfer pre-processed mm_kwargs to the backend so it can skip
             # the HF processor.  Strategy:
             #   - shm (default): shared memory, same-node only (~2ms).
-            #     Cross-node backends fail gracefully and fall back to
-            #     normal processing.
+            #     The worker fails closed if it cannot read the segment and
+            #     the request does not carry raw media.
             #   - nixl: NIXL RDMA (works cross-node via IB).
             if not self.nixl_mm_enabled:
                 logger.debug(
@@ -472,20 +926,30 @@ class VllmProcessor:
         Run a single request through the engine. Does pre and post processing on this machine, delegates
         model inference to a backend using the router.
         """
-        with _nvtx.annotate("mm_frontend:generator", color="blue"):
-            async for item in self._generator_inner(request, context=context):
-                yield item
+        try:
+            with _nvtx.annotate("mm_frontend:generator", color="blue"):
+                async for item in self._generator_inner(request, context=context):
+                    yield item
+        except VLLMClientError as exc:
+            # vLLM 0.27 replaced many request-side ValueError/TypeError raises
+            # with this hierarchy. Preserve vLLM's 400/404/422 distinction at
+            # Dynamo's HTTP boundary.
+            raise vllm_client_error_to_http_error(exc) from exc
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
+        _reject_unsupported_chat_logprobs(
+            request.get("logprobs"),
+            request.get("top_logprobs"),
+        )
+
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
-        # Validate cache-UUID modality support before vLLM downloads or
-        # processes media. Dynamo currently exposes vLLM cache UUIDs for
-        # images only.
+        # Preserve user cache UUIDs alongside URL-backed media. UUID-only image
+        # slots are resolved by the worker-side vLLM processor cache.
         mm_data, mm_uuids = extract_mm_urls(messages)
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
@@ -497,6 +961,8 @@ class VllmProcessor:
                 tokenizer=self.tokenizer,
                 renderer=self.input_processor.renderer,
                 tool_parser_class=self.tool_parser_class,
+                reasoning_parser_class=self.reasoning_parser_class,
+                model_config=self.input_processor.model_config,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
                 default_chat_template_kwargs=self.default_chat_template_kwargs,
@@ -504,6 +970,7 @@ class VllmProcessor:
                 structural_tag_mode=self.structural_tag_mode,
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
+                structural_tag_excludes_reasoning=self.structural_tag_excludes_reasoning,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -539,34 +1006,31 @@ class VllmProcessor:
         sampling_fields = (
             set(getattr(SamplingParams, "__annotations__", ()))
             & set(type(request_for_sampling).model_fields)
-        ) - {"max_tokens", "logprobs", "output_kind"}
+        ) - {"max_tokens", "logprobs", "output_kind", "thinking_token_budget"}
         for k in sorted(sampling_fields):
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
+        # Chat logprobs is a boolean. SamplingParams.logprobs is the integer
+        # alternative count, so it stays out of the field copy above.
+        sampling_params.logprobs = _sampling_logprobs_count(
+            request_for_sampling.logprobs,
+            getattr(request_for_sampling, "top_logprobs", None),
+        )
+        # Response metadata is opt-in, even if generation_config enables it.
+        if request.get("prompt_logprobs") is None or (
+            request.get("stream") is True
+            and not nvext_extra_field_requested(request, "prompt_logprobs")
+        ):
+            sampling_params.prompt_logprobs = None
         # nvext.max_thinking_tokens is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
         # cause process_inputs._validate_params to reject the request. Pluck
-        # the value out of nvext and pass it directly into dynamo_preproc
-        # below.
-        nvext_max_thinking_tokens = (request.get("nvext") or {}).get(
-            "max_thinking_tokens"
-        )
-        logprobs = request_for_sampling.logprobs
-        top_logprobs = request_for_sampling.top_logprobs
-        if logprobs is True:
-            sampling_params.logprobs = top_logprobs if top_logprobs is not None else 1
-        elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-            sampling_params.logprobs = logprobs
-        elif top_logprobs not in (None, 0):
-            sampling_params.logprobs = top_logprobs
-        # TODO: Support logprobs in the distributed vLLM chat processor by
-        # converting worker log_probs/top_logprobs into EngineCoreOutput.new_logprobs.
-        if sampling_params.logprobs is not None:
-            logger.warning(
-                "Logprobs requested but not supported in distributed inference mode"
-            )
+        # the value out of the request and pass it directly into dynamo_preproc
+        # below. Prefer the OpenAI-compatible root-level field, fall back to the
+        # legacy nvext passthrough.
+        thinking_token_budget = resolve_thinking_token_budget(request)
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             # render_messages_async returns a raw prompt. Convert it to a typed
@@ -593,12 +1057,13 @@ class VllmProcessor:
         # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
         # tokenizer metadata for EOS ids when constructing the router payload.
 
-        reasoning_ended, reasoning_parser_kwargs = _build_reasoning_parser_metadata(
+        reasoning_metadata = _build_reasoning_parser_metadata(
             self.reasoning_parser_class,
             self.tokenizer,
             chat_template_kwargs,
             request_for_sampling,
             tokens,
+            self.input_processor.model_config,
         )
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
@@ -612,7 +1077,7 @@ class VllmProcessor:
                 "stop_token_ids": sp.stop_token_ids,
                 "min_tokens": sp.min_tokens,
                 "ignore_eos": sp.ignore_eos,
-                "max_thinking_tokens": nvext_max_thinking_tokens,
+                "max_thinking_tokens": thinking_token_budget,
             },
             "sampling_options": {
                 "n": sp.n,
@@ -621,8 +1086,8 @@ class VllmProcessor:
                 "repetition_penalty": sp.repetition_penalty,
                 "temperature": sp.temperature,
                 "top_p": sp.top_p,
-                "top_k": sp.top_k,
-                "min_p": sp.min_p,
+                "top_k": _disabled_as_unset(sp.top_k, request_for_sampling.top_k),
+                "min_p": _disabled_as_unset(sp.min_p, request_for_sampling.min_p),
                 "seed": sp.seed,
             },
             "output_options": {
@@ -636,10 +1101,12 @@ class VllmProcessor:
         }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
-        if reasoning_ended is not None:
-            dynamo_preproc["reasoning_ended"] = reasoning_ended
-        if reasoning_parser_kwargs is not None:
-            dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+        if reasoning_metadata.engine_reasoning_ended is not None:
+            dynamo_preproc[
+                "reasoning_ended"
+            ] = reasoning_metadata.engine_reasoning_ended
+        if reasoning_metadata.parser_kwargs is not None:
+            dynamo_preproc["reasoning_parser_kwargs"] = reasoning_metadata.parser_kwargs
 
         # Attach user cache identities before building routing metadata. Opaque
         # UUIDs deliberately suppress multimodal exact routing and frontend
@@ -654,7 +1121,11 @@ class VllmProcessor:
                 mm_routing_info,
                 cleanup_items,
                 nixl_transferred,
-            ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
+            ) = await self._prepare_mm_routing(
+                vllm_preproc,
+                dynamo_preproc,
+                mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
+            )
 
             # Forward multimodal URLs so the backend handler can load the media.
             # Only skip when ALL features were transferred — a partial transfer
@@ -678,14 +1149,26 @@ class VllmProcessor:
                 ] = request_for_sampling.mm_processor_kwargs
 
             def new_post_processor() -> StreamingPostProcessor:
+                # vLLM tool parsers keep mutable streaming state. Give every
+                # n>1 choice its own parser instead of reusing the parser that
+                # adjusted the shared request during preprocessing.
+                choice_tool_parser = (
+                    self.tool_parser_class(self.tokenizer, request_for_sampling.tools)
+                    if tool_parser is not None and self.tool_parser_class is not None
+                    else None
+                )
                 return StreamingPostProcessor(
                     tokenizer=self.tokenizer,
                     request_for_sampling=request_for_sampling,
                     sampling_params=sampling_params,
                     prompt_token_ids=tokens,
-                    tool_parser=tool_parser,
+                    tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
+                    model_config=self.input_processor.model_config,
+                    response_reasoning_ended=(
+                        reasoning_metadata.response_reasoning_ended
+                    ),
                     stream_response=bool(request.get("stream", False)),
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback
@@ -776,11 +1259,36 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        usage_metadata: dict[str, Any] = {}
+        # Per-request reasoning-token usage (NVBug 6678449b); see
+        # _ReasoningUsageAnnotator. Must be per-request, never module-level.
+        # The counts live on the post-processors, which are per-request too.
+        reasoning_usage = _ReasoningUsageAnnotator(post_processors)
         _mm_counts, _ = extract_mm_urls(request.get("messages") or [])
         _mm_counts = _mm_counts or {}
         image_count = len(_mm_counts.get("image_url", []))
         video_count = len(_mm_counts.get("video_url", []))
         audio_count = len(_mm_counts.get("audio_url", []))
+        pending_choice_logprobs: dict[int, list[dict[str, Any]]] = {}
+        emitted_choice_tokens: dict[int, list[int]] = {}
+        choice_top_logprobs = _sampling_logprobs_count(
+            request.get("logprobs"),
+            request.get("top_logprobs"),
+        )
+        return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
+        prompt_logprobs = PromptLogprobsAccumulator(request)
+        pending_terminals: dict[int, dict[str, Any]] = {}
+        locally_stopped_requests: set[str] = set()
+
+        def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
+            if usage := response_usage(
+                request,
+                usage_metadata,
+                prompt_tokens=input_tokens,
+                completion_tokens=cumulative_output_tokens,
+                finished=finished,
+            ):
+                output["usage"] = reasoning_usage.annotate(usage)
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -801,44 +1309,97 @@ class VllmProcessor:
                         request_id,
                         message,
                     )
-                    yield make_internal_error(request_id, message)
+                    yield as_error_envelope(make_internal_error(request_id, message))
                     break
                 engine_response = dynamo_response.data()
 
                 if engine_response is None:
                     if dynamo_response.is_error():
-                        yield handle_engine_error(engine_response, request_id, logger)
+                        yield as_error_envelope(
+                            handle_engine_error(engine_response, request_id, logger)
+                        )
                         break
                     # No data or error fields, means we may have a comment or other kind of event.
                     # I'm not sure what those are used for, so TODO. Skip for now.
                     continue
 
                 if "token_ids" not in engine_response:
-                    yield handle_engine_error(engine_response, request_id, logger)
+                    yield as_error_envelope(
+                        handle_engine_error(engine_response, request_id, logger)
+                    )
                     break
+
+                raw_finish_reason = engine_response.get("finish_reason")
+                error_message = _finish_reason_error_message(raw_finish_reason)
+                if error_message is not None:
+                    logger.error(
+                        "Router reported a generation error for request %s: %s",
+                        request_id,
+                        error_message,
+                    )
+                    yield as_error_envelope(
+                        make_internal_error(request_id, error_message)
+                    )
+                    break
+
+                prompt_logprobs.update(engine_response)
+                # Keep sparse metadata even when a choice is suppressed locally.
+                if backend_usage := engine_response.get("completion_usage"):
+                    update_usage_metadata(usage_metadata, backend_usage)
+
+                output_idx = engine_response.get("index", 0) or 0
+                output_request_id = output_request_ids.get(output_idx)
+                if output_request_id is None:
+                    yield as_error_envelope(
+                        {
+                            "error": {
+                                "message": (
+                                    f"Invalid engine choice index {output_idx} "
+                                    f"for request {request_id}"
+                                ),
+                                "type": "internal_error",
+                            }
+                        }
+                    )
+                    break
+
+                finish_reason = map_finish_reason(raw_finish_reason)
+                stop_reason = engine_response.get("stop_reason")
+                if pending_terminals and finish_reason in (
+                    FinishReason.ERROR,
+                    FinishReason.ABORT,
+                ):
+                    yield as_error_envelope(
+                        make_internal_error(request_id, raw_finish_reason)
+                    )
+                    break
+
+                if pending_terminals and (
+                    not prompt_logprobs.needs_payload or finish_reason is not None
+                ):
+                    for pending_idx in list(pending_terminals):
+                        if prompt_logprobs.needs_payload and pending_idx != output_idx:
+                            continue
+                        terminal = pending_terminals.pop(pending_idx)
+                        attach_usage(terminal, finished=True)
+                        prompt_logprobs.attach(terminal)
+                        yield {"_dynamo_annotated": True, "data": terminal}
+
+                if output_request_id in locally_stopped_requests:
+                    continue
 
                 # Count before any choice gate — tool/reasoning parsers may
                 # consume tokens without emitting a visible delta.
                 chunk_tokens = len(engine_response.get("token_ids") or [])
                 cumulative_output_tokens += chunk_tokens
 
-                output_idx = engine_response.get("index", 0) or 0
-                output_request_id = output_request_ids.get(output_idx)
-                if output_request_id is None:
-                    yield {
-                        "error": {
-                            "message": (
-                                f"Invalid engine choice index {output_idx} "
-                                f"for request {request_id}"
-                            ),
-                            "type": "internal_error",
-                        }
-                    }
-                    break
-
-                raw_finish_reason = engine_response.get("finish_reason")
-                finish_reason = map_finish_reason(raw_finish_reason)
-                stop_reason = engine_response.get("stop_reason")
+                if choice_top_logprobs is not None:
+                    _append_worker_logprobs(
+                        pending_choice_logprobs.setdefault(output_idx, []),
+                        engine_response["token_ids"],
+                        engine_response.get("log_probs"),
+                        engine_response.get("top_logprobs"),
+                    )
 
                 output_kwargs: dict[str, Any] = {
                     "request_id": output_request_id,
@@ -861,8 +1422,7 @@ class VllmProcessor:
                     [vllm_response]
                 )
 
-                if vllm_out.reqs_to_abort:
-                    pass
+                locally_stopped_requests.update(vllm_out.reqs_to_abort)
 
                 choices = []
                 postprocess_error = False
@@ -870,23 +1430,41 @@ class VllmProcessor:
                     for output in vllm_out.request_outputs[0].outputs:
                         post = post_processors.get(output.index)
                         if post is None:
-                            yield {
-                                "error": {
-                                    "message": (
-                                        f"Invalid postprocessor choice index {output.index} "
-                                        f"for request {request_id}"
-                                    ),
-                                    "type": "internal_error",
+                            yield as_error_envelope(
+                                {
+                                    "error": {
+                                        "message": (
+                                            f"Invalid postprocessor choice index "
+                                            f"{output.index} for request {request_id}"
+                                        ),
+                                        "type": "internal_error",
+                                    }
                                 }
-                            }
+                            )
                             postprocess_error = True
                             break
                         choice = post.process_output(output)
+                        if output.index == output_idx:
+                            if choice_top_logprobs is not None:
+                                _apply_choice_logprobs(
+                                    choice,
+                                    post,
+                                    output,
+                                    pending_choice_logprobs.setdefault(
+                                        output.index, []
+                                    ),
+                                    emitted_choice_tokens.setdefault(output.index, []),
+                                    choice_top_logprobs,
+                                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                                )
+                            elif choice is not None:
+                                choice["logprobs"] = None
                         if choice:
                             choices.append(choice)
 
                 if postprocess_error:
-                    continue
+                    # Stop: the error frame is terminal, so do not read more.
+                    break
 
                 # One envelope per iteration carries both data and metrics so
                 # client cancellation can't drop the annotation between yields.
@@ -899,9 +1477,21 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if usage := engine_response.get("completion_usage"):
-                        dynamo_out["usage"] = usage
-                    envelope["data"] = dynamo_out
+                    attach_usage(
+                        dynamo_out,
+                        finished=bool(raw_finish_reason)
+                        or output_request_id in locally_stopped_requests,
+                    )
+                    prompt_logprobs.attach(dynamo_out)
+                    if (
+                        output_request_id in locally_stopped_requests
+                        and prompt_logprobs.needs_payload
+                    ):
+                        # vLLM removed this choice's state at the local stop.
+                        # Keep its DELTA response until worker metadata arrives.
+                        pending_terminals[output_idx] = dynamo_out
+                    else:
+                        envelope["data"] = dynamo_out
 
                 metrics = {
                     "input_tokens": input_tokens,
@@ -915,14 +1505,46 @@ class VllmProcessor:
                     metrics["video_count"] = video_count
                 if audio_count:
                     metrics["audio_count"] = audio_count
-                envelope["event"] = "llm_metrics"
-                envelope["comment"] = [json.dumps(metrics)]
+                # Attach metrics to data when available; otherwise use an annotation.
+                if data := envelope.get("data"):
+                    data["llm_metrics"] = metrics
+                else:
+                    envelope["event"] = "llm_metrics"
+                    envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
+            else:
+                for terminal in pending_terminals.values():
+                    attach_usage(terminal, finished=True)
+                    yield {"_dynamo_annotated": True, "data": terminal}
             _nvtx.end_range(rng_stream)
+        except VLLMClientError:
+            # Preserve request-side 400/404/422 errors for generator(), which
+            # translates them at Dynamo's HTTP boundary. The generic handler
+            # below is reserved for genuine internal failures.
+            raise
+        except WorkerUnavailable:
+            # The routed pipeline rejected the request as retryable (for example,
+            # prefill routing is still activating). An error envelope would turn
+            # that 503 into a 500; let the binding restore the class instead.
+            raise
+        except InvalidArgument:
+            raise
         except Exception as e:
+            backend_error = backend_invalid_argument_to_http_error(e)
+            if backend_error is not None:
+                # The worker already judged the request invalid and said so with
+                # its own status. Reporting that as a 500 blames the server for a
+                # client error and drops the only text explaining the rejection.
+                logger.warning(
+                    "Backend rejected request %s with %d: %s",
+                    request_id,
+                    backend_error.code,
+                    backend_error.message,
+                )
+                raise backend_error from e
             logger.exception("Error generating response for request %s", request_id)
-            yield make_internal_error(request_id, str(e))
+            yield as_error_envelope(make_internal_error(request_id, str(e)))
         finally:
             for output_request_id in registered_request_ids:
                 if output_request_id in self.output_processor.request_states:
@@ -1071,14 +1693,45 @@ class EngineFactory:
             reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
                 reasoning_parser_name
             )
+            _ensure_reasoning_parser_output_capable(
+                reasoning_parser_name,
+                reasoning_parser_class,
+                tokenizer,
+                getattr(self.flags, "default_chat_template_kwargs", None) or {},
+                model_config,
+            )
         else:
             reasoning_parser_class = None
         default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
+        runtime_config = mdc.runtime_config()
         (
             structural_tag_mode,
             structural_tag_scope,
             structural_tag_schema,
-        ) = _runtime_config_structural_tag_options(mdc)
+        ) = runtime_structural_tag_options(runtime_config)
+        structural_tag = (
+            runtime_config.get("structural_tag")
+            if isinstance(runtime_config, dict)
+            else None
+        )
+        if isinstance(structural_tag, dict):
+            unsupported_options = [
+                name
+                for name, default in (
+                    ("allow_tool_calls_with_structured_output", False),
+                    ("exclude_special_tokens", None),
+                    ("tool_arguments_any_order", False),
+                )
+                if structural_tag.get(name, default) != default
+            ]
+            if unsupported_options:
+                logger.warning(
+                    "vLLM chat processor ignores unsupported structural-tag option(s): %s",
+                    ", ".join(unsupported_options),
+                )
+        structural_tag_excludes_reasoning = runtime_structural_tag_excludes_reasoning(
+            runtime_config
+        )
 
         block_size = self.config.kv_cache_block_size or 16
 
@@ -1098,6 +1751,7 @@ class EngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

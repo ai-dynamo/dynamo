@@ -10,26 +10,8 @@ Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to 
 
 | Backend                 | Source                                           |
 | ----------------------- | ------------------------------------------------ |
-| **[KVBM](#kvbm)**       | [Dynamo](../../kvbm/overview.md)        |
 | **[LMCache](#lmcache)** | [GitHub](https://github.com/LMCache/LMCache)     |
 | **[FlexKV](#flexkv)**   | [GitHub](https://github.com/taco-project/FlexKV) |
-
-
-## KVBM
-
-[KVBM](../../kvbm/overview.md) (KV Block Manager) is Dynamo's built-in KV cache offloading system. It provides a three-layer architecture (LLM runtime, logical block management, NIXL transport) with support for CPU and disk cache tiers, and integrates natively with Dynamo's KV-aware routing and disaggregated serving.
-
-
-| Deployment                 | Launch Script                                                                           |
-| -------------------------- | --------------------------------------------------------------------------------------- |
-| Aggregated                 | [`agg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm.sh)                     |
-| Aggregated + KV routing    | [`agg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm_router.sh)       |
-| Disaggregated (1P1D)       | [`disagg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm.sh)               |
-| Disaggregated (2P2D)       | [`disagg_kvbm_2p2d.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_2p2d.sh)     |
-| Disaggregated + KV routing | [`disagg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_router.sh) |
-
-
-For configuration details, see the [KVBM Guide](../../kvbm/kvbm-guide.md).
 
 ## LMCache
 
@@ -45,6 +27,8 @@ For configuration details, see the [KVBM Guide](../../kvbm/kvbm-guide.md).
 
 
 For local setup, see [KV Cache Offloading](../../../../../cli/kv-cache-offloading/overview.mdx).
+
+For Kubernetes deployment, see [Deploy LMCache MP](../../../../../kubernetes/kv-cache-offloading/lmcache.mdx).
 
 ## FlexKV
 
@@ -62,6 +46,5 @@ For local setup, see [KV Cache Offloading](../../../../../cli/kv-cache-offloadin
 
 ## See Also
 
-- **[KVBM Design](../../kvbm/kvbm-design.md)**: Architecture and design of Dynamo's built-in KV cache offloading
 - **[Routing Concepts](../../router/routing-concepts.md)**: Routing requests based on KV cache state
 - **[Disaggregated Serving](../../../concepts/system-architecture/disaggregated-serving.md)**: Prefill/decode separation architecture

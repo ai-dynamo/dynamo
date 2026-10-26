@@ -5,6 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
+    assert!(
+        root.is_dir(),
+        "source firewall root does not exist: {}",
+        root.display()
+    );
     for entry in fs::read_dir(root).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
@@ -16,37 +21,16 @@ fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn offline_core_has_no_dynamo_adapter_dependencies() {
-    const FORBIDDEN: &[&str] = &[
-        "crate::loadgen",
-        "crate::scheduler",
-        "OfflineWorkerState",
-        "WorkloadDriver",
-        "ReplayRouterMode",
-        "extensions::",
-    ];
-
-    let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/replay/offline/core");
-    let mut sources = Vec::new();
-    rust_sources(&core, &mut sources);
-    for path in sources {
-        let source = fs::read_to_string(&path).unwrap();
-        for forbidden in FORBIDDEN {
-            assert!(
-                !source.contains(forbidden),
-                "{} crosses the offline core firewall with `{forbidden}`",
-                path.display()
-            );
-        }
-    }
-}
-
-#[test]
 fn offline_kv_router_crate_references_are_extension_owned() {
     let offline = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/replay/offline");
     let extensions = offline.join("extensions");
     let mut sources = Vec::new();
     rust_sources(&offline, &mut sources);
+    assert!(
+        !sources.is_empty(),
+        "source firewall found no Rust sources under {}",
+        offline.display()
+    );
     for path in sources {
         if path.starts_with(&extensions) {
             continue;

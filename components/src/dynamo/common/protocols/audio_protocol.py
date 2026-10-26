@@ -12,9 +12,30 @@ code-generated from the Rust definitions; for now they are maintained
 manually and must be kept in sync.
 """
 
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+class AudioNvExt(BaseModel):
+    """NVIDIA extensions for audio generation requests."""
+
+    annotations: Optional[list[str]] = None
+    """Annotations for SSE stream events."""
+
+    frontend_accepts_audio_chunks: Optional[bool] = None
+    """Internal compatibility signal for frontends that accept audio chunks.
+
+    Workers must aggregate when this is absent or false. Remove after v1.4
+    leaves the N-2 compatibility window in v1.7.
+    """
+
+    cfg_scale: Optional[float] = None
+    """Classifier-free guidance strength (Audex only, which is why it is an
+    extension rather than a top-level OpenAI field; vLLM-Omni likewise takes it
+    under ``extra_params``). 1.0 disables guidance; 1.5 is the recommended TTS
+    quality setting, and 3.0 the official TTA setting (applied by default for
+    text-to-audio)."""
 
 
 class NvCreateAudioSpeechRequest(BaseModel):
@@ -22,6 +43,11 @@ class NvCreateAudioSpeechRequest(BaseModel):
 
     Follows vLLM-Omni's OpenAICreateSpeechRequest format.
     """
+
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
 
     # Standard OpenAI params
     input: str
@@ -39,15 +65,15 @@ class NvCreateAudioSpeechRequest(BaseModel):
     Note: image and video generation use 'response_format' for this; audio uses a
     separate field because OpenAI's audio API already uses 'response_format' for codec."""
 
-    response_format: Optional[str] = "wav"
-    """Output format."""
+    response_format: Optional[str] = None
+    """Output codec. If unset, handlers default to 'wav'."""
 
-    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
-    """Speed factor."""
+    speed: Optional[float] = Field(default=None, ge=0.25, le=4.0)
+    """Speed factor. If unset, handlers default to 1.0."""
 
     # Qwen3-TTS specific params (top-level, matching vLLM-Omni)
-    task_type: Optional[Literal["CustomVoice", "VoiceDesign", "Base"]] = None
-    """TTS task type."""
+    task_type: Optional[str] = None
+    """TTS task type. The handler for the model validates the value."""
 
     language: Optional[str] = None
     """Language: Auto, Chinese, English, Japanese, Korean, etc."""
@@ -63,6 +89,12 @@ class NvCreateAudioSpeechRequest(BaseModel):
 
     max_new_tokens: Optional[int] = None
     """Maximum tokens to generate (default: 2048)."""
+
+    user: Optional[str] = None
+    """Optional user identifier."""
+
+    nvext: Optional[AudioNvExt] = None
+    """NVIDIA extensions."""
 
 
 class AudioData(BaseModel):

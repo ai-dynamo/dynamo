@@ -24,7 +24,7 @@
 //!   `disk`, per-`dp_rank` device counts, and `longest_matched`.
 //!
 //! The `instances` shape is intended to align with Mooncake's
-//! "[RFC]: KV-Store Indexer API Standardization"
+//! "\[RFC\]: KV-Store Indexer API Standardization"
 //! (<https://github.com/kvcache-ai/Mooncake/issues/1403>).
 //! Tier counts are CUMULATIVE through each tier's walk — see the doc on the
 //! response struct in [`server`] for the exact semantics.
@@ -32,10 +32,14 @@
 pub mod backend;
 pub mod listener;
 pub mod logging;
+pub mod lookup;
 pub mod metrics;
+pub mod recording;
 pub mod recovery;
 pub mod registry;
 pub mod server;
+#[doc(hidden)]
+pub mod session_updates;
 
 use std::path::PathBuf;
 use std::sync::Arc;

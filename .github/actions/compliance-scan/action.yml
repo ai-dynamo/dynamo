@@ -69,7 +69,7 @@ runs:
         fi
         echo "base_image=${BASE_IMAGE}" >> $GITHUB_OUTPUT
     - name: Initialize builder
-      uses: ./.github/actions/init-dynamo-builder
+      uses: $/.github/actions/init-dynamo-builder
       with:
         builder_name: ${{ steps.builder.outputs.name }}
         flavor: general
@@ -93,7 +93,7 @@ runs:
 
     - name: Refresh BuildKit builder
       if: ${{ inputs.target != 'dev' }}
-      uses: ./.github/actions/builder-refresher
+      uses: $/.github/actions/builder-refresher
       with:
         builder_name: ${{ steps.builder.outputs.name }}
         flavor: general

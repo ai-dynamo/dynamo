@@ -41,16 +41,16 @@
     {
       "id": "neg-deploy-recipe",
       "question": "Deploy the Llama sglang aggregated recipe on my cluster.",
-      "expected_skill": "dynamo-recipe-runner",
-      "ground_truth": "Recipe deployment belongs to dynamo-recipe-runner.",
-      "expected_behavior": ["dynamo-router-starter stays silent; dynamo-recipe-runner handles it"]
+      "expected_skill": "deploy-dynamo-recipe",
+      "ground_truth": "Deployment of an already-selected recipe belongs to deploy-dynamo-recipe.",
+      "expected_behavior": ["dynamo-router-starter stays silent; deploy-dynamo-recipe handles it"]
     },
     {
       "id": "neg-router-500s-workers-missing",
       "question": "My router endpoint is returning 500s and half the workers are missing — fix it.",
-      "expected_skill": "dynamo-troubleshoot",
-      "ground_truth": "An endpoint that is failing with missing workers is failure diagnosis, which belongs to dynamo-troubleshoot, not normal router setup.",
-      "expected_behavior": ["dynamo-router-starter stays silent; dynamo-troubleshoot handles it"]
+      "expected_skill": "troubleshoot-dynamo",
+      "ground_truth": "An endpoint that is failing with missing workers requires failure diagnosis, which belongs to troubleshoot-dynamo, not normal router setup.",
+      "expected_behavior": ["dynamo-router-starter stays silent; troubleshoot-dynamo handles it"]
     },
     {
       "id": "neg-validate-nixl",

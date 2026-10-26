@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
+use crate::grpc::service::dispatch_error_status;
+// Re-exported so the old per-module path keeps resolving for outside users.
+pub use crate::grpc::service::grpc_monitor_for_disconnects;
 use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
@@ -21,8 +23,8 @@ use super::kserve::inference;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
+    disconnect::create_connection_monitor,
+    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
 };
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
@@ -37,7 +39,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
-/// for an [`super::OpenAICompletionsStreamingEngine`] and will return a stream of
+/// for an `OpenAICompletionsStreamingEngine` and will return a stream of
 /// responses which will be forward to the client.
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
@@ -76,7 +78,7 @@ pub async fn completion_response_stream(
     )
     .await;
     // update the request to always stream
-    let request = request.map(|mut req| {
+    let mut request = request.map(|mut req| {
         req.inner.stream = Some(true);
         req
     });
@@ -105,13 +107,23 @@ pub async fn completion_response_stream(
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.request_metrics().attach_to(&mut request);
 
     // prepare to process any annotations
     let annotations = request.annotations();
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
+        // Deadline is checked before overload so a chain carrying both markers
+        // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
+        // surfaces' 429: the deadline elapsed waiting for capacity, so it is
+        // backpressure rather than a gateway timeout. No rejection accounting.
+        if crate::http::service::metrics::request_deadline_exceeded(e.as_ref()) {
+            return Status::resource_exhausted(
+                crate::http::service::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+            );
+        }
         if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
             state.metrics_clone().inc_rejection(
                 &model_name,
@@ -119,7 +131,7 @@ pub async fn completion_response_stream(
             );
             return Status::resource_exhausted(e.to_string());
         }
-        Status::internal(format!("Failed to generate completions: {}", e))
+        dispatch_error_status(e.as_ref(), "Failed to generate completions")
     })?;
 
     // capture the context to cancel the stream if the client disconnects
@@ -164,46 +176,6 @@ pub async fn completion_response_stream(
     connection_handle.disarm();
 
     Ok((stream, parsing_options))
-}
-
-/// This method will consume an AsyncEngineStream and monitor for disconnects or context cancellation.
-/// This is gRPC variant of `monitor_for_disconnects` as that implementation has SSE specific handling.
-/// Should decouple and reuse `monitor_for_disconnects`
-///
-/// Uses `tokio::select!` to choose between receiving responses from the source stream or detecting when
-/// the context is stopped. If the context is stopped, we break the stream. If the source stream ends
-/// naturally, we mark the request as successful and send the final `[DONE]` event.
-pub fn grpc_monitor_for_disconnects<T>(
-    stream: impl Stream<Item = Annotated<T>>,
-    context: Arc<dyn AsyncEngineContext>,
-    mut inflight_guard: InflightGuard,
-    mut stream_handle: ConnectionHandle,
-) -> impl Stream<Item = Annotated<T>> {
-    stream_handle.arm();
-    async_stream::stream! {
-        tokio::pin!(stream);
-        loop {
-            tokio::select! {
-                event = stream.next() => {
-                    match event {
-                        Some(response) => {
-                            yield response;
-                        }
-                        None => {
-                            // Stream ended normally
-                            inflight_guard.mark_ok();
-                            stream_handle.disarm();
-                            break;
-                        }
-                    }
-                }
-                _ = context.stopped() => {
-                    tracing::trace!("Context stopped; breaking stream");
-                    break;
-                }
-            }
-        }
-    }
 }
 
 /// Get the request ID from a primary source, or lastly create a new one if not present
@@ -334,6 +306,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {
         };
 
         Ok(NvCreateCompletionRequest {
+            no_stop_trim: None,
             inner: CreateCompletionRequest {
                 model: request.model_name,
                 prompt: Prompt::String(text_input),

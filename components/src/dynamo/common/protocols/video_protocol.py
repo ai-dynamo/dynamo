@@ -8,7 +8,7 @@ to ensure compatibility with the Dynamo HTTP frontend.
 """
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -52,6 +52,11 @@ class NvCreateVideoRequest(BaseModel):
 
     Matches Rust NvCreateVideoRequest in lib/llm/src/protocols/openai/videos.rs.
     """
+
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
 
     # Required fields
     prompt: str
@@ -102,6 +107,12 @@ class VideoData(BaseModel):
 
     b64_json: Optional[str] = None
     """Base64-encoded video (if response_format is 'b64_json')."""
+
+    fps: Optional[int] = None
+    """Actual video frame rate when reported by the model."""
+
+    audio_sample_rate: Optional[int] = None
+    """Muxed audio sample rate when the generated video contains audio."""
 
 
 class NvVideosResponse(BaseModel):

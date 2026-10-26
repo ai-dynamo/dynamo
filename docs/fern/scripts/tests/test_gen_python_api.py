@@ -723,25 +723,28 @@ def test_check_mode_flags_landing_page_drift(
 # ---------------------------------------------------------------------------
 
 
-def test_no_hardcoded_dev_paths_in_any_generated_output() -> None:
+def test_no_hardcoded_dev_paths_in_any_generated_output(
+    cached_discovery: list[api_discovery.Module],
+) -> None:
     """No output the generator produces may bake in a ``/dynamo/dev`` URL:
     Fern serves each doc version under its own prefix, and a hardcoded
-    ``/dev`` path in a versioned snapshot links back to the dev site."""
-    generated_paths = [PY_LANDING]
-    for spec in api_discovery.MODULES:
-        generated_paths.append(PY_PAGES_DIR / f"{spec[1]}.mdx")
-    for path in generated_paths:
-        assert path.is_file(), f"expected generated file missing on disk: {path}"
-        text = path.read_text(encoding="utf-8")
-        assert (
-            "/dynamo/dev" not in text
-        ), f"{path.relative_to(REPO_ROOT)}: hardcoded '/dynamo/dev' path found"
+    ``/dev`` path in a versioned snapshot links back to the dev site.
+
+    The pages are publish-time artifacts (not committed), so the check runs
+    against a fresh render rather than files on disk."""
+    rendered = {"README.mdx": api_rendering.render_landing_page(cached_discovery)}
+    for module in cached_discovery:
+        rendered[f"{module.slug}.mdx"] = api_rendering.render_module_page(module)
+    for name, text in rendered.items():
+        assert "/dynamo/dev" not in text, f"{name}: hardcoded '/dynamo/dev' path found"
 
 
-def test_python_landing_links_to_fern_routes_not_mdx_files() -> None:
+def test_python_landing_links_to_fern_routes_not_mdx_files(
+    cached_discovery: list[api_discovery.Module],
+) -> None:
     """Card hrefs must be site routes; Fern only rewrites relative links in
     Markdown, not ``.mdx`` paths handed to a component."""
-    source = PY_LANDING.read_text(encoding="utf-8")
+    source = api_rendering.render_landing_page(cached_discovery)
     hrefs = re.findall(r'href="([^"]+)"', source)
     assert hrefs
     for href in hrefs:
@@ -765,11 +768,13 @@ def test_api_landing_links_resolve_through_the_file_graph() -> None:
     assert 'href="../kubernetes-api/full-api-reference.mdx"' in source
 
 
-def test_generated_pages_do_not_leak_maintainer_instructions() -> None:
+def test_generated_pages_do_not_leak_maintainer_instructions(
+    cached_discovery: list[api_discovery.Module],
+) -> None:
     """Generated pages are reader-facing; the regeneration workflow belongs
     in the API overview, not in the middle of a reference page."""
-    for spec in api_discovery.MODULES:
-        text = (PY_PAGES_DIR / f"{spec[1]}.mdx").read_text(encoding="utf-8")
+    for module in cached_discovery:
+        text = api_rendering.render_module_page(module)
         body = text.split("---\n", 2)[-1].replace(
             api_rendering.MDX_GENERATED_MARKER, ""
         )

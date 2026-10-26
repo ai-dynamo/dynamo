@@ -485,6 +485,7 @@ fn generate_lane_state(
         let outcome = state.apply_event(stored_event(
             member,
             hash_offset as u64 + 1,
+            (!hash_offset.is_multiple_of(query_depth)).then(|| sequence_hashes[hash_offset - 1]),
             sequence_hash,
             local_hash,
         ));
@@ -528,6 +529,7 @@ fn generate_lane_state(
         let store = state.apply_event(stored_event(
             member,
             baseline_hashes as u64 + frame_pair as u64 * 2 + 2,
+            (!hash_offset.is_multiple_of(query_depth)).then(|| sequence_hashes[hash_offset - 1]),
             hash,
             local_hashes[hash_offset],
         ));
@@ -571,18 +573,21 @@ fn lane_hash_base(lane: usize) -> anyhow::Result<u64> {
 fn stored_event(
     member: WorkerWithDpRank,
     event_id: u64,
+    parent_sequence_hash: Option<u64>,
     sequence_hash: u64,
     local_hash: LocalBlockHash,
 ) -> RouterEvent {
+    const EXTERNAL_MASK: u64 = 0x8E11_6E5E_3A7A_2026;
     RouterEvent::new(
         member.worker_id,
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
+                parent_hash: parent_sequence_hash
+                    .map(|hash| ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK)),
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(sequence_hash),
+                    block_hash: ExternalSequenceBlockHash(sequence_hash ^ EXTERNAL_MASK),
                     tokens_hash: local_hash,
                     mm_extra_info: None,
                 }],
@@ -593,12 +598,13 @@ fn stored_event(
 }
 
 fn removed_event(member: WorkerWithDpRank, event_id: u64, hash: u64) -> RouterEvent {
+    const EXTERNAL_MASK: u64 = 0x8E11_6E5E_3A7A_2026;
     RouterEvent::new(
         member.worker_id,
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: vec![ExternalSequenceBlockHash(hash)],
+                block_hashes: vec![ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK)],
             }),
             dp_rank: member.dp_rank,
         },

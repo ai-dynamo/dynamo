@@ -114,6 +114,35 @@ class TestReadTopologyConfig:
         config = read_topology_config()
         assert not config.enabled
 
+    def test_alt_truthy_values_enable_topology(self, monkeypatch, tmp_path):
+        """parse_bool accepts '1', 'on', 'yes' as truthy; they enable topology like 'true'."""
+        topology_dir = tmp_path / "topology"
+        topology_dir.mkdir()
+        (topology_dir / "zone").write_text("us-east-1a")
+        for value in ("1", "on", "yes"):
+            _enable_topology(monkeypatch, topology_dir)
+            monkeypatch.setenv("DYN_TOPOLOGY_ENABLED", value)
+            config = read_topology_config()
+            assert (
+                config.enabled
+            ), f"expected enabled for DYN_TOPOLOGY_ENABLED={value!r}"
+
+    def test_invalid_values_disable_with_warning(self, monkeypatch, caplog):
+        """Unrecognized values disable topology and log a warning instead of raising."""
+        import logging
+
+        for value in ("maybe", "2", "enabled", "truthy"):
+            monkeypatch.setenv("DYN_TOPOLOGY_ENABLED", value)
+            with caplog.at_level(logging.WARNING):
+                config = read_topology_config()
+            assert (
+                not config.enabled
+            ), f"expected disabled for DYN_TOPOLOGY_ENABLED={value!r}"
+            assert any(
+                "DYN_TOPOLOGY_ENABLED" in r.message for r in caplog.records
+            ), f"expected warning for DYN_TOPOLOGY_ENABLED={value!r}"
+            caplog.clear()
+
     def test_reads_all_non_hidden_topology_files(self, monkeypatch, tmp_path):
         """Reads every visible, non-empty file under the topology mount."""
         topology_dir = tmp_path / "topology"

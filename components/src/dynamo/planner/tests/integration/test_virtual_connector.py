@@ -1,16 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-#
-# This test requires etcd and nats to be running, and the bindings to be installed
-#
-
 import asyncio
+import json
 import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
 
 import pytest
 
-from dynamo._core import DistributedRuntime, VirtualConnectorClient
+from dynamo._core import (
+    DistributedRuntime,
+    VirtualConnectorClient,
+    VirtualConnectorCoordinator,
+)
 from dynamo.planner import SubComponentType, TargetReplica, VirtualConnector
 from dynamo.planner.monitoring.worker_info import build_worker_info_from_defaults
 
@@ -24,6 +32,80 @@ pytestmark = [
 logger = logging.getLogger(__name__)
 
 NAMESPACE = "test_virtual_connector"
+ETCD_STARTUP_TIMEOUT = 5
+ETCD_SHUTDOWN_TIMEOUT = 5
+
+
+@contextmanager
+def _isolated_etcd(tmp_path):
+    tmp_path.mkdir()
+    data_dir = tmp_path / "data"
+    log_path = tmp_path / "etcd.log"
+    command = [
+        "etcd",
+        "--logger",
+        "zap",
+        "--data-dir",
+        str(data_dir),
+        "--listen-client-urls",
+        "http://localhost:0",
+        "--advertise-client-urls",
+        "http://localhost:0",
+        "--listen-peer-urls",
+        "http://localhost:0",
+        "--initial-advertise-peer-urls",
+        "http://localhost:0",
+        "--initial-cluster",
+        "default=http://localhost:0",
+    ]
+
+    with log_path.open("w", encoding="utf-8") as log_writer:
+        etcd = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=log_writer,
+        )
+
+        try:
+            client_port = None
+            deadline = time.monotonic() + ETCD_STARTUP_TIMEOUT
+            with log_path.open(encoding="utf-8") as log_reader:
+                while time.monotonic() < deadline:
+                    if etcd.poll() is not None:
+                        break
+
+                    line = log_reader.readline()
+                    if not line:
+                        time.sleep(0.01)
+                        continue
+
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if "serving client" not in entry.get("msg", ""):
+                        continue
+
+                    match = re.search(r":(\d+)$", entry.get("address", ""))
+                    if match:
+                        client_port = int(match.group(1))
+                        break
+
+            if client_port is None:
+                details = log_path.read_text(encoding="utf-8")
+                raise RuntimeError(f"etcd failed to start:\n{details}")
+
+            yield client_port
+        finally:
+            if etcd.poll() is None:
+                etcd.terminate()
+                try:
+                    etcd.wait(timeout=ETCD_SHUTDOWN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    etcd.kill()
+                    etcd.wait(timeout=ETCD_SHUTDOWN_TIMEOUT)
+            shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 class DefaultWorkerInfoProvider:
@@ -118,3 +200,64 @@ async def async_internal(distributed_runtime):
     assert event.num_prefill_workers == 0
     assert event.num_decode_workers == 0
     await client.complete(event)
+
+
+@pytest.mark.timeout(15)
+def test_wait_for_unacknowledged_decision(tmp_path):
+    # DistributedRuntime is process-global, so keep it out of the pytest worker.
+    with _isolated_etcd(tmp_path / "etcd") as etcd_port:
+        subprocess.run(
+            [sys.executable, __file__],
+            check=True,
+            env={**os.environ, "ETCD_ENDPOINTS": f"http://localhost:{etcd_port}"},
+            timeout=30,
+        )
+
+
+async def _wait_for_unacknowledged_decision():
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "etcd", "tcp", event_plane="zmq"
+    )
+    try:
+        coord = VirtualConnectorCoordinator(runtime, NAMESPACE, 1, 30, 5)
+        await coord.async_init()
+        await coord.update_scaling_decision(1, 2)
+
+        # A late consumer must find the decision even though its watch starts afterward.
+        client = VirtualConnectorClient(runtime, NAMESPACE)
+        await asyncio.wait_for(client.wait(), timeout=5)
+        first = await client.get()
+        assert (
+            first.num_prefill_workers,
+            first.num_decode_workers,
+            first.decision_id,
+        ) == (1, 2, 0)
+        await client.complete(first)
+        await coord.wait_for_scaling_completion()
+
+        waiter = asyncio.ensure_future(client.wait())
+        try:
+            done, _ = await asyncio.wait([waiter], timeout=0.2)
+            assert not done, "An acknowledged decision must not wake the next wait"
+            await client.complete(first)
+            done, _ = await asyncio.wait([waiter], timeout=0.2)
+            assert not done, "An acknowledgement update is not a new decision"
+
+            await coord.update_scaling_decision(0, 3)
+            await asyncio.wait_for(waiter, timeout=5)
+            second = await client.get()
+            assert (
+                second.num_prefill_workers,
+                second.num_decode_workers,
+                second.decision_id,
+            ) == (0, 3, 1)
+            await client.complete(second)
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+    finally:
+        runtime.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(_wait_for_unacknowledged_decision())

@@ -6,16 +6,20 @@
 //! The `dynamo.llm` crate is a Rust library that provides a set of traits and types for building
 //! distributed LLM inference solutions.
 
+pub mod admission_gate;
 pub mod backend;
 pub mod common;
 mod direct_zmq_fan_in;
+mod direct_zmq_sub_pool;
 pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
+pub mod first_token;
 pub mod fpm_publisher;
 pub mod fpm_trace;
 pub mod frontend_config;
+mod frontend_load;
 pub mod grpc;
 pub mod http;
 pub mod hub;
@@ -50,6 +54,10 @@ pub mod block_manager;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
+
+#[cfg(test)]
+#[path = "../../runtime/src/test_utils.rs"]
+mod test_utils;
 
 #[cfg(test)]
 mod file_json_field_tests {

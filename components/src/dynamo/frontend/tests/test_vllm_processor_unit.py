@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _routed_engine_fakes import FakeRoutedItem
+from _thinking_parity import THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
     assistant_response_format,
@@ -23,14 +25,16 @@ from _tool_guidance_parity import (
 )
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tool_parsers import ToolParser
 
+from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
     StreamingPostProcessor,
     _prepare_request,
     build_tool_call_guided_decoding,
 )
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the vllm_processor_module fixture). Importing it at module
@@ -764,6 +768,105 @@ async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_featu
 
 
 @pytest.mark.asyncio
+async def test_prepare_mm_routing_does_not_forward_hashes_without_exact_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *_, **__: None,
+    )
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = False
+    processor.use_shm_transfer = True
+    processor._sender = None
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash="a" * 64,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == []
+    assert transferred is False
+    assert "mm_hashes" not in dynamo_preproc["extra_args"]
+    assert "mm_hashes_by_modality" not in dynamo_preproc["extra_args"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_mm_routing_processor_kwargs_keep_transfer_but_skip_exact_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    def fail_routing(*args, **kwargs):
+        raise AssertionError("processor kwargs must disable exact MM routing")
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        fail_routing,
+    )
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = True
+    processor.use_shm_transfer = True
+    processor._sender = SimpleNamespace(
+        prepare=AsyncMock(
+            return_value=({"mm_kwargs_shm": {"modality": "image"}}, ["cleanup"])
+        )
+    )
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash="a" * 64,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+        mm_processor_kwargs={"max_pixels": 4096},
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == ["cleanup"]
+    assert transferred is True
+    assert "mm_hashes" not in dynamo_preproc["extra_args"]
+    assert "mm_hashes_by_modality" not in dynamo_preproc["extra_args"]
+    assert dynamo_preproc["extra_args"]["mm_kwargs_shm"] == {"modality": "image"}
+    assert dynamo_preproc["extra_args"]["mm_placeholders"] == [(0, 16)]
+    assert dynamo_preproc["extra_args"]["expanded_token_ids"] == list(range(16))
+
+
+@pytest.mark.asyncio
 @pytest.mark.multimodal
 async def test_prepare_mm_routing_opaque_uuid_skips_routing_and_transfer(
     vllm_processor_module,
@@ -820,37 +923,48 @@ class TestReasoningParserMetadata:
     def test_no_reasoning_parser_returns_none(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
-        assert _build_reasoning_parser_metadata(
+        metadata = _build_reasoning_parser_metadata(
             None,
             object(),
             {},
             SimpleNamespace(include_reasoning=True),
             [1, 2, 3],
-        ) == (None, None)
+        )
 
-    def test_include_reasoning_false_marks_reasoning_ended(self):
+        assert metadata.engine_reasoning_ended is None
+        assert metadata.response_reasoning_ended is None
+        assert metadata.parser_kwargs is None
+
+    def test_include_reasoning_false_only_marks_engine_reasoning_ended(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
-        class ParserShouldNotBeBuilt:
-            def __init__(self, *args, **kwargs):
-                raise AssertionError("parser should not be constructed")
+        class FakeReasoningParser:
+            def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
+                self.tokenizer = tokenizer
+                self.chat_template_kwargs = chat_template_kwargs
 
-        reasoning_ended, parser_kwargs = _build_reasoning_parser_metadata(
-            ParserShouldNotBeBuilt,
+            def is_reasoning_end(self, prompt_token_ids):
+                return prompt_token_ids == [9, 9]
+
+        metadata = _build_reasoning_parser_metadata(
+            FakeReasoningParser,
             object(),
             {"reasoning_effort": "low"},
             SimpleNamespace(include_reasoning=False),
             [1, 2, 3],
         )
 
-        assert reasoning_ended is True
-        assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "low"}}
+        assert metadata.engine_reasoning_ended is True
+        assert metadata.response_reasoning_ended is False
+        assert metadata.parser_kwargs == {
+            "chat_template_kwargs": {"reasoning_effort": "low"}
+        }
 
     def test_parser_receives_chat_template_kwargs(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
         class FakeReasoningParser:
-            def __init__(self, tokenizer, *, chat_template_kwargs):
+            def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
                 self.tokenizer = tokenizer
                 self.chat_template_kwargs = chat_template_kwargs
 
@@ -858,7 +972,7 @@ class TestReasoningParserMetadata:
                 return prompt_token_ids == [9, 9]
 
         tokenizer = object()
-        reasoning_ended, parser_kwargs = _build_reasoning_parser_metadata(
+        metadata = _build_reasoning_parser_metadata(
             FakeReasoningParser,
             tokenizer,
             {"reasoning_effort": "high"},
@@ -866,8 +980,11 @@ class TestReasoningParserMetadata:
             [9, 9],
         )
 
-        assert reasoning_ended is True
-        assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "high"}}
+        assert metadata.engine_reasoning_ended is True
+        assert metadata.response_reasoning_ended is True
+        assert metadata.parser_kwargs == {
+            "chat_template_kwargs": {"reasoning_effort": "high"}
+        }
 
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
         from dynamo.frontend.vllm_processor import _inject_routing_metadata
@@ -890,6 +1007,106 @@ class TestReasoningParserMetadata:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
+
+
+class TestReasoningParserOutputCapability:
+    def test_harmony_note_only_for_gptoss(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class BoundaryOnlyParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                raise NotImplementedError("boundary detection only")
+
+        with pytest.raises(RuntimeError, match="boundary detection") as exc_info:
+            _ensure_reasoning_parser_output_capable(
+                "future_parser", BoundaryOnlyParser, object(), {}, None
+            )
+        assert "HarmonyParser" not in str(exc_info.value)
+
+        with pytest.raises(RuntimeError, match="HarmonyParser"):
+            _ensure_reasoning_parser_output_capable(
+                "openai_gptoss", BoundaryOnlyParser, object(), {}, None
+            )
+
+    def test_output_capable_parser_accepted(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class WorkingParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                return None
+
+        _ensure_reasoning_parser_output_capable(
+            "fake", WorkingParser, object(), {}, None
+        )
+
+    def test_probe_tolerates_other_empty_input_failures(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class PickyParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                raise IndexError("empty input")
+
+        _ensure_reasoning_parser_output_capable("fake", PickyParser, object(), {}, None)
+
+    def test_incompatible_signature_rejected(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class WrongSignatureParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, delta_text):
+                return None
+
+        with pytest.raises(RuntimeError, match="signature"):
+            _ensure_reasoning_parser_output_capable(
+                "fake", WrongSignatureParser, object(), {}, None
+            )
+
+    def test_real_gptoss_parser_rejected(self):
+        pytest.importorskip("vllm.reasoning.gptoss_reasoning_parser")
+        from vllm.reasoning import ReasoningParserManager
+
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class GptOssTokenizer:
+            vocab = {"<|end|>": 1}
+            encoded = {
+                "<|channel|>final": [2],
+                "<|message|>": [3],
+                "<|start|>assistant<|channel|>final<|message|>": [4],
+            }
+
+            def encode(self, text, *args, **kwargs):
+                return self.encoded[text]
+
+            def get_vocab(self):
+                return self.vocab
+
+        parser_class = ReasoningParserManager.get_reasoning_parser("openai_gptoss")
+        with pytest.raises(RuntimeError, match="openai_gptoss"):
+            _ensure_reasoning_parser_output_capable(
+                "openai_gptoss", parser_class, GptOssTokenizer(), {}, None
+            )
 
 
 @pytest.mark.asyncio
@@ -1011,6 +1228,8 @@ class _FakeOutputProcessor:
 
 
 class _FakePostProcessor:
+    reasoning_token_total = 0
+
     def process_output(self, output):
         return {
             "index": output.index,
@@ -1035,60 +1254,136 @@ def vllm_processor_module(monkeypatch):
     return module
 
 
-@pytest.mark.asyncio
-async def test_generator_preserves_zero_top_logprobs(
-    vllm_processor_module,
-    monkeypatch,
-    caplog,
-):
-    class RequestForSampling(SimpleNamespace):
-        model_fields = {}
-
-    monkeypatch.setattr(
-        vllm_processor_module,
-        "preprocess_chat_request",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                request_for_sampling=RequestForSampling(
-                    max_completion_tokens=None,
-                    max_tokens=1,
-                    logprobs=True,
-                    top_logprobs=0,
-                    cache_salt=None,
-                    mm_processor_kwargs=None,
-                ),
-                tool_parser=None,
-                chat_template_kwargs={},
-                engine_prompt={"prompt": "Hello"},
-                prompt_token_ids=[1],
-                guided_decoding=None,
-            )
-        ),
-    )
-
-    class ProjectionObserved(Exception):
-        pass
-
-    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
-        assert sampling_params.logprobs == 0
-        raise ProjectionObserved
-
-    input_processor = SimpleNamespace(
-        generation_config_fields={},
-        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
-        process_inputs=process_inputs,
-    )
-
-    processor = vllm_processor_module.VllmProcessor(
-        tokenizer=SimpleNamespace(eos_token_id=2),
-        input_processor=input_processor,
+def _logprobs_processor(vllm_processor_module):
+    return vllm_processor_module.VllmProcessor(
+        tokenizer=object(),
+        input_processor=SimpleNamespace(renderer=object(), model_config=None),
         output_processor=object(),
         tool_parser_class=None,
         reasoning_parser_class=None,
         routed_engine=object(),
     )
 
-    with pytest.raises(ProjectionObserved):
+
+def test_disabled_mm_transfer_omits_shm_requirement_log(
+    vllm_processor_module,
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setenv("DYNAMO_DISABLE_NIXL_MM", "1")
+    monkeypatch.delenv("DYNAMO_MM_TRANSFER", raising=False)
+
+    with caplog.at_level("INFO"):
+        _logprobs_processor(vllm_processor_module)
+
+    assert "SHM transfer requires" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("top_logprobs", [-1])
+async def test_generator_rejects_negative_top_logprobs_before_preprocess(
+    vllm_processor_module,
+    monkeypatch,
+    top_logprobs,
+):
+    preprocess_chat_request = AsyncMock()
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        preprocess_chat_request,
+    )
+    processor = _logprobs_processor(vllm_processor_module)
+
+    with pytest.raises(HttpError) as excinfo:
+        await anext(
+            processor._generator_inner(
+                {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "logprobs": True,
+                    "top_logprobs": top_logprobs,
+                }
+            )
+        )
+
+    assert excinfo.value.code == 400
+    assert "top_logprobs" in excinfo.value.message
+    assert str(top_logprobs) in excinfo.value.message
+    preprocess_chat_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("logprobs", [False, None])
+async def test_generator_rejects_top_logprobs_without_logprobs(
+    vllm_processor_module, monkeypatch, logprobs
+):
+    preprocess = AsyncMock(
+        side_effect=AssertionError("must reject before preprocessing")
+    )
+    monkeypatch.setattr(vllm_processor_module, "preprocess_chat_request", preprocess)
+    request = {
+        "model": "test",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "top_logprobs": 1,
+    }
+    if logprobs is not None:
+        request["logprobs"] = logprobs
+    processor = _logprobs_processor(vllm_processor_module)
+    with pytest.raises(HttpError) as excinfo:
+        await anext(processor._generator_inner(request))
+    assert excinfo.value.code == 400
+    assert "`logprobs` must be set to true" in excinfo.value.message
+    preprocess.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generator_rejects_integer_chat_logprobs_before_preprocess(
+    vllm_processor_module,
+    monkeypatch,
+):
+    preprocess_chat_request = AsyncMock()
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        preprocess_chat_request,
+    )
+    processor = _logprobs_processor(vllm_processor_module)
+
+    with pytest.raises(HttpError) as excinfo:
+        await anext(
+            processor._generator_inner(
+                {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "logprobs": 3,
+                }
+            )
+        )
+
+    assert excinfo.value.code == 400
+    assert "boolean" in excinfo.value.message
+    preprocess_chat_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generator_accepts_zero_top_logprobs(
+    vllm_processor_module,
+    monkeypatch,
+):
+    class _ReachedPreprocess(Exception):
+        pass
+
+    async def stop_at_preprocess(*args, **kwargs):
+        raise _ReachedPreprocess
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        stop_at_preprocess,
+    )
+    processor = _logprobs_processor(vllm_processor_module)
+
+    with pytest.raises(_ReachedPreprocess):
         await anext(
             processor._generator_inner(
                 {
@@ -1099,10 +1394,464 @@ async def test_generator_preserves_zero_top_logprobs(
                 }
             )
         )
-    assert (
-        "Logprobs requested but not supported in distributed inference mode"
-        in caplog.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_options,expected_logprobs,expected_prompt_logprobs",
+    [
+        ({}, None, None),
+        ({"logprobs": False, "top_logprobs": 0, "prompt_logprobs": None}, None, None),
+        ({"logprobs": True}, 0, None),
+        ({"logprobs": True, "top_logprobs": 1}, 1, None),
+        ({"logprobs": True, "top_logprobs": 0, "prompt_logprobs": 0}, 0, 0),
+        ({"logprobs": True, "top_logprobs": 1, "prompt_logprobs": 3}, 1, 3),
+        ({"prompt_logprobs": 0}, None, 0),
+        ({"stream": True}, None, None),
+        ({"stream": True, "prompt_logprobs": 0}, None, None),
+        ({"stream": True, "prompt_logprobs": 3}, None, None),
+        (
+            {
+                "stream": True,
+                "prompt_logprobs": 0,
+                "nvext": {"extra_fields": ["prompt_logprobs"]},
+            },
+            None,
+            0,
+        ),
+        (
+            {
+                "stream": True,
+                "prompt_logprobs": 3,
+                "nvext": {"extra_fields": ["prompt_logprobs"]},
+            },
+            None,
+            3,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "generation_config", [{}, {"logprobs": 2, "prompt_logprobs": 2}]
+)
+async def test_generator_forwards_chat_logprobs_count(
+    vllm_processor_module,
+    monkeypatch,
+    request_options,
+    expected_logprobs,
+    expected_prompt_logprobs,
+    generation_config,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset({"prompt_logprobs"})
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=RequestForSampling(
+                    max_completion_tokens=None,
+                    max_tokens=1,
+                    logprobs=request_options.get("logprobs"),
+                    top_logprobs=request_options.get("top_logprobs"),
+                    prompt_logprobs=request_options.get("prompt_logprobs"),
+                    top_k=None,
+                    min_p=None,
+                    cache_salt=None,
+                    mm_processor_kwargs=None,
+                ),
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
     )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        assert sampling_params.logprobs == expected_logprobs
+        assert sampling_params.prompt_logprobs == expected_prompt_logprobs
+        return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
+
+    input_processor = SimpleNamespace(
+        generation_config_fields=generation_config,
+        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
+        process_inputs=process_inputs,
+        model_config=None,
+    )
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=input_processor,
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    monkeypatch.setattr(
+        processor,
+        "_prepare_mm_routing",
+        AsyncMock(return_value=(None, [], False)),
+    )
+    captured = {}
+
+    async def capture_generate_and_stream(*args, **kwargs):
+        captured["dynamo_preproc"] = args[2]
+        yield {"captured": True}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+
+    results = [
+        item
+        async for item in processor._generator_inner(
+            {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello"}],
+                **request_options,
+            }
+        )
+    ]
+
+    assert results == [{"captured": True}]
+    assert captured["dynamo_preproc"]["output_options"]["logprobs"] == expected_logprobs
+    assert (
+        captured["dynamo_preproc"]["output_options"]["prompt_logprobs"]
+        == expected_prompt_logprobs
+    )
+
+
+@pytest.mark.asyncio
+async def test_include_reasoning_false_keeps_response_parser_active(
+    vllm_processor_module,
+    monkeypatch,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset()
+
+    class FakeReasoningParser:
+        engine_based_streaming = False
+
+        def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
+            self.tokenizer = tokenizer
+            self.chat_template_kwargs = chat_template_kwargs
+            self.adjusted_prompt_token_ids = None
+
+        def is_reasoning_end(self, prompt_token_ids):
+            return False
+
+        def adjust_initial_state_from_prompt(self, prompt_token_ids):
+            self.adjusted_prompt_token_ids = prompt_token_ids
+
+        def extract_reasoning_streaming(
+            self,
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+        ):
+            if "</think>" in delta_text:
+                return prepost_module.DeltaMessage(
+                    reasoning="hidden tail",
+                    content="visible answer",
+                )
+            return prepost_module.DeltaMessage(reasoning="hidden reasoning")
+
+        def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+            return 3 in delta_token_ids
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=RequestForSampling(
+                    max_completion_tokens=None,
+                    max_tokens=1,
+                    logprobs=None,
+                    top_logprobs=None,
+                    cache_salt=None,
+                    mm_processor_kwargs=None,
+                    include_reasoning=False,
+                    top_k=None,
+                    min_p=None,
+                ),
+                tool_parser=None,
+                chat_template_kwargs={"reasoning_effort": "low"},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
+
+    input_processor = SimpleNamespace(
+        generation_config_fields={},
+        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
+        process_inputs=process_inputs,
+        # Real InputProcessor always carries this (vllm_config.model_config);
+        # _generator_inner forwards it to the reasoning parser.
+        model_config=None,
+    )
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=input_processor,
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=FakeReasoningParser,
+        routed_engine=object(),
+    )
+    monkeypatch.setattr(
+        processor,
+        "_prepare_mm_routing",
+        AsyncMock(return_value=(None, [], False)),
+    )
+
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id,
+        request,
+        dynamo_preproc,
+        tokens,
+        vllm_preproc,
+        post_processors,
+        *,
+        mm_routing_info,
+        context,
+    ):
+        captured["dynamo_preproc"] = dynamo_preproc
+        captured["post_processor"] = post_processors[0]
+        yield {"captured": True}
+
+    monkeypatch.setattr(
+        processor,
+        "_generate_and_stream",
+        capture_generate_and_stream,
+    )
+
+    results = [
+        item
+        async for item in processor._generator_inner(
+            {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+    ]
+
+    assert results == [{"captured": True}]
+    assert captured["dynamo_preproc"]["reasoning_ended"] is True
+    post_processor = captured["post_processor"]
+    assert post_processor.reasoning_is_done is False
+    assert isinstance(post_processor.reasoning_parser, FakeReasoningParser)
+    assert post_processor.reasoning_parser.adjusted_prompt_token_ids == [1]
+
+    reasoning_choice = post_processor.process_output(
+        SimpleNamespace(
+            index=0,
+            text="<think>hidden reasoning",
+            token_ids=[2],
+            finish_reason=None,
+            logprobs={"tokens": ["hidden"]},
+        )
+    )
+    assert reasoning_choice is None
+
+    content_choice = post_processor.process_output(
+        SimpleNamespace(
+            index=0,
+            text="</think>visible answer",
+            token_ids=[3],
+            finish_reason="stop",
+            logprobs={"tokens": ["hidden", "visible"]},
+        )
+    )
+    assert content_choice == {
+        "index": 0,
+        "delta": {"role": "assistant", "content": "visible answer"},
+        "finish_reason": "stop",
+        "logprobs": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("generation_config", "requested", "expected_top_k", "expected_min_p"),
+    [
+        ({}, {}, None, None),
+        ({"top_k": 20}, {}, 20, None),
+        ({"top_k": 20}, {"temperature": 0.0, "min_p": 0.05}, None, None),
+        ({}, {"top_k": 5, "min_p": 0.1}, 5, 0.1),
+        ({"top_k": 20}, {"top_k": -1, "min_p": 0.0}, -1, 0.0),
+        ({"top_k": 20}, {"temperature": 0.0, "top_k": -1}, 0, None),
+    ],
+    ids=[
+        "no-defaults",
+        "config-top-k",
+        "greedy-reset",
+        "client-enabled",
+        "client-disabled",
+        "greedy-client-disabled",
+    ],
+)
+async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
+    vllm_processor_module,
+    monkeypatch,
+    generation_config,
+    requested,
+    expected_top_k,
+    expected_min_p,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset({"temperature", "top_k", "min_p"})
+
+    request_for_sampling = RequestForSampling(
+        max_completion_tokens=None,
+        max_tokens=1,
+        logprobs=None,
+        top_logprobs=None,
+        cache_salt=None,
+        mm_processor_kwargs=None,
+        **{"temperature": None, "top_k": None, "min_p": None, **requested},
+    )
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=request_for_sampling,
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        # InputProcessor.process_inputs clones, which applies the greedy reset.
+        return SimpleNamespace(
+            sampling_params=sampling_params.clone(), mm_features=None
+        )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=SimpleNamespace(
+            generation_config_fields=generation_config,
+            renderer=SimpleNamespace(
+                process_for_engine_async=AsyncMock(return_value={})
+            ),
+            process_inputs=process_inputs,
+            model_config=None,
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=None,
+        routed_engine=object(),
+    )
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id, request, dynamo_preproc, *args, **kwargs
+    ):
+        captured["sampling_options"] = dynamo_preproc["sampling_options"]
+        yield {}
+
+    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
+
+    async for _ in processor._generator_inner(
+        {"model": "test", "messages": [{"role": "user", "content": "Hello"}]}
+    ):
+        pass
+
+    assert captured["sampling_options"]["top_k"] == expected_top_k
+    assert captured["sampling_options"]["min_p"] == expected_min_p
+
+
+@pytest.mark.asyncio
+async def test_generator_inner_forwards_reasoning_parser_and_model_config(
+    vllm_processor_module,
+    monkeypatch,
+):
+    """The processor must hand its own parser AND model config to preprocessing.
+
+    Every other reasoning-parser test calls preprocess_chat_request or
+    _prepare_request directly with an explicit reasoning_parser_class, so all of
+    them keep passing if the production call in _generator_inner stops forwarding
+    them. This is the boundary check that does not: it reads the arguments off the
+    real call site. Deleting either wiring line makes exactly this test fail.
+
+    model_config is checked alongside because it is equally load-bearing and
+    equally invisible: without it the shipped Cohere parsers return the request
+    untouched and adjust_request() is a silent no-op.
+    """
+
+    class _SentinelReasoningParser:
+        """Identity is the whole point -- this is never instantiated."""
+
+    class _StopAfterPreprocess(Exception):
+        """Ends the generator at the boundary under test."""
+
+    sentinel_model_config = SimpleNamespace(architecture="SentinelForCausalLM")
+    captured: dict = {}
+
+    async def spy_preprocess_chat_request(request, **kwargs):
+        captured.update(kwargs)
+        raise _StopAfterPreprocess
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        spy_preprocess_chat_request,
+    )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2),
+        input_processor=SimpleNamespace(
+            renderer=object(), model_config=sentinel_model_config
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=_SentinelReasoningParser,
+        routed_engine=object(),
+    )
+
+    with pytest.raises(_StopAfterPreprocess):
+        await anext(
+            processor._generator_inner(
+                {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                }
+            )
+        )
+
+    assert captured.get("reasoning_parser_class") is _SentinelReasoningParser
+    assert captured.get("model_config") is sentinel_model_config
 
 
 def _make_processor(module, routed_engine):
@@ -1125,19 +1874,28 @@ def _base_preproc():
     }
 
 
-async def _run_generate(processor, preproc, *, mm_routing_info=None, context=None):
+async def _run_generate(
+    processor,
+    preproc,
+    *,
+    mm_routing_info=None,
+    context=None,
+    request=None,
+    post_processors=None,
+):
     vllm_preproc = SimpleNamespace(
         sampling_params=SimpleNamespace(n=1),
         request_id="vllm-request",
         external_req_id=None,
     )
-    post_processors = {0: _FakePostProcessor()}
+    if post_processors is None:
+        post_processors = {0: _FakePostProcessor()}
 
     return [
         item
         async for item in processor._generate_and_stream(
             "request-id",
-            {"model": MODEL},
+            request if request is not None else {"model": MODEL},
             preproc,
             preproc["token_ids"],
             vllm_preproc,
@@ -1149,6 +1907,599 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stream,stream_options,intermediate_usage",
+        [
+            (True, None, False),
+            (True, {"include_usage": True}, False),
+            (True, {"include_usage": True, "continuous_usage_stats": False}, False),
+            (True, {"include_usage": False, "continuous_usage_stats": True}, False),
+            (True, {"include_usage": True, "continuous_usage_stats": True}, True),
+            (False, None, True),
+        ],
+    )
+    async def test_stream_usage_options_with_sparse_backend_metadata(
+        self, vllm_processor_module, stream, stream_options, intermediate_usage
+    ):
+        responses = [
+            {
+                "token_ids": [101],
+                "completion_usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 1,
+                    "total_tokens": 4,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                },
+            },
+            {"token_ids": [102, 103]},
+            {
+                "token_ids": [104],
+                "completion_usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 4,
+                    "total_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 2},
+                },
+            },
+            {"token_ids": [105]},
+            {"token_ids": [], "finish_reason": "stop"},
+        ]
+        processor = _make_processor(vllm_processor_module, _FakeRoutedEngine(responses))
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request={
+                "model": MODEL,
+                "stream": stream,
+                "stream_options": stream_options,
+            },
+        )
+
+        assert len(chunks) == 5
+        assert ["usage" in chunk["data"] for chunk in chunks] == [
+            intermediate_usage,
+            intermediate_usage,
+            intermediate_usage,
+            intermediate_usage,
+            not stream or bool((stream_options or {}).get("include_usage")),
+        ]
+        expected_counts = [(3, 1, 0), (3, 3, 0), (4, 4, 2), (4, 5, 2), (4, 5, 2)]
+        for chunk, (prompt, completion, cached) in zip(chunks, expected_counts):
+            if "usage" in chunk["data"]:
+                usage = chunk["data"]["usage"]
+                assert usage["prompt_tokens"] == prompt
+                assert usage["completion_tokens"] == completion
+                assert usage["total_tokens"] == prompt + completion
+                assert usage["prompt_tokens_details"] == {"cached_tokens": cached}
+        assert responses[0]["completion_usage"]["completion_tokens"] == 1
+
+    @pytest.mark.asyncio
+    async def test_stream_usage_retains_metadata_from_suppressed_chunk(
+        self, vllm_processor_module
+    ):
+        class SuppressFirstDelta(_FakePostProcessor):
+            def __init__(self):
+                self.first = True
+
+            def process_output(self, output):
+                if self.first:
+                    self.first = False
+                    return None
+                return super().process_output(output)
+
+        processor = _make_processor(
+            vllm_processor_module,
+            _FakeRoutedEngine(
+                [
+                    {
+                        "token_ids": [101, 102],
+                        "completion_usage": {
+                            "prompt_tokens": 3,
+                            "completion_tokens": 2,
+                            "total_tokens": 5,
+                            "prompt_tokens_details": {"cached_tokens": 2},
+                        },
+                    },
+                    {"token_ids": [103]},
+                ]
+            ),
+        )
+        chunks = await _run_generate(
+            processor,
+            _base_preproc(),
+            request={
+                "model": MODEL,
+                "stream": True,
+                "stream_options": {
+                    "include_usage": True,
+                    "continuous_usage_stats": True,
+                },
+            },
+            post_processors={0: SuppressFirstDelta()},
+        )
+        assert "data" not in chunks[0]
+        usage = chunks[1]["data"]["usage"]
+        assert usage["completion_tokens"] == 3
+        assert usage["total_tokens"] == 6
+        assert usage["prompt_tokens_details"] == {"cached_tokens": 2}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "finish_reason",
+        [
+            {"error": "Multimodal SHM transfer failed"},
+            "error: Multimodal SHM transfer failed",
+        ],
+    )
+    async def test_generation_error_ends_stream_with_error_envelope(
+        self,
+        vllm_processor_module,
+        finish_reason,
+    ):
+        class _UnexpectedOutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                raise AssertionError("error response reached normal output processing")
+
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [], "index": 0, "finish_reason": finish_reason},
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        processor.output_processor = _UnexpectedOutputProcessor()
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        assert chunks == [
+            {
+                "_dynamo_annotated": True,
+                "event": "error",
+                "comment": ["Multimodal SHM transfer failed"],
+            }
+        ]
+        assert routed_engine.yielded == 1
+
+    @pytest.mark.asyncio
+    async def test_worker_unavailable_is_raised_not_enveloped(
+        self, vllm_processor_module
+    ):
+        rejection = WorkerUnavailable("prefill routing is still activating")
+
+        class _RejectingRoutedEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise rejection
+
+        processor = _make_processor(vllm_processor_module, _RejectingRoutedEngine([]))
+
+        with pytest.raises(WorkerUnavailable) as caught:
+            await _run_generate(processor, _base_preproc())
+        assert caught.value is rejection
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "request_options", [{}, {"logprobs": False, "top_logprobs": 0}]
+    )
+    async def test_unrequested_logprobs_skip_chunk_processing(
+        self, vllm_processor_module, monkeypatch, request_options
+    ):
+        def unexpected_logprob_work(*args, **kwargs):
+            raise AssertionError("unrequested logprobs must not be processed")
+
+        monkeypatch.setattr(
+            vllm_processor_module, "_append_worker_logprobs", unexpected_logprob_work
+        )
+        monkeypatch.setattr(
+            vllm_processor_module, "_apply_choice_logprobs", unexpected_logprob_work
+        )
+        processor = _make_processor(
+            vllm_processor_module,
+            _FakeRoutedEngine(
+                [
+                    {
+                        "token_ids": [101],
+                        "log_probs": [-0.25],
+                        "top_logprobs": [[{"token_id": 101, "logprob": -0.25}]],
+                        "engine_data": {"prompt_logprobs": "unrequested"},
+                    }
+                ]
+            ),
+        )
+        preproc = _base_preproc()
+        chunks = [
+            item["data"]
+            async for item in processor._generate_and_stream(
+                "request-id",
+                {"model": MODEL, **request_options},
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-request",
+                    external_req_id=None,
+                ),
+                {0: _FakePostProcessor()},
+            )
+            if "data" in item
+        ]
+
+        assert len(chunks) == 1
+        assert chunks[0]["choices"][0]["logprobs"] is None
+        assert "prompt_logprobs" not in chunks[0]
+        assert not processor.output_processor.request_states
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "texts,backend_end",
+        [
+            pytest.param(texts, backend_end, id=f"{case_name}-{backend_end}")
+            for case_name, texts in [
+                ("single", ("hello STOP",)),
+                ("one-stop", ("hello STOP", "world")),
+                ("both-stop", ("hello STOP", "world STOP")),
+            ]
+            for backend_end in [
+                "metadata",
+                "empty",
+                "eof",
+                "error",
+                "error-finish",
+                "abort",
+            ]
+        ]
+        + [
+            pytest.param(
+                ("hello STOP",), "error-dict-finish", id="single-error-dict-finish"
+            ),
+            pytest.param(("hello STOP",), "close", id="single-close"),
+            pytest.param(("hello STOP", "world"), "close", id="one-stop-close"),
+        ],
+    )
+    @pytest.mark.parametrize("usage_mode", ["stream", "unary"])
+    async def test_local_stop_preserves_late_backend_outcome(
+        self, tokenizer, texts, backend_end, usage_mode
+    ):
+        import dynamo.frontend.vllm_processor as module
+
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": usage_mode == "stream",
+            "stream_options": (
+                {"include_usage": True} if usage_mode == "stream" else None
+            ),
+            "prompt_logprobs": 0,
+            "nvext": {"extra_fields": ["prompt_logprobs"]},
+        }
+        sampling_params = SamplingParams(
+            n=len(texts),
+            max_tokens=16,
+            stop=["STOP"],
+            output_kind=module.RequestOutputKind.DELTA,
+        )
+        tokens = tokenizer.encode("Hello", add_special_tokens=False)
+        vllm_preproc = module.EngineCoreRequest(
+            request_id="internal",
+            external_req_id="external",
+            prompt_token_ids=tokens,
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        posts = {
+            index: StreamingPostProcessor(
+                tokenizer=tokenizer,
+                request_for_sampling=prepost_module.ChatCompletionRequest.model_validate(
+                    request
+                ),
+                sampling_params=sampling_params,
+                prompt_token_ids=tokens,
+                tool_parser=None,
+                reasoning_parser_class=None,
+                chat_template_kwargs={},
+            )
+            for index in range(len(texts))
+        }
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        frames = [
+            {
+                "index": index,
+                "token_ids": tokenizer.encode(text, add_special_tokens=False),
+            }
+            for index, text in enumerate(texts)
+        ]
+        output_tokens = sum(len(frame["token_ids"]) for frame in frames)
+        frames.append(
+            {"token_ids": tokenizer.encode(" hidden", add_special_tokens=False)}
+        )
+        if backend_end == "error":
+            frames.append(
+                FakeRoutedItem(None, is_error=True, comments=["backend disconnected"])
+            )
+        elif backend_end != "eof":
+            terminal = {"token_ids": [], "finish_reason": "length"}
+            if backend_end == "metadata":
+                terminal["engine_data"] = {"prompt_logprobs": payload}
+                terminal["completion_usage"] = {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 999,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                }
+            elif backend_end == "error-finish":
+                terminal["finish_reason"] = "error: backend disconnected"
+            elif backend_end == "error-dict-finish":
+                terminal["finish_reason"] = {"error": "backend disconnected"}
+            elif backend_end == "abort":
+                terminal["finish_reason"] = "cancelled"
+            frames.append(terminal)
+        if len(texts) == 2:
+            frames.append({"index": 1, "token_ids": [], "finish_reason": "length"})
+        engine = _FakeRoutedEngine(frames)
+        processor = _make_processor(module, engine)
+        processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
+        response_stream = processor._generate_and_stream(
+            "external", request, _base_preproc(), tokens, vllm_preproc, posts
+        )
+
+        first = await anext(response_stream)
+        assert first["event"] == "llm_metrics"
+        assert json.loads(first["comment"][0])["output_tokens"] == len(
+            frames[0]["token_ids"]
+        )
+        assert engine.yielded == 1
+        assert len(processor.output_processor.request_states) == len(texts) - 1
+        if backend_end == "close":
+            await response_stream.aclose()
+            assert engine.yielded == 1
+            assert not processor.output_processor.request_states
+            return
+
+        envelopes = [first] + [item async for item in response_stream]
+        assert not processor.output_processor.request_states
+        chunks = [item["data"] for item in envelopes if "data" in item]
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
+        if backend_end in {"error", "error-finish", "error-dict-finish", "abort"}:
+            assert envelopes[-1]["event"] == "error"
+            if backend_end == "error-dict-finish":
+                assert envelopes[-1]["comment"] == ["backend disconnected"]
+            assert not any(c["finish_reason"] for c in choices)
+            return
+        assert engine.yielded == len(frames)
+        for index, text in enumerate(texts):
+            output = [choice for choice in choices if choice["index"] == index]
+            assert "".join(
+                c["delta"].get("content", "") for c in output
+            ) == text.replace("STOP", "")
+            assert [c["finish_reason"] for c in output if c["finish_reason"]] == [
+                "stop" if "STOP" in text else "length"
+            ]
+        if usage_mode == "stream":
+            assert all("prompt_logprobs" not in chunk for chunk in chunks)
+        else:
+            assert [
+                chunk["prompt_logprobs"]
+                for chunk in chunks
+                if "prompt_logprobs" in chunk
+            ] == ([payload] if backend_end == "metadata" else [])
+        metadata = [
+            chunk["nvext"]["prompt_logprobs"] for chunk in chunks if "nvext" in chunk
+        ]
+        assert metadata == ([payload] if backend_end == "metadata" else [])
+        if backend_end == "metadata":
+            terminal_chunks = [
+                chunk
+                for chunk in chunks
+                if any(choice["finish_reason"] for choice in chunk["choices"])
+            ]
+            assert terminal_chunks
+            for chunk in terminal_chunks:
+                assert chunk["usage"] == {
+                    "prompt_tokens": 7,
+                    "completion_tokens": output_tokens,
+                    "total_tokens": 7 + output_tokens,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                    "completion_tokens_details": {"reasoning_tokens": 0},
+                }
+            assert terminal["completion_usage"]["completion_tokens"] == 999
+            assert "completion_tokens_details" not in terminal["completion_usage"]
+        metrics = [
+            item["data"]["llm_metrics"]
+            if "data" in item
+            else json.loads(item["comment"][0])
+            for item in envelopes
+            if "llm_metrics" in item.get("data", {})
+            or item.get("event") == "llm_metrics"
+        ]
+        assert sum(metric["chunk_tokens"] for metric in metrics) == output_tokens
+        assert [metric["output_tokens"] for metric in metrics] == sorted(
+            metric["output_tokens"] for metric in metrics
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("count", [None, 0])
+    @pytest.mark.parametrize("include_nvext", [False, True])
+    async def test_prompt_logprobs_survive_buffered_output(
+        self, vllm_processor_module, count, include_nvext
+    ):
+        payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        processor = _make_processor(
+            vllm_processor_module,
+            _FakeRoutedEngine(
+                [
+                    {
+                        "token_ids": [101],
+                        "engine_data": {"prompt_logprobs": payload},
+                    },
+                    {"token_ids": [], "finish_reason": "stop"},
+                ]
+            ),
+        )
+
+        class OutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                choice = SimpleNamespace(
+                    index=0,
+                    finish_reason=(
+                        "stop" if outputs[0].finish_reason is not None else None
+                    ),
+                )
+                return SimpleNamespace(
+                    reqs_to_abort=[],
+                    request_outputs=[SimpleNamespace(outputs=[choice])],
+                )
+
+        class BufferedPostProcessor(_FakePostProcessor):
+            def process_output(self, output):
+                if output.finish_reason is None:
+                    return None
+                choice = super().process_output(output)
+                choice["finish_reason"] = output.finish_reason
+                return choice
+
+        processor.output_processor = OutputProcessor()
+        request = {"model": MODEL}
+        if count is not None:
+            request["prompt_logprobs"] = count
+        if include_nvext:
+            request["nvext"] = {"extra_fields": ["prompt_logprobs"]}
+        preproc = _base_preproc()
+        chunks = [
+            item["data"]
+            async for item in processor._generate_and_stream(
+                "prompt-logprobs",
+                request,
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-prompt-logprobs",
+                ),
+                {0: BufferedPostProcessor()},
+            )
+            if "data" in item
+        ]
+
+        assert len(chunks) == 1
+        assert chunks[0].get("prompt_logprobs") == (
+            payload if count is not None else None
+        )
+        assert chunks[0].get("nvext", {}).get("prompt_logprobs") == (
+            payload if include_nvext else None
+        )
+        assert "prompt_logprobs" not in chunks[0]["choices"][0]
+
+    @pytest.mark.asyncio
+    async def test_backend_rejection_keeps_the_backend_status(
+        self, vllm_processor_module
+    ):
+        # A worker-side rejection crosses the Rust boundary as a plain ValueError
+        # whose text carries the real status. It must reach the client as that
+        # status with that message -- not as a generic 500 with both discarded.
+        class _RejectingEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise ValueError(
+                    'BackendInvalidArgument: {"message":"The min_p and logit_bias '
+                    "sampling parameters are not yet supported with speculative "
+                    'decoding.","code":400}'
+                )
+
+        processor = _make_processor(vllm_processor_module, _RejectingEngine())
+
+        with pytest.raises(HttpError) as excinfo:
+            await _run_generate(processor, _base_preproc())
+
+        assert excinfo.value.code == 400
+        assert "min_p" in excinfo.value.message
+        # The serialized envelope must not leak to the client.
+        assert "BackendInvalidArgument" not in excinfo.value.message
+
+    @pytest.mark.asyncio
+    async def test_invalid_argument_rejection_propagates(self, vllm_processor_module):
+        class _RefusingEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise InvalidArgument("use --enable-multimodal")
+
+        processor = _make_processor(vllm_processor_module, _RefusingEngine())
+
+        with pytest.raises(InvalidArgument, match="--enable-multimodal"):
+            await _run_generate(processor, _base_preproc())
+
+    @pytest.mark.asyncio
+    async def test_genuine_internal_failure_is_still_internal(
+        self, vllm_processor_module
+    ):
+        """A real engine fault stays internal, and is sent as a tagged frame."""
+
+        class _BrokenEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise RuntimeError("CUDA out of memory")
+
+        processor = _make_processor(vllm_processor_module, _BrokenEngine())
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        # Yielded, not raised: an error without the discriminator is not a 4xx.
+        last = chunks[-1]
+        # It must also be tagged. An untagged dict fails to parse and becomes a 500.
+        assert last["_dynamo_annotated"] is True
+        assert last["event"] == "error"
+        assert "CUDA out of memory" in last["comment"][0]
+
+    @pytest.mark.asyncio
+    async def test_unregistered_choice_index_ends_the_stream(
+        self, vllm_processor_module
+    ):
+        """An unknown choice index ends the stream instead of reading on."""
+
+        class _WrongIndexOutputProcessor(_FakeOutputProcessor):
+            def process_outputs(self, outputs):
+                # Index 1 is never registered below, so the lookup misses.
+                return SimpleNamespace(
+                    reqs_to_abort=[],
+                    request_outputs=[
+                        SimpleNamespace(outputs=[SimpleNamespace(index=1)])
+                    ],
+                )
+
+        # Two frames: with `continue` the second one yields a second error.
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+                {"token_ids": [102], "index": 0, "finish_reason": None},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        processor.output_processor = _WrongIndexOutputProcessor()
+        preproc = _base_preproc()
+        vllm_preproc = SimpleNamespace(
+            sampling_params=SimpleNamespace(n=1),
+            request_id="vllm-request",
+            external_req_id=None,
+        )
+
+        chunks = [
+            item
+            async for item in processor._generate_and_stream(
+                "request-id",
+                {"model": MODEL},
+                preproc,
+                preproc["token_ids"],
+                vllm_preproc,
+                {0: _FakePostProcessor()},
+                mm_routing_info=None,
+                context=None,
+            )
+        ]
+
+        assert len(chunks) == 1, f"stream continued after the error: {chunks}"
+        assert chunks[0]["event"] == "error"
+        assert "Invalid postprocessor choice index 1" in chunks[0]["comment"][0]
+
     @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
         routed_engine = _FakeRoutedEngine()
@@ -1181,8 +2532,6 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        # One annotated envelope per iteration carries both data and the
-        # llm_metrics annotation; observer strips the annotation before SSE.
         assert len(chunks) == 1
         envelope = chunks[0]
 
@@ -1194,21 +2543,21 @@ class TestRoutedEnginePath:
                     "index": 0,
                     "delta": {"content": "x"},
                     "finish_reason": None,
+                    "logprobs": None,
                 }
             ],
             "created": envelope["data"]["created"],
             "model": MODEL,
             "object": "chat.completion.chunk",
+            "llm_metrics": {
+                "input_tokens": 3,
+                "output_tokens": 1,
+                "chunk_tokens": 1,
+            },
         }
 
-        assert envelope["event"] == "llm_metrics"
-        assert len(envelope["comment"]) == 1
-        # Zero counts are omitted (text-only request), mirroring the Rust skip-zero behavior.
-        assert json.loads(envelope["comment"][0]) == {
-            "input_tokens": 3,
-            "output_tokens": 1,
-            "chunk_tokens": 1,
-        }
+        assert "event" not in envelope
+        assert "comment" not in envelope
 
     @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
@@ -1252,7 +2601,7 @@ class TestRoutedEnginePath:
             )
         ]
 
-        metrics = json.loads(chunks[0]["comment"][0])
+        metrics = chunks[0]["data"]["llm_metrics"]
         assert metrics["image_count"] == 2
         assert metrics["video_count"] == 1
         # audio has zero parts, so the key is omitted from the emitted metrics.
@@ -1434,6 +2783,433 @@ class TestPreprocessRawRequestControls:
         assert "thinking_mode" not in result.chat_template_kwargs
 
 
+class _FakeStructuralTagReasoningParser:
+    """A reasoning parser that rewrites the caller's constraint.
+
+    Mirrors a real text-grammar parser converting response_format into the
+    structural tag its model actually speaks.
+    """
+
+    def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+        del tokenizer, chat_template_kwargs
+        self._model_config = model_config
+
+    def adjust_request(self, request):
+        request.skip_special_tokens = False
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag='{"format": "reasoning"}'
+        )
+        return request
+
+
+class _FakePassthroughReasoningParser(_FakeStructuralTagReasoningParser):
+    def adjust_request(self, request):
+        return request
+
+
+class _ModelConfigGatedReasoningParser(_FakeStructuralTagReasoningParser):
+    """Rewrites the constraint only when it was given a model_config.
+
+    This is the shipped Cohere parsers' actual contract:
+    BaseCohereCommandReasoningParser.adjust_request reads
+    ``self._model_config.architecture`` and returns the request untouched when the
+    config is absent. A fake that ignores model_config cannot tell a working call
+    from a no-op, which is how the missing kwarg went unnoticed.
+    """
+
+    def adjust_request(self, request):
+        if self._model_config is None:
+            return request
+        return super().adjust_request(request)
+
+
+class TestReasoningParserGuidanceForwarding:
+    """A reasoning parser's guidance must be recomputed and forwarded.
+
+    Regression: parser_guided_decoding was gated on `tool_parser is not None`, and
+    build_tool_call_guided_decoding returns early when there is no tool-call
+    guidance to build. A reasoning parser that rewrote the caller's constraint
+    therefore never surfaced: the request carried the adjusted constraint while the
+    engine received the pre-adjustment copy captured before _prepare_request ran.
+    """
+
+    @staticmethod
+    def _request(**overrides):
+        """A fresh request each call, so no test can perturb another's input."""
+        return {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {"type": "json_object"},
+            **overrides,
+        }
+
+    @staticmethod
+    def _renderer():
+        return SimpleNamespace(
+            render_messages_async=AsyncMock(
+                return_value=(None, {"prompt_token_ids": [1]})
+            )
+        )
+
+    async def _preprocess(self, tokenizer, *, request=None, **kwargs):
+        kwargs.setdefault("tool_parser_class", None)
+        return await prepost_module.preprocess_chat_request(
+            request if request is not None else self._request(),
+            tokenizer=tokenizer,
+            renderer=self._renderer(),
+            **kwargs,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rewrite_is_forwarded_without_a_tool_parser(self, tokenizer):
+        """The whole point: no tool parser anywhere in the request."""
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+        # The pre-adjustment copy must not win.
+        assert result.guided_decoding != {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_passthrough_parser_keeps_the_caller_constraint(self, tokenizer):
+        """adjust_request that changes nothing must not disturb the caller."""
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_FakePassthroughReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_thinking_disabled_does_not_recompute(self, tokenizer):
+        """The gate is off, so no parser runs and nothing may be recomputed.
+
+        Recomputing here would forward a constraint from a parser that the
+        postprocessor will not build.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(chat_template_kwargs={"enable_thinking": False}),
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert result.request_for_sampling.skip_special_tokens is not False
+
+    @pytest.mark.asyncio
+    async def test_rewrite_is_forwarded_with_a_tool_parser_also_active(self, tokenizer):
+        """Attribution is measured, so a tool parser being present is irrelevant.
+
+        Both parsers run against the same request inside _prepare_request. The
+        snapshot taken between them shows the tool parser left the guidance alone
+        and the reasoning parser rewrote it, so the rewrite is attributable and
+        wins -- exactly as it does with no tool parser at all.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(tools=TOOL_REQUEST["tools"], tool_choice="auto"),
+            tool_parser_class=_FakePassthroughToolParser,
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+
+    @pytest.mark.asyncio
+    async def test_tool_parser_rewrite_still_loses_to_the_caller(self, tokenizer):
+        """The other half: tool-path precedence is deliberately unchanged.
+
+        Same measurement, opposite attribution -- the tool parser moved the
+        guidance and the reasoning parser did not -- so the caller's explicit
+        constraint still wins, as pinned by
+        test_assistant_guidance_takes_precedence_over_auto_tool_guidance and the
+        response-format-precedence row of TOOL_GUIDANCE_PARITY_CASES.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(tools=TOOL_REQUEST["tools"], tool_choice="auto"),
+            tool_parser_class=_FakeAdjustRequestGrammarToolParser,
+            reasoning_parser_class=_FakePassthroughReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_model_config_reaches_the_parser(self, tokenizer):
+        """A parser that needs model_config must actually receive it.
+
+        Without it the shipped Cohere parsers return the request untouched, which
+        made the whole adjust_request() call a no-op for the only parser in vLLM
+        that overrides it.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_ModelConfigGatedReasoningParser,
+            model_config=SimpleNamespace(architecture="CohereForCausalLM"),
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+
+    @pytest.mark.asyncio
+    async def test_without_model_config_the_gated_parser_is_a_no_op(self, tokenizer):
+        """The negative control: same parser, no config, caller's constraint stands.
+
+        This is the behaviour the PR shipped before model_config was threaded
+        through -- kept so the pair documents the difference.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_ModelConfigGatedReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+
+class _PassthroughStreamingToolParser(ToolParser):
+    """A tool parser that finds no tool call and passes the raw delta through.
+
+    Subclasses the real ToolParser so every attribute the postprocessor touches
+    exists, and returns the unstripped `delta_text` the way a real parser does.
+    """
+
+    def extract_tool_calls_streaming(self, **kwargs):
+        return prepost_module.DeltaMessage(content=kwargs["delta_text"])
+
+    def get_structural_tag(self, request, *, reasoning=False):
+        return None
+
+
+class _InactiveReasoningParser:
+    """A configured reasoning parser that never becomes active on a request.
+
+    `enable_thinking=False` and `response_reasoning_ended=True` both leave
+    StreamingPostProcessor.reasoning_parser None, so this is only ever passed as a
+    class -- constructing it is the bug this fake exists to catch.
+    """
+
+    def __init__(self, tokenizer, *, chat_template_kwargs):
+        raise AssertionError("must not be constructed for an inactive request")
+
+
+class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
+    """A tool parser that owns two of the tokenizer's special tokens."""
+
+    tool_call_start_token = "<|im_start|>"
+    tool_call_end_token = "<|im_end|>"
+
+
+_GLM_CALL = (
+    "<tool_call>get_weather<arg_key>city</arg_key><arg_value>{}</arg_value></tool_call>"
+)
+_GLM_TWO_CALLS = (
+    "<think>x</think>" + _GLM_CALL.format("Paris") + _GLM_CALL.format("Rome")
+)
+
+
+def _assert_two_glm_calls_streamed(tokenizer, steps):
+    from vllm.reasoning import ReasoningParserManager
+    from vllm.tool_parsers import ToolParserManager
+
+    request, _, _, _, _ = _prepare_request(
+        json.loads(json.dumps(TOOL_REQUEST)),
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+    )
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request,
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=ToolParserManager.get_tool_parser("glm47")(
+            tokenizer, tools=request.tools
+        ),
+        reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("glm45"),
+        chat_template_kwargs={},
+        stream_response=True,
+    )
+    calls: dict[int, tuple[str, str]] = {}
+    content = ""
+    for n, (text, token_ids) in enumerate(steps):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=token_ids,
+                finish_reason="tool_calls" if n == len(steps) - 1 else None,
+                logprobs=None,
+            )
+        )
+        delta = choice["delta"] if choice else {}
+        content += delta.get("content") or ""
+        # Rebuild calls by index, as an OpenAI client does.
+        for tool_call in delta.get("tool_calls") or []:
+            function = tool_call.get("function") or {}
+            name, arguments = calls.get(tool_call["index"], ("", ""))
+            calls[tool_call["index"]] = (
+                name + (function.get("name") or ""),
+                arguments + (function.get("arguments") or ""),
+            )
+
+    assert [
+        (name, json.loads(arguments)["city"])
+        for name, arguments in (calls[i] for i in sorted(calls))
+    ] == [("get_weather", "Paris"), ("get_weather", "Rome")], (calls, content)
+    assert not content.strip(), content
+
+
+@pytest.mark.parametrize("step_tokens", [3, 4, 5, 6])
+def test_parallel_tool_calls_survive_multi_token_steps(tokenizer, step_tokens):
+    """One step can close a call and open the next (e.g. MTP)."""
+    ids = tokenizer.encode(_GLM_TWO_CALLS, add_special_tokens=False)
+    for offset in range(step_tokens):
+        steps = [ids[:offset]] if offset else []
+        steps += [
+            ids[i : i + step_tokens] for i in range(offset, len(ids), step_tokens)
+        ]
+        _assert_two_glm_calls_streamed(
+            tokenizer,
+            [(tokenizer.decode(s, skip_special_tokens=False), s) for s in steps],
+        )
+
+
+def test_parallel_tool_calls_survive_split_start_marker(tokenizer):
+    end = _GLM_TWO_CALLS.index("</tool_call>")
+    split = _GLM_TWO_CALLS.rindex("<tool_call>") + len("<tool")
+    _assert_two_glm_calls_streamed(
+        tokenizer,
+        [
+            (_GLM_TWO_CALLS[:end], []),
+            (_GLM_TWO_CALLS[end:split], []),
+            (_GLM_TWO_CALLS[split:], []),
+        ],
+    )
+
+
+def test_tool_call_opener_split_at_reasoning_end(tokenizer):
+    split = _GLM_TWO_CALLS.index("</think>") + len("</think><tool")
+    _assert_two_glm_calls_streamed(
+        tokenizer,
+        [(_GLM_TWO_CALLS[:split], []), (_GLM_TWO_CALLS[split:], [])],
+    )
+
+
+class TestControlMarkerStrip:
+    """Unconsumed special tokens must not reach the client.
+
+    A text-grammar reasoning parser can only split the stream if the model's
+    content-kind markers survive detokenisation, which is why
+    ParserEngine.adjust_request forces skip_special_tokens=False. Nothing then
+    removes the markers the parser did not consume, so terminal ones leak into
+    visible content -- the report was content = "<|end_message|>408<|end_message|>",
+    a special token on that model's tokenizer. These use `<|im_end|>`, which is
+    the equivalent on Qwen3-0.6B.
+    """
+
+    @staticmethod
+    def _post(
+        tokenizer,
+        *,
+        tool_parser=None,
+        reasoning_parser_class=None,
+        response_reasoning_ended=None,
+        chat_template_kwargs=None,
+    ):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request.pop("tools", None)
+        request, _, _, _, _ = _prepare_request(
+            request, tokenizer=tokenizer, tool_parser_class=None
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=tool_parser,
+            reasoning_parser_class=reasoning_parser_class,
+            chat_template_kwargs=chat_template_kwargs or {},
+            response_reasoning_ended=response_reasoning_ended,
+            stream_response=True,
+        )
+
+    @staticmethod
+    def _content(post, text):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+        assert choice is not None
+        return choice["delta"].get("content")
+
+    def test_reported_leak_is_removed(self, tokenizer):
+        post = self._post(
+            tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
+        )
+        assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
+
+    def test_non_special_literal_of_the_same_shape_survives(self, tokenizer):
+        """Looking like a control token is not proof of being one.
+
+        `<|not_a_real_special_token|>` is absent from all_special_tokens and
+        encodes to ordinary token IDs, so it is generated text and must reach the
+        client intact.
+        """
+        post = self._post(
+            tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
+        )
+        literal = "The literal is <|not_a_real_special_token|>."
+        assert self._content(post, literal) == literal
+
+    def test_parser_owned_markers_are_preserved(self, tokenizer):
+        """A marker the parser owns is wire format, consumed downstream."""
+        post = self._post(tokenizer, tool_parser=_MarkerOwningToolParser(tokenizer))
+        assert (
+            post._strip_control_markers("<|im_start|>{}<|im_end|>")
+            == "<|im_start|>{}<|im_end|>"
+        )
+        # A special token it does not own is still removed.
+        assert post._strip_control_markers("<|endoftext|>x") == "x"
+
+    def test_no_parser_configured_is_passthrough(self, tokenizer):
+        """Only a *configured* parser forces skip_special_tokens off."""
+        post = self._post(tokenizer)
+        assert post.tool_parser is None and post.reasoning_parser is None
+        assert self._content(post, "<|im_end|>408") == "<|im_end|>408"
+
+    @pytest.mark.parametrize(
+        "inactive_kwargs",
+        [
+            {"response_reasoning_ended": True},
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        ],
+        ids=["reasoning-already-ended", "thinking-disabled"],
+    )
+    def test_configured_but_inactive_reasoning_parser_still_strips(
+        self, tokenizer, inactive_kwargs
+    ):
+        """The CONFIGURED parser forces skip_special_tokens off, not the instance.
+
+        preprocessor.rs::parser_requires_special_tokens keys the
+        skip_special_tokens=false default off the deployment's configured
+        reasoning_parser NAME; it never sees this request's enable_thinking or
+        response_reasoning_ended. But this class leaves self.reasoning_parser None on
+        exactly those requests, so gating the strip on the instance made it a no-op
+        precisely where markers still arrive undecoded.
+        """
+        post = self._post(
+            tokenizer,
+            reasoning_parser_class=_InactiveReasoningParser,
+            **inactive_kwargs,
+        )
+        assert post.reasoning_parser is None
+        assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
+
+
 class TestToolCallGuidedDecoding:
     def _request(self, tokenizer, **overrides):
         raw_request = {**TOOL_REQUEST, "tool_choice": "auto", **overrides}
@@ -1479,6 +3255,49 @@ class TestToolCallGuidedDecoding:
         assert set(guided) == {"json"}
         assert parser.requests == []
 
+    def test_named_closed_zero_arg_tool_uses_exact_regex_guidance(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._request(
+                tokenizer,
+                tool_choice={"type": "function", "function": {"name": "get_weather"}},
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+            ),
+            tool_parser=None,
+        )
+
+        assert guided == {"regex": r"\{\}"}
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"minProperties": 0},
+            {"maxProperties": 1},
+            {"examples": [{}]},
+        ],
+    )
+    def test_zero_arg_schema_allows_neutral_bounds_and_annotations(self, extra):
+        assert admits_only_empty_object(
+            {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+                **extra,
+            }
+        )
+
     def test_required_choice_disables_parallel_calls_in_json_guidance(self, tokenizer):
         guided = build_tool_call_guided_decoding(
             self._request(
@@ -1492,6 +3311,26 @@ class TestToolCallGuidedDecoding:
         assert guided is not None
         assert guided["json"]["type"] == "array"
         assert guided["json"]["maxItems"] == 1
+
+    def test_named_choice_with_array_parameters_gets_no_max_items(self, tokenizer):
+        array_tool = {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "array", "items": {"type": "string"}},
+            },
+        }
+        request = self._request(
+            tokenizer,
+            tools=[array_tool],
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+            parallel_tool_calls=False,
+        )
+        guided = build_tool_call_guided_decoding(request, tool_parser=None)
+
+        assert guided is not None
+        assert guided["json"]["type"] == "array"
+        assert "maxItems" not in guided["json"]
 
     # Parsers that require native tool syntax must not get a forced JSON schema.
     @pytest.mark.parametrize(
@@ -1527,8 +3366,9 @@ class TestToolCallGuidedDecoding:
         assert request.tools[0].function.strict is None
         assert parser.requests[0].messages is request.messages
 
-    # Auto schema mode must preserve an omitted strict flag as unset.
-    def test_auto_schema_preserves_unset_strict(self, tokenizer):
+    # In auto schema mode, omitted strict is schema-enforced. Only an explicit
+    # strict:false opts out.
+    def test_auto_schema_enforces_omitted_strict(self, tokenizer):
         parser = _FakeStructuralTagParser()
         guided = build_tool_call_guided_decoding(
             self._request(tokenizer),
@@ -1538,7 +3378,203 @@ class TestToolCallGuidedDecoding:
             structural_tag_schema="auto",
         )
 
-        assert guided == {"structural_tag": {"format": {"strict": [None]}}}
+        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
+
+    def test_auto_schema_preserves_explicit_strict_false(self, tokenizer):
+        parser = _FakeStructuralTagParser()
+        request = self._request(
+            tokenizer,
+            tools=[
+                {
+                    **TOOL_REQUEST["tools"][0],
+                    "function": {
+                        **TOOL_REQUEST["tools"][0]["function"],
+                        "strict": False,
+                    },
+                }
+            ],
+        )
+
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="auto",
+        )
+
+        assert guided == {"structural_tag": {"format": {"strict": [False]}}}
+
+    @pytest.mark.parametrize(
+        "token_suffix", [":6124c78e", ""], ids=["suffixed", "plain"]
+    )
+    @pytest.mark.parametrize("tool_choice_kind", ["auto", "required", "named"])
+    @pytest.mark.parametrize("stream_response", [False, True], ids=["batch", "stream"])
+    def test_hyv4_structural_tag_matches_checkpoint_tokens(
+        self, tokenizer, monkeypatch, token_suffix, tool_choice_kind, stream_response
+    ):
+        import vllm.envs as vllm_envs
+        import xgrammar as xgr
+        from vllm.tool_parsers.hy_v4_tool_parser import HYV4ToolParser
+
+        # Dynamo's explicit policy must work without vLLM's environment gate.
+        monkeypatch.setattr(vllm_envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", False)
+        request = self._request(
+            tokenizer,
+            tools=[parity_tool()],
+            tool_choice=tool_choice_value(tool_choice_kind),
+        )
+        markers = [
+            f"<{closing}{name}{token_suffix}>"
+            for name in ("tool_calls", "tool_call", "arg_key", "arg_value")
+            for closing in ("", "/")
+        ]
+        # Only the vocabulary is needed to detect this checkpoint's suffix.
+        vocab = {marker: index for index, marker in enumerate(markers)}
+        parser = HYV4ToolParser(
+            SimpleNamespace(get_vocab=lambda: vocab, init_kwargs={}), request.tools
+        )
+        assert parser.get_structural_tag(request) is None
+
+        guided = build_tool_call_guided_decoding(
+            request,
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+        assert guided is not None
+        assert set(guided) == {"structural_tag"}
+        compiler = xgr.GrammarCompiler(
+            xgr.TokenizerInfo(["x"], vocab_type=xgr.VocabType.RAW), max_threads=1
+        )
+        compiled = compiler.compile_structural_tag(json.dumps(guided["structural_tag"]))
+        native_output = (
+            f"<tool_calls{token_suffix}><tool_call{token_suffix}>get_weather"
+            f"<arg_key{token_suffix}>city</arg_key{token_suffix}>"
+            f"<arg_value{token_suffix}>Paris</arg_value{token_suffix}>"
+            f"</tool_call{token_suffix}></tool_calls{token_suffix}>"
+        )
+        assert xgr.GrammarMatcher(compiled).accept_string(native_output)
+        assert not xgr.GrammarMatcher(compiled).accept_string(
+            native_output.replace("get_weather", "unknown_tool")
+        )
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=parser,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=stream_response,
+        )
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=native_output,
+                token_ids=list(vocab.values()),
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
+        assert not choice["delta"].get("content")
+        function = choice["delta"]["tool_calls"][0]["function"]
+        assert function["name"] == "get_weather"
+        assert json.loads(function["arguments"]) == {"city": "Paris"}
+
+    def test_structural_tag_builder_error_uses_forced_json_fallback(self, tokenizer):
+        class RaisingParser(_FakeStructuralTagParser):
+            def get_structural_tag(self, request, *, reasoning=False):
+                del request, reasoning
+                raise ValueError("unsupported schema")
+
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer, tool_choice="required"),
+            RaisingParser(),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert guided is not None
+        assert set(guided) == {"json"}
+
+    @pytest.mark.parametrize("strict, expects_tag", [(True, True), (False, False)])
+    def test_declared_model_registry_matches_pinned_vllm_auto_floor(
+        self, tokenizer, monkeypatch, strict, expects_tag
+    ):
+        seen = {}
+
+        class RegistryParser:
+            structural_tag_model = "qwen_3_coder"
+
+            def get_structural_tag(self, request):
+                raise AssertionError(f"unexpected parser-level env gate: {request}")
+
+        # vLLM 0.29.0 has no strict_level argument and returns no auto tag
+        # when every tool is explicitly non-strict.
+        def fake_get_model_structural_tag(*, model, tools, tool_choice, reasoning):
+            seen.update(
+                model=model,
+                strict=tools[0].function.strict,
+                tool_choice=tool_choice,
+                reasoning=reasoning,
+            )
+            return _FakeStructuralTag({"format": {"type": "tag"}}) if strict else None
+
+        monkeypatch.setattr(
+            prepost_module,
+            "get_model_structural_tag",
+            fake_get_model_structural_tag,
+        )
+
+        request = self._request(
+            tokenizer,
+            tools=[
+                {
+                    **TOOL_REQUEST["tools"][0],
+                    "function": {
+                        **TOOL_REQUEST["tools"][0]["function"],
+                        "strict": strict,
+                    },
+                }
+            ],
+        )
+        guided = build_tool_call_guided_decoding(
+            request,
+            RegistryParser(),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert guided == (
+            {"structural_tag": {"format": {"type": "tag"}}} if expects_tag else None
+        )
+        assert seen == {
+            "model": "qwen_3_coder",
+            "strict": strict,
+            "tool_choice": "auto",
+            "reasoning": False,
+        }
+
+    def test_missing_registry_uses_parser_method(self, tokenizer, monkeypatch):
+        class CompatibleParser(_FakeStructuralTagParser):
+            structural_tag_model = "qwen_3_coder"
+
+        parser = CompatibleParser()
+        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
+
+        guided = build_tool_call_guided_decoding(
+            self._request(tokenizer),
+            parser,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
+        assert len(parser.requests) == 1
 
     # Parser-created grammar must survive preprocessing as guided decoding.
     @pytest.mark.asyncio
@@ -1615,6 +3651,63 @@ class TestToolCallGuidedDecoding:
         assert choice["delta"]["tool_calls"][0]["function"] == {
             "name": "get_weather",
             "arguments": '{"city":"Paris"}',
+        }
+
+    @pytest.mark.asyncio
+    async def test_named_closed_zero_arg_regex_becomes_a_tool_call(self, tokenizer):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request["tool_choice"] = {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+        request["tools"][0]["function"]["parameters"] = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        result = await prepost_module.preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=None,
+            structural_tag_mode="off",
+        )
+
+        assert result.guided_decoding == {"regex": r"\{\}"}
+        assert result.uses_dynamo_json_tool_call_fallback is True
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=result.request_for_sampling,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=result.prompt_token_ids,
+            tool_parser=result.tool_parser,
+            reasoning_parser_class=None,
+            chat_template_kwargs=result.chat_template_kwargs,
+            stream_response=False,
+            uses_dynamo_json_tool_call_fallback=(
+                result.uses_dynamo_json_tool_call_fallback
+            ),
+        )
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text="{}",
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": "{}",
         }
 
     # Explicit assistant constraints must override automatic tool-call guidance.
@@ -1833,25 +3926,28 @@ class TestToolCallGuidedDecoding:
         assert prepost_module._is_named_tool_choice(tool_choice) is False
         assert prepost_module._is_forced_tool_choice(tool_choice) is False
 
-    # Legacy guided_* must resolve to a single constraint, not a merged dict.
+    # Legacy guided_* conflicts must be rejected rather than silently discarded.
     @pytest.mark.asyncio
-    async def test_legacy_guided_fields_yield_single_constraint(self, tokenizer):
-        result = await prepost_module.preprocess_chat_request(
-            {
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "guided_json": {"type": "object"},
-                "guided_regex": "\\d+",
-            },
-            tokenizer=tokenizer,
-            renderer=SimpleNamespace(
-                render_messages_async=AsyncMock(
-                    return_value=(None, {"prompt_token_ids": [1]})
-                )
-            ),
-            tool_parser_class=None,
-        )
-        assert result.guided_decoding == {"json": {"type": "object"}}
+    async def test_legacy_guided_fields_reject_conflicts(self, tokenizer):
+        with pytest.raises(
+            InvalidArgument,
+            match="Only one guided-decoding constraint can be set; received: json, regex",
+        ):
+            await prepost_module.preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "guided_json": {"type": "object"},
+                    "guided_regex": "\\d+",
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(
+                    render_messages_async=AsyncMock(
+                        return_value=(None, {"prompt_token_ids": [1]})
+                    )
+                ),
+                tool_parser_class=None,
+            )
 
     # Keep vLLM's guidance decisions aligned with the shared backend matrix.
     @pytest.mark.parametrize(
@@ -2179,22 +4275,6 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
 
 
-def test_runtime_config_structural_tag_options(vllm_processor_module):
-    mdc = SimpleNamespace(
-        runtime_config=lambda: {
-            "structural_tag_mode": "on",
-            "structural_tag_scope": "always",
-            "structural_tag_schema": "strict",
-        }
-    )
-
-    assert vllm_processor_module._runtime_config_structural_tag_options(mdc) == (
-        "on",
-        "always",
-        "strict",
-    )
-
-
 # Regression: MistralTokenizer (--tokenizer-mode mistral) has no chat_template
 # attribute; a direct read used to crash vLLM preprocessing.
 
@@ -2249,3 +4329,912 @@ def test_ensure_chat_template_preserves_existing_hf_template(
     vllm_processor_module._ensure_chat_template(tokenizer, str(tmp_path), None)
 
     assert tokenizer.chat_template == existing
+
+
+class TestThinkingControlParity:  # FRONTEND.10
+    # Keep vLLM's thinking kwargs aligned with the shared backend matrix.
+    @pytest.mark.parametrize("case", THINKING_PARITY_CASES, ids=lambda case: case.name)
+    def test_shared_thinking_policy(self, tokenizer, case):
+        _, _, kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **case.request,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert kwargs == case.expected
+
+
+class _AccountingReasoningParser:
+    """Emits reasoning until a chunk contains "</think>", then visible content."""
+
+    engine_based_streaming = False
+
+    def __init__(self, tokenizer, *, chat_template_kwargs=None, model_config=None):
+        self.tokenizer = tokenizer
+        self.chat_template_kwargs = chat_template_kwargs or {}
+        self.model_config = model_config
+
+    def is_reasoning_end(self, prompt_token_ids):
+        return False
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids):
+        return None
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+    ):
+        if "</think>" in delta_text:
+            return prepost_module.DeltaMessage(content=delta_text.split("</think>")[-1])
+        return prepost_module.DeltaMessage(reasoning=delta_text)
+
+    def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+        return False
+
+    def extract_reasoning(self, text, request=None):
+        if "</think>" in text:
+            reasoning, _, content = text.partition("</think>")
+            return reasoning, content
+        return text, ""
+
+    def count_reasoning_tokens(self, token_ids):
+        """Everything up to and including the end marker counts as reasoning.
+
+        The production code delegates to this, so the fake has to provide it --
+        a fake that omits it inherits ReasoningParser's base, which returns 0.
+        """
+        end = self.tokenizer.encode("</think>", add_special_tokens=False)
+        end_id = end[-1] if end else None
+        count = 0
+        for tid in token_ids:
+            count += 1
+            if tid == end_id:
+                break
+        return count
+
+
+class _PassthroughToolParser:
+    """Finds no tool calls; returns the text as content.
+
+    The buffered non-streaming path only needs `tool_parser is not None` to engage,
+    so this keeps the reasoning-accounting test focused on reasoning.
+    """
+
+    def __init__(self, tokenizer, *args, **kwargs):
+        self.tokenizer = tokenizer
+
+    def extract_tool_calls(self, text, request=None):
+        return SimpleNamespace(tools_called=False, tool_calls=[], content=text)
+
+
+class TestReasoningTokenAccounting:
+    """Reasoning-token usage on the Python chat-processor path (NVBug 6678449b).
+
+    dynamo #12181 added this only to the Rust OpenAIPreprocessor, which
+    `--dyn-chat-processor vllm` bypasses, so `reasoning_tokens` was absent from usage
+    entirely (the worker's _build_completion_usage emits no completion_tokens_details).
+
+    The count is accumulated where the reasoning parser CLASSIFIES output, NOT where
+    the response is projected. The two regression tests below both reported 0 when it
+    was derived from the emitted choices.
+    """
+
+    @staticmethod
+    def _post(tokenizer, *, include_reasoning=True, stream_response=True, tools=False):
+        request = SimpleNamespace(
+            include_reasoning=include_reasoning,
+            tool_choice="auto" if tools else "none",
+            model_fields=frozenset(),
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=_PassthroughToolParser(tokenizer) if tools else None,
+            reasoning_parser_class=_AccountingReasoningParser,
+            chat_template_kwargs={},
+            stream_response=stream_response,
+        )
+
+    @staticmethod
+    def _out(text, token_ids, finish_reason=None, index=0):
+        return SimpleNamespace(
+            index=index,
+            text=text,
+            token_ids=token_ids,
+            finish_reason=finish_reason,
+            logprobs=None,
+        )
+
+    @staticmethod
+    def _annotator(*posts):
+        from dynamo.frontend.vllm_processor import _ReasoningUsageAnnotator
+
+        return _ReasoningUsageAnnotator({i: p for i, p in enumerate(posts)})
+
+    # -- streaming classification ------------------------------------------
+
+    def test_streaming_counts_reasoning_only_not_the_answer(self, tokenizer):
+        """Real parser, real ids: the visible answer must not be counted."""
+        from vllm.reasoning import ReasoningParserManager
+
+        reasoning = tokenizer.encode("<think>abc</think>", add_special_tokens=False)
+        answer = tokenizer.encode("the answer", add_special_tokens=False)
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(reasoning + answer)
+
+        post = self._qwen3_post(tokenizer)
+        for tid in reasoning + answer:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native
+        assert 0 < native < len(reasoning + answer)
+
+    # -- P1 #1: account before the include_reasoning projection ------------
+
+    def test_hidden_reasoning_is_counted_when_include_reasoning_false(self, tokenizer):
+        """include_reasoning=false suppresses the reasoning DELTA, not the tokens.
+
+        Observing emitted choices saw no reasoning_content here and reported 0 for a
+        response that really did spend tokens reasoning.
+        """
+        post = self._post(tokenizer, include_reasoning=False)
+        choice = post.process_output(self._out("hidden", [1, 2, 3]))
+
+        # The projection still hides it -- that part is intended...
+        assert choice is None or "reasoning_content" not in (choice.get("delta") or {})
+        # ...but the tokens are accounted anyway.
+        assert post.reasoning_token_total == 3
+        annotated = self._annotator(post).annotate({"completion_tokens": 10})
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 3
+
+    # -- P1 #2: survive non-streaming tool buffering ------------------------
+
+    def test_non_streaming_tool_buffering_preserves_count(self, tokenizer):
+        """The non-streaming tool path emits nothing per chunk and releases on the
+        terminal delta, where chunk_tokens is 0. Per-chunk observation of emitted
+        choices therefore saw only zeros and reported 0.
+        """
+        post = self._post(tokenizer, stream_response=False, tools=True)
+        for chunk in ("think a", "think b", "think c"):
+            assert post.process_output(self._out(chunk, [1, 2])) is None
+        post.process_output(self._out("</think>answer", [3], finish_reason="stop"))
+
+        assert post.reasoning_token_total > 0
+        annotated = self._annotator(post).annotate({"completion_tokens": 20})
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] > 0
+
+    def test_non_streaming_buffering_counts_even_when_suppressed(self, tokenizer):
+        """Both projections at once: buffered AND include_reasoning=false."""
+        post = self._post(
+            tokenizer, stream_response=False, tools=True, include_reasoning=False
+        )
+        post.process_output(self._out("thinking hard", [1, 2]))
+        post.process_output(self._out("</think>answer", [3], finish_reason="stop"))
+        assert post.reasoning_token_total > 0
+
+    def test_no_reasoning_parser_counts_nothing(self, tokenizer):
+        """Without a reasoning parser there is nothing to delegate to -> 0.
+
+        Note the counterpart is NOT true: with a parser, plain content is not
+        automatically zero. Qwen3's parser counts an unopened span as reasoning
+        (the model is trained to reason first), so delegating means inheriting
+        that contract -- which is the point, since it is what vLLM itself
+        reports.
+        """
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="none", model_fields=frozenset()
+        )
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+        for tid in tokenizer.encode("just an answer", add_special_tokens=False):
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == 0
+
+    # -- the parser's OWN counter, not a re-derivation -----------------------
+
+    @staticmethod
+    def _qwen3_post(tokenizer):
+        from vllm.reasoning import ReasoningParserManager
+
+        request = SimpleNamespace(
+            include_reasoning=True, tool_choice="none", model_fields=frozenset()
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=ReasoningParserManager.get_reasoning_parser("qwen3"),
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+
+    def test_count_matches_the_parser_for_split_marker_tokens(self, tokenizer):
+        """`<think>`, `abc`, `<`, `x` -- the parser counts 3.
+
+        A per-chunk classifier that adds len(delta_token_ids) whenever the chunk
+        carried reasoning reported 2 here. Delegating to the parser's own
+        count_reasoning_tokens is what makes this exact.
+        """
+        from vllm.reasoning import ReasoningParserManager
+
+        ids = [
+            i
+            for piece in ("<think>", "abc", "<", "x")
+            for i in tokenizer.encode(piece, add_special_tokens=False)
+        ]
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(ids)
+        assert native == 3, f"fixture drift: parser now counts {native}"
+
+        post = self._qwen3_post(tokenizer)
+        for tid in ids:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native == 3
+
+    def test_count_survives_non_injective_detokenisation(self, tokenizer):
+        """Generated id 77150 decodes to '１０', which RE-ENCODES to two tokens.
+
+        Counting by re-encoding the decoded reasoning text therefore reported 2
+        for a single generated token. The ledger keeps the original ids, so the
+        parser sees exactly what was generated.
+        """
+        think = tokenizer.encode("<think>", add_special_tokens=False)
+        ids = think + [77150]
+        assert (
+            len(tokenizer.encode(tokenizer.decode([77150]), add_special_tokens=False))
+            == 2
+        ), "fixture drift: 77150 no longer re-encodes to 2 tokens"
+
+        from vllm.reasoning import ReasoningParserManager
+
+        native = ReasoningParserManager.get_reasoning_parser("qwen3")(
+            tokenizer
+        ).count_reasoning_tokens(ids)
+        post = self._qwen3_post(tokenizer)
+        for tid in ids:
+            post.process_output(self._out(tokenizer.decode([tid]), [tid]))
+        assert post.reasoning_token_total == native == 1
+
+    # -- annotation ---------------------------------------------------------
+
+    def test_total_sums_across_choices(self, tokenizer):
+        a, b = self._post(tokenizer), self._post(tokenizer)
+        a.process_output(self._out("x", [1, 2]))
+        b.process_output(self._out("y", [3, 4, 5]))
+        assert self._annotator(a, b).total == 5
+
+    def test_annotate_fills_when_absent_and_does_not_mutate_input(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens": 100}
+        out = self._annotator(post).annotate(usage)
+        assert out["completion_tokens_details"]["reasoning_tokens"] == 2
+        assert "completion_tokens_details" not in usage
+
+    def test_annotate_preserves_a_positive_backend_value(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": 7}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 7
+
+    def test_annotate_replaces_a_zero_backend_value(self, tokenizer):
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": 0}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
+
+    @pytest.mark.parametrize("backend", [-1, -100, None, "7"])
+    def test_annotate_replaces_a_non_positive_backend_value(self, tokenizer, backend):
+        """Only a POSITIVE backend count is authoritative.
+
+        -1 is truthy, so a plain falsiness check preserved it and reported a
+        negative reasoning_tokens to the client.
+        """
+        post = self._post(tokenizer)
+        post.process_output(self._out("x", [1, 2]))
+        usage = {"completion_tokens_details": {"reasoning_tokens": backend}}
+        annotated = self._annotator(post).annotate(usage)
+        assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
+
+
+def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
+    count = vllm_processor_module._sampling_logprobs_count
+    assert count(True, 1) == 1
+    assert count(True, None) == 0
+    assert count(True, 0) == 0
+    assert count(True, -1) is None
+    assert count(None, None) is None
+    assert count(False, 0) is None
+    assert count(None, 0) is None
+    assert count(False, True) is None
+
+
+def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module, tokenizer):
+    built = vllm_processor_module._chat_choice_logprobs(
+        [
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    {
+                        "rank": 2,
+                        "token_id": 11,
+                        "token": "Yo",
+                        "logprob": -1.5,
+                        "bytes": [89, 111],
+                    },
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    },
+                ],
+            }
+        ],
+        1,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    entry = built["content"][0]
+    assert entry["token"] == "Hi"
+    assert entry["logprob"] == -0.5
+    assert "token_id" not in entry
+    assert entry["top_logprobs"] == [
+        {"token": "Hi", "logprob": -0.5, "bytes": [72, 105]}
+    ]
+
+
+@pytest.mark.parametrize("token_text", [None, ""])
+def test_chat_choice_logprobs_decode_null_but_preserve_empty_text(
+    vllm_processor_module, tokenizer, token_text
+):
+    selected_id, alternative_id = tokenizer.encode(
+        "Hello world", add_special_tokens=False
+    )
+    rows = [
+        {"token_id": selected_id, "rank": 1, "token": token_text, "logprob": -0.25},
+        {"token_id": alternative_id, "rank": 2, "token": token_text, "logprob": -0.5},
+    ]
+    built = vllm_processor_module._chat_choice_logprobs(
+        [{"token_id": selected_id, "logprob": -0.25, "top": rows}],
+        2,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    expected = [
+        {
+            "token": text,
+            "logprob": logprob,
+            "bytes": list(text.encode()) if text else None,
+        }
+        for text, logprob in zip(
+            ["Hello", " world"] if token_text is None else ["", ""],
+            [-0.25, -0.5],
+        )
+    ]
+    assert built["content"] == [{**expected[0], "top_logprobs": expected}]
+
+
+def test_chat_choice_logprobs_zero_top_count_omits_alternatives(
+    vllm_processor_module, tokenizer
+):
+    built = vllm_processor_module._chat_choice_logprobs(
+        [
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    }
+                ],
+            }
+        ],
+        0,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    entry = built["content"][0]
+    assert entry["token"] == "Hi"
+    assert entry["logprob"] == -0.5
+    assert entry["top_logprobs"] == []
+
+
+def test_append_worker_logprobs_drops_misaligned_chunk(vllm_processor_module):
+    pending: list = []
+    vllm_processor_module._append_worker_logprobs(pending, [1, 2], [-0.1], None)
+    assert pending == []
+
+
+def test_chat_choice_logprobs_skips_non_dict_top_entry(
+    vllm_processor_module, tokenizer
+):
+    built = vllm_processor_module._chat_choice_logprobs(
+        [
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    None,
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    },
+                ],
+            }
+        ],
+        1,
+        tokenizer=tokenizer,
+    )
+    assert built is not None
+    assert built["content"][0]["top_logprobs"] == [
+        {"token": "Hi", "logprob": -0.5, "bytes": [72, 105]}
+    ]
+
+
+def test_chat_choice_logprobs_formats_token_ids(vllm_processor_module, tokenizer):
+    built = vllm_processor_module._chat_choice_logprobs(
+        [
+            {
+                "token_id": 10,
+                "logprob": -0.5,
+                "top": [
+                    {
+                        "rank": 2,
+                        "token_id": 11,
+                        "token": "Yo",
+                        "logprob": -1.5,
+                        "bytes": [89, 111],
+                    },
+                    {
+                        "rank": 1,
+                        "token_id": 10,
+                        "token": "Hi",
+                        "logprob": -0.5,
+                        "bytes": [72, 105],
+                    },
+                ],
+            }
+        ],
+        2,
+        tokenizer=tokenizer,
+        return_tokens_as_token_ids=True,
+    )
+    assert built is not None
+    entry = built["content"][0]
+    assert entry["token"] == "token_id:10"
+    assert entry["bytes"] == list(b"token_id:10")
+    assert "token_id" not in entry
+    assert entry["top_logprobs"] == [
+        {
+            "token": "token_id:10",
+            "logprob": -0.5,
+            "bytes": list(b"token_id:10"),
+        },
+        {
+            "token": "token_id:11",
+            "logprob": -1.5,
+            "bytes": list(b"token_id:11"),
+        },
+    ]
+
+
+def _logprob_output(token_ids, finish_reason=None):
+    return SimpleNamespace(token_ids=list(token_ids), finish_reason=finish_reason)
+
+
+def _top_entry(token_id, logprob, token="t", raw_bytes=None):
+    entry = {"token_id": token_id, "token": token, "logprob": logprob}
+    if raw_bytes is not None:
+        entry["bytes"] = raw_bytes
+    return [entry]
+
+
+def test_choice_logprobs_decode_selected_tokens_without_top_rows(
+    vllm_processor_module, tokenizer
+):
+    token_ids = tokenizer.encode("Hello world", add_special_tokens=False)
+    assert len(token_ids) == 2
+    pending: list = []
+    emitted: list = []
+    post = SimpleNamespace(tokenizer=tokenizer, _suppress_reasoning_output=False)
+    vllm_processor_module._append_worker_logprobs(
+        pending, token_ids, [-0.25, -0.5], None
+    )
+    choice: dict = {"index": 0}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output(token_ids), pending, emitted, 0
+    )
+    assert choice["logprobs"]["content"] == [
+        {
+            "token": "Hello",
+            "logprob": -0.25,
+            "bytes": list(b"Hello"),
+            "top_logprobs": [],
+        },
+        {
+            "token": " world",
+            "logprob": -0.5,
+            "bytes": list(b" world"),
+            "top_logprobs": [],
+        },
+    ]
+
+
+def test_choice_logprobs_cover_one_multi_token_delta(vllm_processor_module, tokenizer):
+    pending: list = []
+    emitted: list = []
+    append = vllm_processor_module._append_worker_logprobs
+    apply = vllm_processor_module._apply_choice_logprobs
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
+    for token_id, logprob in ((1, -0.1), (2, -0.2), (3, -0.3)):
+        append(
+            pending,
+            [token_id],
+            [logprob],
+            [_top_entry(token_id, logprob, raw_bytes=[116])],
+        )
+    choice: dict = {"index": 0}
+    apply(choice, post, _logprob_output([1, 2, 3]), pending, emitted, 0)
+    assert [entry["logprob"] for entry in choice["logprobs"]["content"]] == [
+        -0.1,
+        -0.2,
+        -0.3,
+    ]
+    assert pending == []
+    assert emitted == []
+
+
+def test_choice_logprobs_wait_for_buffered_tool_parse(vllm_processor_module, tokenizer):
+    """Non-streaming tool parsing emits one choice for every held chunk."""
+    pending: list = []
+    emitted: list = []
+    append = vllm_processor_module._append_worker_logprobs
+    apply = vllm_processor_module._apply_choice_logprobs
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=False, _suppress_reasoning_output=False
+    )
+    for token_id, logprob in ((1, -0.1), (2, -0.2)):
+        append(
+            pending,
+            [token_id],
+            [logprob],
+            [_top_entry(token_id, logprob, raw_bytes=[116])],
+        )
+        apply(None, post, _logprob_output([token_id]), pending, emitted, 1)
+    assert [record["token_id"] for record in pending] == [1, 2]
+    assert emitted == [1, 2]
+    append(pending, [3], [-0.3], [_top_entry(3, -0.3, raw_bytes=[116])])
+    choice: dict = {"index": 0, "logprobs": None}
+    apply(choice, post, _logprob_output([3], "stop"), pending, emitted, 1)
+    assert [entry["logprob"] for entry in choice["logprobs"]["content"]] == [
+        -0.1,
+        -0.2,
+        -0.3,
+    ]
+    assert pending == []
+
+
+def test_choice_logprobs_use_token_id_text(vllm_processor_module, tokenizer):
+    pending: list = []
+    emitted: list = []
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
+    vllm_processor_module._append_worker_logprobs(
+        pending,
+        [10],
+        [-0.5],
+        [_top_entry(10, -0.5, token="Hi", raw_bytes=[72, 105])],
+    )
+    choice: dict = {"index": 0}
+    vllm_processor_module._apply_choice_logprobs(
+        choice,
+        post,
+        _logprob_output([10]),
+        pending,
+        emitted,
+        1,
+        return_tokens_as_token_ids=True,
+    )
+    entry = choice["logprobs"]["content"][0]
+    assert entry["token"] == "token_id:10"
+    assert entry["bytes"] == list(b"token_id:10")
+    assert entry["top_logprobs"] == [
+        {
+            "token": "token_id:10",
+            "logprob": -0.5,
+            "bytes": list(b"token_id:10"),
+        }
+    ]
+
+
+def test_trimmed_stop_token_is_not_attached(vllm_processor_module, tokenizer):
+    pending: list = []
+    emitted: list = []
+    append = vllm_processor_module._append_worker_logprobs
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
+    append(pending, [42], [-0.4], [_top_entry(42, -0.4, token="A", raw_bytes=[65])])
+    append(pending, [99], [-1.0], [_top_entry(99, -1.0, token="<stop>")])
+    choice: dict = {"index": 0, "logprobs": object()}
+    vllm_processor_module._apply_choice_logprobs(
+        choice,
+        post,
+        _logprob_output([42], "stop"),
+        pending,
+        emitted,
+        0,
+    )
+    assert [entry["logprob"] for entry in choice["logprobs"]["content"]] == [-0.4]
+    assert pending == []
+    assert emitted == []
+
+
+def test_misaligned_logprobs_do_not_poison_the_next_choice(
+    vllm_processor_module, tokenizer
+):
+    pending: list = []
+    emitted: list = []
+    append = vllm_processor_module._append_worker_logprobs
+    apply = vllm_processor_module._apply_choice_logprobs
+    post = SimpleNamespace(
+        tokenizer=tokenizer, _fast_plain_text=True, _suppress_reasoning_output=False
+    )
+    append(pending, [3], [-0.3], [_top_entry(3, -0.3, raw_bytes=[116])])
+    missed: dict = {"index": 0, "logprobs": object()}
+    apply(missed, post, _logprob_output([4]), pending, emitted, 0)
+    assert missed["logprobs"] is None
+    assert pending == []
+    assert emitted == []
+    append(pending, [5], [-0.5], [_top_entry(5, -0.5, token="n", raw_bytes=[110])])
+    nxt: dict = {"index": 0}
+    apply(nxt, post, _logprob_output([5]), pending, emitted, 0)
+    assert [entry["logprob"] for entry in nxt["logprobs"]["content"]] == [-0.5]
+    assert nxt["logprobs"]["content"][0]["token"] == "n"
+
+
+def test_empty_terminal_choice_clears_raw_logprobs(vllm_processor_module):
+    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    choice = {"index": 0, "logprobs": object()}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output([], "stop"), [], [], 0
+    )
+    assert choice["logprobs"] is None
+
+
+def test_hidden_reasoning_logprobs_stay_suppressed(vllm_processor_module):
+    pending = [{"token_id": 7, "logprob": -0.4, "top": []}]
+    emitted = [7]
+    post = SimpleNamespace(
+        _fast_plain_text=False,
+        _suppress_reasoning_output=True,
+        previous_token_ids=[7, 8],
+    )
+    choice = {"index": 0, "logprobs": object()}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output([8], "stop"), pending, emitted, 0
+    )
+    assert choice["logprobs"] is None
+    assert pending == []
+    assert emitted == []
+
+
+def test_unrequested_logprobs_stay_null(vllm_processor_module):
+    pending = [{"token_id": 7, "logprob": -0.4, "top": []}]
+    emitted = [7]
+    post = SimpleNamespace(_fast_plain_text=True, _suppress_reasoning_output=False)
+    choice = {"index": 0, "logprobs": object()}
+    vllm_processor_module._apply_choice_logprobs(
+        choice, post, _logprob_output([8]), pending, emitted, None
+    )
+    assert choice["logprobs"] is None
+    assert pending == []
+    assert emitted == []
+
+
+class _ReasoningRecordingToolParser(_FakeStructuralTagParser):
+    def __init__(self, tokenizer=None, tools=None):
+        super().__init__()
+        self.reasoning = []
+
+    def adjust_request(self, request):
+        return request
+
+    def get_structural_tag(self, request, *, reasoning=False):
+        self.reasoning.append(reasoning)
+        return super().get_structural_tag(request)
+
+
+def _prompt_reasoning_parser(start: str | None = "<think>"):
+    class PromptReasoningParser:
+        reasoning_start_str = start
+
+        def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+            del tokenizer, chat_template_kwargs, model_config
+
+        def adjust_request(self, request):
+            return request
+
+    return PromptReasoningParser
+
+
+class TestToolCallGrammarReasoningStart:
+    """The tool-call grammar must match where generation starts.
+
+    Templates that end the generation prompt inside an open reasoning block
+    (e.g. DeepSeek V4.1 with thinking on) start generation in reasoning. Unless
+    the worker engine holds the grammar back until reasoning ends, a tag built
+    for the post-reasoning output forbids the end-of-reasoning marker from the
+    first token, so thinking-mode tool calls can never complete.
+    """
+
+    @staticmethod
+    def _prompt(tokenizer, text):
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    async def _reasoning_requested(
+        self,
+        tokenizer,
+        monkeypatch,
+        *,
+        prompt_text,
+        reasoning_parser_class,
+        structural_tag_excludes_reasoning=False,
+    ):
+        parsers = []
+
+        def make_parser(tokenizer, tools):
+            parser = _ReasoningRecordingToolParser(tokenizer, tools)
+            parsers.append(parser)
+            return parser
+
+        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
+        result = await prepost_module.preprocess_chat_request(
+            {**TOOL_REQUEST, "tool_choice": "auto"},
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(
+                        None,
+                        {"prompt_token_ids": self._prompt(tokenizer, prompt_text)},
+                    )
+                )
+            ),
+            tool_parser_class=make_parser,
+            reasoning_parser_class=reasoning_parser_class,
+            enable_auto_tool_choice=True,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
+        )
+        assert "structural_tag" in result.guided_decoding
+        return [r for parser in parsers for r in parser.reasoning]
+
+    @pytest.mark.parametrize(
+        ("prompt_text", "parser_start", "excludes_reasoning", "expected"),
+        [
+            # The template opened reasoning: the tag starts inside it.
+            ("<|im_start|>assistant\n<think>", "<think>", False, True),
+            ("<|im_start|>assistant\n<think>\n", "<think>", False, True),
+            # The worker engine already holds the grammar until reasoning ends.
+            ("<|im_start|>assistant\n<think>", "<think>", True, False),
+            # Thinking off: the template already closed reasoning.
+            ("<|im_start|>assistant\n<think>\n\n</think>\n\n", "<think>", False, False),
+            # No reasoning marker: the model emits its own opener.
+            ("<|im_start|>assistant\n", "<think>", False, False),
+            # A parser without an opening marker never starts in reasoning.
+            ("<|im_start|>assistant\n<think>", None, False, False),
+        ],
+        ids=[
+            "prompt-opened",
+            "prompt-opened-trailing-newline",
+            "engine-gated",
+            "prompt-closed",
+            "marker-free-prompt",
+            "parser-without-start",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_reasoning_start(
+        self,
+        tokenizer,
+        monkeypatch,
+        prompt_text,
+        parser_start,
+        excludes_reasoning,
+        expected,
+    ):
+        reasoning = await self._reasoning_requested(
+            tokenizer,
+            monkeypatch,
+            prompt_text=prompt_text,
+            reasoning_parser_class=_prompt_reasoning_parser(parser_start),
+            structural_tag_excludes_reasoning=excludes_reasoning,
+        )
+        assert reasoning == [expected]
+
+    @pytest.mark.asyncio
+    async def test_no_reasoning_parser_keeps_post_reasoning_tag(
+        self, tokenizer, monkeypatch
+    ):
+        reasoning = await self._reasoning_requested(
+            tokenizer,
+            monkeypatch,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=None,
+        )
+        assert reasoning == [False]
+
+    @pytest.mark.asyncio
+    async def test_registry_path_receives_reasoning(self, tokenizer, monkeypatch):
+        seen = {}
+
+        class RegistryParser(_ReasoningRecordingToolParser):
+            structural_tag_model = "deepseek_v4_1"
+
+        def fake_get_model_structural_tag(*, model, tools, tool_choice, reasoning):
+            seen["reasoning"] = reasoning
+            return _FakeStructuralTag({"format": {"type": "tag"}})
+
+        monkeypatch.setattr(
+            prepost_module, "get_model_structural_tag", fake_get_model_structural_tag
+        )
+        result = await prepost_module.preprocess_chat_request(
+            {**TOOL_REQUEST, "tool_choice": "auto"},
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(
+                        None,
+                        {
+                            "prompt_token_ids": self._prompt(
+                                tokenizer, "<|im_start|>assistant\n<think>"
+                            )
+                        },
+                    )
+                )
+            ),
+            tool_parser_class=RegistryParser,
+            reasoning_parser_class=_prompt_reasoning_parser("<think>"),
+            enable_auto_tool_choice=True,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+        assert seen == {"reasoning": True}
+        assert result.guided_decoding == {"structural_tag": {"format": {"type": "tag"}}}

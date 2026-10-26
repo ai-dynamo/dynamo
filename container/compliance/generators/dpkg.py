@@ -3,7 +3,9 @@
 """NOTICES-Apt.txt generator.
 
 Enumerates installed dpkg packages via `dpkg-query -W` and resolves licenses
-by parsing each package's `/usr/share/doc/<pkg>/copyright` file.
+by parsing each package's `/usr/share/doc/<pkg>/copyright` file. A removed
+package stays in the inventory while any conffile it left is on disk; see
+_conffiles_on_disk.
 
 Two parsers:
   - DEP-5 (machine-readable copyright format): structured `License:` fields
@@ -23,6 +25,7 @@ gate rejects by default — fix via license_overrides.yaml.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -35,6 +38,22 @@ logger = logging.getLogger(__name__)
 ECOSYSTEM = "dpkg"
 
 _COPYRIGHT_DIR = Path("usr/share/doc")
+
+# dpkg states that do not mean "installed". In `not-installed`, no file of the
+# package is on disk. `config-files` means removed but not purged: dpkg deleted
+# the package's files and kept its conffiles, and those still ship in the image.
+# The TensorRT-LLM base images leave doca-sdk-common (a script under
+# /etc/profile.d and an ld.so.conf.d entry) and dpdk-community (an ld.so.conf.d
+# entry) this way. So a `config-files` package is skipped only when none of its
+# conffiles is left, and otherwise needs a license like any other package; the
+# copyright file went with the removal, so that is usually an override. Every
+# other state (installed, unpacked, half-configured, half-installed, triggers-*)
+# leaves the unpacked files in place, so those stay in the inventory.
+_NOT_INSTALLED = "not-installed"
+_CONFFILES_ONLY = "config-files"
+
+# One line of dpkg's Conffiles field: " <path> <md5sum or newconffile> [flags]".
+_CONFFILE_LINE = re.compile(r"^\s*(/.+?)\s+(?:[0-9a-f]{32}|newconffile)(?:\s+\S+)*\s*$")
 
 
 # ---- Debian short-name → SPDX ID mapping ----------------------------------------
@@ -398,6 +417,38 @@ def _resolve_license(pkg_name: str, version: str = "", root: Path = Path("/")) -
 # ---- Distribution scan ---------------------------------------------------------
 
 
+def _dpkg_query_cmd(root: Path, *args: str) -> list[str]:
+    cmd = ["dpkg-query", *args]
+    if root != Path("/"):
+        cmd.insert(1, f"--admindir={root / 'var/lib/dpkg'}")
+    return cmd
+
+
+def _conffiles_on_disk(name: str, root: Path) -> list[str] | None:
+    """Return the conffiles of a removed package that are still under `root`.
+
+    None when dpkg-query lists no conffile for it, or fails: the package is
+    then kept, because only a listed conffile that is gone proves the removal
+    left nothing behind.
+    """
+    result = subprocess.run(
+        _dpkg_query_cmd(root, "-W", "-f=${Conffiles}\\n", name),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    listed = [
+        match.group(1)
+        for match in map(_CONFFILE_LINE.match, result.stdout.splitlines())
+        if match
+    ]
+    if not listed:
+        return None
+    return [path for path in listed if os.path.lexists(root / path.lstrip("/"))]
+
+
 def collect_components(root: Path = Path("/")) -> list[Component]:
     """Run dpkg-query, resolve licenses, return Components.
 
@@ -406,9 +457,9 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
     (e.g. macOS dev shells, Alpine builders, distroless images). Inside the
     runtime images we ship, dpkg-query is always present.
     """
-    cmd = ["dpkg-query", "-W", "-f=${Package}\\t${Version}\\n"]
-    if root != Path("/"):
-        cmd.insert(1, f"--admindir={root / 'var/lib/dpkg'}")
+    cmd = _dpkg_query_cmd(
+        root, "-W", "-f=${Package}\\t${Version}\\t${db:Status-Status}\\n"
+    )
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -422,14 +473,30 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
 
     components: list[Component] = []
     unresolved = 0
+    skipped: list[str] = []
+    leftovers: list[str] = []
     for line in result.stdout.splitlines():
         if "\t" not in line:
             continue
-        name, version = line.split("\t", 1)
-        name = name.strip()
-        version = version.strip()
+        fields = line.split("\t", 2)
+        name = fields[0].strip()
+        version = fields[1].strip()
+        # Empty when dpkg-query does not know the field: it prints nothing and
+        # still exits 0, so an unsupported field must not empty the inventory.
+        status = fields[2].strip() if len(fields) > 2 else ""
         if not name or not version:
             continue
+        if status == _NOT_INSTALLED:
+            skipped.append(f"{name}@{version} ({status})")
+            continue
+        if status == _CONFFILES_ONLY:
+            left = _conffiles_on_disk(name, root)
+            if left == []:
+                skipped.append(f"{name}@{version} ({status}, no conffile left)")
+                continue
+            leftovers.append(
+                f"{name}@{version} ({', '.join(left or ['conffiles not listed'])})"
+            )
         spdx = _resolve_license(name, version, root)
         if spdx == UNKNOWN:
             unresolved += 1
@@ -444,11 +511,22 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
         )
 
     logger.info(
-        "Collected %d dpkg packages from %s (%d unresolved → UNKNOWN)",
+        "Collected %d dpkg packages from %s (%d unresolved → UNKNOWN, "
+        "%d skipped with no files left)",
         len(components),
         root,
         unresolved,
+        len(skipped),
     )
+    if skipped:
+        logger.info("Skipped dpkg entries: %s", ", ".join(sorted(skipped)))
+    if leftovers:
+        # Name the files: these packages are removed, and what the NOTICES
+        # entry covers is only the conffiles listed here.
+        logger.info(
+            "Removed dpkg packages kept for their conffiles: %s",
+            "; ".join(sorted(leftovers)),
+        )
     return components
 
 

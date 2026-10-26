@@ -13,8 +13,10 @@ For a faster **offline replay** that drives simulated engines directly without a
 registration, or runtime services, see [Run a DynoSim Simulation](dynosim-replay.mdx).
 
 This tutorial uses file-based discovery so that the frontend and worker can run without etcd or
-NATS. For Kubernetes, see [Simulate a Kubernetes Deployment](../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx). For every available flag,
-see the [Mocker CLI Reference](../../../reference/components/mocker-cli-reference.mdx).
+NATS. For Kubernetes, see
+[Simulate a Kubernetes Deployment](../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx).
+For commonly used flags, see the
+[Mocker CLI Reference](../../../reference/components/mocker-cli-reference.mdx).
 
 ## Prerequisites
 
@@ -22,8 +24,8 @@ Install Dynamo by following [Install Dynamo](../../installation/install-dynamo.m
 the local environment can import the frontend and Mocker modules:
 
 ```bash
-python -m dynamo.frontend --help >/dev/null
-python -m dynamo.mocker --help >/dev/null
+python3 -m dynamo.frontend --help >/dev/null
+python3 -m dynamo.mocker --help >/dev/null
 ```
 
 <Steps toc={true}>
@@ -31,7 +33,7 @@ python -m dynamo.mocker --help >/dev/null
 In the first terminal, start the OpenAI-compatible frontend:
 
 ```bash
-python -m dynamo.frontend --http-port 8000 --discovery-backend file
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file
 ```
 
 File-based discovery keeps this tutorial on one machine and selects the local event path.
@@ -41,7 +43,7 @@ File-based discovery keeps this tutorial on one machine and selects the local ev
 In a second terminal, start one simulated worker with the same discovery backend:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file
 ```
@@ -69,7 +71,7 @@ A successful response confirms that local discovery and request routing are work
 Stop the Mocker process and restart it with four workers:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --num-workers 4
@@ -84,7 +86,7 @@ and thread pool.
 Stop the aggregated Mocker process. Start a prefill worker:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode prefill \
@@ -94,7 +96,7 @@ python -m dynamo.mocker \
 In another terminal, start a decode worker:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode decode
@@ -108,7 +110,7 @@ and decode.
 Restart the worker with settings that match the experiment you want to run. For example:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --num-gpu-blocks-override 8192 \

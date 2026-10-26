@@ -1,10 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt::Display, sync::LazyLock};
+use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
+use dynamo_protocols::types::{
+    ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
+};
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+};
+use serde_json::Value;
+
+use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
+
+use super::{
+    common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
+    tools::{ToolChoiceError, validate_openai_tool_choice},
 };
 
 //
@@ -22,8 +33,6 @@ pub const TEMPERATURE_RANGE: (f32, f32) = (MIN_TEMPERATURE, MAX_TEMPERATURE);
 pub const MIN_TOP_P: f32 = 0.0;
 /// Maximum allowed value for OpenAI's `top_p` sampling option
 pub const MAX_TOP_P: f32 = 1.0;
-/// Allowed range of values for OpenAI's `top_p` sampling option
-pub const TOP_P_RANGE: (f32, f32) = (MIN_TOP_P, MAX_TOP_P);
 
 /// Minimum allowed value for `min_p`
 pub const MIN_MIN_P: f32 = 0.0;
@@ -61,7 +70,10 @@ pub const MAX_TOP_LOGPROBS: u8 = 20;
 /// Minimum allowed value for `logprobs` in completion requests
 pub const MIN_LOGPROBS: u8 = 0;
 /// Maximum allowed value for `logprobs` in completion requests
-pub const MAX_LOGPROBS: u8 = 5;
+///
+/// Matches the chat `top_logprobs` limit and vLLM's default `--max-logprobs`,
+/// rather than the legacy OpenAI completions limit of 5.
+pub const MAX_LOGPROBS: u8 = 20;
 
 /// Minimum allowed value for `n` (number of choices)
 pub const MIN_N: u8 = 1;
@@ -109,7 +121,28 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "allowed_token_ids",
     "bad_words_token_ids",
     "logprob_token_ids",
+    "vllm_xargs",
 ];
+
+/// `vllm_xargs` keys vLLM itself fills from dedicated request fields. Dynamo only
+/// forwards router-generated `kv_transfer_params`, so clients may not set them.
+const RESERVED_VLLM_XARGS_KEYS: &[&str] = &["kv_transfer_params", "ec_transfer_params"];
+
+/// Treat null passthrough fields as omitted while preserving unknown fields for validation.
+pub(super) fn deserialize_extra_fields<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    let mut fields =
+        std::collections::HashMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    fields
+        .retain(|key, value| !value.is_null() || !PASSTHROUGH_EXTRA_FIELDS.contains(&key.as_str()));
+    Ok(fields)
+}
 
 static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS));
@@ -146,8 +179,15 @@ fn validate_no_unsupported_fields_with_ignore(
         anyhow::bail!("`cache_salt` must be a string");
     }
     if let Some(value) = unsupported_fields.get("stop_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+        let token_ids: Vec<crate::types::TokenIdType> = serde_json::from_value(value.clone())
             .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
+        if token_ids.len() > MAX_STOP_SEQUENCES {
+            return Err(crate::protocols::common::invalid_argument_error(format!(
+                "Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                token_ids.len()
+            )));
+        }
     }
     if let Some(value) = unsupported_fields.get("detokenize")
         && !value.is_boolean()
@@ -166,6 +206,36 @@ fn validate_no_unsupported_fields_with_ignore(
     if let Some(value) = unsupported_fields.get("logprob_token_ids") {
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("vllm_xargs") {
+        validate_vllm_xargs(value)?;
+    }
+    Ok(())
+}
+
+/// Validates `vllm_xargs` against vLLM's OpenAI schema: an object whose values are
+/// strings, numbers or booleans, or arrays of those.
+fn validate_vllm_xargs(value: &serde_json::Value) -> Result<(), anyhow::Error> {
+    fn is_scalar(value: &serde_json::Value) -> bool {
+        value.is_string() || value.is_number() || value.is_boolean()
+    }
+
+    let Some(args) = value.as_object() else {
+        anyhow::bail!("`vllm_xargs` must be an object");
+    };
+    for (key, arg) in args {
+        if RESERVED_VLLM_XARGS_KEYS.contains(&key.as_str()) {
+            anyhow::bail!("`vllm_xargs.{key}` is not supported");
+        }
+        let valid = match arg {
+            serde_json::Value::Array(items) => items.iter().all(is_scalar),
+            other => is_scalar(other),
+        };
+        if !valid {
+            anyhow::bail!(
+                "`vllm_xargs.{key}` must be a string, number, boolean, or an array of those"
+            );
+        }
     }
     Ok(())
 }
@@ -203,9 +273,52 @@ pub fn validate_response_format(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );
             }
+
+            // Schema must be a JSON object — numbers, strings, arrays, and
+            // booleans are not valid JSON Schema documents.
+            if !json_schema.schema.is_object() {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` must be a JSON object, got {}",
+                    match &json_schema.schema {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Bool(_) => "boolean",
+                        _ => "non-object",
+                    }
+                );
+            }
             Ok(())
         }
     }
+}
+
+/// Reject multiple independent constraints on assistant output.
+pub fn validate_response_format_conflicts(
+    response_format: &Option<dynamo_protocols::types::ResponseFormat>,
+    common: &CommonExt,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ResponseFormat;
+
+    let has_response_format_constraint = response_format
+        .as_ref()
+        .is_some_and(|format| !matches!(format, ResponseFormat::Text));
+    let has_explicit_guided_decoding = common.guided_json.is_some()
+        || common.guided_regex.is_some()
+        || common
+            .guided_choice
+            .as_ref()
+            .is_some_and(|choices| !choices.is_empty())
+        || common.guided_grammar.is_some();
+
+    if has_response_format_constraint && has_explicit_guided_decoding {
+        anyhow::bail!(
+            "`response_format` cannot be used together with `guided_json`, `guided_regex`, \
+             `guided_choice`, or `guided_grammar`"
+        );
+    }
+
+    Ok(())
 }
 
 /// Validates the temperature parameter
@@ -226,7 +339,7 @@ pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Erro
 /// Validates the top_p parameter
 pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(p) = top_p
-        && !(MIN_TOP_P..=MAX_TOP_P).contains(&p)
+        && !(p.is_finite() && p > MIN_TOP_P && p <= MAX_TOP_P)
     {
         anyhow::bail!(
             "Top_p must be between {} and {}, got {}",
@@ -320,7 +433,8 @@ pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Validates logit bias map
+/// Validates logit bias map: each key must be a token id (the string form of a
+/// `u32`) and each value a number within the allowed bias range.
 pub fn validate_logit_bias(
     logit_bias: &Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<(), anyhow::Error> {
@@ -330,6 +444,10 @@ pub fn validate_logit_bias(
     };
 
     for (token, bias_value) in logit_bias {
+        token.parse::<u32>().map_err(|_| {
+            anyhow::anyhow!("Logit bias key must be a non-negative 32-bit integer token id")
+        })?;
+
         let bias = bias_value.as_f64().ok_or_else(|| {
             anyhow::anyhow!(
                 "Logit bias value for token '{}' must be a number, got {:?}",
@@ -429,11 +547,11 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                     anyhow::bail!("Stop sequences array cannot be empty");
                 }
                 if sequences.len() > MAX_STOP_SEQUENCES {
-                    anyhow::bail!(
+                    return Err(crate::protocols::common::invalid_argument_error(format!(
                         "Maximum of {} stop sequences allowed, got {}",
                         MAX_STOP_SEQUENCES,
                         sequences.len()
-                    );
+                    )));
                 }
                 for (i, sequence) in sequences.iter().enumerate() {
                     if sequence.is_empty() {
@@ -446,11 +564,11 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                     anyhow::bail!("Stop token IDs array cannot be empty");
                 }
                 if token_ids.len() > MAX_STOP_SEQUENCES {
-                    anyhow::bail!(
+                    return Err(crate::protocols::common::invalid_argument_error(format!(
                         "Maximum of {} stop token IDs allowed, got {}",
                         MAX_STOP_SEQUENCES,
                         token_ids.len()
-                    );
+                    )));
                 }
             }
         }
@@ -515,6 +633,111 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
     Ok(())
 }
 
+/// Merges and validates request tools and tools declared in system messages.
+/// An explicitly empty request list is invalid unless system messages supply tools.
+pub(crate) fn validated_effective_tools(
+    request: &CreateChatCompletionRequest,
+) -> Result<Cow<'_, [ChatCompletionTool]>, anyhow::Error> {
+    let dynamic_tools = request
+        .dynamic_system_tools()
+        .enumerate()
+        .map(|(index, tool)| normalize_dynamic_system_tool(tool, index))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Check the request field, not the merged slice below: an omitted `tools`
+    // field also produces an empty slice and must stay valid. System-message
+    // tools still make an explicit `tools: []` usable.
+    if dynamic_tools.is_empty() && request.tools.as_ref().is_some_and(|tools| tools.is_empty()) {
+        anyhow::bail!("tools array cannot be empty; omit the field entirely to disable tool use");
+    }
+
+    let tools = if dynamic_tools.is_empty() {
+        Cow::Borrowed(request.tools.as_deref().unwrap_or_default())
+    } else {
+        let mut tools = request.tools.clone().unwrap_or_default();
+        tools.extend(dynamic_tools);
+        Cow::Owned(tools)
+    };
+
+    validate_tools(&Some(tools.as_ref()))?;
+    Ok(tools)
+}
+
+fn normalize_dynamic_system_tool(
+    tool: &Value,
+    index: usize,
+) -> Result<ChatCompletionTool, anyhow::Error> {
+    let object = tool.as_object().ok_or_else(|| {
+        anyhow::anyhow!("dynamic system tool at index {index} must be a JSON object")
+    })?;
+    let function = match (object.get("type"), object.get("function")) {
+        (Some(Value::String(kind)), Some(Value::Object(function))) if kind == "function" => {
+            function
+        }
+        (Some(kind), _) if kind.as_str() != Some("function") => {
+            anyhow::bail!("dynamic system tool at index {index} must have type=\"function\"");
+        }
+        (Some(_), _) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} with type=\"function\" needs a function object"
+            );
+        }
+        (None, Some(_)) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} with a function field needs type=\"function\""
+            );
+        }
+        (None, None) => object,
+    };
+
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("dynamic system tool at index {index} needs a non-empty string name")
+        })?;
+    let description = optional_dynamic_string(function.get("description"), "description", index)?;
+    let parameters = match function.get("parameters") {
+        None | Some(Value::Null) => None,
+        Some(parameters @ Value::Object(_)) => Some(parameters.clone()),
+        Some(_) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} parameters must be a JSON Schema object"
+            );
+        }
+    };
+    let strict = match function.get("strict") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(strict)) => Some(*strict),
+        Some(_) => {
+            anyhow::bail!("dynamic system tool at index {index} strict must be a boolean");
+        }
+    };
+
+    Ok(ChatCompletionTool {
+        r#type: ChatCompletionToolType::Function,
+        function: FunctionObject {
+            name: name.to_string(),
+            description,
+            parameters,
+            strict,
+        },
+    })
+}
+
+fn optional_dynamic_string(
+    value: Option<&Value>,
+    field: &str,
+    index: usize,
+) -> Result<Option<String>, anyhow::Error> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => anyhow::bail!("dynamic system tool at index {index} {field} must be a string"),
+    }
+}
+
 /// Validates tools array
 pub fn validate_tools(
     tools: &Option<&[dynamo_protocols::types::ChatCompletionTool]>,
@@ -532,6 +755,7 @@ pub fn validate_tools(
         );
     }
 
+    let skip_strict_schema_validation = *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
     for (i, tool) in tools.iter().enumerate() {
         if tool.function.name.len() > MAX_FUNCTION_NAME_LENGTH {
             anyhow::bail!(
@@ -548,11 +772,11 @@ pub fn validate_tools(
             .function
             .name
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
         {
             anyhow::bail!(
                 "Function at index {} has an invalid name: \"{}\". \
-                 Only a-z, A-Z, 0-9, underscores, and dashes are allowed.",
+                 Only a-z, A-Z, 0-9, underscores, dashes, and dots are allowed.",
                 i,
                 tool.function.name,
             );
@@ -566,6 +790,10 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
+        super::strict_schema::validate_strict_function(
+            &tool.function,
+            skip_strict_schema_validation,
+        )?;
     }
     Ok(())
 }
@@ -577,25 +805,26 @@ pub fn validate_tool_choice(
 ) -> Result<(), anyhow::Error> {
     use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
-    let tools_empty = tools.is_none_or(|tools| tools.is_empty());
-
-    match tool_choice {
-        Some(ChatCompletionToolChoiceOption::Required) if tools_empty => {
-            anyhow::bail!("tool_choice is \"required\" but tools is empty");
+    match validate_openai_tool_choice(tool_choice.as_ref(), tools) {
+        Ok(()) => Ok(()),
+        Err(ToolChoiceError::EmptyTools) => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty")
         }
-        Some(ChatCompletionToolChoiceOption::Named(named)) => {
-            let tools = tools.unwrap_or(&[]);
-            if !tools.iter().any(|t| t.function.name == named.function.name) {
-                anyhow::bail!(
-                    "tool named \"{}\" in tool_choice is not present in tools",
-                    named.function.name
-                );
+        Err(ToolChoiceError::MissingTools) => match tool_choice {
+            Some(ChatCompletionToolChoiceOption::Required) => {
+                anyhow::bail!("tool_choice is \"required\" but tools is empty")
             }
+            Some(ChatCompletionToolChoiceOption::Named(named)) => anyhow::bail!(
+                "tool named \"{}\" in tool_choice is not present in tools",
+                named.function.name
+            ),
+            _ => Err(ToolChoiceError::MissingTools.into()),
+        },
+        Err(ToolChoiceError::ToolNotFound(name)) => {
+            anyhow::bail!("tool named \"{name}\" in tool_choice is not present in tools")
         }
-        _ => {}
+        Err(error) => Err(error.into()),
     }
-
-    Ok(())
 }
 
 /// Validates reasoning effort parameter
@@ -853,6 +1082,57 @@ pub fn validate_chat_template_args(
     Ok(())
 }
 
+/// Rejects a request with conflicting guided-decoding options.
+///
+/// The conflict rule itself lives in [`crate::protocols::common::GuidedDecodingOptions::validate`],
+/// reached here through `from_optional`, so this function adds no second copy of it. What it adds is
+/// the call at the request-validation boundary: every other field is checked here, where
+/// a failure becomes a 400 naming the problem, while guided decoding was checked only
+/// later inside `extract_sampling_options`. By that point the error is an untyped
+/// `anyhow` with nothing for the HTTP layer to branch on, so a malformed request was
+/// reported to the caller as `500 Internal Server Error`.
+///
+/// `structural_tag` has no `CommonExtProvider` getter, matching `extract_sampling_options`,
+/// which also passes `None` for it.
+pub fn validate_guided_decoding(request: &impl CommonExtProvider) -> Result<(), anyhow::Error> {
+    extract_guided_decoding_options(request)?;
+    Ok(())
+}
+
+/// vLLM `ChatCompletionRequest` (`mode="before"`): both flags true on the raw
+/// payload is an error. Omitted `add_generation_prompt` finalizes to true (vLLM
+/// 0.27.1 and the Python frontend), so `continue_final_message=true` requires
+/// an explicit `add_generation_prompt=false`. Generic HuggingFace continuation
+/// is not assistant-only; last-message role is checked at truncation time.
+pub fn validate_continue_final_message(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if continue_final_message != Some(true) {
+        return Ok(());
+    }
+    if add_generation_prompt.unwrap_or(true) {
+        anyhow::bail!(
+            "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        );
+    }
+    Ok(())
+}
+
+/// Chat-template generation controls are meaningless on `/v1/completions`.
+/// Reject them so they are not silently ignored after landing on `CommonExt`.
+pub fn validate_chat_only_generation_flags(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if add_generation_prompt.is_some() || continue_final_message.is_some() {
+        anyhow::bail!(
+            "`add_generation_prompt` and `continue_final_message` are only supported on /v1/chat/completions"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -861,8 +1141,99 @@ mod tests {
 
     use super::*;
 
+    /// Echoing client-controlled keys can duplicate a whole request body while
+    /// building HTTP errors, so oversized keys must also yield a fixed diagnostic.
+    #[test]
+    fn test_validate_logit_bias_keys() {
+        let bias = |key: &str| Some(HashMap::from([(key.to_string(), json!(1.0))]));
+        let oversized_key = "x".repeat(16 * 1024);
+
+        for key in ["not-a-token", "-1", "", "1.5", "4294967296", &oversized_key] {
+            let msg = validate_logit_bias(&bias(key)).unwrap_err().to_string();
+            assert_eq!(
+                msg,
+                "Logit bias key must be a non-negative 32-bit integer token id"
+            );
+        }
+
+        for key in ["0", "50256", "4294967295"] {
+            assert!(validate_logit_bias(&bias(key)).is_ok(), "key: {key}");
+        }
+    }
+
+    /// A valid token ID must still reach the numeric and range checks for its
+    /// bias value, rather than letting key validation mask a missing value check.
+    #[test]
+    fn test_validate_logit_bias_values_with_valid_key() {
+        for (value, expected_error) in [
+            (json!("not-a-number"), "must be a number"),
+            (json!(-101.0), "must be between -100 and 100"),
+            (json!(101.0), "must be between -100 and 100"),
+        ] {
+            let bias = Some(HashMap::from([("50256".to_string(), value)]));
+            let msg = validate_logit_bias(&bias).unwrap_err().to_string();
+            assert!(msg.contains("'50256'"), "unexpected error: {msg}");
+            assert!(msg.contains(expected_error), "unexpected error: {msg}");
+        }
+    }
+
     fn unknown_fields() -> HashMap<String, serde_json::Value> {
         HashMap::from([("experimental_field".to_string(), json!("value"))])
+    }
+
+    fn explicit_guided_decoding_options() -> Vec<CommonExt> {
+        vec![
+            CommonExt {
+                guided_json: Some(json!({"type": "object"})),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_regex: Some("[a-z]+".to_string()),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_choice: Some(vec!["yes".to_string(), "no".to_string()]),
+                ..Default::default()
+            },
+            CommonExt {
+                guided_grammar: Some("root ::= 'yes'".to_string()),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn structured_response_format_rejects_explicit_guided_decoding() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::JsonObject);
+
+        for common in explicit_guided_decoding_options() {
+            let error = validate_response_format_conflicts(&response_format, &common).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "`response_format` cannot be used together with `guided_json`, `guided_regex`, \
+                 `guided_choice`, or `guided_grammar`"
+            );
+        }
+    }
+
+    #[test]
+    fn text_response_format_allows_explicit_guided_decoding() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::Text);
+
+        for common in explicit_guided_decoding_options() {
+            validate_response_format_conflicts(&response_format, &common).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_guided_choice_does_not_conflict_with_response_format() {
+        let response_format = Some(dynamo_protocols::types::ResponseFormat::JsonObject);
+        let common = CommonExt {
+            guided_choice: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        validate_response_format_conflicts(&response_format, &common).unwrap();
     }
 
     #[test]
@@ -898,6 +1269,90 @@ mod tests {
     }
 
     #[test]
+    fn null_passthrough_fields_are_omitted_from_chat_and_completion_requests() {
+        use crate::engines::ValidateRequest;
+        use crate::protocols::common::extensions::request_cache_salt;
+        use crate::protocols::openai::{
+            OpenAIStopConditionsProvider, chat_completions::NvCreateChatCompletionRequest,
+            completions::NvCreateCompletionRequest,
+        };
+
+        let mut payload = json!({"model": "test-model"});
+        for field in PASSTHROUGH_EXTRA_FIELDS {
+            payload[field] = serde_json::Value::Null;
+        }
+
+        let mut chat_payload = payload.clone();
+        chat_payload["messages"] = json!([{"role": "user", "content": "hello"}]);
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(chat_payload).unwrap();
+        ValidateRequest::validate(&chat).unwrap();
+        assert!(chat.unsupported_fields.is_empty());
+        assert_eq!(chat.get_stop_token_ids(), None);
+        assert_eq!(request_cache_salt(&chat), None);
+
+        payload["prompt"] = json!("hello");
+        let completion: NvCreateCompletionRequest = serde_json::from_value(payload).unwrap();
+        ValidateRequest::validate(&completion).unwrap();
+        assert!(completion.unsupported_fields.is_empty());
+        assert_eq!(completion.get_stop_token_ids(), None);
+        assert_eq!(request_cache_salt(&completion), None);
+
+        let unknown_null: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "experimental_field": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            unknown_null.unsupported_fields.get("experimental_field"),
+            Some(&serde_json::Value::Null)
+        );
+        let err = ValidateRequest::validate(&unknown_null).unwrap_err();
+        assert!(err.to_string().contains("experimental_field"));
+    }
+
+    #[test]
+    fn extra_field_deserialization_preserves_non_null_values() {
+        #[derive(serde::Deserialize)]
+        struct ExtraFields {
+            #[serde(flatten, deserialize_with = "deserialize_extra_fields")]
+            fields: HashMap<String, serde_json::Value>,
+        }
+
+        let fields: ExtraFields = serde_json::from_value(json!({
+            "cache_salt": "tenant",
+            "stop_token_ids": [],
+            "detokenize": false,
+            "allowed_token_ids": [1],
+            "bad_words_token_ids": [[2]],
+            "logprob_token_ids": [3],
+            "vllm_xargs": {"flag": true},
+        }))
+        .unwrap();
+        validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap();
+        assert_eq!(fields.fields.len(), PASSTHROUGH_EXTRA_FIELDS.len());
+        assert_eq!(fields.fields["detokenize"], json!(false));
+        assert_eq!(fields.fields["stop_token_ids"], json!([]));
+
+        for (field, bad) in [
+            ("cache_salt", json!(7)),
+            ("stop_token_ids", json!([null])),
+            ("detokenize", json!(0)),
+            ("allowed_token_ids", json!([-1])),
+            ("bad_words_token_ids", json!([1])),
+            ("logprob_token_ids", json!(["1"])),
+            ("vllm_xargs", json!([1])),
+            ("experimental_field", json!({"nested": null})),
+        ] {
+            let fields: ExtraFields = serde_json::from_value(json!({field: bad})).unwrap();
+            assert_eq!(fields.fields[field], bad);
+            let err =
+                validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap_err();
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    #[test]
     fn validate_no_unsupported_fields_accepts_logprob_token_ids() {
         let fields = HashMap::from([("logprob_token_ids".to_string(), json!([14, 15]))]);
         validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
@@ -909,6 +1364,51 @@ mod tests {
             let fields = HashMap::from([("logprob_token_ids".to_string(), bad)]);
             let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
             assert!(err.to_string().contains("must be an array of token IDs"));
+        }
+    }
+
+    #[test]
+    fn validate_logprobs_matches_top_logprobs_limit() {
+        validate_logprobs(Some(MAX_TOP_LOGPROBS)).unwrap();
+        let err = validate_logprobs(Some(MAX_TOP_LOGPROBS + 1)).unwrap_err();
+        assert!(err.to_string().contains("between 0 and 20"), "{err}");
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_accepts_vllm_xargs() {
+        let fields = HashMap::from([(
+            "vllm_xargs".to_string(),
+            json!({
+                "diffusion_seed_canvas": [100, 45518, 0],
+                "diffusion_max_steps": 1,
+                "diffusion_read_only": true,
+                "temperature_scale": 0.5,
+                "tag": "read",
+            }),
+        )]);
+        validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_malformed_vllm_xargs() {
+        for (bad, message) in [
+            (json!("x"), "`vllm_xargs` must be an object"),
+            (json!([1]), "`vllm_xargs` must be an object"),
+            (json!({"a": null}), "`vllm_xargs.a` must be"),
+            (json!({"a": {"nested": 1}}), "`vllm_xargs.a` must be"),
+            (json!({"a": [[1]]}), "`vllm_xargs.a` must be"),
+            (
+                json!({"kv_transfer_params": {"do_remote_prefill": true}}),
+                "`vllm_xargs.kv_transfer_params` is not supported",
+            ),
+            (
+                json!({"ec_transfer_params": 1}),
+                "`vllm_xargs.ec_transfer_params` is not supported",
+            ),
+        ] {
+            let fields = HashMap::from([("vllm_xargs".to_string(), bad)]);
+            let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
+            assert!(err.to_string().contains(message), "{err}");
         }
     }
 
@@ -933,5 +1433,104 @@ mod tests {
         let err =
             validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn validate_top_p_rejects_zero() {
+        let err = validate_top_p(Some(0.0)).unwrap_err();
+        assert!(err.to_string().contains("Top_p"));
+    }
+
+    #[test]
+    fn validate_top_p_accepts_valid_values() {
+        validate_top_p(Some(0.1)).unwrap();
+        validate_top_p(Some(1.0)).unwrap();
+        validate_top_p(None).unwrap();
+    }
+
+    #[test]
+    fn validate_response_format_rejects_non_object_schema() {
+        let fmt = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": { "name": "test", "schema": 42 }
+        }))
+        .unwrap();
+        let err = validate_response_format(&Some(fmt)).unwrap_err();
+        assert!(err.to_string().contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn validate_response_format_accepts_valid_object_schema() {
+        let fmt = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test",
+                "schema": { "type": "object", "properties": {} }
+            }
+        }))
+        .unwrap();
+        validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_up_to_max_sequences() {
+        let max_strings = Some(dynamo_protocols::types::Stop::StringArray(
+            (0..MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect(),
+        ));
+        validate_stop(&max_strings).unwrap();
+
+        let max_token_ids = Some(dynamo_protocols::types::Stop::TokenIdArray(
+            (0..MAX_STOP_SEQUENCES as u32).collect(),
+        ));
+        validate_stop(&max_token_ids).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_rejects_over_max_sequences() {
+        let over_max_strings = Some(dynamo_protocols::types::Stop::StringArray(
+            (0..=MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect(),
+        ));
+        let err = validate_stop(&over_max_strings).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+
+        let over_max_token_ids = Some(dynamo_protocols::types::Stop::TokenIdArray(
+            (0..=MAX_STOP_SEQUENCES as u32).collect(),
+        ));
+        let err = validate_stop(&over_max_token_ids).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_over_max_stop_token_ids() {
+        let over_max: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
+        let unsupported_fields = HashMap::from([("stop_token_ids".to_string(), json!(over_max))]);
+
+        let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+
+        let at_max: Vec<u32> = (0..MAX_STOP_SEQUENCES as u32).collect();
+        let ok_fields = HashMap::from([("stop_token_ids".to_string(), json!(at_max))]);
+        validate_no_unsupported_fields(&ok_fields).unwrap();
     }
 }

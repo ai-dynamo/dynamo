@@ -1,10 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
+
 import pytest
 
-from tests.serve.conftest import MULTIMODAL_IMG_URL
-from tests.utils.multimodal import UuidPassthroughChatPayload
+from tests.serve.conftest import (
+    MULTIMODAL_IMG_URL,
+    MULTIMODAL_VIDEO_URL,
+    get_multimodal_test_image_bytes,
+)
+from tests.utils.multimodal import (
+    UuidPassthroughChatPayload,
+    make_mixed_image_video_payload,
+    make_qwen35_custom_encoder_multi_image_payload,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -63,3 +73,32 @@ def test_uuid_embedding_cache_payload_checks_hit_after_gpu_eviction() -> None:
         r"identifier='dynamo\-mm\-cache\-image\-1'"
     ]
     payload.final_validation()
+
+
+def test_qwen35_multi_image_payload_is_order_sensitive() -> None:
+    payload = make_qwen35_custom_encoder_multi_image_payload()
+    content = payload.body["messages"][0]["content"]
+
+    assert payload.expected_response == ["green then red"]
+    assert "green" not in content[0]["text"].lower()
+    assert "red" not in content[0]["text"].lower()
+    assert [part["image_url"]["url"] for part in content[1:]] == [
+        "data:image/png;base64,"
+        + base64.b64encode(get_multimodal_test_image_bytes(color)).decode()
+        for color in ("green", "red")
+    ]
+
+
+def test_mixed_image_video_payload_requires_video_context() -> None:
+    payload = make_mixed_image_video_payload(["triangle"], frontend_decoding=True)
+    content = payload.body["messages"][0]["content"]
+
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": MULTIMODAL_IMG_URL},
+    }
+    assert content[2] == {
+        "type": "video_url",
+        "video_url": {"url": MULTIMODAL_VIDEO_URL},
+    }
+    assert payload.expected_response == ["triangle"]

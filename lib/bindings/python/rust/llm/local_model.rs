@@ -10,9 +10,7 @@ use dynamo_kv_router::protocols::{
 use dynamo_runtime::protocols::EndpointId;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
-use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
-use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
-use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
+use llm_rs::local_model::runtime_config::StructuralTagConfig as RsStructuralTagConfig;
 use llm_rs::local_model::runtime_config::TokenizerBackend as RsTokenizerBackend;
 use llm_rs::protocols::tensor::TensorModelConfig;
 use pyo3::exceptions::PyValueError;
@@ -163,6 +161,11 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_kv_event_source_mode(&mut self, mode: Option<String>) {
+        self.inner.kv_event_source_mode = mode;
+    }
+
+    #[setter]
     fn set_kv_state_endpoint(&mut self, kv_state_endpoint: Option<String>) {
         self.inner.kv_state_endpoint = kv_state_endpoint.as_deref().map(EndpointId::from);
     }
@@ -261,6 +264,11 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn kv_event_source_mode(&self) -> Option<String> {
+        self.inner.kv_event_source_mode.clone()
+    }
+
+    #[getter]
     fn kv_state_endpoint(&self) -> Option<String> {
         self.inner
             .kv_state_endpoint
@@ -271,6 +279,19 @@ impl ModelRuntimeConfig {
     #[getter]
     fn exclude_tools_when_tool_choice_none(&self) -> bool {
         self.inner.exclude_tools_when_tool_choice_none
+    }
+
+    #[getter]
+    fn structural_tag(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        self.inner
+            .structural_tag
+            .as_ref()
+            .map(|config| {
+                pythonize::pythonize(py, config)
+                    .map(|value| value.unbind())
+                    .map_err(to_pyerr)
+            })
+            .transpose()
     }
 
     #[getter]
@@ -286,44 +307,18 @@ impl ModelRuntimeConfig {
         self.inner.get_engine_specific(key).map_err(to_pyerr)
     }
 
-    fn set_structural_tag_mode(&mut self, mode: &str) -> PyResult<()> {
-        self.inner.structural_tag_mode = match mode {
-            "off" => RsStructuralTagMode::Off,
-            "on" => RsStructuralTagMode::On,
-            _ => {
-                return Err(PyErr::new::<PyException, _>(format!(
-                    "Invalid structural_tag_mode: {mode}. Expected 'off' or 'on'."
-                )));
-            }
-        };
-        Ok(())
-    }
-
-    /// Set the structural tag scope ("auto" or "always").
-    fn set_structural_tag_scope(&mut self, scope: &str) -> PyResult<()> {
-        self.inner.structural_tag_scope = match scope {
-            "auto" => RsStructuralTagScope::Auto,
-            "always" => RsStructuralTagScope::Always,
-            _ => {
-                return Err(PyErr::new::<PyException, _>(format!(
-                    "Invalid structural_tag_scope: {scope}. Expected 'auto' or 'always'."
-                )));
-            }
-        };
-        Ok(())
-    }
-
-    /// Set the structural tag schema mode ("auto" or "strict").
-    fn set_structural_tag_schema(&mut self, schema: &str) -> PyResult<()> {
-        self.inner.structural_tag_schema = match schema {
-            "auto" => RsStructuralTagSchemaMode::Auto,
-            "strict" => RsStructuralTagSchemaMode::Strict,
-            _ => {
-                return Err(PyErr::new::<PyException, _>(format!(
-                    "Invalid structural_tag_schema: {schema}. Expected 'auto' or 'strict'."
-                )));
-            }
-        };
+    #[pyo3(signature = (structural_tag=None))]
+    fn set_structural_tag(&mut self, structural_tag: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let structural_tag = structural_tag
+            .map(|config| -> anyhow::Result<_> {
+                let value = pythonize::depythonize(config)?;
+                Ok(RsStructuralTagConfig::from_value_strict(value)?)
+            })
+            .transpose()
+            .map_err(|error| {
+                PyValueError::new_err(format!("Invalid structural_tag config: {error}"))
+            })?;
+        self.inner.structural_tag = structural_tag;
         Ok(())
     }
 

@@ -43,9 +43,6 @@ impl RuntimeWorkerQueryTransport {
         })
     }
 
-    // Retained for the version-aware state-agent watcher that will activate
-    // residency-v2 consumption (DEP #13044).
-    #[allow(dead_code)]
     pub(crate) async fn query_status(
         &self,
         worker_id: WorkerId,
@@ -76,6 +73,31 @@ impl RuntimeWorkerQueryTransport {
             }
             _ => anyhow::bail!("unexpected non-status response to a KV state-agent status query"),
         }
+    }
+
+    pub(crate) async fn query_state_agent_recovery(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        target: Instance,
+        expected: KvStateAgentIdentity,
+        expected_attachment_generation: Option<u64>,
+        timeout: Duration,
+    ) -> Result<WorkerKvQueryResponse> {
+        let request = WorkerKvQueryRequest {
+            worker_id,
+            dp_rank,
+            start_event_id: None,
+            end_event_id: None,
+            supports_tree_dump_failed: true,
+            kind: WorkerKvQueryKind::StateAgentRecovery {
+                expected,
+                expected_attachment_generation,
+            },
+        };
+        tokio::time::timeout(timeout, self.query(target, request))
+            .await
+            .context("KV state-agent recovery timed out")?
     }
 
     async fn query(

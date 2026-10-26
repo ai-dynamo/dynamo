@@ -3,9 +3,7 @@
 
 """Ownership-based GMS V1 worker for vLLM's normal model loader.
 
-Select explicitly with::
-
-    --worker-cls gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker
+Dynamo selects this worker when ``DYN_GMS_USE_V1=true``.
 """
 
 from __future__ import annotations
@@ -18,6 +16,12 @@ from vllm.v1.worker.gpu_worker import Worker
 
 class GMSV1Worker(Worker):
     """Route vLLM allocator scopes to the selected GMS V1 backend."""
+
+    def _get_sleep_mode_backend(self):
+        # vLLM 0.30 uses a property; retained 0.29 images still use the method.
+        if hasattr(Worker, "sleep_mode_backend"):
+            return self.sleep_mode_backend
+        return super()._get_sleep_mode_backend()
 
     def init_device(self) -> None:
         model_config = self.vllm_config.model_config

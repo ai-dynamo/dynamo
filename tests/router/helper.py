@@ -23,25 +23,6 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
-def parse_sse_json_chunks(body: str) -> list[dict[str, Any]]:
-    """Decode JSON objects from single-line SSE data fields."""
-    chunks = []
-    for line in body.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if not data or data == "[DONE]":
-            continue
-        try:
-            chunk = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(chunk, dict):
-            chunks.append(chunk)
-    return chunks
-
-
 def generate_random_suffix() -> str:
     """Generate a 10-character random alphabetic suffix for namespace isolation."""
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
@@ -243,19 +224,19 @@ async def wait_for_frontend_ready(
                 f"expected={expected_num_workers}, configured={configured_workers}"
             )
 
-        runtime = get_runtime(
+        with managed_runtime(
             store_backend=store_backend,
             request_plane=request_plane,
-        )
-        for group in worker_groups:
-            endpoint = runtime.endpoint(
-                f"{group.namespace}.{group.component_name}.generate"
-            )
-            await poll_for_worker_instances(
-                endpoint,
-                group.num_workers,
-                max_wait_time=timeout,
-            )
+        ) as runtime:
+            for group in worker_groups:
+                endpoint = runtime.endpoint(
+                    f"{group.namespace}.{group.component_name}.generate"
+                )
+                await poll_for_worker_instances(
+                    endpoint,
+                    group.num_workers,
+                    max_wait_time=timeout,
+                )
 
     models_url = f"{frontend_url}/v1/models"
     chat_url = f"{frontend_url}/v1/chat/completions"
@@ -392,9 +373,12 @@ async def poll_for_worker_instances(
     instance_ids: list[int] = []
     start_time = asyncio.get_running_loop().time()
 
+    last_logged = None
     while len(instance_ids) < expected_num_workers:
         instance_ids = client.instance_ids()
-        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+        if len(instance_ids) != last_logged:
+            logger.info("Found %d instance(s): %s", len(instance_ids), instance_ids)
+            last_logged = len(instance_ids)
 
         if len(instance_ids) >= expected_num_workers:
             break
@@ -404,7 +388,10 @@ async def poll_for_worker_instances(
                 f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
             )
 
-        await asyncio.sleep(1.0)
+        # Registration takes a few seconds; a coarse poll adds up to a full
+        # interval of dead time to every mocker launch. Log only on change so
+        # the finer poll does not flood the test log.
+        await asyncio.sleep(0.25)
 
     return instance_ids
 

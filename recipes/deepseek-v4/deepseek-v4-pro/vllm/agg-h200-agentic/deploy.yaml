@@ -32,7 +32,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
             readOnly: true
-  - name: VllmDecodeWorker
+  - name: worker
     type: worker
     replicas: 1
     podTemplate:

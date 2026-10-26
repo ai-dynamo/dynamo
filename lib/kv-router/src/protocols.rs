@@ -79,6 +79,20 @@ pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
     (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
 }
 
+/// Map a non-empty multimodal identifier to Dynamo's routing hash.
+///
+/// Preserve vLLM's canonical 64-character hex-digest mapping for compatibility,
+/// and hash shorter opaque identifiers emitted by external renderers with XXH3.
+pub fn hash_mm_identifier(identifier: &str) -> Option<u64> {
+    if identifier.is_empty() {
+        return None;
+    }
+    if identifier.len() == 64 && identifier.chars().all(|c| c.is_ascii_hexdigit()) {
+        return u64::from_str_radix(&identifier[..16], 16).ok();
+    }
+    Some(xxh3::xxh3_64(identifier.as_bytes()))
+}
+
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata,
 /// LoRA adapter identity, and cache namespace.
 ///
@@ -265,14 +279,14 @@ fn compute_seq_hash_for_block_with(
     sequence_hashes
 }
 
-/// Router-hint metadata exposed by a worker config for one global DP rank.
+/// TRANSFER hint metadata exposed by a worker config for one global DP rank.
 ///
 /// This is borrowed from the underlying worker config so candidate filtering can
 /// check capability, role compatibility, and source endpoint presence without
 /// allocating. `source_control_endpoint` is optional because targets only need
 /// to consume hints, while sources must provide an endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RouterHintWorkerMetadata<'a> {
+pub struct KvHintTransferWorkerMetadata<'a> {
     pub worker_type: &'a str,
     pub source_control_endpoint: Option<&'a str>,
 }
@@ -286,16 +300,15 @@ pub trait WorkerConfigLike {
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
 
-    /// Router-hint capability and source metadata for a specific global DP rank.
+    /// TRANSFER capability and source metadata for a specific global DP rank.
     ///
-    /// `None` means this worker/rank does not support router hints. Backends
-    /// that support hints but cannot serve as a source may return `Some` with
-    /// `source_control_endpoint: None`. If router hints grow into a broader
-    /// multi-backend contract, move this method into a dedicated extension trait.
-    fn router_hint_metadata_for_dp_rank(
+    /// `None` means this worker/rank does not support TRANSFER. Backends that
+    /// support TRANSFER but cannot serve as a source may return `Some` with
+    /// `source_control_endpoint: None`.
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         _dp_rank: DpRank,
-    ) -> Option<RouterHintWorkerMetadata<'_>> {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
         None
     }
 
@@ -440,6 +453,25 @@ pub struct WorkerWithDpRank {
     pub dp_rank: DpRank,
 }
 
+/// A worker affinity target that may apply to every data-parallel rank of a worker.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorkerAffinityTarget {
+    pub worker_id: WorkerId,
+    pub dp_rank: Option<DpRank>,
+}
+
+impl WorkerAffinityTarget {
+    pub fn new(worker_id: WorkerId, dp_rank: Option<DpRank>) -> Self {
+        Self { worker_id, dp_rank }
+    }
+}
+
+impl From<WorkerWithDpRank> for WorkerAffinityTarget {
+    fn from(worker: WorkerWithDpRank) -> Self {
+        Self::new(worker.worker_id, Some(worker.dp_rank))
+    }
+}
+
 impl WorkerWithDpRank {
     pub fn new(worker_id: WorkerId, dp_rank: DpRank) -> Self {
         Self { worker_id, dp_rank }
@@ -489,7 +521,7 @@ pub enum ResidencyOwner {
 /// Lower-tier edges carry this fixed-size value instead of embedding the full
 /// [`CacheOwnerId`] in every ownership entry. The full owner remains in the
 /// reverse index once per logical owner so dumps can round-trip it exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResidencyOwnerKey([u8; 16]);
 
 impl ResidencyOwnerKey {
@@ -560,7 +592,7 @@ fn update_cache_owner_hash(hasher: &mut blake3::Hasher, owner: CacheOwnerId) {
 /// Router-core stores no discovery state. The lib/llm wrapper resolves and
 /// swaps this snapshot when source, attachment, or readability membership
 /// changes; one snapshot is pinned for each tiered lookup.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResidencyProjection {
     exact_owners: FxHashMap<ResidencyOwnerKey, WorkerWithDpRank>,
 }
@@ -605,6 +637,85 @@ impl ResidencyProjection {
 
     pub fn is_empty(&self) -> bool {
         self.exact_owners.is_empty()
+    }
+}
+
+/// Persistent source metadata used to resolve a cache owner into a router hint.
+///
+/// This is advisory discovery metadata. Endpoint health and ownership takeover
+/// are guaranteed by the persistent cache implementation, not probed by Dynamo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterHintSourceMetadata {
+    pub source_control_endpoint: String,
+    pub worker_type: String,
+    /// Topology labels of the cache, like a worker's `topology_domains`. Hint
+    /// targets with a `kv_transfer_domain` only fetch from the same island.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub topology_domains: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRouterHintSource {
+    pub metadata: RouterHintSourceMetadata,
+    pub attached_worker: Option<WorkerWithDpRank>,
+}
+
+/// One immutable lookup snapshot for scheduling projection and persistent hint sources.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResidencyRoutingSnapshot {
+    projection: ResidencyProjection,
+    router_hint_sources: FxHashMap<ResidencyOwnerKey, ResolvedRouterHintSource>,
+}
+
+impl ResidencyRoutingSnapshot {
+    pub fn from_projection(projection: ResidencyProjection) -> Self {
+        Self {
+            projection,
+            router_hint_sources: FxHashMap::default(),
+        }
+    }
+
+    pub fn new(
+        projection: ResidencyProjection,
+        router_hint_sources: impl IntoIterator<
+            Item = (
+                CacheOwnerId,
+                RouterHintSourceMetadata,
+                Option<WorkerWithDpRank>,
+            ),
+        >,
+    ) -> Self {
+        let router_hint_sources = router_hint_sources
+            .into_iter()
+            .map(|(owner, metadata, attached_worker)| {
+                (
+                    ResidencyOwner::cache_owner(owner).compact_key(),
+                    ResolvedRouterHintSource {
+                        metadata,
+                        attached_worker,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            projection,
+            router_hint_sources,
+        }
+    }
+
+    pub fn projection(&self) -> &ResidencyProjection {
+        &self.projection
+    }
+
+    pub fn router_hint_source(
+        &self,
+        owner: ResidencyOwnerKey,
+    ) -> Option<&ResolvedRouterHintSource> {
+        self.router_hint_sources.get(&owner)
+    }
+
+    pub fn has_router_hint_source(&self, owner: ResidencyOwnerKey) -> bool {
+        self.router_hint_sources.contains_key(&owner)
     }
 }
 
@@ -830,11 +941,23 @@ impl Placement {
 pub struct PlacementEvent {
     pub placement: Placement,
     pub event: KvCacheEvent,
+    /// Session that triggered this store or reuse report, if provided by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl PlacementEvent {
     pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
-        Self { placement, event }
+        Self {
+            placement,
+            event,
+            session_id: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
@@ -845,12 +968,14 @@ impl PlacementEvent {
         let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
             return None;
         };
-        Some(RouterEvent::with_residency_domain(
+        let mut event = RouterEvent::with_residency_domain(
             worker.worker_id,
             self.event,
             self.placement.tier,
             self.placement.residency_domain,
-        ))
+        );
+        event.session_id = self.session_id;
+        Some(event)
     }
 }
 
@@ -968,9 +1093,77 @@ pub struct WorkerSelectionResult {
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
 
+    /// Greatest raw router-visible overlap among eligible workers, in tokens,
+    /// for tracked requests.
+    pub max_raw_cached_tokens: Option<usize>,
+
+    /// Selected worker's raw router-visible overlap, in tokens, for tracked requests.
+    pub selected_raw_cached_tokens: Option<usize>,
+
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
+}
+
+/// How many candidates a selection trace retains: the `top_k` lowest-cost rows
+/// plus the selected worker, or every candidate when `top_k` is zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionTraceSpec {
+    pub top_k: usize,
+}
+
+/// A scored candidate: the worker and its total cost after every scorer ran, in
+/// the policy's cost units (scheduler-tracked KV blocks for the builtin policy).
+/// Lower is better.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionTraceRow {
+    pub worker: WorkerWithDpRank,
+    pub cost: f64,
+}
+
+/// Per-candidate costs captured for one worker selection.
+///
+/// Rows are unordered. When `rows.len() < candidate_count`, the selection was
+/// truncated to the `top_k` lowest-cost candidates plus the selected worker,
+/// which is always present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionTrace {
+    /// Eligible candidates the policy scored, before truncation.
+    pub candidate_count: usize,
+    /// Whether the host pinned the selection to one worker and rank.
+    pub pinned: bool,
+    /// Retained candidates, unordered.
+    pub rows: Vec<SelectionTraceRow>,
+}
+
+/// One router scheduler's view of a worker rank's in-flight load.
+///
+/// Routers publish this on the scheduler-load subject; workers never do.
+/// Fields added after the first release must be `#[serde(default)]`, and `Option`
+/// when absent does not mean zero.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchedulerLoad {
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
+    pub active_decode_blocks: u64,
+    pub active_prefill_tokens: u64,
+    pub group: SchedulerGroup,
+}
+
+/// Which schedulers' views describe the same requests.
+///
+/// Views within one group overlap, so consumers take their maximum; views from
+/// different groups are disjoint, so consumers sum them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SchedulerGroup {
+    /// A scheduler that only knows the requests it routed itself.
+    Standalone { scheduler_id: u64 },
+    /// Schedulers that replicate request state, so each reports the group's full load.
+    ReplicaGroup { group_id: String },
+    /// Future aggregation kinds are decoded but cannot contribute to load totals.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Active load metrics for a worker, used for overload detection.
@@ -990,7 +1183,6 @@ pub struct ActiveLoad {
     ///
     /// This is published by workers only and is the authoritative signal for
     /// backend KV occupancy used by overload detection.
-    #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }
 
@@ -1045,8 +1237,9 @@ pub struct ActiveSequenceEvent {
     pub request_id: String,
     pub worker: WorkerWithDpRank,
     pub data: ActiveSequenceEventData,
+    /// Source DRT identity, used to suppress a publisher's own echo. Router events use the router
+    /// ID; worker-origin completion marks use the worker ID.
     pub router_id: u64,
-    #[serde(default)]
     pub lora_name: Option<String>,
 }
 
@@ -1073,7 +1266,6 @@ pub enum ActiveSequenceEventData {
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
-        #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
     // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
@@ -1136,7 +1328,6 @@ pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
     /// Absolute position of the first block in this batch for positional replay.
-    #[serde(default)]
     pub start_position: Option<u32>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
@@ -1257,7 +1448,6 @@ pub struct KvCacheStoredBlockData {
     /// Extra multimodal metadata for this block
     /// Note: Do NOT use skip_serializing_if with bincode - it breaks deserialization
     /// because bincode is positional and expects all fields to be present.
-    #[serde(default)]
     pub mm_extra_info: Option<BlockExtraInfo>,
 }
 
@@ -1326,7 +1516,10 @@ pub enum KvCacheEventError {
     #[error("Invalid block sequence")]
     InvalidBlockSequence,
 
-    /// A bounded, pre-commit index omission; this does not prove the backing table is full.
+    /// A bounded physical-index omission; this does not prove the backing table is full.
+    ///
+    /// An indexer may still commit exact source lineage and ownership so removal and later
+    /// re-admission remain correct.
     #[error("Indexer capacity exhausted")]
     CapacityExhausted,
 
@@ -1363,10 +1556,13 @@ pub struct RouterEvent {
     ///
     /// This is absent on the legacy Worker-only wire. CacheOwner events are
     /// valid only on a versioned, residency-aware source where this field is
-    /// present; they must never be sent to legacy consumers. Keep this field
-    /// last so legacy positional MessagePack remains prefix-compatible.
+    /// present; they must never be sent to legacy consumers. MessagePack
+    /// compatibility relies on `to_vec_named`; positional encoding is unsupported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_source: Option<CacheOwnerId>,
+    /// Session that triggered this store or reuse report, if provided by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl RouterEvent {
@@ -1403,6 +1599,7 @@ impl RouterEvent {
         Self {
             worker_id,
             state_source: None,
+            session_id: None,
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
@@ -1423,6 +1620,11 @@ impl RouterEvent {
     /// Attach an explicit stable source to a residency-aware event.
     pub fn with_state_source(mut self, state_source: CacheOwnerId) -> Self {
         self.state_source = Some(state_source);
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 
@@ -1789,6 +1991,7 @@ mod tests {
             ];
             let decoded: Vec<RouterEvent> =
                 rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
+            assert_eq!(decoded[0].session_id, None);
             assert_eq!(
                 decoded[0].resolved_residency_domain(),
                 Ok(ResidencyDomain::Worker)
@@ -1800,11 +2003,16 @@ mod tests {
                 stored(3),
                 StorageTier::Disk,
                 ResidencyDomain::Worker,
-            );
+            )
+            .with_session_id("session-1");
             let old_reader: LegacyRouterEvent =
                 rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
             assert_eq!(old_reader.event.event_id, 3);
             assert_eq!(old_reader.storage_tier, StorageTier::Disk);
+
+            let round_trip: RouterEvent =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
+            assert_eq!(round_trip.session_id.as_deref(), Some("session-1"));
 
             let mixed = vec![
                 ExplicitDomainEvent {
@@ -1863,6 +2071,22 @@ mod tests {
             (MM_PAD_SHIFT_VALUE + 0xCAFE) as u32,
             "high bits above the 30-bit mask must be discarded"
         );
+    }
+
+    #[test]
+    fn mm_identifier_hash_preserves_canonical_vllm_digest_mapping() {
+        let identifier = "0123456789abcdef".repeat(4);
+        assert_eq!(hash_mm_identifier(&identifier), Some(0x0123_4567_89ab_cdef));
+    }
+
+    #[test]
+    fn mm_identifier_hash_supports_opaque_identifiers() {
+        let identifier = "opaque-renderer-image-0";
+        assert_eq!(
+            hash_mm_identifier(identifier),
+            Some(xxh3::xxh3_64(identifier.as_bytes()))
+        );
+        assert_eq!(hash_mm_identifier(""), None);
     }
 
     #[test]
@@ -2366,6 +2590,18 @@ mod tests {
     }
 
     #[test]
+    fn router_hint_source_topology_is_optional_on_the_wire() {
+        let without_topology = serde_json::json!({
+            "source_control_endpoint": "tcp://owner:23280",
+            "worker_type": "prefill",
+        });
+        let metadata: RouterHintSourceMetadata =
+            serde_json::from_value(without_topology.clone()).unwrap();
+        assert!(metadata.topology_domains.is_empty());
+        assert_eq!(serde_json::to_value(&metadata).unwrap(), without_topology);
+    }
+
+    #[test]
     fn test_worker_config_like_topology_domains_default() {
         // A minimal implementor that does NOT override topology_domains()
         struct MinimalConfig;
@@ -2402,7 +2638,7 @@ mod tests {
             "Default kv_transfer_preferred_weight() should return None"
         );
         assert!(config.native_offloading_capacity_tokens().is_none());
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]
@@ -2688,5 +2924,46 @@ mod tests {
             serde_json::to_string(&load).unwrap(),
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
         );
+    }
+
+    #[test]
+    fn scheduler_load_accepts_unknown_fields_but_requires_identity_and_measurements() {
+        let frame = serde_json::json!({
+            "worker_id": 7,
+            "dp_rank": 2,
+            "active_decode_blocks": 10,
+            "active_prefill_tokens": 20,
+            "group": {"kind": "standalone", "scheduler_id": 42, "future_group_field": true},
+            "future_measurement": 99
+        });
+        let batch: Vec<SchedulerLoad> =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&vec![frame.clone()]).unwrap()).unwrap();
+        assert_eq!(
+            batch,
+            [SchedulerLoad {
+                worker_id: 7,
+                dp_rank: 2,
+                active_decode_blocks: 10,
+                active_prefill_tokens: 20,
+                group: SchedulerGroup::Standalone { scheduler_id: 42 },
+            }]
+        );
+        for required in [
+            "worker_id",
+            "dp_rank",
+            "group",
+            "active_decode_blocks",
+            "active_prefill_tokens",
+        ] {
+            let mut incomplete = frame.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            assert!(
+                rmp_serde::from_slice::<Vec<SchedulerLoad>>(
+                    &rmp_serde::to_vec_named(&vec![incomplete]).unwrap(),
+                )
+                .is_err(),
+                "missing {required} must not become a valid zero-load report"
+            );
+        }
     }
 }

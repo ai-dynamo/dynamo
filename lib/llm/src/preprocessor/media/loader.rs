@@ -13,10 +13,11 @@ use reqwest::redirect::Policy;
 
 use dynamo_memory::nixl::NixlAgent;
 use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
+use dynamo_runtime::error::{DynamoError, ErrorType};
 
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
+use super::rdma::{DataType, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent};
 use super::require_image_url;
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -27,13 +28,52 @@ const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 
+const IMAGE_FETCH_FAILED: &str = "Failed to fetch the image_url media";
+const IMAGE_DECODE_FAILED: &str =
+    "Failed to decode the image_url data: it is not a valid or supported image";
+#[cfg(feature = "media-ffmpeg")]
+const VIDEO_FETCH_FAILED: &str = "Failed to fetch the video_url media";
+#[cfg(feature = "media-ffmpeg")]
+const VIDEO_DECODE_FAILED: &str =
+    "Failed to decode the video_url data: it is not a valid or supported video";
+
+// Size cap for a `data:` URL, which carries its whole payload inline. Keep the
+// name and default in sync with the Python counterpart
+// (components/src/dynamo/common/http/url_validator.py::max_data_url_bytes).
+const MAX_DATA_URL_MB_ENV: &str = "DYN_MM_MAX_DATA_URL_MB";
+const DEFAULT_MAX_DATA_URL_MB: usize = 16;
+
+/// Size cap in bytes for a `data:` URL, from `DYN_MM_MAX_DATA_URL_MB`.
+///
+/// Read per call, like the Python workers. An unparseable or non-positive
+/// value falls back to the default with a warning.
+pub fn max_data_url_bytes() -> usize {
+    let default = DEFAULT_MAX_DATA_URL_MB * 1024 * 1024;
+    let Ok(raw) = std::env::var(MAX_DATA_URL_MB_ENV) else {
+        return default;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return default;
+    }
+    match raw.parse::<usize>() {
+        Ok(mb) if mb > 0 => mb.saturating_mul(1024 * 1024),
+        _ => {
+            tracing::warn!(
+                "Ignoring invalid {MAX_DATA_URL_MB_ENV}={raw:?}; using {DEFAULT_MAX_DATA_URL_MB} MB"
+            );
+            default
+        }
+    }
+}
+
 // IP ranges that must never be reachable from a user-controlled URL.
 // Source: RFC1918 (private), RFC6598 (CGNAT), RFC5735 (loopback, link-local,
 // 0.0.0.0/8), RFC4193 (ULA), RFC4291 (IPv6 loopback / link-local), RFC6890
 // (reserved). Link-local 169.254/16 covers the AWS / OpenStack metadata IP.
 //
 // Keep this list in sync with the Python counterpart
-// (components/src/dynamo/common/multimodal/url_validator.py::_BLOCKED_IP_NETWORKS).
+// (components/src/dynamo/common/http/url_validator.py::_BLOCKED_IP_NETWORKS).
 static BLOCKED_IP_NETWORKS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
     [
         "0.0.0.0/8",
@@ -68,7 +108,7 @@ static BLOCKED_IP_NETWORKS: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
 // internal-service names to attacker IPs. Match is case-insensitive.
 //
 // Keep this list in sync with the Python counterpart
-// (components/src/dynamo/common/multimodal/url_validator.py::_BLOCKED_HOSTS).
+// (components/src/dynamo/common/http/url_validator.py::_BLOCKED_HOSTS).
 static BLOCKED_HOSTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         "localhost",
@@ -89,6 +129,46 @@ static BLOCKED_HOSTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 /// Return `true` if `ip` falls inside any of the blocked ranges.
 pub fn is_blocked_ip(ip: &IpAddr) -> bool {
     BLOCKED_IP_NETWORKS.iter().any(|net| net.contains(ip))
+}
+
+/// Build a policy refusal that the HTTP service maps to 400.
+fn policy_rejection(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message.into())
+        .build()
+}
+
+/// Classify media failures as 400, preserving typed errors and local resource faults.
+/// New errors expose only a fixed message; causes may hold presigned URLs or decoder output.
+fn media_input_error(public: &'static str, error: anyhow::Error) -> anyhow::Error {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<DynamoError>().is_some())
+    {
+        return error;
+    }
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            .is_some_and(|errno| matches!(errno, libc::EMFILE | libc::ENFILE | libc::ENOMEM))
+    }) {
+        return DynamoError::builder()
+            .error_type(ErrorType::Internal)
+            .message(format!(
+                "Media processing exhausted frontend resources: {error:#}"
+            ))
+            .public_message("Frontend resources unavailable while processing media")
+            .build()
+            .into();
+    }
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(format!("{public}: {error:#}"))
+        .public_message(public)
+        .build()
+        .into()
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -152,9 +232,40 @@ impl MediaFetcher {
 }
 
 impl MediaFetcher {
+    pub(crate) fn is_policy_rejection(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            cause
+                .downcast_ref::<DynamoError>()
+                .is_some_and(|err| err.error_type() == ErrorType::InvalidArgument)
+        })
+    }
+
+    /// Restore policy classification when reqwest hides a redirect cause.
+    pub(crate) fn map_fetch_error(error: anyhow::Error) -> anyhow::Error {
+        if Self::is_policy_rejection(&error) {
+            return error;
+        }
+
+        let is_redirect_failure = error.chain().any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_redirect)
+        });
+        if is_redirect_failure {
+            // reqwest also uses this category for malformed redirects, so do
+            // not claim that policy validation was necessarily the cause.
+            return policy_rejection(format!(
+                "Media URL redirect was not followed (blocked destination, \
+                 redirect limit, or invalid redirect): {error}"
+            ))
+            .into();
+        }
+        error
+    }
+
     pub fn check_if_url_allowed(&self, url: &url::Url) -> Result<()> {
         if !matches!(url.scheme(), "http" | "https" | "data") {
-            anyhow::bail!("Only HTTP(S) and data URLs are allowed");
+            return Err(policy_rejection("Only HTTP(S) and data URLs are allowed").into());
         }
 
         if url.scheme() == "data" {
@@ -163,13 +274,13 @@ impl MediaFetcher {
 
         let host = url
             .host()
-            .ok_or_else(|| anyhow::anyhow!("URL has no host component"))?;
+            .ok_or_else(|| policy_rejection("URL has no host component"))?;
 
         if !self.allow_direct_ip && !matches!(host, url::Host::Domain(_)) {
-            anyhow::bail!("Direct IP access is not allowed");
+            return Err(policy_rejection("Direct IP access is not allowed").into());
         }
         if !self.allow_direct_port && url.port().is_some() {
-            anyhow::bail!("Direct port access is not allowed");
+            return Err(policy_rejection("Direct port access is not allowed").into());
         }
 
         // Host-level checks: blocked hostnames and IP literals in blocked
@@ -179,7 +290,10 @@ impl MediaFetcher {
                 url::Host::Domain(domain) => {
                     let lowered = domain.trim_end_matches('.').to_ascii_lowercase();
                     if BLOCKED_HOSTS.contains(lowered.as_str()) {
-                        anyhow::bail!("Host '{domain}' is blocked (resolves to internal service)");
+                        return Err(policy_rejection(format!(
+                            "Host '{domain}' is blocked (resolves to internal service)"
+                        ))
+                        .into());
                     }
                     None
                 }
@@ -189,7 +303,9 @@ impl MediaFetcher {
             if let Some(ip) = ip_literal
                 && is_blocked_ip(&ip)
             {
-                anyhow::bail!("IP literal '{ip}' is in a blocked range");
+                return Err(
+                    policy_rejection(format!("IP literal '{ip}' is in a blocked range")).into(),
+                );
             }
         }
 
@@ -197,7 +313,10 @@ impl MediaFetcher {
             && let Some(host_str) = url.host_str()
             && !allowed_domains.contains(host_str)
         {
-            anyhow::bail!("Host '{host_str}' is not in the allowed_media_domains list");
+            return Err(policy_rejection(format!(
+                "Host '{host_str}' is not in the allowed_media_domains list"
+            ))
+            .into());
         }
 
         Ok(())
@@ -218,13 +337,18 @@ impl MediaFetcher {
         };
 
         let port = url.port_or_known_default().unwrap_or(0);
+        // A DNS lookup failure does not establish an SSRF policy violation.
+        // Fail closed and preserve the resolver error.
         let iter = tokio::net::lookup_host((host, port))
             .await
             .map_err(|e| anyhow::anyhow!("Could not resolve host '{host}': {e}"))?;
         for sock_addr in iter {
             let ip = sock_addr.ip();
             if is_blocked_ip(&ip) {
-                anyhow::bail!("Host '{host}' resolves to blocked IP '{ip}'");
+                return Err(policy_rejection(format!(
+                    "Host '{host}' resolves to blocked IP '{ip}'"
+                ))
+                .into());
             }
         }
         Ok(())
@@ -240,7 +364,9 @@ impl MediaFetcher {
         let fetcher_for_redirects = self.clone();
         let redirect_policy = Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(anyhow::anyhow!("too many redirects (max={MAX_REDIRECTS})"));
+                return attempt.error(policy_rejection(format!(
+                    "too many redirects (max={MAX_REDIRECTS})"
+                )));
             }
             match fetcher_for_redirects.check_if_url_allowed(attempt.url()) {
                 Ok(()) => attempt.follow(),
@@ -285,10 +411,9 @@ impl Resolve for BlocklistResolver {
                 iter.filter(|sa| !is_blocked_ip(&sa.ip())).collect()
             };
             if addrs.is_empty() {
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::AddrNotAvailable,
-                    format!("no non-blocked addresses for host '{host}'"),
-                ))
+                return Err(Box::new(policy_rejection(format!(
+                    "no non-blocked addresses for host '{host}'"
+                )))
                     as Box<dyn std::error::Error + Send + Sync>);
             }
             Ok(Box::new(addrs.into_iter()) as Addrs)
@@ -401,6 +526,8 @@ impl MediaLoader {
     }
 
     pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
+        media_decoder.warn_if_unavailable_backends();
+
         // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
         // honored even when the caller doesn't pass an explicit fetcher.
         let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
@@ -461,6 +588,20 @@ impl MediaLoader {
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         media_io_kwargs: Option<&MediaDecoder>,
     ) -> Result<RdmaMediaDataDescriptor> {
+        self.fetch_and_decode_media_part_with_video_hash(oai_content_part, media_io_kwargs, false)
+            .await
+    }
+
+    pub(crate) async fn fetch_and_decode_media_part_with_video_hash(
+        &self,
+        oai_content_part: &ChatCompletionRequestUserMessageContentPart,
+        media_io_kwargs: Option<&MediaDecoder>,
+        _hash_video: bool,
+    ) -> Result<RdmaMediaDataDescriptor> {
+        // Drain before the cache lookup: the worker also reads cached buffers, so cache
+        // hits add notifications too.
+        drain_nixl_notifications(&self.nixl_agent);
+
         // Image-only fast path: cache lookup keyed by URL/datauri string.
         // Video/audio aren't cached yet (their lifetime/content semantics
         // are different — easy to add later if profiling justifies it).
@@ -496,13 +637,20 @@ impl MediaLoader {
                 let url = require_image_url(image_part)?;
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
-                    .await?;
-                let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+                    .await
+                    .map_err(|e| media_input_error(IMAGE_FETCH_FAILED, e))?;
+                let data = EncodedMediaData::from_url(url, &self.http_client)
+                    .await
+                    .map_err(MediaFetcher::map_fetch_error)
+                    .map_err(|e| media_input_error(IMAGE_FETCH_FAILED, e))?;
 
                 // Use runtime decoder if provided, with MDC limits enforced
                 let decoder =
                     mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
-                decoder.decode_async(data).await?
+                decoder
+                    .decode_async(data)
+                    .await
+                    .map_err(|e| media_input_error(IMAGE_DECODE_FAILED, e))?
             }
             #[allow(unused_variables)]
             ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
@@ -525,13 +673,20 @@ impl MediaLoader {
                         })?;
                     self.media_fetcher
                         .check_if_url_allowed_with_dns(url)
-                        .await?;
-                    let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+                        .await
+                        .map_err(|e| media_input_error(VIDEO_FETCH_FAILED, e))?;
+                    let data = EncodedMediaData::from_url(url, &self.http_client)
+                        .await
+                        .map_err(MediaFetcher::map_fetch_error)
+                        .map_err(|e| media_input_error(VIDEO_FETCH_FAILED, e))?;
 
                     // Use runtime decoder if provided, with MDC limits enforced
                     let decoder =
                         mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
-                    decoder.decode_async(data).await?
+                    decoder
+                        .decode_async_with_video_hash(data, _hash_video)
+                        .await
+                        .map_err(|e| media_input_error(VIDEO_DECODE_FAILED, e))?
                 }
             }
             ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
@@ -540,6 +695,7 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
+        // A NIXL registration failure is a server fault and stays a 500.
         let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
 
         // Insert into the cache on the way out. We only cache image inputs
@@ -655,6 +811,105 @@ mod tests {
             descriptor.source_storage.unwrap().is_registered(),
             "Source storage should be registered with NIXL"
         );
+    }
+
+    /// Unfetchable or undecodable media must be `InvalidArgument` (HTTP 400) with a fixed
+    /// public message that leaks neither the URL nor the payload.
+    #[tokio::test]
+    async fn test_bad_media_is_invalid_argument() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let png = include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
+        let truncated_png = b64(&png[..png.len() / 2]);
+        let closed_port = {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.local_addr().unwrap().port()
+        };
+
+        let mut cases = vec![
+            ("image_url", "data:image/png;base64,".to_string()),
+            (
+                "image_url",
+                "data:image/png;base64,!!!not-base64".to_string(),
+            ),
+            (
+                "image_url",
+                format!("data:image/png;base64,{}", b64(b"hello")),
+            ),
+            (
+                "image_url",
+                format!("data:image/png;base64,{truncated_png}"),
+            ),
+            ("image_url", format!("http://127.0.0.1:{closed_port}/x.png")),
+        ];
+        #[cfg(feature = "media-ffmpeg")]
+        {
+            cases.push(("video_url", "data:video/mp4;base64,".to_string()));
+            // The decoder stages video bytes in a memfd. Where memfd is forbidden, that
+            // host fault is a 500, so this case cannot reach the decoder.
+            let options = memfile::CreateOptions::new().allow_sealing(true);
+            match memfile::MemFile::create("probe", options) {
+                Ok(_) => cases.push((
+                    "video_url",
+                    format!("data:video/mp4;base64,{}", b64(b"not a video")),
+                )),
+                Err(e) => {
+                    println!("skipping the undecodable video case (memfd not available: {e})")
+                }
+            }
+        }
+
+        let media_decoder = MediaDecoder {
+            image: Some(ImageDecoder::default()),
+            #[cfg(feature = "media-ffmpeg")]
+            video: Some(Default::default()),
+        };
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+        let loader = match MediaLoader::new(media_decoder, Some(fetcher)) {
+            Ok(l) => l,
+            Err(e) => {
+                println!(
+                    "test test_bad_media_is_invalid_argument ... ignored (NIXL/UCX not available: {e})"
+                );
+                return;
+            }
+        };
+
+        for (modality, url) in cases {
+            let content_part: ChatCompletionRequestUserMessageContentPart =
+                serde_json::from_value(serde_json::json!({
+                    "type": modality,
+                    modality: {"url": url},
+                }))
+                .unwrap();
+            let error = loader
+                .fetch_and_decode_media_part(&content_part, None)
+                .await
+                .expect_err("bad media must be rejected");
+            let dynamo_error = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<DynamoError>())
+                .unwrap_or_else(|| panic!("{modality} {url:.60}: unclassified error: {error:#}"));
+            assert_eq!(
+                dynamo_error.error_type(),
+                ErrorType::InvalidArgument,
+                "{modality} {url:.60}: {error:#}"
+            );
+            let public = dynamo_error
+                .public_message()
+                .unwrap_or_else(|| panic!("{modality} {url:.60}: no public message"));
+            assert!(public.contains(modality), "{public}");
+            assert!(
+                !public.contains("http://") && !public.contains("base64"),
+                "{public}"
+            );
+        }
     }
 
     /// With the cache enabled, a second fetch of the same URL must be served
@@ -876,6 +1131,126 @@ mod tests {
 mod tests_non_nixl {
     use super::*;
 
+    fn assert_invalid_argument_in_chain(error: &(dyn std::error::Error + 'static)) {
+        let mut current = Some(error);
+        while let Some(cause) = current {
+            if let Some(dynamo_error) = cause.downcast_ref::<DynamoError>()
+                && dynamo_error.error_type() == ErrorType::InvalidArgument
+            {
+                return;
+            }
+            current = cause.source();
+        }
+        panic!("error chain did not contain InvalidArgument: {error}");
+    }
+
+    /// Reads the request head so the test server never closes with unread
+    /// request bytes, which would reset the connection instead of closing it.
+    async fn read_request_head(connection: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let n = connection.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    #[test]
+    fn media_input_error_keeps_classified_errors() {
+        let host_fault: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Internal)
+            .message("memfd failed")
+            .build()
+            .into();
+        let passed = media_input_error(IMAGE_DECODE_FAILED, host_fault);
+        let dynamo_error = passed
+            .downcast_ref::<DynamoError>()
+            .expect("classified error passes through");
+        assert_eq!(dynamo_error.error_type(), ErrorType::Internal);
+    }
+
+    #[rstest::rstest]
+    #[case(libc::EMFILE, ErrorType::Internal)]
+    #[case(libc::ENFILE, ErrorType::Internal)]
+    #[case(libc::ENOMEM, ErrorType::Internal)]
+    #[case(libc::ECONNREFUSED, ErrorType::InvalidArgument)]
+    #[tokio::test]
+    async fn media_fetch_preserves_resource_failures(
+        #[case] errno: i32,
+        #[case] expected: ErrorType,
+    ) {
+        struct FailingResolver(i32);
+        impl Resolve for FailingResolver {
+            fn resolve(&self, _name: Name) -> Resolving {
+                let errno = self.0;
+                Box::pin(async move {
+                    Err(Box::new(std::io::Error::from_raw_os_error(errno))
+                        as Box<dyn std::error::Error + Send + Sync>)
+                })
+            }
+        }
+
+        // Inject an OS error through reqwest's real source chain without exhausting
+        // process-wide resources or depending on external DNS or HTTP services.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(FailingResolver(errno)))
+            .build()
+            .unwrap();
+        let url = "http://media.invalid/image?token=secret".parse().unwrap();
+        let error = EncodedMediaData::from_url(&url, &client)
+            .await
+            .expect_err("injected resolver error must prevent the fetch");
+        let error = media_input_error(IMAGE_FETCH_FAILED, MediaFetcher::map_fetch_error(error));
+        let classified = error.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(classified.error_type(), expected);
+        assert!(!classified.public_message().unwrap().contains("secret"));
+    }
+
+    #[cfg(feature = "media-ffmpeg")]
+    #[test]
+    fn test_truncated_webm_is_invalid_argument() {
+        // A WebM EBML header followed by a damaged segment and a truncated Info
+        // element. Matroska resync finds Info, then returns EIO on premature EOF.
+        let bytes =
+            b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm\x00\x15\x49\xa9\x66\x8c\x2a\xd7\xb1\x88\x00";
+        let decoder = super::super::decoders::video::VideoDecoder::default();
+        let error = decoder
+            .decode(EncodedMediaData::from_bytes(bytes.to_vec()))
+            .expect_err("truncated WebM must fail to decode");
+        assert!(
+            error
+                .to_string()
+                .contains(&ffmpeg_next::Error::Other { errno: libc::EIO }.to_string()),
+            "expected the Matroska premature-EOF error: {error:#}"
+        );
+        let error = media_input_error(VIDEO_DECODE_FAILED, error);
+        assert_invalid_argument_in_chain(error.as_ref());
+        let classified = error.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(classified.public_message(), Some(VIDEO_DECODE_FAILED));
+    }
+
+    #[test]
+    fn max_data_url_bytes_reads_env_and_ignores_bad_values() {
+        const DEFAULT: usize = 16 * 1024 * 1024;
+        temp_env::with_var(MAX_DATA_URL_MB_ENV, None::<&str>, || {
+            assert_eq!(max_data_url_bytes(), DEFAULT);
+        });
+        temp_env::with_var(MAX_DATA_URL_MB_ENV, Some(" 2 "), || {
+            assert_eq!(max_data_url_bytes(), 2 * 1024 * 1024);
+        });
+        for raw in ["", "abc", "1.5", "0", "-1"] {
+            temp_env::with_var(MAX_DATA_URL_MB_ENV, Some(raw), || {
+                assert_eq!(max_data_url_bytes(), DEFAULT, "{raw:?}");
+            });
+        }
+    }
+
     #[test]
     fn test_cache_key_is_stable_per_url() {
         // Same URL → same key, every time. Different URLs → different keys.
@@ -920,12 +1295,10 @@ mod tests_non_nixl {
         };
 
         let url = url::Url::parse("http://192.168.1.1/image.jpg").unwrap();
-        let result = fetcher.check_if_url_allowed(&url);
-
-        assert!(result.is_err());
+        let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+        assert_invalid_argument_in_chain(error.as_ref());
         assert!(
-            result
-                .unwrap_err()
+            error
                 .to_string()
                 .contains("Direct IP access is not allowed")
         );
@@ -939,12 +1312,10 @@ mod tests_non_nixl {
         };
 
         let url = url::Url::parse("http://example.com:8080/image.jpg").unwrap();
-        let result = fetcher.check_if_url_allowed(&url);
-
-        assert!(result.is_err());
+        let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+        assert_invalid_argument_in_chain(error.as_ref());
         assert!(
-            result
-                .unwrap_err()
+            error
                 .to_string()
                 .contains("Direct port access is not allowed")
         );
@@ -967,14 +1338,9 @@ mod tests_non_nixl {
 
         // Disallowed domain should fail
         let url = url::Url::parse("https://untrusted.com/image.jpg").unwrap();
-        let result = fetcher.check_if_url_allowed(&url);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("allowed_media_domains")
-        );
+        let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+        assert_invalid_argument_in_chain(error.as_ref());
+        assert!(error.to_string().contains("allowed_media_domains"));
     }
 
     #[test]
@@ -1002,6 +1368,16 @@ mod tests_non_nixl {
     }
 
     #[test]
+    fn test_non_http_schemes_are_policy_rejections() {
+        let fetcher = MediaFetcher::default();
+        for scheme in ["file", "ftp"] {
+            let url = url::Url::parse(&format!("{scheme}://example.com/x")).unwrap();
+            let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+            assert_invalid_argument_in_chain(error.as_ref());
+        }
+    }
+
+    #[test]
     fn test_blocked_ip_literal_rejected_even_when_direct_ip_allowed() {
         // allow_direct_ip=true lets IP-literal URLs through the early check,
         // but the RFC-range blocklist must still reject cloud-metadata IPs.
@@ -1011,14 +1387,9 @@ mod tests_non_nixl {
         };
 
         let url = url::Url::parse("http://169.254.169.254/latest/meta-data/").unwrap();
-        let result = fetcher.check_if_url_allowed(&url);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("is in a blocked range")
-        );
+        let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+        assert_invalid_argument_in_chain(error.as_ref());
+        assert!(error.to_string().contains("is in a blocked range"));
     }
 
     #[test]
@@ -1030,10 +1401,10 @@ mod tests_non_nixl {
             "kubernetes.default.svc",
         ] {
             let url = url::Url::parse(&format!("https://{host}/x")).unwrap();
-            let result = fetcher.check_if_url_allowed(&url);
-            assert!(result.is_err(), "{host} should be blocked");
+            let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+            assert_invalid_argument_in_chain(error.as_ref());
             assert!(
-                result.unwrap_err().to_string().contains("blocked"),
+                error.to_string().contains("blocked"),
                 "{host} error should mention 'blocked'"
             );
         }
@@ -1066,8 +1437,8 @@ mod tests_non_nixl {
     fn test_hostname_blocklist_case_insensitive() {
         let fetcher = MediaFetcher::default();
         let url = url::Url::parse("https://Metadata.Google.Internal/x").unwrap();
-        let result = fetcher.check_if_url_allowed(&url);
-        assert!(result.is_err());
+        let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+        assert_invalid_argument_in_chain(error.as_ref());
     }
 
     #[test]
@@ -1090,8 +1461,8 @@ mod tests_non_nixl {
         // `metadata.google.internal` at the DNS layer.
         let fetcher = MediaFetcher::default();
         let url = url::Url::parse("https://metadata.google.internal./x").unwrap();
-        let result = fetcher.check_if_url_allowed(&url);
-        assert!(result.is_err(), "FQDN with trailing dot should be rejected");
+        let error = fetcher.check_if_url_allowed(&url).unwrap_err();
+        assert_invalid_argument_in_chain(error.as_ref());
     }
 
     #[tokio::test]
@@ -1118,7 +1489,150 @@ mod tests_non_nixl {
         // The sync hostname-blocklist check fires before we attempt any DNS.
         let fetcher = MediaFetcher::default();
         let url = url::Url::parse("https://localhost/x").unwrap();
-        let result = fetcher.check_if_url_allowed_with_dns(&url).await;
-        assert!(result.is_err());
+        let error = fetcher
+            .check_if_url_allowed_with_dns(&url)
+            .await
+            .unwrap_err();
+        assert_invalid_argument_in_chain(error.as_ref());
+    }
+
+    #[tokio::test]
+    async fn test_redirect_to_blocked_target_is_terminal_and_makes_no_connection() {
+        use tokio::io::AsyncWriteExt;
+
+        let target = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let source = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let source_port = source.local_addr().unwrap().port();
+        let source_task = tokio::spawn(async move {
+            let (mut connection, _) = source.accept().await.unwrap();
+            read_request_head(&mut connection).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            connection.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let fetcher = MediaFetcher {
+            // The source test server needs these two allowances. Private IPs
+            // remain blocked, which is the redirect verdict under test.
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            ..Default::default()
+        };
+        let error = fetcher
+            .build_http_client()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{source_port}/redirect"))
+            .send()
+            .await
+            .expect_err("redirect to loopback must be rejected");
+        source_task.await.unwrap();
+
+        let error = MediaFetcher::map_fetch_error(error.into());
+        assert_invalid_argument_in_chain(error.as_ref());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), target.accept())
+                .await
+                .is_err(),
+            "redirect target unexpectedly received a connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redirect_limit_is_a_policy_rejection() {
+        use tokio::io::AsyncWriteExt;
+
+        let source = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let source_port = source.local_addr().unwrap().port();
+        let source_task = tokio::spawn(async move {
+            loop {
+                let (mut connection, _) = source.accept().await.unwrap();
+                read_request_head(&mut connection).await;
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{source_port}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                connection.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+        let error = fetcher
+            .build_http_client()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{source_port}/redirect"))
+            .send()
+            .await
+            .expect_err("redirect limit must stop the request");
+        source_task.abort();
+        assert!(source_task.await.unwrap_err().is_cancelled());
+
+        let error = MediaFetcher::map_fetch_error(error.into());
+        assert_invalid_argument_in_chain(error.as_ref());
+    }
+
+    #[tokio::test]
+    async fn test_transport_failure_is_not_a_policy_rejection() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+        let error = fetcher
+            .build_http_client()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/unavailable"))
+            .send()
+            .await
+            .expect_err("closed test port must reject the connection");
+
+        let error = MediaFetcher::map_fetch_error(error.into());
+        assert!(!MediaFetcher::is_policy_rejection(&error));
+    }
+
+    #[tokio::test]
+    async fn test_connection_time_dns_filter_is_terminal_and_makes_no_connection() {
+        let target = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let fetcher = MediaFetcher {
+            allow_direct_port: true,
+            ..Default::default()
+        };
+
+        let error = fetcher
+            .build_http_client()
+            .unwrap()
+            .get(format!("http://localhost:{target_port}/private"))
+            .send()
+            .await
+            .expect_err("localhost DNS result must be rejected at connect time");
+
+        assert_invalid_argument_in_chain(&error);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), target.accept())
+                .await
+                .is_err(),
+            "DNS-filtered target unexpectedly received a connection"
+        );
     }
 }

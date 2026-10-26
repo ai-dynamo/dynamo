@@ -3,9 +3,9 @@
 
 //! Block pool bookkeeping for thread-safe block management.
 //!
-//! - [`BlockStore<T>`]: unified single-mutex owner of reset and inactive
+//! - `BlockStore<T>`: unified single-mutex owner of reset and inactive
 //!   pool state.
-//! - [`InactiveIndex`]: pluggable T-free eviction-order trait for the
+//! - `InactiveIndex`: pluggable T-free eviction-order trait for the
 //!   inactive pool (crate-private).
 //! - Type-safe RAII guards (`MutableBlock`, `CompleteBlock`,
 //!   `ImmutableBlock`, `WeakBlock`) live in `crate::blocks` and return to

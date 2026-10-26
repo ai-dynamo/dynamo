@@ -29,6 +29,7 @@ from dynamo.profiler.utils.config import (
     get_component_by_name,
     get_component_name_by_type,
     get_main_container,
+    remove_all_argument_occurrences,
     sanitize_cli_args,
     set_unique_argument_value,
     setup_worker_component_resources,
@@ -56,6 +57,8 @@ class ConfigModifierProtocol(Protocol):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
+        *,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         ...
 
@@ -171,6 +174,14 @@ class BaseConfigModifier:
     # Worker CLI arg name for model path / name. vLLM uses "--model"; others use "--model-path".
     WORKER_MODEL_PATH_ARG: str = "--model-path"
     WORKER_SERVED_MODEL_NAME_ARG: str = "--served-model-name"
+
+    # Worker CLI args that cap the context window. An external generator derives
+    # these from one workload's target sequence lengths, which would leave the
+    # deployment unable to serve a longer request the model itself supports, so
+    # they are dropped from generated args and the engine default applies. A
+    # value set in `spec.overrides.dgd` is merged after generation and survives.
+    # Subclasses declare the arg their backend reads.
+    GENERATED_CONTEXT_LENGTH_ARGS: tuple[str, ...] = ()
 
     @classmethod
     def _get_model_name_and_path_from_args(cls, args: list[str]) -> Tuple[str, str]:
@@ -311,8 +322,8 @@ class BaseConfigModifier:
 
         # If operator defaults are being used (no command/args), we must provide full CLI.
         if not main_container.command and not main_container.args:
-            main_container.command = ["python3", "-m", "dynamo.frontend"]
-            main_container.args = []
+            main_container.command = ["python3"]
+            main_container.args = ["-m", "dynamo.frontend"]
 
         def _patch(tokens: list[str]) -> list[str]:
             tokens = set_unique_argument_value(tokens, "--model-name", model_name)
@@ -608,8 +619,23 @@ class BaseConfigModifier:
                 return component.name
         return None
 
-    @staticmethod
+    @classmethod
+    def _drop_generated_context_length_args(cls, args: list[str]) -> list[str]:
+        """Drop context-window caps a generator derived from the target ISL/OSL."""
+        for arg_name in cls.GENERATED_CONTEXT_LENGTH_ARGS:
+            remaining = remove_all_argument_occurrences(args, arg_name)
+            if remaining != args:
+                logger.info(
+                    "Dropping generated %s so the worker keeps the engine default; "
+                    "set it in spec.overrides.dgd to pin an explicit value.",
+                    arg_name,
+                )
+            args = remaining
+        return args
+
+    @classmethod
     def _apply_worker_config(
+        cls,
         component: Component,
         cli_args: list[str],
         replicas: int,
@@ -618,7 +644,9 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to one worker component."""
         component.replicas = replicas
-        get_main_container(component).args = sanitize_cli_args(list(cli_args))
+        get_main_container(component).args = cls._drop_generated_context_length_args(
+            sanitize_cli_args(list(cli_args))
+        )
 
         # Apply resources after args so multinode sizing can inspect final TP/PP flags.
         setup_worker_component_resources(component, gpus, num_gpus_per_node)
@@ -694,3 +722,40 @@ class BaseConfigModifier:
             agg_gpus,
             num_gpus_per_node=num_gpus_per_node,
         )
+
+    @classmethod
+    def set_config_replicas(
+        cls,
+        config: dict,
+        replicas: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's replica count to the worker component.
+
+        Backend-agnostic (component.replicas is a plain Kubernetes field, no
+        CLI flag involved), unlike set_config_model/set_config_kv_cache, so
+        this lives once here rather than duplicated per backend. Mirrors the
+        one relevant line of _apply_worker_config (component.replicas =
+        replicas) without touching CLI args or GPU resources, since those
+        are already set by set_config_tp_size/tep/dep separately.
+
+        Without this call, a candidate's total materialized GPU footprint
+        (replicas x gpus-per-worker) silently diverges from what was
+        actually evaluated: setup_worker_component_resources correctly sets
+        gpus-per-worker via the tp/tep/dep setters, but replicas is left at
+        whatever the base template hardcodes (confirmed: replicas: 1 in
+        every agg.yaml template), regardless of the candidate's real
+        replicas value. Confirmed in review: a real 4-GPU candidate
+        (tp=2, replicas=2) materialized as a 2-GPU DGD (tp=2, replicas=1).
+        """
+        cfg = Config.model_validate(config)
+        component_name = cls._resolve_component_name(cfg, component_type)
+        component = (
+            get_component_by_name(cfg, component_name) if component_name else None
+        )
+        if component is None:
+            raise ValueError(
+                f"could not find worker component for {component_type} to set replicas"
+            )
+        component.replicas = replicas
+        return cfg.model_dump()

@@ -24,9 +24,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
@@ -62,7 +62,7 @@ func assertOnlyKnownDCDAnnotations(t *testing.T, annotations map[string]string) 
 
 func TestDCD_RoundTrip_Empty(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "ns"},
+		Name: "empty", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "empty",
@@ -79,7 +79,7 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(3)
 	minAvailable := int32(2)
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
+		Name: "min", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -96,9 +96,51 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 	}
 }
 
+func TestDCD_RoundTrip_ExplicitMultinodeRoles(t *testing.T) {
+	t.Log("Build a hub DCD with a complete explicit multinode role schema")
+	src := &v1beta1.DynamoComponentDeployment{
+		Name: "multinode", Namespace: "ns",
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "multinode",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 4},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name:     v1beta1.ComponentRoleLeader,
+						Replicas: new(int32(1)),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "leader:1.5.0", Args: []string{"--node-rank", "0"},
+						}}}},
+					},
+					{
+						Name:     v1beta1.ComponentRoleWorker,
+						Replicas: new(int32(3)),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main", Image: "worker:1.5.0", Args: []string{"--node-rank", "$(RANK)"},
+						}}}},
+						ProviderOverride: &v1beta1.ProviderOverride{
+							APIVersion: "grove.io/v1alpha1",
+							Target:     "PodCliqueTemplateSpec",
+							Value:      apiextensionsv1.JSON{Raw: []byte(`{"topologyConstraint":{"pack":{"required":"rack"}}}`)},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Round-trip the shared role structure through v1alpha1")
+	got := dcdRoundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestDCD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "edit", Namespace: "ns"},
+		Name: "edit", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ServiceName:   "edit",
@@ -124,7 +166,7 @@ func TestDCD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 
 func TestDCD_OmittedServiceNameOriginDoesNotOverrideHubEdit(t *testing.T) {
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "default-name", Namespace: "ns"},
+		Name: "default-name", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			BackendFramework: backendFrameworkSGLang,
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
@@ -169,7 +211,7 @@ func TestDCD_OmittedServiceNameOriginDoesNotOverrideHubEdit(t *testing.T) {
 
 func TestDCD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) {
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "hub-only-edit", Namespace: "ns"},
+		Name: "hub-only-edit", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ServiceName:   "hub-only-edit",
@@ -225,7 +267,7 @@ func TestDCD_IntermediateHubPodTemplateEditsRoundTripThroughSpoke(t *testing.T) 
 
 func TestDCD_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
 	original := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "alpha-only-edit", Namespace: "ns"},
+		Name: "alpha-only-edit", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "alpha-only-edit",
@@ -255,7 +297,7 @@ func TestDCD_IntermediateSpokeAlphaOnlyEditsSurvivePreservedHub(t *testing.T) {
 
 func TestDCD_IntermediateSpokeExtraPodSpecEditsSurvivePreservedHub(t *testing.T) {
 	original := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "extra-pod-spec-edit", Namespace: "ns"},
+		Name: "extra-pod-spec-edit", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "extra-pod-spec-edit",
@@ -290,7 +332,7 @@ func TestDCD_IntermediateSpokeExtraPodSpecEditsSurvivePreservedHub(t *testing.T)
 
 func TestDCD_IntermediateHubSharedMemorySizeEditWinsOverPreservedOrigin(t *testing.T) {
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "shared-memory-edit", Namespace: "ns"},
+		Name: "shared-memory-edit", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				SharedMemory: &SharedMemorySpec{
@@ -325,7 +367,7 @@ func TestDCD_IntermediateHubSharedMemorySizeEditWinsOverPreservedOrigin(t *testi
 
 func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pt", Namespace: "ns"},
+		Name: "pt", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "pt",
@@ -362,11 +404,11 @@ func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 
 func TestDCD_RoundTrip_PodTemplateKeepsGeneratedMainMarker(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "generated-main-marker", Namespace: "ns"},
+		Name: "generated-main-marker", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName:   "generated-main-marker",
-				FrontendSidecar: ptr.To(defaultFrontendSidecarContainerName),
+				FrontendSidecar: new(defaultFrontendSidecarContainerName),
 				PodTemplate: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -410,7 +452,7 @@ func TestDCD_RoundTrip_PodTemplateKeepsGeneratedMainMarker(t *testing.T) {
 
 func TestDCD_RoundTrip_CompilationCacheWithoutGeneratedMountKeepsMarker(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "compilation-cache-no-mount", Namespace: "ns"},
+		Name: "compilation-cache-no-mount", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "compilation-cache-no-mount",
@@ -423,9 +465,7 @@ func TestDCD_RoundTrip_CompilationCacheWithoutGeneratedMountKeepsMarker(t *testi
 						Containers: []corev1.Container{{
 							Name: "main",
 							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"ready"}},
-								},
+								Exec: &corev1.ExecAction{Command: []string{"ready"}},
 							},
 						}},
 					},
@@ -469,27 +509,23 @@ func TestDCD_RoundTrip_CompilationCacheWithoutGeneratedMountKeepsMarker(t *testi
 
 func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pt-overlay", Namespace: "ns"},
+		Name: "pt-overlay", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "pt-overlay",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:        testHubOnlyTemplateName,
-						Labels:      map[string]string{"old": "label"},
-						Annotations: map[string]string{"old": "annotation"},
-					},
+					Name:        testHubOnlyTemplateName,
+					Labels:      map[string]string{"old": "label"},
+					Annotations: map[string]string{"old": "annotation"},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name:  "main",
 							Image: "worker:old",
 							Env:   []corev1.EnvVar{{Name: "OLD", Value: "old"}},
 							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"old"}},
-								},
+								Exec: &corev1.ExecAction{Command: []string{"old"}},
 							},
 							VolumeMounts: []corev1.VolumeMount{{
 								Name:      testModelPVCName,
@@ -516,9 +552,7 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 		Annotations: map[string]string{"new": "annotation"},
 	}
 	spoke.Spec.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{Command: []string{"new"}},
-		},
+		Exec: &corev1.ExecAction{Command: []string{"new"}},
 	}
 	spoke.Spec.VolumeMounts = []VolumeMount{{Name: testModelPVCName, MountPoint: "/new-models"}}
 
@@ -568,7 +602,7 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 
 func TestDCD_RoundTrip_Experimental(t *testing.T) {
 	clientPodTemplate := &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "loader"}},
+		Labels: map[string]string{"role": "loader"},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:    "gms-loader",
@@ -578,7 +612,7 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 		},
 	}
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: "ns"},
+		Name: "exp", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "exp",
@@ -634,21 +668,21 @@ func TestDCD_RoundTrip_ExperimentalGrove(t *testing.T) {
 		{
 			name: "grove.forceScalingGroup only",
 			experimental: &v1beta1.ExperimentalSpec{
-				Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+				Grove: &v1beta1.GroveSpec{ForceScalingGroup: new(true)},
 			},
 		},
 		{
 			name: "grove.forceScalingGroup alongside alpha-representable GMS",
 			experimental: &v1beta1.ExperimentalSpec{
 				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
-				Grove:            &v1beta1.GroveSpec{ForceScalingGroup: true},
+				Grove:            &v1beta1.GroveSpec{ForceScalingGroup: new(true)},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			src := &v1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "exp-grouping", Namespace: "ns"},
+				Name: "exp-grouping", Namespace: "ns",
 				Spec: v1beta1.DynamoComponentDeploymentSpec{
 					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 						ComponentName: "exp-grouping",
@@ -667,7 +701,7 @@ func TestDCD_RoundTrip_ExperimentalGrove(t *testing.T) {
 
 func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) {
 	alpha := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "alpha-enums", Namespace: "ns"},
+		Name: "alpha-enums", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				GPUMemoryService: &GPUMemoryServiceSpec{
@@ -704,7 +738,7 @@ func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) 
 	}
 
 	beta := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "beta-enums", Namespace: "ns"},
+		Name: "beta-enums", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				Experimental: &v1beta1.ExperimentalSpec{
@@ -745,7 +779,7 @@ func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) 
 // single-service replica status).
 func TestDCD_RoundTrip_Status(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "status", Namespace: "ns"},
+		Name: "status", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "status",
@@ -757,11 +791,16 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 				{Type: "Available", Status: metav1.ConditionTrue, Reason: "AllReady", Message: "ok"},
 			},
 			Component: &v1beta1.ComponentReplicaStatus{
-				ComponentKind:   v1beta1.ComponentKindDeployment,
-				ComponentNames:  []string{"dcd-0"},
-				Replicas:        3,
-				UpdatedReplicas: 3,
-				ReadyReplicas:   ptr.To(int32(3)),
+				ComponentKind:        v1beta1.ComponentKindDeployment,
+				ComponentNames:       []string{"dcd-0"},
+				ServedModelName:      "Qwen/Qwen3-8B",
+				RuntimeComponentName: "custom-decode",
+				GPUPowerLimitWatts:   new(int64(300)),
+				GPUsPerEngine:        new(int64(2)),
+				GPUsPerReplica:       new(int64(3)),
+				Replicas:             3,
+				UpdatedReplicas:      3,
+				ReadyReplicas:        new(int32(3)),
 			},
 		},
 	}
@@ -773,7 +812,7 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 
 func TestDCD_FromV1alpha1_StatusComponentNameWithoutComponentNames(t *testing.T) {
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "status-alpha", Namespace: "ns"},
+		Name: "status-alpha", Namespace: "ns",
 		Status: DynamoComponentDeploymentStatus{
 			Service: &ServiceReplicaStatus{
 				ComponentName:   "dcd-current",
@@ -800,7 +839,7 @@ func TestDCD_FromV1alpha1_StatusComponentNameWithoutComponentNames(t *testing.T)
 
 func TestDCD_FromExistingHubStatusPreservationRestoresComponentName(t *testing.T) {
 	hub := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "status-existing-hub", Namespace: "ns"},
+		Name: "status-existing-hub", Namespace: "ns",
 		Status: v1beta1.DynamoComponentDeploymentStatus{
 			Component: &v1beta1.ComponentReplicaStatus{
 				Replicas:        1,
@@ -830,7 +869,7 @@ func TestDCD_FromExistingHubStatusPreservationRestoresComponentName(t *testing.T
 
 func TestDCD_IntermediateHubStatusComponentNamesWinOverPreservedSpoke(t *testing.T) {
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "status-edit", Namespace: "ns"},
+		Name: "status-edit", Namespace: "ns",
 		Status: DynamoComponentDeploymentStatus{
 			Service: &ServiceReplicaStatus{
 				ComponentName: "dcd-old",
@@ -861,7 +900,7 @@ func TestDCD_IntermediateHubStatusComponentNamesWinOverPreservedSpoke(t *testing
 func TestDCD_FromV1alpha1_SparseSpokeSaveCarriesAlphaOnlyFields(t *testing.T) {
 	dynNs := "legacy-dyn-ns"
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "full", Namespace: "ns"},
+		Name: "full", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ComponentType:    "worker",
@@ -919,7 +958,7 @@ func TestDCD_FromV1alpha1_SparseSpokeSaveCarriesAlphaOnlyFields(t *testing.T) {
 
 func TestDCD_FromV1alpha1_PodTemplateDedicatedFields(t *testing.T) {
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pod-dedicated", Namespace: "ns"},
+		Name: "pod-dedicated", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ComponentType: "worker",
@@ -950,7 +989,7 @@ func TestDCD_FromV1alpha1_PodTemplateDedicatedFields(t *testing.T) {
 
 func TestDCD_FromV1alpha1_EmptyExtraPodSpecDoesNotMaterializePodTemplate(t *testing.T) {
 	src := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "empty-extra", Namespace: "ns"},
+		Name: "empty-extra", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ComponentType: "worker",
@@ -985,7 +1024,7 @@ func TestDCD_JSONRoundTrip_Bytes(t *testing.T) {
 	shm := resource.MustParse("4Gi")
 	replicas := int32(2)
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: "ns"},
+		Name: "json", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{

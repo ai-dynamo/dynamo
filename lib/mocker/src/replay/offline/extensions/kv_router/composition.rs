@@ -1,0 +1,611 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Dynamo-owned Router/Planner composition for the shared AISimulate Replayer.
+
+use aisimulate_core::replay::{
+    AggregatedRoundRobinPlacement, NoEngineEvents, NoReplayMetadata, PoolRoundRobinPlacement,
+    ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
+};
+use anyhow::{Context, Result, bail};
+use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+use std::collections::HashSet;
+
+use super::{KvReplayMetadata, KvRouterPlacement};
+use crate::common::protocols::MockerConfig;
+use crate::replay::ReplayPrefillLoadEstimator;
+use crate::replay::offline::extensions::kv_events::RouterEventObservation;
+
+/// Round-robin placement with an optional Dynamo Planner scaling policy.
+pub(in crate::replay) struct RoundRobinReplayComposition {
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    scaling_enabled: bool,
+}
+
+impl RoundRobinReplayComposition {
+    pub(in crate::replay) fn new(scaling_policy: Option<Box<dyn ReplayScalingPolicy>>) -> Self {
+        Self {
+            scaling_enabled: scaling_policy.is_some(),
+            scaling_policy,
+        }
+    }
+}
+
+impl ReplayComposition for RoundRobinReplayComposition {
+    type Metadata = NoReplayMetadata;
+    type Observation = NoEngineEvents;
+    type AggregatedPlacement = AggregatedRoundRobinPlacement<()>;
+    type DisaggregatedPlacement = PoolRoundRobinPlacement<()>;
+
+    fn validate_spec(&self, spec: &ReplaySpec) -> aisimulate_core::replay::ReplayResult<()> {
+        if spec.adapters.placement.provider != "round_robin" {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+                "round-robin composition received placement provider {:?}",
+                spec.adapters.placement.provider
+            )));
+        }
+        validate_adapter_descriptors(spec, "round_robin", self.scaling_enabled)?;
+        Ok(())
+    }
+
+    fn create_aggregated_placement(
+        &mut self,
+        dp_size: u32,
+        topology: Vec<WorkerTopology>,
+    ) -> Result<Self::AggregatedPlacement> {
+        Ok(AggregatedRoundRobinPlacement::new(dp_size, topology))
+    }
+
+    fn create_disaggregated_placements(
+        &mut self,
+        _prefill_dp_size: u32,
+        prefill_topology: Vec<WorkerTopology>,
+        _decode_dp_size: u32,
+        decode_topology: Vec<WorkerTopology>,
+    ) -> Result<(Self::DisaggregatedPlacement, Self::DisaggregatedPlacement)> {
+        Ok((
+            PoolRoundRobinPlacement::new(prefill_topology),
+            PoolRoundRobinPlacement::new(decode_topology),
+        ))
+    }
+
+    fn take_scaling_policy(&mut self) -> anyhow::Result<Option<Box<dyn ReplayScalingPolicy>>> {
+        Ok(self.scaling_policy.take())
+    }
+}
+
+enum KvTopologyConfig {
+    Aggregated {
+        args: Box<MockerConfig>,
+        num_workers: usize,
+    },
+    Disaggregated {
+        prefill_args: Box<MockerConfig>,
+        decode_args: Box<MockerConfig>,
+        num_prefill_workers: usize,
+        num_decode_workers: usize,
+    },
+}
+
+/// KV-aware placement plus an optional Dynamo Planner scaling policy.
+pub(in crate::replay) struct KvReplayComposition {
+    topology: KvTopologyConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    scaling_enabled: bool,
+    // TODO: Expose opt-in, per-replay selector seeding through the public CLI/Python
+    // APIs, separate from arrival_seed, and retain stable ordering for seeded ties.
+    determinism: ReplayDeterminism,
+    /// Captured from [`crate::replay::with_kv_event_lag_ms`] at construction.
+    kv_event_lag_ms: f64,
+}
+
+impl KvReplayComposition {
+    pub(in crate::replay) fn aggregated(
+        args: MockerConfig,
+        num_workers: usize,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    ) -> Self {
+        let scaling_enabled = scaling_policy.is_some();
+        Self {
+            topology: KvTopologyConfig::Aggregated {
+                args: Box::new(args),
+                num_workers,
+            },
+            router_config,
+            prefill_load_estimator,
+            scaling_policy,
+            scaling_enabled,
+            determinism: ReplayDeterminism::Random,
+            kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
+        }
+    }
+
+    pub(in crate::replay) fn disaggregated(
+        prefill_args: MockerConfig,
+        decode_args: MockerConfig,
+        num_prefill_workers: usize,
+        num_decode_workers: usize,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    ) -> Self {
+        let scaling_enabled = scaling_policy.is_some();
+        Self {
+            topology: KvTopologyConfig::Disaggregated {
+                prefill_args: Box::new(prefill_args),
+                decode_args: Box::new(decode_args),
+                num_prefill_workers,
+                num_decode_workers,
+            },
+            router_config,
+            prefill_load_estimator,
+            scaling_policy,
+            scaling_enabled,
+            determinism: ReplayDeterminism::Random,
+            kv_event_lag_ms: crate::replay::kv_event_lag_ms(),
+        }
+    }
+}
+
+impl ReplayComposition for KvReplayComposition {
+    type Metadata = KvReplayMetadata;
+    type Observation = RouterEventObservation;
+    type AggregatedPlacement = KvRouterPlacement;
+    type DisaggregatedPlacement = KvRouterPlacement;
+
+    fn validate_spec(&self, spec: &ReplaySpec) -> aisimulate_core::replay::ReplayResult<()> {
+        if spec.adapters.placement.provider != "dynamo_kv_router" {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+                "Dynamo KV composition received placement provider {:?}",
+                spec.adapters.placement.provider
+            )));
+        }
+        validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)?;
+        Ok(())
+    }
+
+    fn create_aggregated_placement(
+        &mut self,
+        dp_size: u32,
+        topology: Vec<WorkerTopology>,
+    ) -> Result<Self::AggregatedPlacement> {
+        let KvTopologyConfig::Aggregated { args, num_workers } = &self.topology else {
+            bail!("disaggregated Router composition used for aggregated replay");
+        };
+        validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
+        KvRouterPlacement::new_with_selector_seed(
+            args,
+            self.router_config.take(),
+            self.prefill_load_estimator.take(),
+            topology.len(),
+            self.determinism.selector_seed(),
+        )?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)
+    }
+
+    fn create_disaggregated_placements(
+        &mut self,
+        prefill_dp_size: u32,
+        prefill_topology: Vec<WorkerTopology>,
+        decode_dp_size: u32,
+        decode_topology: Vec<WorkerTopology>,
+    ) -> Result<(Self::DisaggregatedPlacement, Self::DisaggregatedPlacement)> {
+        let KvTopologyConfig::Disaggregated {
+            prefill_args,
+            decode_args,
+            num_prefill_workers,
+            num_decode_workers,
+        } = &self.topology
+        else {
+            bail!("aggregated Router composition used for disaggregated replay");
+        };
+        validate_runtime_topology(
+            "prefill",
+            prefill_args,
+            *num_prefill_workers,
+            prefill_dp_size,
+            &prefill_topology,
+        )?;
+        validate_runtime_topology(
+            "decode",
+            decode_args,
+            *num_decode_workers,
+            decode_dp_size,
+            &decode_topology,
+        )?;
+        let router_config = self.router_config.take();
+        let prefill = KvRouterPlacement::new_with_selector_seed(
+            prefill_args,
+            Some(derive_prefill_router_config(
+                prefill_args,
+                router_config.clone(),
+            )),
+            self.prefill_load_estimator.take(),
+            prefill_topology.len(),
+            self.determinism.selector_seed(),
+        )
+        .context("constructing prefill KV Router placement")?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        let decode = KvRouterPlacement::new_with_selector_seed(
+            decode_args,
+            Some(derive_decode_router_config(decode_args, router_config)),
+            None,
+            decode_topology.len(),
+            self.determinism.selector_seed(),
+        )
+        .context("constructing decode KV Router placement")?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?;
+        Ok((prefill, decode))
+    }
+
+    fn take_scaling_policy(&mut self) -> anyhow::Result<Option<Box<dyn ReplayScalingPolicy>>> {
+        Ok(self.scaling_policy.take())
+    }
+
+    fn set_determinism(
+        &mut self,
+        determinism: ReplayDeterminism,
+    ) -> aisimulate_core::replay::ReplayResult<()> {
+        #[cfg(not(feature = "replay-bench"))]
+        if determinism == ReplayDeterminism::CanonicalV1 {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
+                "canonical KV Router replay requires the replay-bench feature".to_string(),
+            ));
+        }
+        self.determinism = determinism;
+        Ok(())
+    }
+}
+
+fn validate_adapter_descriptors(
+    spec: &ReplaySpec,
+    expected_placement: &str,
+    scaling_enabled: bool,
+) -> aisimulate_core::replay::ReplayResult<()> {
+    if spec.adapters.placement.provider != expected_placement {
+        return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+            "composition requires placement provider {expected_placement:?}, got {:?}",
+            spec.adapters.placement.provider
+        )));
+    }
+    if !spec.adapters.placement.config.is_null() {
+        return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+            "placement provider {expected_placement:?} received an unused config descriptor"
+        )));
+    }
+
+    let expected_scaling = if scaling_enabled {
+        "dynamo_planner"
+    } else {
+        "none"
+    };
+    if spec.adapters.scaling.provider != expected_scaling {
+        return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+            "composition requires scaling provider {expected_scaling:?}, got {:?}",
+            spec.adapters.scaling.provider
+        )));
+    }
+    if !spec.adapters.scaling.config.is_null() {
+        return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+            "scaling provider {expected_scaling:?} received an unused config descriptor"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_runtime_topology(
+    stage: &str,
+    args: &MockerConfig,
+    expected_workers: usize,
+    dp_size: u32,
+    topology: &[WorkerTopology],
+) -> Result<()> {
+    let configured_dp = args.dp_size.max(1);
+    if dp_size != configured_dp {
+        bail!(
+            "{stage} Replay topology DP size {dp_size} disagrees with Dynamo engine DP size {configured_dp}"
+        );
+    }
+    if topology.len() != expected_workers {
+        bail!(
+            "{stage} Replay topology has {} logical workers but Dynamo composition was configured for {expected_workers}",
+            topology.len()
+        );
+    }
+
+    let expected_ranks = usize::try_from(dp_size).context("Replay DP size does not fit usize")?;
+    let mut scheduler_ids = HashSet::new();
+    for (expected_worker_id, worker) in topology.iter().enumerate() {
+        if worker.worker_id != expected_worker_id {
+            bail!(
+                "{stage} Replay topology worker IDs must be contiguous: expected {expected_worker_id}, got {}",
+                worker.worker_id
+            );
+        }
+        if worker.scheduler_ids.len() != expected_ranks {
+            bail!(
+                "{stage} Replay worker {} exposes {} scheduler ranks; expected DP size {dp_size}",
+                worker.worker_id,
+                worker.scheduler_ids.len()
+            );
+        }
+        for scheduler_id in &worker.scheduler_ids {
+            if !scheduler_ids.insert(*scheduler_id) {
+                bail!("{stage} Replay topology repeats scheduler ID {scheduler_id}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn base_router_config(
+    args: &MockerConfig,
+    router_config: Option<KvRouterConfig>,
+) -> KvRouterConfig {
+    let mut config = router_config.unwrap_or_default();
+    if let Some(policy) = args.runtime.router_queue_policy {
+        config.router_queue_policy = policy;
+    }
+    config
+}
+
+pub(in crate::replay) fn derive_prefill_router_config(
+    args: &MockerConfig,
+    router_config: Option<KvRouterConfig>,
+) -> KvRouterConfig {
+    let mut config = base_router_config(args, router_config);
+    config.router_track_active_blocks = false;
+    config
+}
+
+pub(in crate::replay) fn derive_decode_router_config(
+    args: &MockerConfig,
+    router_config: Option<KvRouterConfig>,
+) -> KvRouterConfig {
+    let mut config = base_router_config(args, router_config);
+    config.overlap_score_credit = 0.0;
+    config.router_assume_kv_reuse = false;
+    config.router_track_prefill_tokens = false;
+    config.router_prefill_load_model = RouterPrefillLoadModel::None;
+    config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aisimulate_core::replay::{ProviderSpec, ReplayAdapters, ReplayTopology, WorkerPoolSpec};
+
+    use crate::common::protocols::DirectRequest;
+    use crate::replay::ReplayRouterMode;
+
+    fn spec(scaling: ProviderSpec) -> ReplaySpec {
+        ReplaySpec {
+            version: 1,
+            topology: ReplayTopology::Aggregated {
+                workers: WorkerPoolSpec::default(),
+            },
+            engine: serde_json::Value::Null,
+            adapters: ReplayAdapters {
+                placement: ProviderSpec::round_robin(),
+                scaling,
+            },
+            max_sim_time_ms: None,
+            max_in_flight: None,
+            record_per_request: false,
+            sla: Default::default(),
+            requests: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn injected_scaling_policy_must_match_serializable_descriptor() {
+        let composition = RoundRobinReplayComposition::new(None);
+        let error = composition
+            .validate_spec(&spec(ProviderSpec {
+                provider: "dynamo_planner".into(),
+                config: serde_json::Value::Null,
+            }))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires scaling provider \"none\"")
+        );
+    }
+
+    #[test]
+    fn runtime_topology_must_match_dynamo_dp_and_worker_shape() {
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":2})).unwrap();
+        let error = validate_runtime_topology(
+            "aggregated",
+            &args,
+            1,
+            2,
+            &[WorkerTopology {
+                worker_id: 0,
+                scheduler_ids: vec![0],
+            }],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("expected DP size 2"));
+    }
+
+    #[test]
+    fn native_vllm_kv_router_does_not_observe_blocks_before_pass_completion() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 4,
+                "max_num_batched_tokens": 256,
+                "speedup_ratio": 0.001
+            }
+        }))
+        .unwrap();
+        let router_config = KvRouterConfig {
+            // If the first pass were published at pass start, this deliberately
+            // strong credit would route the matching mid-pass request back to
+            // the busy worker that owns those still-incomplete blocks.
+            overlap_score_credit: 100.0,
+            overlap_score_credit_decay: 0.0,
+            router_temperature: 0.0,
+            ..KvRouterConfig::default()
+        };
+        let shared_prompt = vec![7; 128];
+        let request = |uuid, arrival_timestamp_ms| DirectRequest {
+            tokens: shared_prompt.clone(),
+            max_output_tokens: 2,
+            uuid: Some(uuid::Uuid::from_u128(uuid)),
+            arrival_timestamp_ms: Some(arrival_timestamp_ms),
+            ..DirectRequest::default()
+        };
+        let report = crate::replay::offline::entrypoints::simulate_trace_with_scaling_policy(
+            args,
+            Some(router_config),
+            None,
+            vec![request(1, 0.0), request(2, 1.0)],
+            2,
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            None,
+            Default::default(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let first = report
+            .per_request
+            .iter()
+            .find(|record| record.uuid == uuid::Uuid::from_u128(1).to_string())
+            .unwrap();
+        let mid_pass = report
+            .per_request
+            .iter()
+            .find(|record| record.uuid == uuid::Uuid::from_u128(2).to_string())
+            .unwrap();
+        let first_route = first.routing_history.first().unwrap();
+        let mid_pass_route = mid_pass.routing_history.first().unwrap();
+        assert_ne!(
+            mid_pass_route.logical_worker_id, first_route.logical_worker_id,
+            "a request arriving before the first pass completed consumed its KV events"
+        );
+        assert_eq!(mid_pass_route.reported_overlap_tokens, Some(0));
+    }
+
+    #[test]
+    fn kv_event_lag_hides_a_finished_requests_blocks_until_due() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 4,
+                "max_num_batched_tokens": 256,
+            },
+        }))
+        .unwrap();
+        let router_config = KvRouterConfig {
+            overlap_score_credit: 100.0,
+            overlap_score_credit_decay: 0.0,
+            router_temperature: 0.0,
+            ..KvRouterConfig::default()
+        };
+        let shared_prompt = vec![7; 128];
+        let request = |uuid, arrival_timestamp_ms| DirectRequest {
+            tokens: shared_prompt.clone(),
+            max_output_tokens: 2,
+            uuid: Some(uuid::Uuid::from_u128(uuid)),
+            arrival_timestamp_ms: Some(arrival_timestamp_ms),
+            ..DirectRequest::default()
+        };
+        // Request 2 arrives 10 s after request 1, long after it finished. Request 1's cached
+        // blocks attract it unless the KV event lag exceeds that gap.
+        let routes = |lag_ms: f64| {
+            let report = crate::replay::with_kv_event_lag_ms(lag_ms, || {
+                crate::replay::offline::entrypoints::simulate_trace_with_scaling_policy(
+                    args.clone(),
+                    Some(router_config.clone()),
+                    None,
+                    vec![request(1, 0.0), request(2, 10_000.0)],
+                    2,
+                    1.0,
+                    ReplayRouterMode::KvRouter,
+                    true,
+                    None,
+                    Default::default(),
+                    None,
+                    None,
+                )
+            })
+            .unwrap()
+            .unwrap();
+            [1, 2].map(|uuid| {
+                let record = report
+                    .per_request
+                    .iter()
+                    .find(|record| record.uuid == uuid::Uuid::from_u128(uuid).to_string())
+                    .unwrap();
+                let route = record.routing_history.first().unwrap();
+                (route.logical_worker_id, route.reported_overlap_tokens)
+            })
+        };
+
+        for lag_ms in [0.0, 5_000.0] {
+            let [first, second] = routes(lag_ms);
+            assert_eq!(second.0, first.0, "lag {lag_ms} ms");
+            assert!(second.1.is_some_and(|tokens| tokens > 0), "lag {lag_ms} ms");
+        }
+
+        let [_, stale_second] = routes(60_000.0);
+        assert_eq!(stale_second.1, Some(0));
+    }
+
+    #[test]
+    fn kv_event_lag_reaches_both_disaggregated_routers() {
+        let topology = || {
+            vec![WorkerTopology {
+                worker_id: 0,
+                scheduler_ids: vec![0],
+            }]
+        };
+        let mut composition = crate::replay::with_kv_event_lag_ms(25.0, || {
+            KvReplayComposition::disaggregated(
+                MockerConfig::default(),
+                MockerConfig::default(),
+                1,
+                1,
+                None,
+                None,
+                None,
+            )
+        })
+        .unwrap();
+        let (prefill, decode) = composition
+            .create_disaggregated_placements(1, topology(), 1, topology())
+            .unwrap();
+        assert_eq!(prefill.router.kv_event_lag_ms, 25.0);
+        assert_eq!(decode.router.kv_event_lag_ms, 25.0);
+    }
+
+    #[cfg(feature = "replay-bench")]
+    #[test]
+    fn kv_composition_uses_only_explicit_canonical_determinism() {
+        let mut composition =
+            KvReplayComposition::aggregated(MockerConfig::default(), 1, None, None, None);
+        assert_eq!(composition.determinism.selector_seed(), None);
+
+        composition
+            .set_determinism(ReplayDeterminism::CanonicalV1)
+            .unwrap();
+
+        assert_eq!(
+            composition.determinism.selector_seed(),
+            Some(aisimulate_core::replay::CANONICAL_SELECTOR_SEED)
+        );
+    }
+}

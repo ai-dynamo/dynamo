@@ -23,7 +23,7 @@ use crate::block_manager::kv_consolidator::KvEventConsolidator;
 ///   from the cache. This messasge will include enough information to identify the block within a
 ///   storage hierarchy; minmally, the sequence hash and the storage location/class.
 ///
-/// The [RegistrationHandle] associated from [EventManager::block_register] call is an RAII object
+/// The [RegistrationHandle] associated from `EventManager::block_register` call is an RAII object
 /// which will trigger a `Remove` event on being dropped.
 pub trait EventManager: EventPublisher + EventReleaseManager + Send + Sync {
     // fn register_block(&self, token_block: &TokenBlock) -> PublishHandle;

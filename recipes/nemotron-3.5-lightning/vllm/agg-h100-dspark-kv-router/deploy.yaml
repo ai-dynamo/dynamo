@@ -140,8 +140,6 @@ spec:
                 - --block-size
                 - "64"
                 - --async-scheduling
-                - --quantization
-                - modelopt_fp4
                 - --mamba-backend
                 - flashinfer
                 - --mamba-ssm-cache-dtype

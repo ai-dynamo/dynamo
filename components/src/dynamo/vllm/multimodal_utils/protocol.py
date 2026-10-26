@@ -170,6 +170,8 @@ class MultiModalRequest(BaseModel):
 class MultiModalInput(BaseModel):
     image_url: Optional[str] = None
     video_url: Optional[str] = None
+    # Frontend-decoded RGB descriptor, mutually exclusive with image_url.
+    image_decoded: Optional[dict[str, Any]] = None
 
 
 class MultiModalGroup(BaseModel):
@@ -192,6 +194,8 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     # Add these fields for Qwen VL (mRoPE) decode-only worker
     image_grid_thw: Optional[List[List[int]]] = None
     embeddings_shape: Optional[List[int]] = None
+    # Opaque frontend-derived scope for encoded/decoded image caches.
+    image_cache_scope: Optional[str] = None
 
 
 class MyRequestOutput(BaseModel):

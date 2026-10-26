@@ -22,37 +22,42 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/scale"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type groveScaler struct {
-	scaleClient scale.ScalesGetter
+	client client.Client
 }
 
-func newGroveScaler(scaleClient scale.ScalesGetter) *groveScaler {
-	return &groveScaler{scaleClient: scaleClient}
+func newGroveScaler(kubeClient client.Client) *groveScaler {
+	return &groveScaler{client: kubeClient}
 }
 
 // Reconcile applies component replica changes to the Grove resources created
-// asynchronously from the PodCliqueSet.
+// asynchronously from the PodCliqueSet. scalingBlocked is resolved after PCS
+// synchronization. While blocked, observe capacity without writing replicas.
+// The result reports whether an explicit replica change is waiting.
 func (s *groveScaler) Reconcile(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) error {
+	scalingBlocked bool,
+) (deferred bool, err error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
+	managedComponents := req.ManagedComponents()
+	pcsName := dynamo.PCSNameForDGD(req.DGD, req.IsDelegated)
 
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
+	for i := range managedComponents {
+		component := &managedComponents[i]
 		componentName := component.ComponentName
 		info := checkpointInfos[componentName]
 		gated := info != nil &&
@@ -71,18 +76,42 @@ func (s *groveScaler) Reconcile(
 		}
 
 		usesPCSG := component.UsesPCSG()
-		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
+		resourceName := dynamo.GroveComponentResourceName(pcsName, componentName)
 		resourceKind := "PodClique"
 		gvr := consts.PodCliqueGVR
 		if usesPCSG {
 			resourceKind = "PodCliqueScalingGroup"
 			gvr = consts.PodCliqueScalingGroupGVR
 		}
+		// Observe capacity while the workload configuration or coherent rollout is pending.
+		if scalingBlocked {
+			var child client.Object
+			if usesPCSG {
+				child = &grovev1alpha1.PodCliqueScalingGroup{}
+			} else {
+				child = &grovev1alpha1.PodClique{}
+			}
+			if err := s.client.Get(ctx, client.ObjectKey{Name: resourceName, Namespace: req.DGD.Namespace}, child); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return deferred, err
+			}
+			switch resource := child.(type) {
+			case *grovev1alpha1.PodClique:
+				deferred = deferred || resource.Spec.Replicas != replicas
+			case *grovev1alpha1.PodCliqueScalingGroup:
+				deferred = deferred || resource.Spec.Replicas != replicas
+			}
+			continue
+		}
+
+		// Unexpected admission or API failures retain the normal controller retry path.
 		if err := s.scaleResource(
 			ctx,
 			gvr,
 			resourceName,
-			dgd.Namespace,
+			req.DGD.Namespace,
 			replicas,
 		); err != nil {
 			logger.Error(
@@ -93,12 +122,12 @@ func (s *groveScaler) Reconcile(
 				"resourceName", resourceName,
 				"replicas", replicas,
 			)
-			return fmt.Errorf("failed to scale %s %s: %w", resourceKind, resourceName, err)
+			return deferred, fmt.Errorf("failed to scale %s %s: %w", resourceKind, resourceName, err)
 		}
 	}
 
-	logger.V(1).Info("Successfully reconciled Grove scaling operations")
-	return nil
+	logger.V(1).Info("Successfully reconciled Grove scaling operations", "deferred", deferred)
+	return deferred, nil
 }
 
 func (s *groveScaler) scaleResource(
@@ -108,7 +137,7 @@ func (s *groveScaler) scaleResource(
 	namespace string,
 	newReplicas int32,
 ) error {
-	err := commoncontroller.ScaleResource(ctx, s.scaleClient, gvr, namespace, resourceName, newReplicas)
+	err := commoncontroller.ScaleResource(ctx, s.client, gvr, namespace, resourceName, newReplicas)
 	if apierrors.IsNotFound(err) {
 		// Grove creates these resources asynchronously after the PodCliqueSet.
 		// A later reconciliation retries the scale once the child exists.

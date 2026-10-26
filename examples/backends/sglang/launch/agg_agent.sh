@@ -72,7 +72,6 @@ python3 -m dynamo.sglang \
   --tp "$TP" \
   --trust-remote-code \
   --radix-eviction-policy priority \
-  --skip-tokenizer-init \
   --dyn-reasoning-parser glm45 \
   --dyn-tool-call-parser glm47 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \

@@ -6,7 +6,10 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, WorkerWithDpRank};
+use dynamo_kv_router::indexer::cuckoo::CanonicalSequenceBlockHash;
+use dynamo_kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData, WorkerWithDpRank,
+};
 use dynamo_mocker::loadgen::{SessionTrace, Trace};
 use dynamo_mocker::replay::ReplayWorkerArtifacts;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -394,8 +397,14 @@ fn verify_sha256(expected: &str, actual: &str) -> anyhow::Result<()> {
 
 #[derive(Default)]
 struct PoolCapacityTracker {
-    members: FxHashMap<WorkerWithDpRank, FxHashSet<u64>>,
-    global_degrees: FxHashMap<u64, u32>,
+    /// Per-source engine vocabulary, mirroring the real CKF: capacity is sized by canonical
+    /// hashes, because different sources can assign different external ids to identical
+    /// canonical content and the filter deduplicates on the canonical domain.
+    lineage: FxHashMap<
+        WorkerWithDpRank,
+        FxHashMap<ExternalSequenceBlockHash, CanonicalSequenceBlockHash>,
+    >,
+    global_degrees: FxHashMap<CanonicalSequenceBlockHash, u32>,
     peak_active_distinct: usize,
     event_count: usize,
 }
@@ -403,14 +412,10 @@ struct PoolCapacityTracker {
 impl PoolCapacityTracker {
     fn apply(&mut self, member: WorkerWithDpRank, event: &KvCacheEvent) -> anyhow::Result<()> {
         match &event.data {
-            KvCacheEventData::Stored(stored) => {
-                for block in &stored.blocks {
-                    self.store(member, block.block_hash.0)?;
-                }
-            }
+            KvCacheEventData::Stored(stored) => self.store(member, stored)?,
             KvCacheEventData::Removed(removed) => {
                 for hash in &removed.block_hashes {
-                    self.remove(member, hash.0)?;
+                    self.remove(member, *hash)?;
                 }
             }
             KvCacheEventData::Cleared => self.clear(member)?,
@@ -423,46 +428,69 @@ impl PoolCapacityTracker {
         Ok(())
     }
 
-    fn store(&mut self, member: WorkerWithDpRank, hash: u64) -> anyhow::Result<()> {
-        if !self.members.entry(member).or_default().insert(hash) {
-            return Ok(());
+    fn store(&mut self, member: WorkerWithDpRank, stored: &KvCacheStoreData) -> anyhow::Result<()> {
+        let lineage = self.lineage.entry(member).or_default();
+        let mut previous = match stored.parent_hash {
+            Some(parent) => Some(
+                *lineage
+                    .get(&parent)
+                    .with_context(|| format!("capacity tracker: unknown parent {}", parent.0))?,
+            ),
+            None => None,
+        };
+        for block in &stored.blocks {
+            let canonical = previous.map_or_else(
+                || CanonicalSequenceBlockHash::root(block.tokens_hash),
+                |parent| parent.child(block.tokens_hash),
+            );
+            previous = Some(canonical);
+            if lineage.insert(block.block_hash, canonical).is_some() {
+                continue;
+            }
+            let degree = self.global_degrees.entry(canonical).or_default();
+            *degree = degree
+                .checked_add(1)
+                .context("DC CKF ownership degree overflow while sizing corpus")?;
         }
-        let degree = self.global_degrees.entry(hash).or_default();
-        *degree = degree
-            .checked_add(1)
-            .context("DC CKF ownership degree overflow while sizing corpus")?;
         Ok(())
     }
 
-    fn remove(&mut self, member: WorkerWithDpRank, hash: u64) -> anyhow::Result<()> {
-        let Some(hashes) = self.members.get_mut(&member) else {
+    fn remove(
+        &mut self,
+        member: WorkerWithDpRank,
+        hash: ExternalSequenceBlockHash,
+    ) -> anyhow::Result<()> {
+        let Some(lineage) = self.lineage.get_mut(&member) else {
             return Ok(());
         };
-        if !hashes.remove(&hash) {
+        let Some(canonical) = lineage.remove(&hash) else {
             return Ok(());
+        };
+        if lineage.is_empty() {
+            self.lineage.remove(&member);
         }
-        if hashes.is_empty() {
-            self.members.remove(&member);
-        }
-        self.decrement(hash)
+        self.decrement(canonical)
     }
 
     fn clear(&mut self, member: WorkerWithDpRank) -> anyhow::Result<()> {
-        let Some(hashes) = self.members.remove(&member) else {
+        let Some(lineage) = self.lineage.remove(&member) else {
             return Ok(());
         };
-        for hash in hashes {
-            self.decrement(hash)?;
+        for (_, canonical) in lineage {
+            self.decrement(canonical)?;
         }
         Ok(())
     }
 
-    fn decrement(&mut self, hash: u64) -> anyhow::Result<()> {
-        let Some(degree) = self.global_degrees.get_mut(&hash) else {
-            bail!("capacity tracker lost ownership degree for hash {hash}");
+    fn decrement(&mut self, canonical: CanonicalSequenceBlockHash) -> anyhow::Result<()> {
+        let Some(degree) = self.global_degrees.get_mut(&canonical) else {
+            bail!(
+                "capacity tracker lost ownership degree for canonical hash {}",
+                canonical.as_u64()
+            );
         };
         if *degree == 1 {
-            self.global_degrees.remove(&hash);
+            self.global_degrees.remove(&canonical);
         } else {
             *degree -= 1;
         }
@@ -492,7 +520,14 @@ mod tests {
         Ok(file)
     }
 
-    fn stored(event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
+    fn source_external(worker: u64, dp_rank: u32, hash: u64) -> ExternalSequenceBlockHash {
+        // Real engines assign per-process ids, so the fixture derives externals that differ
+        // per worker and per rank; only the canonical domain may deduplicate across sources.
+        const EXTERNAL_MASK: u64 = 0x5A4E_D00D_7711_0202;
+        ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK ^ (worker << 32) ^ ((dp_rank as u64) << 48))
+    }
+
+    fn stored(worker: u64, event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
         KvCacheEvent {
             event_id,
             dp_rank,
@@ -502,7 +537,7 @@ mod tests {
                 blocks: hashes
                     .iter()
                     .map(|hash| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(*hash),
+                        block_hash: source_external(worker, dp_rank, *hash),
                         tokens_hash: LocalBlockHash(*hash),
                         mm_extra_info: None,
                     })
@@ -511,15 +546,14 @@ mod tests {
         }
     }
 
-    fn removed(event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
+    fn removed(worker: u64, event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
         KvCacheEvent {
             event_id,
             dp_rank,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: hashes
                     .iter()
-                    .copied()
-                    .map(ExternalSequenceBlockHash)
+                    .map(|hash| source_external(worker, dp_rank, *hash))
                     .collect(),
             }),
         }
@@ -654,17 +688,19 @@ mod tests {
                 trace_distinct_hash_upper_bound: 2,
             }],
         };
+        // Both workers store the same canonical [10, 20] prefix under worker-local external
+        // ids; external counting would report a peak of 5, canonical counting reports 3.
         let artifacts = vec![
             ReplayWorkerArtifacts {
                 kv_events: vec![
-                    timed(1, stored(1, 0, &[10, 20])),
-                    timed(3, removed(2, 0, &[10, 20])),
+                    timed(1, stored(0, 1, 0, &[10, 20])),
+                    timed(3, removed(0, 2, 0, &[10, 20])),
                 ],
                 ..Default::default()
             },
             ReplayWorkerArtifacts {
                 kv_events: vec![
-                    timed(2, stored(1, 0, &[20, 30])),
+                    timed(2, stored(1, 1, 0, &[10, 20, 30])),
                     timed(
                         4,
                         KvCacheEvent {

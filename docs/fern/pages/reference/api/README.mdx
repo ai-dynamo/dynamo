@@ -45,8 +45,11 @@ come from docstrings read by [griffe][griffe]: edit the source, then rerun
 takes one more hop — `make generate-api-docs` in `deploy/operator/` turns the
 CRD Go types into `api-reference-k8s.md`, which `gen_kubernetes_api.py` then
 renders, so editing a Go type and rerunning the renderer alone changes nothing.
-The `Generated API References` pre-merge job runs all three with `--check`,
-scoped to the branch's own changes on a pull request and strict on `main`.
+The Python and Rust pages are not committed: the docs pipeline generates them
+at publish time, and the `Generated API References` pre-merge job reruns both
+generators to prove a source change cannot break them. Only the Kubernetes
+output stays committed, checked with `--check` scoped to the branch's own
+changes on a pull request and strict on `main`.
 </Note>
 
 [griffe]: https://mkdocstrings.github.io/griffe/
