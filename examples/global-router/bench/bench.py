@@ -385,31 +385,32 @@ def ssm_output(member, command_id, instance):
 
 
 def cpu_sampler_script(namespace, samples, interval_s):
-    """Samples per-container CPU on a node with crictl and prints, for each
-    container in ``namespace``, its busiest interval in cores."""
+    """Samples per-pod CPU on a node from cgroup v2 ``cpu.stat`` and prints,
+    for each pod in ``namespace``, its busiest interval in cores. Pod names
+    come from the kubelet's ``/var/log/pods/<namespace>_<pod>_<uid>`` dirs."""
     return f"""python3 - <<'PY'
-import json, subprocess, time
+import glob, json, os, time
 def snap():
-    stats = json.loads(subprocess.run(["crictl", "stats", "-o", "json"],
-                                      capture_output=True, text=True, check=True).stdout)
     out = {{}}
-    for entry in stats.get("stats", []):
-        labels = entry["attributes"].get("labels", {{}})
-        if labels.get("io.kubernetes.pod.namespace") != "{namespace}":
+    for directory in glob.glob("/var/log/pods/{namespace}_*"):
+        _, pod, uid = os.path.basename(directory).rsplit("_", 2)
+        slices = glob.glob("/sys/fs/cgroup/kubepods.slice/**/kubepods*-pod%s.slice/cpu.stat"
+                           % uid.replace("-", "_"), recursive=True)
+        if not slices:
             continue
-        key = labels.get("io.kubernetes.pod.name", "?") + "/" + labels.get("io.kubernetes.container.name", "?")
-        cpu = entry.get("cpu") or {{}}
-        out[key] = (int(cpu.get("timestamp", 0)), int((cpu.get("usageCoreNanoSeconds") or {{}}).get("value", 0)))
+        with open(slices[0]) as stat:
+            usage = int(dict(line.split() for line in stat)["usage_usec"])
+        out[pod] = (time.monotonic(), usage)
     return out
 peak = {{}}
 previous = snap()
 for _ in range({samples}):
     time.sleep({interval_s})
     current = snap()
-    for key, (stamp, used) in current.items():
-        if key in previous and stamp > previous[key][0]:
-            cores = (used - previous[key][1]) / (stamp - previous[key][0])
-            peak[key] = max(peak.get(key, 0.0), round(cores, 2))
+    for pod, (stamp, used) in current.items():
+        if pod in previous and stamp > previous[pod][0]:
+            cores = (used - previous[pod][1]) / 1e6 / (stamp - previous[pod][0])
+            peak[pod] = max(peak.get(pod, 0.0), round(cores, 2))
     previous = current
 print("BENCH_CPU " + json.dumps(peak, sort_keys=True))
 PY"""
