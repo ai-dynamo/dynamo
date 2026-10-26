@@ -1,9 +1,9 @@
 ---
-name: capture-nsys-timeline
+name: profile-with-nsight-operator
 description: >-
-  Captures Nsight Systems (nsys) timelines from chosen components of a Dynamo DynamoGraphDeployment on Kubernetes
-  with NVIDIA Nsight Operator, using kubectl and Nsight's nsight_operator.py CLI, and verifies that every expected pod
-  produced a report. Use when someone asks to profile, trace, or record a timeline of a Dynamo frontend, router,
+  Profiles chosen components of a Dynamo DynamoGraphDeployment on Kubernetes with Nsight Systems (nsys) through
+  NVIDIA Nsight Operator, using kubectl and Nsight's nsight_operator.py CLI, and verifies that every expected pod
+  produced a report. Use when someone asks to profile, trace, or run nsys on a Dynamo frontend, router,
   aggregated worker, or prefill or decode worker on a cluster that runs Nsight Operator. Use deploy-dynamo-recipe for
   bring-up and troubleshoot-dynamo for failed deployments.
 license: Apache-2.0
@@ -16,7 +16,7 @@ metadata:
     - nsight-systems
 ---
 
-# Capture Nsys Timeline
+# Profile with Nsight Operator
 
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -25,12 +25,12 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Purpose
 
-Record `nsys` timelines of the Dynamo components a user names, in one capture window, and prove that every expected
-pod produced a report. Nsight Operator adds `nsys` to selected pods when they are created; this skill chooses the
+Profile the Dynamo components a user names with `nsys`, in one capture window, and prove that every expected pod
+produced a report. Nsight Operator adds `nsys` to selected pods when they are created; this skill chooses the
 selectors, writes the per-test profile config, runs the window with Nsight's CLI, and checks completeness. It does
 not wrap or replace `nsight_operator.py`.
 
-Read `docs/fern/pages/kubernetes/operations/nsight-systems-timelines.mdx` first. It holds the profile-config
+Read `docs/fern/pages/kubernetes/operations/nsight-operator-profiling.mdx` first. It holds the profile-config
 template, the label table, the per-component `nsys` arguments and NVTX settings, and the pitfalls. This skill does
 not repeat them.
 
@@ -145,7 +145,7 @@ Report:
 
 ## References
 
-- `docs/fern/pages/kubernetes/operations/nsight-systems-timelines.mdx`: template, labels, settings, and pitfalls.
+- `docs/fern/pages/kubernetes/operations/nsight-operator-profiling.mdx`: template, labels, settings, and pitfalls.
 - `docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx`: the "Pod Labels" section.
 - [Nsight Operator documentation](https://docs.nvidia.com/nsight-operator/), including the multitenant quickstart and
   the CLI reference.

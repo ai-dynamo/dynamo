@@ -83,7 +83,7 @@ Identify every semantic owner and preserve the field's documented end-to-end beh
 - `dynamo-router-starter` — start/patch router modes with smoke checks
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
 - `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
-- `capture-nsys-timeline` — capture Nsight Systems timelines of chosen components with Nsight Operator and verify every report arrived
+- `profile-with-nsight-operator` — profile chosen components with Nsight Systems through Nsight Operator and verify every report arrived
 
 **Adding a skill:** the folder name must equal the frontmatter `name` (kebab-case); the
 `description` is third person, states what the skill does and when to use it, and is at

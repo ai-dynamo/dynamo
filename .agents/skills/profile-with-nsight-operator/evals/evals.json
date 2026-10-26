@@ -1,10 +1,10 @@
 {
-  "skill": "capture-nsys-timeline",
+  "skill": "profile-with-nsight-operator",
   "cases": [
     {
       "id": "decode-only-window",
       "question": "Profile only the decode workers of my DGD vllm-disagg in namespace perf-test for 60 seconds while my benchmark runs. Nsight Operator is already installed.",
-      "expected_skill": "capture-nsys-timeline",
+      "expected_skill": "profile-with-nsight-operator",
       "ground_truth": "Write a per-test profile config with only a decode rule selecting the DGD name label and nvidia.com/dynamo-component-type decode, one literal tag, apply it before the pods are created, confirm one collection agent per decode pod, open one window with profiler-start --delay and --duration 60, and poll ls until every decode pod has a report with kernel rows.",
       "expected_behavior": [
         "Check which profile-config fields the API server accepts and server-dry-run the config",
@@ -18,7 +18,7 @@
     {
       "id": "helper-selects-nothing",
       "question": "I ran Nsight's Dynamo helper with --components Frontend Backend and none of my Dynamo pods got injected. Why?",
-      "expected_skill": "capture-nsys-timeline",
+      "expected_skill": "profile-with-nsight-operator",
       "ground_truth": "The helper compares the values with the lowercase nvidia.com/dynamo-component-type label; Frontend is a component name and Dynamo has no backend type. Use lowercase types such as frontend, worker, prefill, or decode, then recreate the pods.",
       "expected_behavior": [
         "Explain that component types are lowercase and Frontend is a component name",
@@ -28,8 +28,8 @@
     },
     {
       "id": "frontend-nvtx-ranges",
-      "question": "Capture a CPU timeline of the frontend and its KV router with Dynamo's own NVTX ranges.",
-      "expected_skill": "capture-nsys-timeline",
+      "question": "Profile the CPU side of the frontend and its KV router, with Dynamo's own NVTX ranges.",
+      "expected_skill": "profile-with-nsight-operator",
       "ground_truth": "Select the frontend type label only (the KV router runs inside the frontend by default), use the CPU tool config without CUDA tracing, and set DYN_ENABLE_RUST_NVTX=1 on Dynamo 1.6.0 or newer images before the pods start.",
       "expected_behavior": [
         "Select the frontend with the frontend type label",
@@ -41,7 +41,7 @@
     {
       "id": "missing-report",
       "question": "The window ended two minutes ago but ls shows reports for only two of my three workers. Can I delete the DGD now?",
-      "expected_skill": "capture-nsys-timeline",
+      "expected_skill": "profile-with-nsight-operator",
       "ground_truth": "Do not delete the DGD yet. Keep polling ls within a bounded wait, check status for the missing pod's collection agent, and if it never reports, mark the capture incomplete and check injection for that pod.",
       "expected_behavior": [
         "Keep the DGD until every expected pod has a report or the bounded wait ends",
