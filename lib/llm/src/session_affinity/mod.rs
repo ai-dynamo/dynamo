@@ -28,8 +28,16 @@ pub(crate) fn config_from_env(
     ttl: Duration,
     mode: SessionAffinityMode,
 ) -> Result<SessionAffinityConfig, Error> {
+    config_from_lookup(ttl, mode, |key| env::var(key))
+}
+
+fn config_from_lookup(
+    ttl: Duration,
+    mode: SessionAffinityMode,
+    get_env: impl FnOnce(&str) -> Result<String, env::VarError>,
+) -> Result<SessionAffinityConfig, Error> {
     let mut config = SessionAffinityConfig::new(ttl).with_mode(mode);
-    match env::var(DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES) {
+    match get_env(DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES) {
         Ok(value) => {
             config.max_entries = value
                 .parse::<NonZeroUsize>()
