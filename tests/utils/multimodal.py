@@ -8,9 +8,11 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Type
+from unittest.mock import patch
 
 import pytest
 
+from dynamo.common.multimodal.nvdec_decoder import DISABLE_ENV, nvdec_available
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import (
     MULTIMODAL_IMG_URL,
@@ -36,6 +38,16 @@ AUDIO_TEST_URL = (
     "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client"
     "/main/datasets/mini_en/wav/1221-135766-0002.wav"
 )
+
+
+def nvdec_unavailable() -> bool:
+    """Probe NVDEC with the setting passed to NVDEC serve-test workers."""
+    nvdec_available.cache_clear()
+    try:
+        with patch.dict(os.environ, {DISABLE_ENV: "0"}):
+            return not nvdec_available()
+    finally:
+        nvdec_available.cache_clear()
 
 
 # ---------------------------------------------------------------------------

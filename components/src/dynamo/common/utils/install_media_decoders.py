@@ -10,13 +10,14 @@ their input-format surface narrow by default.
 
 Two input classes already work without this module. VP8/VP9 decode through the
 in-tree FFmpeg, and H.264/H.265 decode on the GPU through NVDEC
-(``common.multimodal.nvdec_decoder``), which every backend routes to by default.
+(``common.multimodal.nvdec_decoder``), when enabled with ``DYN_DISABLE_NVDEC=0``.
 
 This module covers what is left:
 
 * compressed audio (AAC and friends), which NVDEC does not decode at all, and
-* H.264/H.265 on hosts where NVDEC is unavailable -- a GPU with no video decode
-  engine, or a container not granted the ``video`` driver capability.
+* H.264/H.265 on hosts where NVDEC is disabled or unavailable -- including the
+  default configuration, a GPU with no video decode engine, or a container not
+  granted the ``video`` driver capability.
 
 Each backend decodes such input through a specific Python package whose wheel
 bundles its own FFmpeg, so the support can be added by a plain ``pip install``
@@ -123,7 +124,7 @@ VALIDATED_SPECS: dict[str, str] = {d.package: d.spec for d in (_OPENCV, _PYAV, _
 #
 # Excluded on purpose, for two different reasons:
 #   * PyNvVideoCodec -- already shipped in every CUDA runtime image as the
-#     NVDEC path, so H.264/H.265 decode needs no install there. Listing it
+#     NVDEC path, so H.264/H.265 decode needs no install when enabled. Listing it
 #     here would reinstall what is already present.
 #   * torchcodec, PyAV-on-SGLang, opencv-on-SGLang -- no Dynamo decode path
 #     imports them, so installing them would add a carrier nothing calls.

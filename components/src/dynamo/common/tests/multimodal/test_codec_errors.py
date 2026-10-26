@@ -122,6 +122,18 @@ def test_unknown_codec_still_actionable(monkeypatch):
     assert "install_media_decoders sglang" in msg
 
 
+def test_unknown_codec_without_nvdec_names_setting(monkeypatch):
+    """The SGLang preflight can report NVDEC guidance before probing the codec."""
+    monkeypatch.setattr(codec_errors, "nvdec_available", lambda: False)
+    msg = str(video_decoder_missing("sglang", "decord2", "decord", None))
+
+    assert "an undetected codec" in msg
+    assert "For H.264/H.265 video" in msg
+    assert "DYN_DISABLE_NVDEC=0" in msg
+    assert "NVIDIA_DRIVER_CAPABILITIES" in msg
+    assert "install_media_decoders sglang" in msg
+
+
 def test_audio_message_has_no_hardware_alternative():
     err = audio_decoder_missing("vllm")
 

@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.serve.common import (
     SERVE_TEST_DIR,
@@ -31,7 +30,11 @@ from tests.serve.multimodal_profiles.sglang import (
 )
 from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
-from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
+from tests.utils.multimodal import (
+    make_image_payload_b64,
+    make_multimodal_configs,
+    nvdec_unavailable,
+)
 from tests.utils.payload_builder import (
     anthropic_messages_payload_default,
     anthropic_messages_stream_payload_default,
@@ -94,10 +97,9 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
 # clip failed the run with no relation to the code under test.
 VIDEO_TEST_URI = MULTIMODAL_VIDEO_URL
 
-# Evaluated once at collection, like the vLLM profile's guard: NVDEC needs
-# DYN_DISABLE_NVDEC=0 and the container's driver "video" capability, which CI
-# runners do not grant.
-_NVDEC_UNAVAILABLE = not nvdec_available()
+# Probe once at collection with DYN_DISABLE_NVDEC=0, matching the NVDEC
+# serve case's worker configuration.
+_NVDEC_UNAVAILABLE = nvdec_unavailable()
 
 # Generated multimodal configs from profile definitions (mirrors test_vllm.py).
 # Each profile expands into one config per MmCase per topology with the
@@ -851,13 +853,11 @@ sglang_configs = {
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
-            # CI runners lack the driver "video" capability libnvcuvid needs, so
-            # this skips there and is exercised on GPU hardware instead.
+            # Skip when the driver "video" capability libnvcuvid needs is unavailable.
             pytest.mark.skipif(
                 _NVDEC_UNAVAILABLE,
                 reason=(
-                    "NVDEC is disabled or unavailable. Enable it with DYN_DISABLE_NVDEC=0 "
-                    "and grant the driver 'video' capability "
+                    "NVDEC is unavailable. Grant the driver 'video' capability "
                     "(NVIDIA_DRIVER_CAPABILITIES)"
                 ),
             ),
@@ -881,6 +881,7 @@ sglang_configs = {
         ],
         timeout=420,
         env={
+            "DYN_DISABLE_NVDEC": "0",
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
             "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",

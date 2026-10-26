@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import os
+from functools import lru_cache
 
 import pytest
 
@@ -10,6 +12,7 @@ from tests.serve.conftest import (
     MULTIMODAL_VIDEO_URL,
     get_multimodal_test_image_bytes,
 )
+from tests.utils import multimodal
 from tests.utils.multimodal import (
     UuidPassthroughChatPayload,
     make_mixed_image_video_payload,
@@ -21,6 +24,42 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
 ]
+
+
+@pytest.mark.parametrize("disable_value", [None, "1", "0"])
+@pytest.mark.parametrize("available", [False, True])
+def test_nvdec_probe_restores_setting_and_cache(monkeypatch, disable_value, available):
+    if disable_value is None:
+        monkeypatch.delenv("DYN_DISABLE_NVDEC", raising=False)
+    else:
+        monkeypatch.setenv("DYN_DISABLE_NVDEC", disable_value)
+
+    @lru_cache(maxsize=1)
+    def nvdec_available():
+        return os.environ.get("DYN_DISABLE_NVDEC") == "0" and available
+
+    monkeypatch.setattr(multimodal, "nvdec_available", nvdec_available)
+    nvdec_available()  # An earlier collection probe may have cached the default.
+
+    assert multimodal.nvdec_unavailable() is not available
+    assert os.environ.get("DYN_DISABLE_NVDEC") == disable_value
+    assert nvdec_available.cache_info().currsize == 0
+    assert nvdec_available() is (disable_value == "0" and available)
+
+
+def test_nvdec_probe_restores_setting_on_failure(monkeypatch):
+    monkeypatch.delenv("DYN_DISABLE_NVDEC", raising=False)
+
+    @lru_cache(maxsize=1)
+    def nvdec_available():
+        assert os.environ["DYN_DISABLE_NVDEC"] == "0"
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(multimodal, "nvdec_available", nvdec_available)
+    with pytest.raises(RuntimeError, match="probe failed"):
+        multimodal.nvdec_unavailable()
+    assert "DYN_DISABLE_NVDEC" not in os.environ
+    assert nvdec_available.cache_info().currsize == 0
 
 
 def _image_part(body: dict) -> dict:
