@@ -27,8 +27,8 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent, RawKvEventSink,
-    ReplayRequestContext,
+    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
+    RawKvEventSink, ReplayRequestContext,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -376,6 +376,14 @@ impl MockerExecutionContext {
     fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> u32 {
         if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
             return dp_rank;
+        }
+
+        // SGLang's default auto policy follows the bootstrap room on prefill workers.
+        if self.engine_args.backend == EngineType::Sglang
+            && self.engine_args.is_prefill()
+            && let Some(bootstrap_info) = request.bootstrap_info.as_ref()
+        {
+            return (bootstrap_info.bootstrap_room % u64::from(self.engine_args.dp_size)) as u32;
         }
 
         self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
@@ -1501,6 +1509,74 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    fn dp_rank_engine(
+        backend: EngineType,
+        worker_type: WorkerType,
+        dp_size: u32,
+    ) -> MockerExecutionContext {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "dp_size": dp_size,
+            "engine": { "backend": backend, "worker_type": worker_type }
+        }))
+        .unwrap();
+        MockerExecutionContext::new(args)
+    }
+
+    fn dp_rank_request(room: Option<u64>, rank: Option<u32>) -> PreprocessedRequest {
+        use crate::protocols::common::preprocessor::{BootstrapInfo, RoutingHints};
+
+        let mut request = prefill_request();
+        request.routing = Some(RoutingHints {
+            dp_rank: rank,
+            ..Default::default()
+        });
+        request.bootstrap_info = room.map(|bootstrap_room| BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 0,
+            bootstrap_room,
+            handoff_id: None,
+        });
+
+        request
+    }
+
+    #[test]
+    fn sglang_prefill_dp_rank_follows_bootstrap_room() {
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 3);
+        for (room, expected) in [(0, 0), ((1_u64 << 32) + 2, 0), (i64::MAX as u64, 1)] {
+            assert_eq!(
+                engine.resolve_dp_rank(&dp_rank_request(Some(room), None)),
+                expected,
+                "room={room}"
+            );
+        }
+    }
+
+    #[test]
+    fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
+        assert_eq!(
+            engine.resolve_dp_rank(&dp_rank_request(Some(10), Some(3))),
+            3
+        );
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 0);
+    }
+
+    #[test]
+    fn dp_rank_other_backends_and_roles_keep_round_robin() {
+        for (backend, worker_type) in [
+            (EngineType::Sglang, WorkerType::Decode),
+            (EngineType::Vllm, WorkerType::Prefill),
+        ] {
+            let engine = dp_rank_engine(backend, worker_type, 4);
+            let ranks: Vec<_> = [6, 10, 15, 19, 6]
+                .into_iter()
+                .map(|room| engine.resolve_dp_rank(&dp_rank_request(Some(room), None)))
+                .collect();
+            assert_eq!(ranks, [0, 1, 2, 3, 0], "{backend:?} {worker_type:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

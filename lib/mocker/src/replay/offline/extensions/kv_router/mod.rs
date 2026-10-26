@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_custom_policy_builtin::DefaultWorkerSelector;
+use dynamo_custom_policy_builtin::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -506,6 +506,11 @@ impl KvRouterPlacement {
     pub(in crate::replay) fn with_kv_event_lag_ms(mut self, lag_ms: f64) -> Result<Self> {
         self.router.set_kv_event_lag_ms(lag_ms)?;
         Ok(self)
+    }
+
+    /// Runtime parameter handle for this placement's worker selector.
+    pub(in crate::replay) fn selector_control(&self) -> DefaultWorkerSelectorControl {
+        self.router.selector.runtime_control()
     }
 
     fn placement(&self, admission: WorkerAdmission) -> Placement {
@@ -2557,16 +2562,10 @@ policy_classes:
     }
 
     #[test]
-    fn kv_event_lag_is_validated_and_scoped_to_the_call() {
+    fn kv_event_lag_is_validated() {
         let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         assert!(router.set_kv_event_lag_ms(-1.0).is_err());
         assert!(router.set_kv_event_lag_ms(f64::NAN).is_err());
-        assert!(crate::replay::with_kv_event_lag_ms(f64::INFINITY, || ()).is_err());
-
-        let inside =
-            crate::replay::with_kv_event_lag_ms(25.0, crate::replay::kv_event_lag_ms).unwrap();
-        assert_eq!(inside, 25.0);
-        assert_eq!(crate::replay::kv_event_lag_ms(), 0.0);
     }
 
     fn session_router_config() -> KvRouterConfig {

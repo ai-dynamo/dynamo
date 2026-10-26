@@ -3,14 +3,17 @@
 
 """Compatibility entry points spanning shared offline and Dynamo online replay."""
 
+import functools
 import json
+import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict, overload
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
 
+from dynamo._core import KvRouterConfig
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
@@ -20,6 +23,10 @@ from dynamo.replay.report import (
     ReplayReport,
     ReplayTelemetryDetails,
 )
+
+if TYPE_CHECKING:
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.core.types import RetuneInputs, TrafficObservation
 
 _AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
 
@@ -89,6 +96,9 @@ class _TraceReplayOptions(_CommonReplayOptions, total=False):
     trace_num_prefix_groups: int
     report_jsonl_path: str | os.PathLike[str] | None
     max_sim_time_ms: float | None
+    # Internal to retune sweeps; not part of the public API.
+    _planner_warmup_observations: "Sequence[TrafficObservation] | None"
+    _deterministic: bool
 
 
 class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
@@ -105,6 +115,143 @@ def _normalize_trace_files(trace_files):
     if isinstance(trace_files, (str, os.PathLike)):
         return [trace_files]
     return list(trace_files)
+
+
+def _retune_inputs(
+    config: "PlannerConfig",
+    *,
+    trace_files: Sequence[str | os.PathLike[str]],
+    trace_format: str,
+    replay_concurrency: int | None,
+    agentic_lanes: int | None,
+    agentic_snapshot: dict[str, Any] | None,
+    agentic_warmup: bool,
+    agentic_profile: dict[str, Any] | None,
+    max_sim_time_ms: float | None,
+    extra_engine_args: Any,
+    prefill_engine_args: Any,
+    decode_engine_args: Any,
+    router_mode: Literal["round_robin", "kv_router"],
+    router_config: KvRouterConfig | None,
+    ais_perf_config: Any,
+    performance_model_metadata: dict[str, Any] | None,
+    model_name: str | None,
+    kv_event_lag_ms: float | None,
+    benchmark_granularity: int,
+    arrival_speedup_ratio: float,
+) -> "RetuneInputs":
+    """Derive planner retune inputs from this ``run_trace_replay`` call.
+
+    Every retune candidate replays one recorded window against the engine of
+    the outer replay, so the engine is pinned from the outer kwargs and the
+    trace time axis from the outer trace. Retune is open-loop and reads
+    ``dynamo.request.trace.v1`` files only, so it rejects the agentic replay
+    options and a trace whose requests carry ``agent_context`` (an agentic
+    Dynamo trace). ``execution_model`` is not an input: it only names the
+    target model of agentic rows, and ``DynamoReplayRunner`` sets it for every
+    performance-model engine, agentic or not. ``aisimulate predict --stack
+    dynamo`` replays through this function too, so each error also names the
+    AISimulate setting.
+    """
+
+    if trace_format != "dynamo":
+        raise ValueError(
+            "planner.retune replays a Dynamo request trace: it requires "
+            "trace_format='dynamo' (in aisimulate predict, traffic.source.format: "
+            f"dynamo); got {trace_format!r}"
+        )
+    if replay_concurrency is not None:
+        raise ValueError(
+            "planner.retune replays open-loop traffic at the trace timestamps; "
+            "replay_concurrency (in aisimulate predict, traffic.load.type: "
+            "concurrency) is not supported"
+        )
+    agentic_options = {
+        "agentic_lanes": agentic_lanes is not None,
+        "agentic_snapshot": agentic_snapshot is not None,
+        "agentic_warmup": bool(agentic_warmup),
+        "agentic_profile": agentic_profile is not None,
+    }
+    if rejected := sorted(name for name, used in agentic_options.items() if used):
+        raise ValueError(
+            "planner.retune replays open-loop traffic; agentic replay options "
+            "(in aisimulate predict, traffic.load.agentic_*) are not supported: "
+            f"{rejected}"
+        )
+    if max_sim_time_ms is not None:
+        raise ValueError(
+            "planner.retune replays complete windows; max_sim_time_ms (in "
+            "aisimulate predict, traffic.stop.max_virtual_time_seconds) is not "
+            "supported"
+        )
+
+    # Lazy imports: the planner and replay-config modules import
+    # ``dynamo.mocker``, whose package initializer imports this module (see
+    # ``_planner_replay_adapter``).
+    from dynamo.planner.config.planner_config import RetuneEngineSpec
+    from dynamo.planner.core.types import RetuneInputs
+    from dynamo.planner.offline.trace_data import detect_trace_format
+    from dynamo.planner.retune.window import read_trace_history, trace_origin_ms
+    from dynamo.replay.config import load_engine_args
+
+    # Pin the engine shape the outer replay runs (prefill and decode args make
+    # it disaggregated whatever the planner mode); the controller rejects a
+    # shape that does not match the planner mode.
+    engine = RetuneEngineSpec(
+        extra_engine_args=load_engine_args(extra_engine_args),
+        prefill_engine_args=load_engine_args(prefill_engine_args),
+        decode_engine_args=load_engine_args(decode_engine_args),
+        router_mode=router_mode,
+        router_config=json.loads((router_config or KvRouterConfig()).to_json()),
+        ais_perf_config=(
+            None if ais_perf_config is None else ais_perf_config.to_dict()
+        ),
+        performance_model_metadata=performance_model_metadata,
+        model_name=model_name,
+        kv_event_lag_ms=kv_event_lag_ms,
+        benchmark_granularity=benchmark_granularity,
+    )
+    trace_paths = tuple(os.fspath(path) for path in trace_files)
+    row_counts: dict[str, int] = {}
+    origin_ms = trace_origin_ms(trace_paths, row_counts=row_counts)
+    if agentic_requests := row_counts["agent_context_stripped"]:
+        # Retune windows drop agent_context, so candidates would replay
+        # open-loop traffic that the outer agentic replay never ran.
+        raise ValueError(
+            "planner.retune replays open-loop traffic; the trace has "
+            f"{agentic_requests} requests with agent_context (an agentic "
+            "Dynamo trace)"
+        )
+    history_paths: tuple[str, ...] = ()
+    # Only an inner planner that scales on throughput reads the history (to
+    # warm its predictors), so other configs leave the warmup trace alone.
+    warmup_trace = config.load_predictor_warmup_trace
+    if config.enable_throughput_scaling and warmup_trace is not None:
+        if detect_trace_format(warmup_trace) == "mooncake":
+            raise ValueError(
+                "planner.retune with throughput scaling reads "
+                "load_predictor_warmup_trace as recorded history, which needs "
+                "a dynamo.request.trace.v1 trace on the replayed trace's "
+                "absolute time axis; Mooncake timestamps are relative"
+            )
+        history_paths = (warmup_trace,)
+        # History and windows are read on one time axis; an overlapping
+        # history would count requests twice in predictor warmup.
+        overlap = read_trace_history(history_paths, origin_ms, math.inf, math.inf)
+        if overlap:
+            raise ValueError(
+                "planner.retune history (load_predictor_warmup_trace) must end "
+                "at or before the first replayed request on the same absolute "
+                f"time axis; {overlap} history requests arrive at "
+                f"or after {origin_ms:.0f} ms"
+            )
+    return RetuneInputs(
+        engine=engine,
+        trace_paths=trace_paths,
+        history_paths=history_paths,
+        trace_origin_ms=origin_ms,
+        arrival_speedup_ratio=arrival_speedup_ratio,
+    )
 
 
 def _planner_config_arg(planner_config):
@@ -268,6 +415,15 @@ def run_trace_replay(
     weka_nested_timestamp_basis=None,
     telemetry_options=None,
     kv_event_lag_ms=None,
+    # Internal: a retune sweep's inner planner is warmed with the history it
+    # already bucketed instead of its load_predictor_warmup_trace.
+    _planner_warmup_observations=None,
+    # Internal: a retune sweep replays the baseline and every candidate with
+    # the canonical router seed and ordinal request ids (common random numbers).
+    # With an SLA-mode planner the pinned AISimulate is not guaranteed to be
+    # bitwise reproducible across processes (its forward-pass sample store
+    # iterates in hash order).
+    _deterministic=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
@@ -342,6 +498,7 @@ def run_trace_replay(
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
         "kv_event_lag_ms": kv_event_lag_ms,
+        "deterministic": _deterministic,
     }
     replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
@@ -367,6 +524,28 @@ def run_trace_replay(
                 "planner_config replay with trace_format='dynamo' "
                 "requires at least one trace file"
             )
+        retune_inputs_factory = functools.partial(
+            _retune_inputs,
+            trace_files=trace_files,
+            trace_format=trace_format,
+            replay_concurrency=replay_concurrency,
+            agentic_lanes=agentic_lanes,
+            agentic_snapshot=agentic_snapshot,
+            agentic_warmup=agentic_warmup,
+            agentic_profile=agentic_profile,
+            max_sim_time_ms=max_sim_time_ms,
+            extra_engine_args=extra_engine_args,
+            prefill_engine_args=prefill_engine_args,
+            decode_engine_args=decode_engine_args,
+            router_mode=router_mode,
+            router_config=router_config,
+            ais_perf_config=ais_perf_config,
+            performance_model_metadata=performance_model_metadata,
+            model_name=model_name,
+            kv_event_lag_ms=kv_event_lag_ms,
+            benchmark_granularity=benchmark_granularity,
+            arrival_speedup_ratio=arrival_speedup_ratio,
+        )
         adapter_scope = _planner_replay_adapter()(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
@@ -375,6 +554,8 @@ def run_trace_replay(
             performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
+            retune_inputs_factory=retune_inputs_factory,
+            warmup_observations=_planner_warmup_observations,
         )
         with adapter_scope as adapter:
             native = _run_mocker_trace_replay(
