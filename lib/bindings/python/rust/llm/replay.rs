@@ -1815,7 +1815,6 @@ fn build_synthetic_workload(
         },
         shared_prefix_ratio,
         cached_prefix_tokens: 0,
-        images: None,
         num_prefix_groups,
         first_turn_arrivals,
         inter_turn_delays: if inter_turn_delay_ms == 0.0 {
@@ -1825,6 +1824,7 @@ fn build_synthetic_workload(
         },
         seed: 42,
         arrival_seed,
+        images: None,
     })
 }
 

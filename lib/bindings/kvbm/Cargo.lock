@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610230000000081"
+version = "0.13.0-dev.202610240000000082"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ab44195597a9d1f1b8b89ae2201004d4062d03438fd03efe0b4ba7471d93fb6"
+checksum = "fa3e351f2964f97c386e270dc1ef46e771b72542d5015d638a25f3b4eef34ccd"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2303,11 +2303,12 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.24"
+version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a62c4aea442890712dcdb64e493fac636edad8c9b25f793948800507c41bedc"
+checksum = "561fd41706eeccdad858e90702f736a35020d7c3761c5c6e7dbb47a83bf1a59f"
 dependencies = [
  "anyhow",
+ "dynamo-structural-tag",
  "openai-harmony",
  "percent-encoding",
  "regex",
@@ -2446,6 +2447,18 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-structural-tag"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8d57353db2c855b6d8154bb67b752d95547ee33eda3ee55342c0625211bdaae"
+dependencies = [
+ "anyhow",
+ "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

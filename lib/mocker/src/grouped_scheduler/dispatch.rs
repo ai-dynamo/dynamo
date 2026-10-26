@@ -157,7 +157,7 @@ async fn dispatch_pass_completion(
             let lifecycle = effects
                 .lifecycle_events
                 .into_iter()
-                .filter_map(|event| compatibility.lifecycle_event(event).transpose())
+                .map(|event| compatibility.lifecycle_event(event))
                 .collect::<Result<Vec<_>>>()?;
             publications.push(PendingRankPublication {
                 dp_rank: rank.dp_rank,
@@ -271,7 +271,7 @@ fn merge_boundary_command_effects(
     let lifecycle = effects
         .lifecycle_events
         .into_iter()
-        .filter_map(|event| compatibility.lifecycle_event(event).transpose())
+        .map(|event| compatibility.lifecycle_event(event))
         .collect::<Result<Vec<_>>>()?;
     let publication = publications
         .iter_mut()
@@ -341,7 +341,7 @@ pub(super) async fn dispatch_command_effects(
     let lifecycle = effects
         .lifecycle_events
         .into_iter()
-        .filter_map(|event| compatibility.lifecycle_event(event).transpose())
+        .map(|event| compatibility.lifecycle_event(event))
         .collect::<Result<Vec<_>>>()?;
     let result = scheduler_command_result(effects.result, effects.suppressed_pending_output);
     let pending = pending.lock().remove(&command_id);

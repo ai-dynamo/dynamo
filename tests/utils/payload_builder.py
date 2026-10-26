@@ -38,6 +38,7 @@ from tests.utils.payloads import (
     SGLangGenerateCancellationPayload,
     SGLangGenerateRecoveryPayload,
     SGLangMetricsPayload,
+    StopStringChatPayload,
     StreamingChatPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
@@ -991,6 +992,34 @@ def http_cancellation_payloads(
             expected_log=[],
             expected_finish_reason="length",
             expected_completion_tokens=4,
+        ),
+    ]
+
+
+def stop_string_payloads(metrics: EngineMetrics | None) -> list[BasePayload]:
+    """End on a stop string, once keeping it and once trimming it.
+
+    With metrics, the trimming request also checks that the engine stops at
+    the match. It cannot use ignore_eos, which drops stop strings; Qwen3's
+    thinking for this prompt runs past max_tokens instead, so an engine that
+    misses the cancel generates all of them.
+    """
+    body = {
+        "messages": [{"role": "user", "content": "Can you write me a song?"}],
+        "temperature": 0,
+        "stop": ["song"],
+    }
+    return [
+        StopStringChatPayload(
+            body={**body, "max_tokens": 32, "include_stop_str_in_output": True},
+            expected_response=["song"],
+            expected_log=[],
+        ),
+        StopStringChatPayload(
+            body={**body, "max_tokens": 256},
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
         ),
     ]
 

@@ -491,6 +491,14 @@ impl ReplayRouter {
         dp_size: usize,
     ) -> Result<ReplayPlacement> {
         anyhow::ensure!(
+            request.kv_hints.is_none(),
+            "Dynamo online replay does not support authored KV fetch hints"
+        );
+        anyhow::ensure!(
+            request.images.is_empty(),
+            "Dynamo online replay does not support image requests"
+        );
+        anyhow::ensure!(
             num_workers > 0,
             "online replay requires at least one worker"
         );
@@ -645,13 +653,52 @@ mod tests {
             dp_rank: 0,
             preferred_dp_rank: None,
             preferred_prefill_dp_rank: None,
+            kv_hints: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
             policy_class: None,
             replay_context: None,
             images: Vec::new(),
-            kv_hints: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn online_replay_rejects_unhandled_request_fields_before_placement() {
+        for mode in [ReplayRouterMode::RoundRobin, ReplayRouterMode::KvRouter] {
+            let router = ReplayRouter::new(mode, &MockerConfig::default(), None, None, 1).unwrap();
+            let mut request = priority_request(1, 0, 0);
+            request.kv_hints = Some(aisimulate_core::replay::AuthoredKvHints {
+                source_worker: 0,
+                source_dp_rank: 0,
+            });
+            let error = router.select_worker(&request, 1, 1).await.unwrap_err();
+            assert!(error.to_string().contains("authored KV fetch hints"));
+            request.kv_hints = None;
+            request.images.push(aisimulate_core::engine::ImageSpec {
+                identity: 1,
+                token_start: 0,
+                token_end: 1,
+                encoder: aisimulate_core::engine::EncoderShape {
+                    sequences: 1,
+                    patch_tokens: 1,
+                    transformer_tokens: 1,
+                    output_tokens: 1,
+                },
+                embedding_bytes: 1,
+            });
+            let error = router.select_worker(&request, 1, 1).await.unwrap_err();
+            assert!(error.to_string().contains("image requests"));
+            request.images.clear();
+            assert_eq!(
+                router.select_worker(&request, 1, 1).await.unwrap(),
+                ReplayPlacement {
+                    worker_idx: 0,
+                    dp_rank: 0
+                }
+            );
+            router.on_complete(request.uuid.unwrap()).await.unwrap();
+            router.shutdown().await.unwrap();
         }
     }
 
