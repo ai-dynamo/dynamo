@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::replicas::ReplicaEndpoint;
 use crate::watch::{Completeness, Snapshot};
-use crate::wire::{PoolListing, PoolRegistration, PoolsResponse, RoutersResponse};
+use crate::wire::{Lease, PoolListing, PoolRegistration, PoolsResponse, RoutersResponse};
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -99,30 +99,22 @@ impl GlobalDiscoveryClient {
 
     async fn get_json<T: DeserializeOwned>(&self, url: &Url) -> Result<T, DiscoveryClientError> {
         let response = self.send(self.http.get(url.clone()), url).await?;
-        let body = response
-            .bytes()
-            .await
-            .map_err(|source| DiscoveryClientError::Request {
-                url: url.clone(),
-                source,
-            })?;
-        serde_json::from_slice(&body).map_err(|source| DiscoveryClientError::Decode {
-            url: url.clone(),
-            source,
-        })
+        read_json(response, url).await
     }
 
-    /// Calls `POST /pools` to register a pool or refresh its registration.
-    /// The PoolRelay calls this on a schedule, and each call is also the
-    /// pool's heartbeat.
+    /// Calls `POST /pools` to register a pool or refresh its registration,
+    /// and returns the service's [`Lease`]. Each call is also the pool's
+    /// heartbeat, so the PoolRelay calls this again after
+    /// `Lease::heartbeat_interval`.
     pub async fn register_pool(
         &self,
         registration: &PoolRegistration,
-    ) -> Result<(), DiscoveryClientError> {
+    ) -> Result<Lease, DiscoveryClientError> {
         let url = &self.pools_url;
-        self.send(self.http.post(url.clone()).json(registration), url)
+        let response = self
+            .send(self.http.post(url.clone()).json(registration), url)
             .await?;
-        Ok(())
+        read_json(response, url).await
     }
 
     async fn send(
@@ -147,6 +139,25 @@ impl GlobalDiscoveryClient {
             body: response.text().await.unwrap_or_default(),
         })
     }
+}
+
+/// A body cut off mid-transfer is a `Request` error. Only JSON that does not
+/// match `T` is a `Decode` error.
+async fn read_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    url: &Url,
+) -> Result<T, DiscoveryClientError> {
+    let body = response
+        .bytes()
+        .await
+        .map_err(|source| DiscoveryClientError::Request {
+            url: url.clone(),
+            source,
+        })?;
+    serde_json::from_slice(&body).map_err(|source| DiscoveryClientError::Decode {
+        url: url.clone(),
+        source,
+    })
 }
 
 /// `base_url` with `segment` appended, keeping any path it already has.

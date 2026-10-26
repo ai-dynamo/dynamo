@@ -10,8 +10,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use dynamo_global_discovery_client::{
-    Capacity, DiscoveryClientError, GlobalDiscoveryClient, PoolKey, PoolLocation, PoolRegistration,
-    ReplicaEndpoint, ReplicaId,
+    Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolLocation,
+    PoolRegistration, ReplicaEndpoint, ReplicaId,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -71,9 +71,9 @@ async fn serve_routers(State(fake): State<FakeService>) -> Response {
 async fn serve_register(
     State(fake): State<FakeService>,
     Json(registration): Json<Value>,
-) -> StatusCode {
+) -> Json<Value> {
     fake.0.lock().unwrap().registrations.push(registration);
-    StatusCode::NO_CONTENT
+    Json(json!({ "heartbeat_interval_s": 5, "lease_duration_s": 15 }))
 }
 
 fn replica(id: &str, url: &str) -> ReplicaEndpoint {
@@ -160,8 +160,15 @@ async fn registers_a_pool() {
     let fake = FakeService::new(r#"{ "routers": [] }"#);
     let client = fake.client().await;
 
-    client.register_pool(&registration()).await.unwrap();
+    let lease = client.register_pool(&registration()).await.unwrap();
 
+    assert_eq!(
+        lease,
+        Lease {
+            heartbeat_interval: Duration::from_secs(5),
+            lease_duration: Duration::from_secs(15),
+        }
+    );
     // The field names are the contract with the service, so compare the JSON
     // it received rather than decoding it back into the same struct.
     assert_eq!(

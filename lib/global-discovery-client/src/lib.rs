@@ -17,4 +17,4 @@ mod wire;
 pub use client::{DiscoveryClientError, GlobalDiscoveryClient};
 pub use replicas::{ReplicaEndpoint, ReplicaEvent, ReplicaId};
 pub use watch::{Completeness, Snapshot, WatchEvent};
-pub use wire::{Capacity, PoolKey, PoolListing, PoolLocation, PoolRegistration};
+pub use wire::{Capacity, Lease, PoolKey, PoolListing, PoolLocation, PoolRegistration};
