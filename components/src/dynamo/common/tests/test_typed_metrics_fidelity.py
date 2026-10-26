@@ -17,6 +17,9 @@ import pytest
 from prometheus_client import CollectorRegistry, Counter, Histogram
 
 from dynamo.common.utils.prometheus import (
+    EXTRA_METRIC_PREFIXES_ENV_VAR,
+    get_extra_metric_prefixes,
+    get_prometheus_expfmt,
     get_prometheus_typed,
     register_engine_metrics_callback,
 )
@@ -132,3 +135,33 @@ def test_registered_callback_carries_auto_labels_into_typed_samples():
                 assert (
                     got.get(key) == value
                 ), f"{sample_name} lost label {key}={value}: {got}"
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_extra_metric_prefixes_unset_returns_empty(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv(EXTRA_METRIC_PREFIXES_ENV_VAR, raising=False)
+    assert get_extra_metric_prefixes() == []
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.unit
+def test_extra_metric_prefixes_pass_expfmt_filter(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(EXTRA_METRIC_PREFIXES_ENV_VAR, "myconnector_")
+
+    registry = CollectorRegistry()
+    Counter("builtin_requests_total", "builtin", registry=registry).inc()
+    Counter("myconnector_hits_total", "custom component", registry=registry).inc()
+    Counter("unrelated_total", "not whitelisted", registry=registry).inc()
+
+    output = get_prometheus_expfmt(
+        registry,
+        metric_prefix_filters=["builtin_", *get_extra_metric_prefixes()],
+    )
+
+    assert "builtin_requests_total" in output
+    assert "myconnector_hits_total" in output
+    assert "# HELP myconnector_hits_total" in output
+    assert "unrelated_total" not in output
