@@ -221,7 +221,8 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["decode", "prefill"])
 async def test_worker_preserves_primary_error_when_async_drain_fails(caplog, role):
-    factory = _make_factory()
+    state_agent_lifecycle = SimpleNamespace(close=AsyncMock())
+    factory = _make_factory(state_agent_lifecycle=state_agent_lifecycle)
     engine_client = Mock()
     handler = Mock()
     handler.aclose = AsyncMock(side_effect=RuntimeError("async drain failed"))
@@ -244,7 +245,7 @@ async def test_worker_preserves_primary_error_when_async_drain_fails(caplog, rol
     assert exc_info.value is startup_error
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
     assert f"Failed to drain {role} worker after an earlier failure" in caplog.text
-    factory.state_agent_lifecycle.close.assert_awaited_once()
+    state_agent_lifecycle.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1248,6 +1249,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
 
     handler = Mock(embedding_cache_manager=None)
     handler.cleanup = Mock()
+    handler.aclose = AsyncMock()
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.PrefillWorkerHandler",
         Mock(return_value=handler),
@@ -1851,6 +1853,7 @@ async def test_prefill_exit_shuts_down_the_engine_after_withdrawing_state_agent(
     (engine_setup, _stat_logger), engine_client = _restore_snapshot_engine()
     engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
     handler = Mock(embedding_cache_manager=None)
+    handler.aclose = AsyncMock()
     handler.cleanup.side_effect = lambda: calls.append("handler")
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.PrefillWorkerHandler", Mock(return_value=handler)
