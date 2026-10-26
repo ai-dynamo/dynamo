@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Capture Nsight Systems Timelines
-subtitle: Record nsys timelines of chosen Dynamo components on Kubernetes with NVIDIA Nsight Operator
+title: Profile with Nsight Operator
+subtitle: Profile chosen Dynamo components on Kubernetes with Nsight Systems (nsys) through NVIDIA Nsight Operator
 ---
 
 [NVIDIA Nsight Operator](https://docs.nvidia.com/nsight-operator/) adds Nsight Systems (`nsys`) to the pods you
@@ -14,7 +14,7 @@ knowledge:
 
 - which pod labels select each Dynamo component;
 - a profile config with process patterns and `nsys` arguments for each component;
-- the NVTX settings that add Dynamo's own ranges to the timeline;
+- the NVTX settings that add Dynamo's own ranges to the reports;
 - pitfalls seen with Dynamo, and what has been tested.
 
 Stock Dynamo images work, and the DynamoGraphDeployment (DGD) needs no new fields.
@@ -131,9 +131,9 @@ spec:
     processIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.](vllm|sglang|trtllm)( .*)?$']
 ```
 
-- **Tags.** Every rule uses the same literal tag, the DGD name, so one window records every selected component and
-  their timelines line up. A tag holds one capture session at a time. For separate windows per component, give each
-  rule its own tag.
+- **Tags.** Every rule uses the same literal tag, the DGD name, so one window profiles every selected component over
+  the same period. A tag holds one capture session at a time. For separate windows per component, give each rule its
+  own tag.
 - **Names.** Nsight looks up tool configs by name across the whole namespace, so tests that share a namespace need
   their own tool-config names. Do not name the config `dynamo-profile-config`, which Nsight's helper writes and deletes.
 - **Patterns.** They match Dynamo's launch commands, `python -m dynamo.<module>` and `python3 -m dynamo.<module>`, so
