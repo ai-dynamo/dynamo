@@ -48,16 +48,13 @@ func TestBuildInfoCollector(t *testing.T) {
 		labels[lp.GetName()] = lp.GetValue()
 	}
 
-	// Version label must equal the value passed in.
 	assert.Equal(t, "9.9.9", labels["version"])
-	// Platform is always known at runtime.
 	assert.Equal(t, runtime.GOOS+"/"+runtime.GOARCH, labels["platform"])
-	// go_version comes from debug.ReadBuildInfo().GoVersion, always set for a Go binary.
 	assert.NotEmpty(t, labels["go_version"])
-	// VCS labels exist and are non-empty; test binaries usually lack VCS
-	// settings, so the fallback "unknown" is expected — do not assert exact values.
+	// Test binaries usually lack VCS settings, so the fallback "unknown" is
+	// expected — do not assert exact values.
 	assert.NotEmpty(t, labels["git_commit"])
-	assert.NotEmpty(t, labels["build_date"])
+	assert.NotEmpty(t, labels["git_commit_date"])
 }
 
 func TestBuildInfoCollectorUnknownVersion(t *testing.T) {
@@ -78,8 +75,15 @@ func TestBuildInfoCollectorUnknownVersion(t *testing.T) {
 }
 
 func TestInitMetricsRegistersBuildInfo(t *testing.T) {
-	// InitMetrics registers into the global controller-runtime registry.
-	// Gather from it and verify our metric shows up exactly once with value 1.
+	// InitMetrics registers into the package-global controller-runtime
+	// registry; swap in a fresh one so repeated runs (-count=2) do not panic
+	// on duplicate registration. Not parallel: replaces package-global state.
+	originalRegistry := ctrlmetrics.Registry
+	ctrlmetrics.Registry = prometheus.NewRegistry()
+	t.Cleanup(func() {
+		ctrlmetrics.Registry = originalRegistry
+	})
+
 	InitMetrics("9.9.9")
 
 	families, err := ctrlmetrics.Registry.Gather()
@@ -92,7 +96,15 @@ func TestInitMetricsRegistersBuildInfo(t *testing.T) {
 		}
 		found++
 		require.Len(t, f.GetMetric(), 1)
-		assert.Equal(t, 1.0, f.GetMetric()[0].GetGauge().GetValue())
+		metric := f.GetMetric()[0]
+		assert.Equal(t, 1.0, metric.GetGauge().GetValue())
+
+		// InitMetrics must forward operatorVersion to the version label.
+		labels := map[string]string{}
+		for _, lp := range metric.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		assert.Equal(t, "9.9.9", labels["version"])
 	}
 	assert.Equal(t, 1, found, "dynamo_operator_build_info must be registered exactly once")
 }

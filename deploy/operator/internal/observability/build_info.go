@@ -28,20 +28,20 @@ import (
 // determined (e.g. container builds whose context has no .git directory).
 const unknownBuildValue = "unknown"
 
-// vcsInfo holds build metadata extracted from debug.ReadBuildInfo().
 type vcsInfo struct {
-	commit    string
-	buildDate string
-	goVersion string
+	commit     string
+	commitDate string
+	goVersion  string
 }
 
-// readVCSInfo extracts VCS and Go version metadata from the binary's embedded
-// build info. Missing values fall back to unknownBuildValue; this never fails.
+// readVCSInfo reads the binary's embedded build info. Note that vcs.time is
+// the source revision's commit timestamp, not the time the binary was built.
+// Missing values fall back to unknownBuildValue; this never fails.
 func readVCSInfo() vcsInfo {
 	info := vcsInfo{
-		commit:    unknownBuildValue,
-		buildDate: unknownBuildValue,
-		goVersion: unknownBuildValue,
+		commit:     unknownBuildValue,
+		commitDate: unknownBuildValue,
+		goVersion:  unknownBuildValue,
 	}
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -58,17 +58,15 @@ func readVCSInfo() vcsInfo {
 			}
 		case "vcs.time":
 			if s.Value != "" {
-				info.buildDate = s.Value
+				info.commitDate = s.Value
 			}
 		}
 	}
 	return info
 }
 
-// buildInfoCollector returns a gauge with constant value 1 that exposes the
-// operator's build metadata as labels, following the standard Prometheus
-// *_build_info convention. The metadata is frozen at construction time; the
-// collector holds no mutable state.
+// buildInfoCollector implements the standard Prometheus *_build_info
+// convention: a constant-1 gauge carrying build metadata as labels.
 func buildInfoCollector(operatorVersion string) prometheus.Collector {
 	vcs := readVCSInfo()
 	return prometheus.NewGaugeFunc(
@@ -77,11 +75,11 @@ func buildInfoCollector(operatorVersion string) prometheus.Collector {
 			Name:      "build_info",
 			Help:      "Dynamo operator build metadata exposed as labels with a constant value of 1.",
 			ConstLabels: prometheus.Labels{
-				"version":    operatorVersion,
-				"git_commit": vcs.commit,
-				"build_date": vcs.buildDate,
-				"go_version": vcs.goVersion,
-				"platform":   runtime.GOOS + "/" + runtime.GOARCH,
+				"version":         operatorVersion,
+				"git_commit":      vcs.commit,
+				"git_commit_date": vcs.commitDate,
+				"go_version":      vcs.goVersion,
+				"platform":        runtime.GOOS + "/" + runtime.GOARCH,
 			},
 		},
 		func() float64 { return 1 },
