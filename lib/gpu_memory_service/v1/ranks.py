@@ -10,12 +10,15 @@ CUDA_VISIBLE_DEVICES and serves device N's sockets.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from gpu_memory_service.v1 import landlock
 
 logger = logging.getLogger(__name__)
 
@@ -46,20 +49,30 @@ def node_gpus(proc_gpus: Path = _PROC_GPUS, dev: Path = _DEV) -> list[Gpu]:
 
 
 def start_ranks(
-    gpus: list[Gpu], command: Callable[[int], list[str]]
+    gpus: list[Gpu], command: Callable[[int], list[str]], *, confine: bool
 ) -> list[subprocess.Popen]:
-    """Start ``command(n)`` for GMS device n on each GPU."""
+    """Start ``command(n)`` for GMS device n on each GPU.
+
+    With ``confine``, each process can open no GPU node but its own (see
+    ``landlock``), so CUDA starts on that GPU alone.
+    """
     processes = []
     for device, gpu in enumerate(gpus):
         process = subprocess.Popen(
             command(device),
             env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu.uuid},
+            preexec_fn=(
+                functools.partial(landlock.confine_to_gpu, gpu.minor)
+                if confine
+                else None
+            ),
         )
         logger.info(
-            "Started GMS V1 device=%d gpu=%s bus=%s pid=%d",
+            "Started GMS V1 device=%d gpu=%s bus=%s confined=%s pid=%d",
             device,
             gpu.uuid,
             gpu.bus_id,
+            confine,
             process.pid,
         )
         processes.append(process)

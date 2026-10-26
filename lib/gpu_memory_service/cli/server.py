@@ -4,9 +4,10 @@
 """GMS server entry point.
 
 Launches one GMS server process per GPU, then supervises them. Each V1 process
-is pinned to its GPU and with --enable-loader loads its GPU's weights in a
-thread. V0 can start one loader process per GPU. Device discovery uses NVML
-without initializing the CUDA driver.
+is pinned to its GPU, can open no other GPU (see v1.landlock), and with
+--enable-loader loads its GPU's weights in a thread. V0 can start one loader
+process per GPU. Device discovery uses NVML without initializing the CUDA
+driver.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from gpu_memory_service.client.session import _GMSClientSession as v0_session
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
-from gpu_memory_service.v1 import ranks
+from gpu_memory_service.v1 import landlock, ranks
 from gpu_memory_service.v1.client.session import _GMSClientSession as v1_session
 from gpu_memory_service.v1.device import get_socket_path as v1_get_socket_path
 
@@ -69,8 +70,17 @@ def _supervise(
     return 0
 
 
-def _run_v1_ranks(loader_argv: list[str] | None) -> int:
+def _run_v1_ranks(loader_argv: list[str] | None, confine: bool) -> int:
     """Run one V1 server process per GPU until one exits."""
+    if confine:
+        try:
+            landlock.abi_version()
+        except OSError as exc:
+            raise SystemExit(
+                f"GMS V1 cannot confine each device's process to its GPU: {exc}. "
+                "Pass --no-isolation to run them unconfined; each then starts "
+                "CUDA on every visible GPU, which is slower."
+            ) from exc
 
     def command(device: int) -> list[str]:
         argv = [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
@@ -87,7 +97,7 @@ def _run_v1_ranks(loader_argv: list[str] | None) -> int:
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
     try:
-        processes.extend(ranks.start_ranks(ranks.node_gpus(), command))
+        processes.extend(ranks.start_ranks(ranks.node_gpus(), command, confine=confine))
         return _supervise(processes)
     finally:
         _terminate_all(processes)
@@ -114,6 +124,15 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--no-isolation",
+        action="store_true",
+        help=(
+            "V1: do not confine each GPU's server process to its own GPU with "
+            "Landlock, for kernels without it. Each process then starts CUDA on "
+            "every visible GPU, which is slower."
+        ),
+    )
+    parser.add_argument(
         "--enable-loader",
         nargs=argparse.REMAINDER,
         metavar="ARG",
@@ -135,7 +154,7 @@ def main(argv: list[str] | None = None) -> None:
     if use_v1 and args.device_type != VMMDeviceType.CUDA.value:
         parser.error("DYN_GMS_USE_V1=true only supports --device-type=cuda")
     if use_v1 and not args.probe_restore_ready:
-        raise SystemExit(_run_v1_ranks(args.enable_loader))
+        raise SystemExit(_run_v1_ranks(args.enable_loader, not args.no_isolation))
 
     init_vmm(VMMDeviceType.from_str(args.device_type))
     vmm = get_vmm()
