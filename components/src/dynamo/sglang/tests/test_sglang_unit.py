@@ -439,6 +439,7 @@ def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
         ("Tokens", "Prefill", "Prefill", True),
         ("Tokens", "Chat", "Decode", True),
         ("Tokens", "Completions", "Aggregated", True),
+        ("Tokens", "Chat", "Encode", True),
         ("Tokens", "Empty", "Prefill", False),
         ("Tokens", "Empty", "Decode", False),
         ("Text", "Chat", "Aggregated", False),

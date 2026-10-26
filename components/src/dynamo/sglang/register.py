@@ -123,9 +123,11 @@ def _supports_engine_generate(
         return False
     if worker_type == WorkerType.Prefill:
         return output_type == ModelType.Prefill
-    return worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
-        output_type.supports_chat() or output_type == ModelType.Completions
-    )
+    return worker_type in (
+        WorkerType.Decode,
+        WorkerType.Aggregated,
+        WorkerType.Encode,
+    ) and (output_type.supports_chat() or output_type == ModelType.Completions)
 
 
 def _supports_systemone_serial(
