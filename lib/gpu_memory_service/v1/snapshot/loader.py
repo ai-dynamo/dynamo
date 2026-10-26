@@ -12,7 +12,7 @@ import os
 from gpu_memory_service.cli.snapshot.loader import _build_parser as _build_v0_parser
 from gpu_memory_service.common.vmm import VMMDeviceType, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
-from gpu_memory_service.v1.device import cuda_ordinal, get_socket_path
+from gpu_memory_service.v1 import device as device_identity
 from gpu_memory_service.v1.snapshot.weight_artifact import load_weights
 
 logging.basicConfig(
@@ -86,10 +86,11 @@ def load(args: argparse.Namespace) -> None:
     """Fill GMS device ``args.device``'s weights server from its artifact."""
     logger.info("GMS V1 loader starting device=%d", args.device)
     init_vmm(VMMDeviceType.CUDA)
+    gpu_uuid = device_identity.gpu_uuid(args.device)
     load_weights(
         os.path.join(args.checkpoint_dir, f"device-{args.device}"),
-        get_socket_path(args.device, "weights"),
-        cuda_ordinal(args.device),
+        device_identity.get_socket_path(gpu_uuid, "weights"),
+        device_identity.cuda_ordinal(gpu_uuid),
         max_workers=args.max_workers,
         transfer_backend=args.transfer_backend,
         backend_config=args.backend_config,

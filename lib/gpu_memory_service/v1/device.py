@@ -1,14 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""V1-local CUDA device identity and socket naming."""
+"""V1-local GPU identity and socket naming.
+
+GMS device N is the container's N-th GPU in PCI bus order. N names the
+device's checkpoint artifact; its sockets are named by the GPU's UUID, so an
+engine finds them from its own GPU whatever order CUDA numbers GPUs in.
+"""
 
 from __future__ import annotations
 
 import os
 import sys
 import tempfile
+from dataclasses import dataclass
 from functools import cache
+from pathlib import Path
 from uuid import UUID
 
 from gpu_memory_service.common.vmm.cuda_utils import cuda_ensure_initialized
@@ -19,6 +26,38 @@ except ImportError:
     cuda = None
 
 _AF_UNIX_PATH_LIMIT = 104 if sys.platform == "darwin" else 108
+_PROC_GPUS = Path("/proc/driver/nvidia/gpus")
+_DEV = Path("/dev")
+
+
+@dataclass(frozen=True)
+class Gpu:
+    bus_id: str
+    minor: int
+    uuid: str
+
+
+def node_gpus(proc_gpus: Path = _PROC_GPUS, dev: Path = _DEV) -> list[Gpu]:
+    """GPUs this container can open, in PCI bus order, without starting CUDA."""
+    gpus = []
+    for entry in proc_gpus.iterdir():
+        info = dict(
+            line.split(":", 1)
+            for line in (entry / "information").read_text().splitlines()
+            if ":" in line
+        )
+        minor = int(info["Device Minor"])
+        if os.access(dev / f"nvidia{minor}", os.R_OK | os.W_OK):
+            gpus.append(Gpu(entry.name.lower(), minor, info["GPU UUID"].strip()))
+    return sorted(gpus, key=lambda gpu: gpu.bus_id)
+
+
+def gpu_uuid(device: int) -> str:
+    """The UUID of GMS device ``device``."""
+    gpus = node_gpus()
+    if not 0 <= device < len(gpus):
+        raise ValueError(f"GMS device {device} is not one of {len(gpus)} GPUs")
+    return gpus[device].uuid
 
 
 def _check_cuda(result, operation: str) -> None:
@@ -57,15 +96,20 @@ def get_device_uuid(device: int) -> str:
     return f"GPU-{UUID(bytes=bytes(uuid.bytes))}"
 
 
-def cuda_ordinal(device: int) -> int:
-    """The CUDA ordinal of GMS device ``device`` in this process.
+def cuda_ordinal(gpu_uuid: str) -> int:
+    """This process's CUDA ordinal of the GPU with ``gpu_uuid``."""
+    if cuda is None:
+        raise RuntimeError(
+            "cuda-python is required for GPU Memory Service device identity"
+        )
 
-    GMS device N is the pod's N-th GPU: it names the sockets and the artifact
-    directory. A process pinned to that one GPU with CUDA_VISIBLE_DEVICES, as
-    the V1 supervisor starts each device's server, sees it as ordinal 0.
-    """
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    return 0 if visible and "," not in visible else device
+    cuda_ensure_initialized()
+    result, count = cuda.cuDeviceGetCount()
+    _check_cuda(result, "cuDeviceGetCount")
+    for ordinal in range(count):
+        if get_device_uuid(ordinal) == gpu_uuid:
+            return ordinal
+    raise RuntimeError(f"GPU {gpu_uuid} is not visible to CUDA")
 
 
 def invalidate_device_uuid_cache() -> None:
@@ -73,12 +117,12 @@ def invalidate_device_uuid_cache() -> None:
     get_device_uuid.cache_clear()
 
 
-def get_socket_path(device: int, tag: str = "weights") -> str:
-    """Return the V1 socket path for a CUDA-visible device and domain."""
+def get_socket_path(gpu_uuid: str, tag: str = "weights") -> str:
+    """Return the V1 socket path for a GPU and domain."""
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     path = os.path.join(
         socket_dir,
-        f"gms_{device}_{tag}.sock",
+        f"gms_{gpu_uuid}_{tag}.sock",
     )
     path_bytes = len(os.fsencode(path))
     if path_bytes >= _AF_UNIX_PATH_LIMIT:
