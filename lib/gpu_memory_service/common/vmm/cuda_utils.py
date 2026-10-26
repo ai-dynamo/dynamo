@@ -120,6 +120,8 @@ def cumem_create_tolerate_oom(size: int, device: int) -> tuple[bool, int]:
     prop.requestedHandleTypes = (
         cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
     )
+    # GPUDirect RDMA (NIXL/UCX dma-buf registration) needs this on exported memory.
+    prop.allocFlags.gpuDirectRDMACapable = 1
 
     result, handle = cuda.cuMemCreate(size, prop, 0)
     if result == cuda.CUresult.CUDA_SUCCESS:
