@@ -29,7 +29,8 @@ Usage — same syntax as the bare nvtx module:
 When enabled, uses a named nvtx.Domain and pre-allocated EventAttributes
 objects (cached lazily by (message, color)) so that repeated calls to
 start_range incur only a single dict lookup — no object allocation
-or domain cache lookups on the hot path.
+or domain cache lookups on the hot path. Color names are resolved here,
+so markers never need matplotlib.
 """
 import functools
 import inspect
@@ -58,11 +59,46 @@ if ENABLED:
     _domain = _nvtx_lib.get_domain("dynamo")
     _attr_cache: dict = {}
 
+    # The nvtx package resolves only a few color names itself and imports
+    # matplotlib for any other, which runtime images do not ship; an unresolved
+    # name then raises TypeError at the annotation site, which for a decorator
+    # means at import. Dynamo therefore passes nvtx an RGB integer. The names nvtx
+    # knows keep its values; any unknown name gets the nvtx default color.
+    _COLORS = {
+        "black": 0x000000,
+        "blue": 0x0000FF,
+        "brown": 0xA52A2A,
+        "cyan": 0x00FFFF,
+        "darkgreen": 0x006400,
+        "gray": 0x808080,
+        "green": 0x008000,
+        "grey": 0x808080,
+        "lime": 0x00FF00,
+        "magenta": 0xFF00FF,
+        "navy": 0x000080,
+        "olive": 0x808000,
+        "orange": 0xFFA500,
+        "pink": 0xFFC0CB,
+        "purple": 0x800080,
+        "rapids": 0x7400FF,
+        "red": 0xFF0000,
+        "teal": 0x008080,
+        "white": 0xFFFFFF,
+        "yellow": 0xFFFF00,
+    }
+
+    def _resolve_color(color):
+        if color is None or isinstance(color, int):
+            return color
+        return _COLORS.get(color)
+
     def _get_attr(message: str, color: str):
         try:
             return _attr_cache[message, color]
         except KeyError:
-            attr = _domain.get_event_attributes(message=message, color=color)
+            attr = _domain.get_event_attributes(
+                message=message, color=_resolve_color(color)
+            )
             _attr_cache[message, color] = attr
             return attr
 
@@ -72,9 +108,14 @@ if ENABLED:
     def end_range(rng) -> None:
         _domain.end_range(rng)
 
-    # functools.partial so decorator and context-manager usage both land
-    # in the "dynamo" domain, keeping all markers in one nsys row.
-    annotate = functools.partial(_nvtx_lib.annotate, domain="dynamo")
+    def annotate(message=None, color=None, **kwargs):
+        """nvtx.annotate in the "dynamo" domain with a matplotlib-free color.
+
+        Works as a decorator and as a context manager, like nvtx.annotate.
+        Keeping every marker in one domain keeps them in one nsys row.
+        """
+        kwargs.setdefault("domain", "dynamo")
+        return _nvtx_lib.annotate(message, color=_resolve_color(color), **kwargs)
 
     def range_decorator(message: str, color: str = "white"):
         """Decorator that wraps an async generator function with an NVTX range.
