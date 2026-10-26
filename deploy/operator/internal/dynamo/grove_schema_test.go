@@ -18,10 +18,8 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsvalidation "k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	apitest "k8s.io/apiextensions-apiserver/pkg/test"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/utils/ptr"
 )
 
 type grovePodCliqueSetRequestValidator struct {
@@ -92,7 +90,7 @@ func generateTopologyTestPodCliqueSet(t *testing.T, deploymentPack v1alpha1.Topo
 
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: "worker",
-		Replicas:      ptr.To(int32(2)),
+		Replicas:      new(int32(2)),
 		TopologyConstraint: &v1alpha1.TopologyConstraint{
 			PackDomain: "rack",
 		},
@@ -101,7 +99,7 @@ func generateTopologyTestPodCliqueSet(t *testing.T, deploymentPack v1alpha1.Topo
 		component.Multinode = &v1alpha1.MultinodeSpec{NodeCount: 2}
 	}
 	deployment := &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-deploy", Namespace: "default"},
+		Name: "test-deploy", Namespace: "default",
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
 				TopologyProfile: "grove-topology",

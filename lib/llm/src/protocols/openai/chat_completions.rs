@@ -29,10 +29,13 @@ pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
 use dynamo_parsers::tool_calling::{ToolCallResponse, ToolCallResponseChunk};
+#[cfg(test)]
 use dynamo_protocols::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
-    FunctionCall, FunctionCallStream, FunctionType,
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, FinishReason,
+};
+use dynamo_protocols::types::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, FunctionCall,
+    FunctionCallStream, FunctionType,
 };
 
 /// Map a parser-native [`ToolCallResponse`] onto the protocol/wire
@@ -395,11 +398,8 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     Some(())
 }
 
-/// Build one synthetic stream choice from an existing response template.
-///
-/// Both streaming tool-call paths use this constructor when an engine omits a
-/// terminal choice. Accounting data belongs only on the usage chunk and must
-/// not be copied onto the synthetic choice.
+/// Synthetic terminal choices must not repeat accounting from the template's usage chunk.
+#[cfg(test)]
 pub(super) fn stream_choice_chunk_from_template(
     template: &NvCreateChatCompletionStreamResponse,
     index: u32,
@@ -1737,13 +1737,24 @@ mod tests {
             make_tool("func-name_v2"),
             make_tool("FuncName"),
             make_tool("Func_Name-123"),
+            make_tool("my-tool.v2"),
         ];
         assert!(validate::validate_tools(&Some(&tools)).is_ok());
     }
 
     #[test]
     fn test_validate_tools_invalid_names() {
-        for name in ["<func_name>", "func name", "func@name", "func,name", ""] {
+        for name in [
+            "<func_name>",
+            "func name",
+            "func@name",
+            "func,name",
+            "func=name",
+            "func\"name",
+            "func:name",
+            "func/name",
+            "",
+        ] {
             let tools = vec![ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {

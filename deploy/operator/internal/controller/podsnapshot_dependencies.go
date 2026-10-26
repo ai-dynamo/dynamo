@@ -135,10 +135,9 @@ func (r *DynamoComponentDeploymentReconciler) mapPodSnapshotToDCDRequests(
 	requests := make([]ctrl.Request, 0, len(components.Items))
 	for i := range components.Items {
 		component := &components.Items[i]
-		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+		requests = append(requests, ctrl.Request{
 			Namespace: component.Namespace,
-			Name:      component.Name,
-		}})
+			Name:      component.Name})
 	}
 	return requests
 }

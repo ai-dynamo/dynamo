@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dynamo_kv_router::identity::PoolId;
 use dynamo_kv_router::indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
-use dynamo_kv_router::protocols::{ActiveLoad, WorkerId};
+use dynamo_kv_router::protocols::{ActiveLoad, SchedulerLoad, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::transports::event_plane::EventEnvelope;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, OwnedSemaphorePermit, TryAcquireError};
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
@@ -21,11 +22,15 @@ use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, DcRelayIdentity,
     KvQuerySemantics, ModelAlias, WorkerRole,
 };
-use super::load::{LoadObservationOutcome, PoolLoadSnapshot, PoolLoadState};
+use super::load::{
+    Coverage, LoadObservationOutcome, PoolDeployment, PoolLoadSnapshot, PoolLoadState,
+    PoolSchedulerLoad, SchedulerLoadState,
+};
 use super::publication::{
     PublicationHub, PublicationHubConfig, PublicationHubError, PublicationHubSubscription,
     TerminalFailure, publication_lease,
 };
+use super::serving_load::PoolServingLoad;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;
@@ -82,6 +87,9 @@ struct PoolEntry {
 
 struct PoolServingState {
     load: PoolLoadState,
+    scheduler: SchedulerLoadState,
+    /// `None` while the runtime configuration is invalid.
+    deployment: Option<PoolDeployment>,
 }
 
 #[derive(Clone)]
@@ -699,22 +707,30 @@ impl PoolRegistry {
         validate_registrations(&request.registrations)?;
         validate_roles(&request.roles)?;
         let serving = request.serving_facts.as_ref().map(|facts| {
-            let load = match PoolLoadState::from_runtime_configs(&facts.runtime_configs) {
-                Ok(load) => load,
-                Err(error) => {
-                    // Load telemetry is supplemental to CKF materialization. Attach
-                    // the pool with an explicitly degraded snapshot rather than make
-                    // malformed capacity metadata block KV evidence publication.
-                    tracing::warn!(
-                        pool_id = %request.pool_id,
-                        endpoint = %request.endpoint,
-                        %error,
-                        "Ignoring invalid KV DC Relay pool load capacity during attach"
-                    );
-                    PoolLoadState::default()
-                }
-            };
-            PoolServingState { load }
+            let (load, deployment) =
+                match PoolLoadState::from_runtime_configs(&facts.runtime_configs) {
+                    Ok(load) => (
+                        load,
+                        Some(PoolDeployment::from_runtime_configs(&facts.runtime_configs)),
+                    ),
+                    Err(error) => {
+                        // Load telemetry is supplemental to CKF materialization. Attach
+                        // the pool with an explicitly degraded snapshot rather than make
+                        // malformed capacity metadata block KV evidence publication.
+                        tracing::warn!(
+                            pool_id = %request.pool_id,
+                            endpoint = %request.endpoint,
+                            %error,
+                            "Ignoring invalid KV DC Relay pool load capacity during attach"
+                        );
+                        (PoolLoadState::default(), None)
+                    }
+                };
+            PoolServingState {
+                load,
+                scheduler: SchedulerLoadState::default(),
+                deployment,
+            }
         });
 
         let layout_generation = {
@@ -944,6 +960,9 @@ impl PoolRegistry {
             return Ok(false);
         };
         let capacity_update = serving.load.replace_capacity(runtime_configs);
+        serving.deployment = capacity_update
+            .is_ok()
+            .then(|| PoolDeployment::from_runtime_configs(runtime_configs));
         match capacity_update {
             Ok(changed) => {
                 if changed {
@@ -1004,6 +1023,78 @@ impl PoolRegistry {
             publish_load_if_changed(&state, &self.load_tx, pool_id);
         }
         true
+    }
+
+    /// Records a router's complete rank batch. Undeclared ranks are ignored.
+    /// Returns false for a retired generation or a batch containing undeclared ranks.
+    pub(super) fn observe_scheduler_load(
+        &self,
+        pool_id: PoolId,
+        layout_generation: u64,
+        envelope: &EventEnvelope,
+        mut loads: Vec<SchedulerLoad>,
+        received_at: Instant,
+    ) -> bool {
+        let mut state = self.state.lock();
+        let Some(serving) = active_serving(&mut state, pool_id, layout_generation) else {
+            return false;
+        };
+        let reported_ranks = loads.len();
+        loads.retain(|load| {
+            serving
+                .load
+                .has_rank(&WorkerWithDpRank::new(load.worker_id, load.dp_rank))
+        });
+        let all_declared = loads.len() == reported_ranks;
+        serving.scheduler.observe(envelope, loads, received_at);
+        all_declared
+    }
+
+    /// Serving load of every active pool, which is exactly the catalog's pool
+    /// set. `scheduler_publishers` holds the recently registered scheduler-load
+    /// publishers per serving endpoint; an endpoint whose roster is unknown is
+    /// absent. Also forgets expired scheduler views.
+    ///
+    /// This prunes and aggregates every pool under the registry lock that
+    /// ingest also takes, once per load window: O(routers x ranks), cheap at
+    /// current scale. A per-pool lock would remove the contention if it grows.
+    pub(super) fn serving_pool_loads(
+        &self,
+        scheduler_publishers: &HashMap<EndpointId, HashSet<u64>>,
+        now: Instant,
+    ) -> Vec<PoolServingLoad> {
+        let mut state = self.state.lock();
+        let mut pools = state
+            .pools
+            .values_mut()
+            .filter(|entry| entry.state == PoolEntryState::Active)
+            .map(|entry| {
+                let (scheduler, deployment) = match entry.serving.as_mut() {
+                    Some(serving) => {
+                        serving.scheduler.prune(now);
+                        let discovered = scheduler_publishers.get(&entry.endpoint);
+                        (
+                            serving.scheduler.snapshot(&serving.load, discovered, now),
+                            serving.deployment,
+                        )
+                    }
+                    None => (
+                        PoolSchedulerLoad {
+                            coverage: Coverage::Missing,
+                            source_observed_ms: 0,
+                        },
+                        None,
+                    ),
+                };
+                PoolServingLoad {
+                    producer: entry.identity,
+                    scheduler,
+                    deployment,
+                }
+            })
+            .collect::<Vec<_>>();
+        pools.sort_unstable_by_key(|pool| pool.producer.pool_id());
+        pools
     }
 
     pub(super) async fn withdraw(
@@ -1399,6 +1490,21 @@ fn publish_catalog_remove(
 fn publish_catalog_clear(state: &mut PoolRegistryState, sender: &watch::Sender<DcPoolCatalog>) {
     let revision = advance_catalog_revision(state);
     sender.send_modify(|catalog| catalog.clear(revision));
+}
+
+fn active_serving(
+    state: &mut PoolRegistryState,
+    pool_id: PoolId,
+    layout_generation: u64,
+) -> Option<&mut PoolServingState> {
+    state
+        .pools
+        .get_mut(&pool_id)
+        .filter(|entry| {
+            entry.layout_generation == layout_generation && entry.state == PoolEntryState::Active
+        })?
+        .serving
+        .as_mut()
 }
 
 fn publish_load_if_changed(
@@ -3239,5 +3345,161 @@ mod tests {
         );
         assert_eq!(registry.load_snapshots()[0].kv_expected_ranks, 0);
         registry.detach(replacement).await.unwrap();
+    }
+
+    fn serving_worker(max_num_seqs: Option<u64>) -> ModelRuntimeConfig {
+        ModelRuntimeConfig {
+            total_kv_blocks: Some(100),
+            max_num_seqs,
+            ..ModelRuntimeConfig::default()
+        }
+    }
+
+    async fn attach_served(registry: &PoolRegistry) -> PoolAttachment {
+        let mut attach_request = request(pool(1), "fast.router.generate", "llama");
+        attach_request.serving_facts = Some(PoolServingFacts {
+            runtime_configs: HashMap::from([(1, serving_worker(Some(8)))]),
+        });
+        registry.attach(attach_request).await.unwrap()
+    }
+
+    fn scheduler_envelope(sequence: u64) -> EventEnvelope {
+        EventEnvelope {
+            publisher_id: 7,
+            sequence,
+            published_at: 1_000,
+            topic: String::new(),
+            payload: Default::default(),
+        }
+    }
+
+    fn scheduler_view(dp_rank: u32) -> SchedulerLoad {
+        SchedulerLoad {
+            worker_id: 1,
+            dp_rank,
+            active_decode_blocks: 3,
+            active_prefill_tokens: 4,
+            group: dynamo_kv_router::protocols::SchedulerGroup::Standalone { scheduler_id: 7 },
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_load_is_generation_scoped_and_separate_from_kv_usage() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let served = attach_served(&registry).await;
+        let kv_before = registry.load_snapshots();
+        let now = Instant::now();
+        // Rank 1 is not declared; the next generation does not exist yet.
+        assert!(!registry.observe_scheduler_load(
+            served.pool_id,
+            served.layout_generation,
+            &scheduler_envelope(1),
+            vec![scheduler_view(1)],
+            now,
+        ));
+        assert!(!registry.observe_scheduler_load(
+            served.pool_id,
+            served.layout_generation + 1,
+            &scheduler_envelope(1),
+            vec![scheduler_view(0)],
+            now,
+        ));
+        assert!(registry.observe_scheduler_load(
+            served.pool_id,
+            served.layout_generation,
+            &scheduler_envelope(2),
+            vec![scheduler_view(0)],
+            now,
+        ));
+        assert_eq!(registry.load_snapshots(), kv_before);
+
+        let registered =
+            HashMap::from([(EndpointId::from("fast.router.generate"), HashSet::from([7]))]);
+        assert_eq!(
+            registry.serving_pool_loads(&registered, now)[0]
+                .scheduler
+                .coverage,
+            Coverage::Complete(super::super::load::SchedulerGauges {
+                active_decode_blocks: 3,
+                active_prefill_tokens: 4,
+            })
+        );
+        // An unknown roster cannot prove coverage.
+        assert_eq!(
+            registry.serving_pool_loads(&HashMap::new(), now)[0]
+                .scheduler
+                .coverage,
+            Coverage::Partial
+        );
+        registry.detach(served).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serving_pool_loads_list_every_pool() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let served = attach_served(&registry).await;
+        let mut unserved_request = request(pool(2), "slow.router.generate", "llama");
+        unserved_request.serving_facts = None;
+        let unserved = registry.attach(unserved_request).await.unwrap();
+        let now = Instant::now();
+
+        let loads = registry.serving_pool_loads(&HashMap::new(), now);
+        assert_eq!(loads.len(), 2);
+        assert_eq!(loads[0].producer.pool_id(), served.pool_id);
+        assert_eq!(loads[1].producer.pool_id(), unserved.pool_id);
+        assert_eq!(loads[1].scheduler.coverage, Coverage::Missing);
+        assert_eq!(loads[1].deployment, None);
+
+        registry.detach(served).await.unwrap();
+        registry.detach(unserved).await.unwrap();
+        assert!(registry.serving_pool_loads(&HashMap::new(), now).is_empty());
+    }
+
+    #[tokio::test]
+    async fn pool_deployment_follows_runtime_configs() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let served = attach_served(&registry).await;
+        let deployment =
+            || registry.serving_pool_loads(&HashMap::new(), Instant::now())[0].deployment;
+        assert_eq!(
+            deployment(),
+            Some(PoolDeployment {
+                live_workers: 1,
+                max_concurrency: Some(8),
+            })
+        );
+
+        // A worker without a declared limit leaves the pool's limit unknown.
+        registry
+            .replace_load_capacity(
+                served.pool_id,
+                served.layout_generation,
+                &HashMap::from([(1, serving_worker(Some(8))), (2, serving_worker(None))]),
+            )
+            .unwrap();
+        assert_eq!(
+            deployment(),
+            Some(PoolDeployment {
+                live_workers: 2,
+                max_concurrency: None,
+            })
+        );
+
+        // An invalid configuration leaves no deployment facts.
+        registry
+            .replace_load_capacity(
+                served.pool_id,
+                served.layout_generation,
+                &HashMap::from([(
+                    1,
+                    ModelRuntimeConfig {
+                        data_parallel_size: 0,
+                        ..serving_worker(Some(8))
+                    },
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(deployment(), None);
+        registry.detach(served).await.unwrap();
     }
 }
