@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_global_view_broadcaster::{Frame, GlobalViewBroadcaster};
@@ -31,8 +33,10 @@ async fn broadcasts_to_all_routers_and_recovers_a_disconnected_replica() {
                 let connections_tx = connections_tx.clone();
                 async move {
                     let (sink, stream) = mpsc::channel(8);
-                    connections_tx.send((router, stream)).map_err(|_| ())?;
-                    Ok::<_, ()>(sink)
+                    connections_tx
+                        .send((router, stream))
+                        .map_err(|_| "connection observer closed")?;
+                    Ok::<_, &'static str>(sink)
                 }
             })
             .await;
@@ -157,7 +161,7 @@ async fn update_during_connection_is_included_in_the_initial_snapshot() {
                     resume.await.unwrap();
                     let (sink, stream) = mpsc::channel(8);
                     stream_tx.send(stream).unwrap();
-                    Ok::<_, ()>(sink)
+                    Ok::<_, &'static str>(sink)
                 }
             })
             .await;
@@ -203,7 +207,55 @@ async fn update_during_connection_is_included_in_the_initial_snapshot() {
 }
 
 #[tokio::test]
-async fn lagging_router_reconnects_with_the_current_snapshot() {
+async fn retries_a_failed_router_attachment() {
+    let broadcaster = GlobalViewBroadcaster::new();
+    broadcaster.upsert("blue", 10);
+    let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
+    let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attach_attempts = Arc::clone(&attempts);
+    let running = broadcaster.clone();
+    let task = tokio::spawn(async move {
+        running
+            .run(directory_rx, move |_| {
+                let connections_tx = connections_tx.clone();
+                let attempts = Arc::clone(&attach_attempts);
+                async move {
+                    if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                        return Err("router unavailable");
+                    }
+                    let (sink, stream) = mpsc::channel(8);
+                    connections_tx
+                        .send(stream)
+                        .map_err(|_| "connection observer closed")?;
+                    Ok(sink)
+                }
+            })
+            .await;
+    });
+
+    let mut stream = timeout(Duration::from_secs(2), connections_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        next(&mut stream).await,
+        Frame::Snapshot {
+            revision: 1,
+            pools: HashMap::from([("blue", 10)]),
+        }
+    );
+
+    drop(directory_tx);
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lagging_router_reconnects_with_a_fresh_snapshot() {
     let broadcaster = GlobalViewBroadcaster::new();
     let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
     let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
@@ -213,9 +265,11 @@ async fn lagging_router_reconnects_with_the_current_snapshot() {
             .run(directory_rx, move |router| {
                 let connections_tx = connections_tx.clone();
                 async move {
-                    let (sink, stream) = mpsc::channel(1);
-                    connections_tx.send((router, stream)).map_err(|_| ())?;
-                    Ok::<_, ()>(sink)
+                    let (sink, stream) = mpsc::channel(128);
+                    connections_tx
+                        .send((router, stream))
+                        .map_err(|_| "connection observer closed")?;
+                    Ok::<_, &'static str>(sink)
                 }
             })
             .await;
@@ -246,6 +300,15 @@ async fn lagging_router_reconnects_with_the_current_snapshot() {
             pools: HashMap::from([("blue", 100)]),
         }
     );
+    broadcaster.upsert("blue", 101);
+    assert_eq!(
+        next(&mut recovered).await,
+        Frame::Upsert {
+            revision: 101,
+            pool: "blue",
+            view: 101,
+        }
+    );
     drop(directory_tx);
     timeout(Duration::from_secs(2), task)
         .await
@@ -265,8 +328,10 @@ async fn stalled_router_resnapshots_without_draining_its_old_channel() {
                 let connections_tx = connections_tx.clone();
                 async move {
                     let (sink, stream) = mpsc::channel(1);
-                    connections_tx.send((router, stream)).map_err(|_| ())?;
-                    Ok::<_, ()>(sink)
+                    connections_tx
+                        .send((router, stream))
+                        .map_err(|_| "connection observer closed")?;
+                    Ok::<_, &'static str>(sink)
                 }
             })
             .await;

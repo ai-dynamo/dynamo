@@ -7,6 +7,7 @@
 //! define a network transport.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -14,10 +15,11 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 const UPDATE_BUFFER: usize = 64;
 const RECONNECT_DELAY: Duration = Duration::from_millis(100);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A complete view on connection, followed by revisioned changes.
@@ -29,6 +31,8 @@ pub enum Frame<P: Eq + Hash, V> {
 }
 
 impl<P: Eq + Hash, V> Frame<P, V> {
+    /// This sequence resets when the broadcaster starts, so receivers must
+    /// pair it with the relay incarnation.
     pub fn revision(&self) -> u64 {
         match self {
             Self::Snapshot { revision, .. }
@@ -130,40 +134,34 @@ where
         }
     }
 
-    /// Maintain one connection task for each router in the current directory.
+    /// Open one outbound connection from the relay to each router in the directory.
     /// Closing the directory stops every task.
     pub async fn run<R, C, F, E>(&self, mut directory: watch::Receiver<HashSet<R>>, attach: C)
     where
-        R: Clone + Eq + Hash + Send + Sync + 'static,
+        R: Clone + Debug + Eq + Hash + Send + Sync + 'static,
         C: Fn(R) -> F + Send + Sync + 'static,
         F: Future<Output = Result<mpsc::Sender<Frame<P, V>>, E>> + Send + 'static,
-        E: Send + 'static,
+        E: Display + Send + 'static,
     {
         let attach = Arc::new(attach);
-        let mut tasks = RouterTasks {
-            handles: HashMap::new(),
-        };
+        let mut tasks: HashMap<R, AbortOnDropHandle<()>> = HashMap::new();
         loop {
+            // Release the watch borrow before changing connection tasks.
             let routers = directory.borrow_and_update().clone();
-            tasks.handles.retain(|router, task| {
-                if routers.contains(router) {
-                    true
-                } else {
-                    task.abort();
-                    false
-                }
-            });
+            tasks.retain(|router, _| routers.contains(router));
             for router in routers {
-                if tasks.handles.contains_key(&router) {
+                if tasks.contains_key(&router) {
                     continue;
                 }
                 let broadcaster = self.clone();
                 let attacher = Arc::clone(&attach);
                 let task_router = router.clone();
-                let task = tokio::spawn(async move {
-                    broadcaster.forward_to_router(task_router, attacher).await;
-                });
-                tasks.handles.insert(router, task);
+                tasks.insert(
+                    router,
+                    AbortOnDropHandle::new(tokio::spawn(async move {
+                        broadcaster.forward_to_router(task_router, attacher).await;
+                    })),
+                );
             }
             if directory.changed().await.is_err() {
                 break;
@@ -173,61 +171,58 @@ where
 
     async fn forward_to_router<R, C, F, E>(&self, router: R, attach: Arc<C>)
     where
-        R: Clone,
+        R: Clone + Debug,
         C: Fn(R) -> F,
         F: Future<Output = Result<mpsc::Sender<Frame<P, V>>, E>>,
+        E: Display,
     {
+        let mut retry_delay = RECONNECT_DELAY;
         loop {
-            let Ok(sink) = attach(router.clone()).await else {
-                tokio::time::sleep(RECONNECT_DELAY).await;
-                continue;
+            let sink = match attach(router.clone()).await {
+                Ok(sink) => {
+                    retry_delay = RECONNECT_DELAY;
+                    sink
+                }
+                Err(error) => {
+                    tracing::warn!(?router, error = %error, "Global view attach failed");
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(MAX_RECONNECT_DELAY);
+                    continue;
+                }
             };
-            let (mut updates, revision, pools) = {
-                let state = self.inner.state.read();
-                (
-                    self.inner.updates.subscribe(),
-                    state.revision,
-                    state.pools.clone(),
-                )
-            };
-            if sink
-                .send_timeout(Frame::Snapshot { revision, pools }, SEND_TIMEOUT)
-                .await
-                .is_err()
-            {
+            let (mut updates, snapshot) = self.snapshot_and_subscribe();
+            if sink.send_timeout(snapshot, SEND_TIMEOUT).await.is_err() {
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
-            let mut seen = revision;
             loop {
                 tokio::select! {
                     _ = sink.closed() => break,
                     update = updates.recv() => match update {
-                        Ok(frame) if frame.revision() > seen => {
-                            let revision = frame.revision();
+                        Ok(frame) => {
                             if sink.send_timeout(frame, SEND_TIMEOUT).await.is_err() {
                                 break;
                             }
-                            seen = revision;
                         }
-                        Ok(_) => {}
-                        Err(_) => break, // Resnapshot after lag or stream closure.
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(?router, skipped, "Global view router lagged; reconnecting for snapshot");
+                            break;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
     }
-}
 
-struct RouterTasks<R> {
-    handles: HashMap<R, JoinHandle<()>>,
-}
-
-impl<R> Drop for RouterTasks<R> {
-    fn drop(&mut self) {
-        for task in self.handles.values() {
-            task.abort();
-        }
+    fn snapshot_and_subscribe(&self) -> (broadcast::Receiver<Frame<P, V>>, Frame<P, V>) {
+        let state = self.inner.state.read();
+        let updates = self.inner.updates.subscribe();
+        let snapshot = Frame::Snapshot {
+            revision: state.revision,
+            pools: state.pools.clone(),
+        };
+        (updates, snapshot)
     }
 }
