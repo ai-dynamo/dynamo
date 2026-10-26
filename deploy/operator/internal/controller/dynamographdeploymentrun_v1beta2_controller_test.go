@@ -73,6 +73,7 @@ func newDGDRRunFixture(t *testing.T, hardware dgdrRunHardwareDiscoverer, objects
 		reconciler: &DynamoGraphDeploymentRunV1beta2Reconciler{
 			Client:                  c,
 			Hardware:                hardware,
+			PlannerImage:            "example.com/dynamo-planner:1.2.3",
 			OperatorImage:           "example.com/dynamo-operator:1.2.3",
 			OperatorImagePullPolicy: corev1.PullAlways,
 		},
@@ -109,17 +110,20 @@ func (f *dgdrRunFixture) job() *batchv1.Job {
 	return &jobs.Items[0]
 }
 
-func dgdrRunForTest(t *testing.T, parameters map[string]any) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
 	t.Helper()
-	raw, err := json.Marshal(parameters)
+	raw, err := json.Marshal(inputOverrides)
 	if err != nil {
 		t.Fatalf("marshal parameters: %v", err)
 	}
 	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "search-1", Namespace: "default", UID: "run-uid", Generation: 1},
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
-			Model:          &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
-			AISimulate:     &nvidiacomv1beta2.AISimulateSpec{Image: "example.com/dynamo-planner:1.2.3", Parameters: &runtime.RawExtension{Raw: raw}},
+			Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
+			Hardware: &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
+				SKU: ptr.To("h200_sxm"), Budget: ptr.To[int32](16),
+			}},
+			AISimulate:     &nvidiacomv1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: raw}},
 			Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 2},
 		}},
 	}
@@ -128,7 +132,7 @@ func dgdrRunForTest(t *testing.T, parameters map[string]any) *nvidiacomv1beta2.D
 func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
 	run := dgdrRunForTest(t, map[string]any{
-		"search_space": map[string]any{"hardware_sku": "h200_sxm", "gpu_budget": 16},
+		"search_space": map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": 16},
 		"dgdr_run": map[string]any{
 			"max_candidates": 7,
 			"runtime_image":  "example.com/custom-vllm-runtime:1.2.3",
@@ -142,16 +146,19 @@ func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 	f.reconcile()
 
 	job := f.job()
-	assertDGDRRunJobIsolation(t, job, run, f.reconciler.OperatorImage)
+	assertDGDRRunJobIsolation(t, job, run, f.reconciler.PlannerImage, f.reconciler.OperatorImage)
 	assertDGDRRunInput(t, f.client, job, hardware)
 	assertDGDRRunSupportResources(t, f.client, job, run)
-	assertDGDRRunPendingStatus(t, f.run(), job.Name)
+	stored := f.run()
+	assertDGDRRunPendingStatus(t, stored, job.Name)
+	assertDGDRRunStatusInputMatchesConfigMap(t, f.client, stored, job)
 }
 
 func assertDGDRRunJobIsolation(
 	t *testing.T,
 	job *batchv1.Job,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	plannerImage string,
 	operatorImage string,
 ) {
 	t.Helper()
@@ -169,8 +176,8 @@ func assertDGDRRunJobIsolation(
 	}
 	sweeper := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunSweeperContainer)
 	publisher := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunPublisherContainer)
-	if sweeper.Image != run.Spec.AISimulate.Image {
-		t.Fatalf("sweeper image = %q, want %q", sweeper.Image, run.Spec.AISimulate.Image)
+	if sweeper.Image != plannerImage {
+		t.Fatalf("sweeper image = %q, want operator-configured planner image %q", sweeper.Image, plannerImage)
 	}
 	if publisher.Image != operatorImage || publisher.ImagePullPolicy != corev1.PullAlways {
 		t.Fatalf("publisher image = %q/%s, want configured operator image/Always", publisher.Image, publisher.ImagePullPolicy)
@@ -184,6 +191,33 @@ func assertDGDRRunJobIsolation(
 	if !hasMountAt(sweeper.VolumeMounts, dgdrRunSnapshotVolume, "/work/results") ||
 		!hasMountAt(publisher.VolumeMounts, dgdrRunSnapshotVolume, "/work/results") {
 		t.Fatal("sweeper and publisher do not share the parameter-overridden snapshot directory")
+	}
+}
+
+func assertDGDRRunStatusInputMatchesConfigMap(
+	t *testing.T,
+	c client.Client,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	job *batchv1.Job,
+) {
+	t.Helper()
+	if run.Status.AISimulate == nil || run.Status.AISimulate.Input == nil {
+		t.Fatal("status.aisimulate.input is empty")
+	}
+	var statusInput map[string]any
+	if err := json.Unmarshal(run.Status.AISimulate.Input.Raw, &statusInput); err != nil {
+		t.Fatalf("decode status.aisimulate.input: %v", err)
+	}
+	configMap := &corev1.ConfigMap{}
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
+		t.Fatalf("get input ConfigMap: %v", err)
+	}
+	var configInput map[string]any
+	if err := yaml.Unmarshal([]byte(configMap.Data[dgdrRunInputKey]), &configInput); err != nil {
+		t.Fatalf("decode input ConfigMap: %v", err)
+	}
+	if !reflect.DeepEqual(statusInput, configInput) {
+		t.Fatalf("status input = %#v, want exact ConfigMap input %#v", statusInput, configInput)
 	}
 }
 
@@ -210,11 +244,11 @@ func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job, hardwar
 	if output["derive_runtime_images"] != true {
 		t.Fatalf("derive_runtime_images = %v, want true for a backend search", output["derive_runtime_images"])
 	}
-	if got := input["search_space"].(map[string]any)["hardware_sku"]; got != "h200_sxm" {
-		t.Fatalf("search_space.hardware_sku = %v, want h200_sxm", got)
+	if got := input["search_space"].(map[string]any)["hardware_sku"]; got != "h100_sxm" {
+		t.Fatalf("search_space.hardware_sku = %v, want authoritative input override h100_sxm", got)
 	}
 	if !reflect.DeepEqual(hardware.calls, []nvidiacomv1beta1.GPUSKUType{"h200_sxm"}) {
-		t.Fatalf("hardware discovery calls = %v, want one filtered call", hardware.calls)
+		t.Fatalf("hardware discovery calls = %v, want the admitted typed SKU h200_sxm", hardware.calls)
 	}
 }
 

@@ -9,9 +9,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"path"
 	"strconv"
 	"strings"
@@ -19,7 +19,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -83,6 +84,7 @@ type DynamoGraphDeploymentRunV1beta2Reconciler struct {
 	Config                  *configv1alpha1.OperatorConfiguration
 	RuntimeConfig           *commoncontroller.RuntimeConfig
 	Hardware                dgdrRunHardwareDiscoverer
+	PlannerImage            string
 	OperatorImage           string
 	OperatorImagePullPolicy corev1.PullPolicy
 }
@@ -106,10 +108,6 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) Reconcile(
 	if run.DeletionTimestamp != nil || meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) {
 		return ctrl.Result{}, nil
 	}
-	if run.Spec.AISimulate == nil || run.Spec.AISimulate.Image == "" {
-		return ctrl.Result{}, fmt.Errorf("Run %q has no spec.aisimulate.image", run.Name)
-	}
-
 	jobs, err := r.ownedJobs(ctx, run)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -143,7 +141,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) Reconcile(
 		}
 	}
 
-	return ctrl.Result{}, r.reconcileRunStatus(ctx, run, job)
+	return ctrl.Result{}, r.reconcileRunStatus(ctx, run, job, execution)
 }
 
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) ownedJobs(
@@ -244,9 +242,14 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 		if parseErr != nil {
 			return dgdrRunExecution{}, fmt.Errorf("read ConfigMap %q: %w", name, parseErr)
 		}
+		input, inputErr := dgdrRunStatusInput(configMap.Data[dgdrRunInputKey])
+		if inputErr != nil {
+			return dgdrRunExecution{}, fmt.Errorf("read ConfigMap %q input: %w", name, inputErr)
+		}
 		execution := dgdrRunExecution{
 			GPUsPerNode:  gpusPerNode,
 			SnapshotPath: annotationOrDefault(configMap.Annotations, dgdrRunSnapshotPathAnnotation, dgdrRunSnapshotPath),
+			Input:        input,
 		}
 		if job != nil {
 			jobGPUs, jobErr := positiveAnnotation(job.Annotations, dgdrRunGPUsPerNodeAnnotation)
@@ -275,21 +278,21 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 		}
 		execution.SnapshotPath = annotationOrDefault(job.Annotations, dgdrRunSnapshotPathAnnotation, dgdrRunSnapshotPath)
 	}
-	input, err := aisimulate.DecodeParameters(run.Spec.AISimulate.Parameters)
+	if execution.GPUsPerNode == 0 {
+		execution.GPUsPerNode, err = r.discoverGPUsPerNode(ctx, run)
+		if err != nil {
+			return dgdrRunExecution{}, err
+		}
+	}
+	input, snapshotPath, err := dgdrRunInput(run, r.PlannerImage, execution.GPUsPerNode)
 	if err != nil {
 		return dgdrRunExecution{}, err
 	}
-	if execution.GPUsPerNode == 0 {
-		if configured, found := nestedPositiveInt(input, "dgdr_run", "num_gpus_per_node"); found {
-			execution.GPUsPerNode = configured
-		} else {
-			execution.GPUsPerNode, err = r.discoverGPUsPerNode(ctx, input)
-			if err != nil {
-				return dgdrRunExecution{}, err
-			}
-		}
+	contents, err := yaml.Marshal(input)
+	if err != nil {
+		return dgdrRunExecution{}, fmt.Errorf("encode AISimulate input: %w", err)
 	}
-	contents, snapshotPath, err := dgdrRunInput(run, input, execution.GPUsPerNode)
+	execution.Input, err = dgdrRunStatusInput(string(contents))
 	if err != nil {
 		return dgdrRunExecution{}, err
 	}
@@ -320,16 +323,15 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) discoverGPUsPerNode(
 	ctx context.Context,
-	input map[string]any,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
 ) (int, error) {
 	if r.Hardware == nil {
 		return 0, errors.New("discover GPUs per node: hardware discoverer is not configured")
 	}
-	sku, _, err := unstructured.NestedString(input, "search_space", "hardware_sku")
-	if err != nil {
-		return 0, fmt.Errorf("read search_space.hardware_sku: %w", err)
+	if run.Spec.Hardware == nil || run.Spec.Hardware.GPU == nil || run.Spec.Hardware.GPU.SKU == nil {
+		return 0, errors.New("discover GPUs per node: spec.hardware.gpu.sku was not resolved by Request admission")
 	}
-	info, err := r.Hardware.Discover(ctx, nvidiacomv1beta1.GPUSKUType(sku))
+	info, err := r.Hardware.Discover(ctx, nvidiacomv1beta1.GPUSKUType(*run.Spec.Hardware.GPU.SKU))
 	if err != nil {
 		return 0, fmt.Errorf("discover GPUs per node: %w", err)
 	}
@@ -341,9 +343,9 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) discoverGPUsPerNode(
 
 func dgdrRunInput(
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
-	parameters map[string]any,
+	plannerImage string,
 	gpusPerNode int,
-) ([]byte, string, error) {
+) (map[string]any, string, error) {
 	if run.Spec.Recommendation == nil || run.Spec.Recommendation.MaxCandidates < 1 {
 		return nil, "", errors.New("spec.recommendation.maxCandidates must be defaulted before the Run is created")
 	}
@@ -351,46 +353,41 @@ func dgdrRunInput(
 		"name":                  run.Name,
 		"snapshot_dir":          dgdrRunSnapshotPath,
 		"namespace":             run.Namespace,
-		"runtime_image":         run.Spec.AISimulate.Image,
+		"runtime_image":         plannerImage,
 		"derive_runtime_images": true,
 		"num_gpus_per_node":     int64(gpusPerNode),
 		"max_candidates":        int64(run.Spec.Recommendation.MaxCandidates),
 	}}
-	input := aisimulate.MergeParameters(underlay, parameters)
+	input, err := aisimulate.LowerWithUnderlay(&run.Spec.NativeSearchInput, underlay)
+	if err != nil {
+		return nil, "", err
+	}
 	snapshotPath := dgdrRunSnapshotPath
 	if configured, found, err := unstructured.NestedString(input, "dgdr_run", "snapshot_dir"); err == nil && found && path.IsAbs(configured) {
 		snapshotPath = path.Clean(configured)
 	}
-	contents, err := yaml.Marshal(input)
-	if err != nil {
-		return nil, "", fmt.Errorf("encode AISimulate input: %w", err)
-	}
-	return contents, snapshotPath, nil
+	return input, snapshotPath, nil
 }
 
 type dgdrRunExecution struct {
 	GPUsPerNode  int
 	SnapshotPath string
+	Input        *runtime.RawExtension
 }
 
-func nestedPositiveInt(input map[string]any, fields ...string) (int, bool) {
-	value, found, err := unstructured.NestedFieldNoCopy(input, fields...)
-	if err != nil || !found {
-		return 0, false
+func dgdrRunStatusInput(contents string) (*runtime.RawExtension, error) {
+	var input map[string]any
+	if err := yaml.Unmarshal([]byte(contents), &input); err != nil {
+		return nil, fmt.Errorf("decode AISimulate input: %w", err)
 	}
-	var number float64
-	switch typed := value.(type) {
-	case int64:
-		number = float64(typed)
-	case float64:
-		number = typed
-	default:
-		return 0, false
+	if input == nil {
+		return nil, errors.New("decode AISimulate input: expected an object")
 	}
-	if number < 1 || number > math.MaxInt || math.Trunc(number) != number {
-		return 0, false
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("encode AISimulate status input: %w", err)
 	}
-	return int(number), true
+	return &runtime.RawExtension{Raw: raw}, nil
 }
 
 func positiveAnnotation(annotations map[string]string, key string) (int, error) {
@@ -438,7 +435,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 					Containers: []corev1.Container{
 						{
 							Name:            dgdrRunSweeperContainer,
-							Image:           run.Spec.AISimulate.Image,
+							Image:           r.PlannerImage,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"aisimulate"},
 							Args: []string{
@@ -512,8 +509,13 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRunStatus(
 	ctx context.Context,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
 	job *batchv1.Job,
+	execution dgdrRunExecution,
 ) error {
+	if execution.Input == nil {
+		return errors.New("update Run status: effective AISimulate input is missing")
+	}
 	original := run.DeepCopy()
+	run.Status.AISimulate = &nvidiacomv1beta2.AISimulateRunStatus{Input: execution.Input.DeepCopy()}
 	run.Status.JobRef = &nvidiacomv1beta2.ResourceReference{Name: job.Name, UID: job.UID}
 	run.Status.Phase = nvidiacomv1beta2.DGDRRunPhasePending
 	reason, message := dgdrRunReasonPending, dgdrRunMessagePending
@@ -636,6 +638,9 @@ func dgdrRunResourceName(runName string) string {
 }
 
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.PlannerImage == "" {
+		return errors.New("planner image is required for the DGDR Run sweeper")
+	}
 	if r.OperatorImage == "" {
 		return errors.New("operator image is required for the DGDR Run publisher")
 	}

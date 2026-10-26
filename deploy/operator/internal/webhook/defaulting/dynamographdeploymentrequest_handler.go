@@ -100,14 +100,15 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	defaultDynamoGraphDeploymentRequest(dgdr, dynamoGraphDeploymentRequestDefaultOptions{
 		operation: req.Operation,
-		image:     defaultPlannerImageFor(d.OperatorVersion, d.DefaultImage),
+		image:     PlannerImageFor(d.OperatorVersion, d.DefaultImage),
 	})
 	return nil
 }
 
-// defaultPlannerImageFor returns explicitImage when set, else the planner image with a
-// canonical operator-version tag, or an empty string when the version cannot be parsed.
-func defaultPlannerImageFor(operatorVersion, explicitImage string) string {
+// PlannerImageFor returns explicitImage when set, else the planner image with a canonical
+// operator-version tag, or an empty string when the version cannot be parsed. The same resolved
+// image defaults v1beta1 Requests and executes v1beta2 Runs.
+func PlannerImageFor(operatorVersion, explicitImage string) string {
 	if explicitImage != "" {
 		return explicitImage
 	}
