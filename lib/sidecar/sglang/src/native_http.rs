@@ -590,7 +590,9 @@ fn output(
         (None, Some(finish)) => decode_terminal(&response["meta_info"], finish),
         (None, None) => LLMEngineOutput::default(),
     };
-    output.engine_data = Some(serde_json::json!({"sglang_response": response}));
+    let mut engine_data = Map::new();
+    engine_data.insert("sglang_response".to_string(), response);
+    output.engine_data = Some(Value::Object(engine_data));
     if finished {
         output.disaggregated_params = prefill_handoff.take();
     }
@@ -995,6 +997,27 @@ mod tests {
         .unwrap();
         assert_eq!(serde_json::to_value(grpc.trace_headers).unwrap(), expected);
         assert_eq!(http.body["external_trace_header"], expected);
+    }
+
+    #[test]
+    fn native_output_moves_expert_payload_into_envelope() {
+        let response = json!({
+            "meta_info": {"routed_experts": "A".repeat(65536)},
+            "unknown_field": [1, 2, 3]
+        });
+        let experts = response["meta_info"]["routed_experts"].as_str().unwrap();
+        let original_ptr = experts.as_ptr();
+        let (converted, finished) = output(response, false, &mut None);
+        assert!(!finished);
+        let response = &converted.engine_data.unwrap()["sglang_response"];
+        assert_eq!(
+            response["meta_info"]["routed_experts"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            original_ptr
+        );
+        assert_eq!(response["unknown_field"], json!([1, 2, 3]));
     }
 
     #[test]
