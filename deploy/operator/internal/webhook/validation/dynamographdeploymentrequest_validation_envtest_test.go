@@ -59,8 +59,8 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		"spec":{"components":[{"name":"VllmPrefillWorker"}]}
 	}`
 
-	discoveredH200 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}
-	discoveredH100 := gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}
+	discoveredH200 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}
+	discoveredH100 := gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}
 
 	tests := []struct {
 		name               string
@@ -836,9 +836,18 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name:         "v1beta2 hardware omitted is discovered and the budget capped",
 			request:      v1beta2DGDRForAdmission(nil, nil),
 			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8},
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64},
 			check: func(t *testing.T, result *unstructured.Unstructured) {
 				expectV1beta2GPUValues(t, result, "h200_sxm", 32)
+			},
+		},
+		{
+			name:         "v1beta2 same-SKU nodes with different GPU counts use the aggregate",
+			request:      v1beta2DGDRForAdmission(nil, nil),
+			gpuDiscovery: true,
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2, TotalGPUs: 12},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				expectV1beta2GPUValues(t, result, "h200_sxm", 12)
 			},
 		},
 		{
@@ -847,7 +856,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["hardware"] = map[string]any{}
 			}, nil),
 			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
 			check: func(t *testing.T, result *unstructured.Unstructured) {
 				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
 			},
@@ -858,7 +867,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm"}}
 			}, nil),
 			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 8},
+			discovered:   gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64},
 			check: func(t *testing.T, result *unstructured.Unstructured) {
 				expectV1beta2GPUValues(t, result, "h100_sxm", 32)
 			},
@@ -934,7 +943,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h200_sxm"}}
 			}, nil),
 			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
+			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
 			check: func(t *testing.T, result *unstructured.Unstructured) {
 				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
 			},

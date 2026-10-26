@@ -157,8 +157,7 @@ func (o DGDRV1beta2Options) resolveHardware(
 	// A filtered discovery with no GPUs means the caller pinned a SKU the cluster cannot run.
 	var gpus int
 	if found != nil {
-		// TODO(#17192): Use the discovered aggregate GPU count so mixed node sizes of one SKU are counted correctly.
-		gpus = found.GPUsPerNode * found.NodesWithGPUs
+		gpus = found.TotalGPUs
 	}
 	if spec.Hardware != nil && spec.Hardware.GPU != nil && spec.Hardware.GPU.SKU != nil && gpus <= 0 {
 		return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Invalid(

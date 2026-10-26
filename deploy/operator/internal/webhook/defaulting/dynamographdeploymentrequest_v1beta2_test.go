@@ -75,7 +75,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		}
 	})
 	t.Run("everything missing", func(t *testing.T) {
-		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 16, NodesWithGPUs: 1}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 16, NodesWithGPUs: 1, TotalGPUs: 16}}
 		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil))
 		if err != nil {
 			t.Fatal(err)
@@ -88,7 +88,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		}
 	})
 	t.Run("a pinned SKU filters discovery and keeps its value", func(t *testing.T) {
-		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "b200_sxm", GPUsPerNode: 4, NodesWithGPUs: 1}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "b200_sxm", GPUsPerNode: 4, NodesWithGPUs: 1, TotalGPUs: 4}}
 		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), nil))
 		if err != nil {
 			t.Fatal(err)
@@ -108,7 +108,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		}
 	})
 	t.Run("the budget is capped", func(t *testing.T) {
-		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 1024, NodesWithGPUs: 1}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 1024, NodesWithGPUs: 1, TotalGPUs: 1024}}
 		if got, err := (DGDRV1beta2Options{Hardware: d}).resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, nil)); err != nil || got.budget != 32 {
 			t.Fatalf("default cap: %+v", got)
 		}
@@ -126,7 +126,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 }
 
 func TestResolveDefaultsV1beta2(t *testing.T) {
-	d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}
+	d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}}
 	got, err := DGDRV1beta2Options{Hardware: d}.
 		resolveDefaults(context.Background(), admissionv1.Create, nil, modelOnlySpecV1beta2())
 	if err != nil {
@@ -150,7 +150,7 @@ func v1beta2Envelope(t *testing.T, spec *nvidiacomv1beta2.DynamoGraphDeploymentR
 
 func TestDefaultEnvelopeV1beta2(t *testing.T) {
 	options := DGDRV1beta2Options{
-		Hardware: &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}},
+		Hardware: &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}},
 	}
 	dgdr := v1beta2Envelope(t, modelOnlySpecV1beta2())
 
@@ -246,7 +246,7 @@ func TestResolveHardwareByOperationV1beta2(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}
+			d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}}
 			got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), tt.op, tt.old, tt.spec)
 			if err != nil {
 				t.Fatal(err)

@@ -35,8 +35,8 @@ func hardwareOfV1beta2(sku *string, budget *int32) *nvidiacomv1beta2.HardwareSpe
 func TestResolveHardwareCompletesTheTypedHardwareOrRejects(t *testing.T) {
 	str := func(s string) *string { return &s }
 	num := func(n int32) *int32 { return &n }
-	h200x8 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}
-	h200x64 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8}
+	h200x8 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}
+	h200x64 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64}
 	tests := []struct {
 		name       string
 		hardware   *nvidiacomv1beta2.HardwareSpec
@@ -50,6 +50,9 @@ func TestResolveHardwareCompletesTheTypedHardwareOrRejects(t *testing.T) {
 	}{
 		{"omitted hardware discovers the SKU and the budget", nil, h200x8, nil, "h200_sxm", 8, 1, "", ""},
 		{"an empty hardware object is automatic discovery", &nvidiacomv1beta2.HardwareSpec{}, h200x8, nil, "h200_sxm", 8, 1, "", ""},
+		{"same-SKU nodes with different GPU counts use the aggregate", nil,
+			gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2, TotalGPUs: 12},
+			nil, "h200_sxm", 12, 1, "", ""},
 		{"an empty gpu object is automatic discovery",
 			&nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{}}, h200x8, nil, "h200_sxm", 8, 1, "", ""},
 		{"the discovered budget is capped", nil, h200x64, nil, "h200_sxm", 32, 1, "", ""},
@@ -81,7 +84,7 @@ func TestResolveHardwareCompletesTheTypedHardwareOrRejects(t *testing.T) {
 			nil, "", 0, 1, "",
 			"spec.hardware.gpu.sku: Required value: the cluster has several GPU types (H200, H100)"},
 		{"a pinned SKU is not ambiguous in a heterogeneous cluster", hardwareOfV1beta2(str("h200_sxm"), nil),
-			gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}, nil, "", 8, 1, "h200_sxm", ""},
+			gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}, nil, "", 8, 1, "h200_sxm", ""},
 		{"no GPUs at all reject the missing budget", nil, gpu.GPUInfo{System: "h200_sxm"}, nil, "", 0, 1, "",
 			`spec.hardware.gpu.budget: Required value: no GPUs of SKU "h200_sxm" were found in the cluster`},
 	}
