@@ -315,7 +315,7 @@ The operator maintains observed state under `status`.
 <ParamField path="status.conditions" type="[]metav1.Condition">
   Standard Kubernetes conditions. `Available` reports whether the component is serving traffic; `DynamoComponentReady` reports whether the underlying Dynamo component is ready.
 
-  For a Deployment-backed component, `Available` is `False` with reason `ContainerCrashLooping` while a not-Ready Pod of the current template has a container that restarted at least twice and is down after a non-zero exit.
+  For a Deployment-backed component, `Available` is `False` with reason `ContainerCrashLooping` while a not-Ready Pod that the Deployment selects, other than one being deleted, has a container that restarted at least twice and is down after a non-zero exit. During a rollout this includes Pods of the previous template.
 
   <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
 </ParamField>
