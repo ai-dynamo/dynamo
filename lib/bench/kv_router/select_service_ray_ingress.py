@@ -156,7 +156,9 @@ class PeerUpdateForwarder:
 class KVTokenTracker:
     """The select, lifecycle and peer-update paths of Ray's ``KVTokenTracker``."""
 
-    def __init__(self, svc: SelectionService, block_size: int, writer_id: int, ttl):
+    def __init__(
+        self, svc: SelectionService, block_size: int, writer_id: int, ttl, variant=None
+    ):
         self._svc = svc
         self._block_size = block_size
         self._session_affinity_ttl_s = ttl
@@ -168,6 +170,11 @@ class KVTokenTracker:
         self._session_affinity_task: Optional[asyncio.Task] = None
         self._replica_updates: asyncio.Queue = asyncio.Queue()
         self._replica_apply_task: Optional[asyncio.Task] = None
+        # Bench what-ifs, off by default (Ray's code as written):
+        # concurrent_apply awaits a round's peer updates together instead of one by one;
+        # binding_batch > 1 drains that many queued bindings per stream item.
+        self._concurrent_apply = bool(variant and variant.concurrent_apply)
+        self._binding_batch = variant.binding_batch if variant else 1
 
     def start_replica_broadcast(self, handle: "_PeerBroadcast") -> None:
         self._replica_forwarder = PeerUpdateForwarder(handle, self._replication_writer_id)
@@ -177,6 +184,12 @@ class KVTokenTracker:
             )
 
     async def _forward_session_bindings(self) -> None:
+        if self._binding_batch > 1:
+            stream = self._svc.session_binding_updates(max_batch=self._binding_batch)
+            async for bindings in stream:
+                for binding in bindings:
+                    self._replica_forwarder.report("session_affinity", binding)
+            return
         async for binding in self._svc.session_binding_updates():
             self._replica_forwarder.report("session_affinity", binding)
 
@@ -199,7 +212,17 @@ class KVTokenTracker:
             batches = [updates for _, updates in queued]
             try:
                 await self._evict_stale_requests()
-                for update in [update for batch in batches for update in batch]:
+                updates = [update for batch in batches for update in batch]
+                if self._concurrent_apply:
+                    results = await asyncio.gather(
+                        *(self._apply_update(update) for update in updates),
+                        return_exceptions=True,
+                    )
+                    for error in results:
+                        if isinstance(error, Exception):
+                            print(f"Failed to apply peer update: {error!r}", flush=True)
+                    continue
+                for update in updates:
                     try:
                         await self._apply_update(update)
                     except Exception as error:  # noqa: BLE001 - mirrors Ray
@@ -494,7 +517,7 @@ class Ingress:
     async def _register_all(self, writer):
         block_size = self.pending_registrations[0][1]
         self.tracker = KVTokenTracker(
-            self.svc, block_size, self.writer_id, self.args.session_affinity_ttl_secs
+            self.svc, block_size, self.writer_id, self.args.session_affinity_ttl_secs, self.args
         )
         for index, (_, _, max_batched, endpoint, replay_endpoint) in enumerate(
             self.pending_registrations
@@ -638,6 +661,17 @@ async def main():
         type=int,
         default=1024,
         help="Concurrent lifecycle appliers (Ray: one RPC in flight per engine replica).",
+    )
+    parser.add_argument(
+        "--concurrent-apply",
+        action="store_true",
+        help="What-if: await each round of peer updates together (Ray awaits them one by one).",
+    )
+    parser.add_argument(
+        "--binding-batch",
+        type=int,
+        default=1,
+        help="What-if: drain up to this many queued session bindings per stream item.",
     )
     parser.add_argument(
         "--peer-socket",

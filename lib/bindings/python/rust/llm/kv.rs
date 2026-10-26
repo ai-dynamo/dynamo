@@ -690,6 +690,8 @@ pub(crate) struct SelectionService {
 #[pyclass]
 pub(crate) struct SessionBindingStream {
     updates: Arc<selection::SessionBindingUpdates>,
+    /// Above 1, each item is a list of up to this many queued bindings.
+    max_batch: usize,
 }
 
 #[cfg(feature = "select-service")]
@@ -701,10 +703,17 @@ impl SessionBindingStream {
 
     fn __anext__<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let updates = self.updates.clone();
+        let max_batch = self.max_batch;
         crate::future_into_py(py, async move {
-            let event = updates.recv().await.ok_or_else(|| {
-                pyo3::exceptions::PyStopAsyncIteration::new_err("selection service shut down")
-            })?;
+            let shut_down =
+                || pyo3::exceptions::PyStopAsyncIteration::new_err("selection service shut down");
+            if max_batch > 1 {
+                let events = updates.recv_many(max_batch).await.ok_or_else(shut_down)?;
+                return Python::with_gil(|py| {
+                    pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr)
+                });
+            }
+            let event = updates.recv().await.ok_or_else(shut_down)?;
             Python::with_gil(|py| pythonize(py, &event).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
@@ -781,13 +790,15 @@ impl SelectionService {
 
     /// Session bindings this replica commits or refreshes, for the host to
     /// broadcast to its peers. Ends when the service shuts down.
-    fn session_binding_updates(&self) -> PyResult<SessionBindingStream> {
+    #[pyo3(signature = (*, max_batch = 1))]
+    fn session_binding_updates(&self, max_batch: usize) -> PyResult<SessionBindingStream> {
         Ok(SessionBindingStream {
             updates: Arc::new(
                 self.inner
                     .session_binding_updates()
                     .map_err(selection_to_pyerr)?,
             ),
+            max_batch,
         })
     }
 

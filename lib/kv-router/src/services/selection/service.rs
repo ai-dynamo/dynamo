@@ -364,6 +364,17 @@ impl SessionBindingUpdates {
             event = rx.recv() => event,
         }
     }
+
+    /// Wait for at least one binding, then take up to `limit` that are queued.
+    pub async fn recv_many(&self, limit: usize) -> Option<Vec<AffinityBindingEvent>> {
+        let mut rx = self.rx.lock().await;
+        let mut events = Vec::with_capacity(limit.min(1024));
+        tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => None,
+            received = rx.recv_many(&mut events, limit) => (received > 0).then_some(events),
+        }
+    }
 }
 
 impl SelectionService {
