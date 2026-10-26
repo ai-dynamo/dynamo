@@ -772,6 +772,7 @@ def test_request_trace_cursor_excludes_a_partial_prior_line(tmp_path: Path) -> N
 @pytest.mark.gpu_0
 @pytest.mark.pre_merge
 def test_parent_context_requires_observed_parent_session() -> None:
+    """Require a child's parent session to appear in the same trace."""
     records = [
         {
             "agent_context": {
@@ -796,7 +797,10 @@ def test_parent_context_requires_observed_parent_session() -> None:
 @pytest.mark.gpu_0
 @pytest.mark.pre_merge
 def test_codex_rejected_escalation_only_matches_policy_rejection() -> None:
+    """Distinguish rejected escalation calls from successful calls and text."""
+
     def record(payload: dict) -> str:
+        """Encode a payload as one Codex session response item."""
         return json.dumps({"type": "response_item", "payload": payload})
 
     escalated_args = json.dumps(
@@ -866,6 +870,7 @@ def _assert_agent_context_in_trace(
     start_index: int,
     timeout_s: float = 30.0,
 ) -> None:
+    """Wait for agent context in trace records added after the cursor."""
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
@@ -1059,6 +1064,7 @@ def _codex_rejected_escalation(session_lines: list[str]) -> str | None:
 
 
 def _codex_session_records(codex_home: Path) -> set[Path]:
+    """Find Codex rollout files so each attempt can identify its new session."""
     return set((Path(codex_home) / "sessions").rglob("rollout-*.jsonl"))
 
 
