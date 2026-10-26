@@ -21,7 +21,7 @@ func crashLoopTestPod(name string, ready bool, restarts, exitCode int32) corev1.
 		readyStatus = corev1.ConditionTrue
 	}
 	pod := corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Status: corev1.PodStatus{
 			Phase:      corev1.PodRunning,
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: readyStatus}},

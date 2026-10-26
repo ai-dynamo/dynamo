@@ -2630,8 +2630,8 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 					ComponentNames:    []string{"test-component"},
 					Replicas:          1,
 					UpdatedReplicas:   1,
-					ReadyReplicas:     ptr.To(int32(0)),
-					AvailableReplicas: ptr.To(int32(0)),
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
 				},
 			},
 		},
@@ -2652,8 +2652,8 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 					ComponentNames:    []string{"test-component"},
 					Replicas:          1,
 					UpdatedReplicas:   1,
-					ReadyReplicas:     ptr.To(int32(0)),
-					AvailableReplicas: ptr.To(int32(0)),
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
 				},
 			},
 		},
@@ -2672,8 +2672,8 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 					ComponentNames:    []string{"test-component"},
 					Replicas:          1,
 					UpdatedReplicas:   1,
-					ReadyReplicas:     ptr.To(int32(0)),
-					AvailableReplicas: ptr.To(int32(0)),
+					ReadyReplicas:     new(int32(0)),
+					AvailableReplicas: new(int32(0)),
 				},
 			},
 		},
@@ -2773,13 +2773,11 @@ const (
 // cases' DCD.
 func crashLoopTestDeployment() *appsv1.Deployment {
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       crashLoopTestDCDName,
-			Namespace:  crashLoopTestNamespace,
-			Generation: 1,
-		},
+		Name:       crashLoopTestDCDName,
+		Namespace:  crashLoopTestNamespace,
+		Generation: 1,
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To(int32(1)),
+			Replicas: new(int32(1)),
 		},
 		Status: appsv1.DeploymentStatus{
 			ObservedGeneration: 1,
@@ -2793,7 +2791,7 @@ func crashLoopTestDeployment() *appsv1.Deployment {
 // cases' DCD that a rollout is deleting.
 func crashLoopTestTerminatingPod() *corev1.Pod {
 	pod := crashLoopTestPod(crashLoopTestNamespace, "test-component-previous-a", crashLoopTestDCDName, false, 3)
-	pod.DeletionTimestamp = ptr.To(metav1.Now())
+	pod.DeletionTimestamp = new(metav1.Now())
 	// The fake client refuses a deleted object that no finalizer holds.
 	pod.Finalizers = []string{"test.nvidia.com/hold"}
 	return pod

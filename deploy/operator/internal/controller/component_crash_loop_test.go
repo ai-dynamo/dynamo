@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
@@ -26,11 +25,9 @@ func crashLoopTestPod(namespace, name, dcdName string, ready bool, restarts int3
 		readyStatus = corev1.ConditionTrue
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    map[string]string{commonconsts.KubeLabelDynamoSelector: dcdName},
-		},
+		Name:      name,
+		Namespace: namespace,
+		Labels:    map[string]string{commonconsts.KubeLabelDynamoSelector: dcdName},
 		Status: corev1.PodStatus{
 			Phase:      corev1.PodRunning,
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: readyStatus}},
@@ -129,7 +126,7 @@ func TestMapDeploymentPodToDCDRequests(t *testing.T) {
 		{
 			name: "Pod labeled for a DCD",
 			pod:  crashLoopTestPod("inference", "worker-a", "graph-worker", false, 2),
-			want: []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "inference", Name: "graph-worker"}}},
+			want: []ctrl.Request{{Namespace: "inference", Name: "graph-worker"}},
 		},
 		{
 			name: "Pod without the selector label",
