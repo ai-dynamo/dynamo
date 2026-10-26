@@ -20,6 +20,12 @@ of ai-dynamo/dynamo#16969:
   ``session_binding_updates()`` are broadcast to the peer ingress processes, which apply
   them with ``create_reservation`` and ``apply_session_binding``.
 
+Concurrency follows Ray Serve: at most ``--max-ongoing-requests`` selections (the
+``LLMRouter`` deployment's ``max_ongoing_requests=1000``) run on the loop at once while the
+rest wait outside it, as they would at the proxy; and lifecycle batches are applied by
+``--lifecycle-shards`` concurrent tasks keyed by request id, standing in for the one
+outstanding ``on_lifecycle_events`` RPC per engine replica.
+
 Ray carries the peer broadcast as ``DeploymentHandle.broadcast("on_replica_updates")``;
 here the batch is pickled once and written to each peer's Unix socket, and the sender
 waits for every peer's acknowledgement before sending the next batch, as Ray waits on
@@ -58,7 +64,16 @@ LIFECYCLE_HOOKS = frozenset(
 
 # Harness counters, printed to the service log every STATS_INTERVAL_S seconds.
 STATS: Counter = Counter()
+# Per-interval maxima, reset after each print.
+LAG_MAX: Dict[str, float] = {}
 STATS_INTERVAL_S = 10
+
+
+def _record_lag(name: str, enqueued_at: float) -> None:
+    lag_ms = (time.monotonic() - enqueued_at) * 1000
+    STATS[f"{name}_lag_ms_sum"] += lag_ms
+    STATS[f"{name}_lag_n"] += 1
+    LAG_MAX[name] = max(LAG_MAX.get(name, 0.0), lag_ms)
 
 REGISTER, REGISTER_DONE, REGISTERED, SELECT, SELECT_REPLY, LIFECYCLE_BATCH = 1, 2, 3, 4, 5, 6
 PEER_UPDATES, PEER_ACK = 7, 8
@@ -172,13 +187,16 @@ class KVTokenTracker:
             return
         if self._replica_apply_task is None or self._replica_apply_task.done():
             self._replica_apply_task = asyncio.create_task(self._apply_replica_updates())
-        self._replica_updates.put_nowait(updates)
+        # Harness: carry the enqueue time to measure apply lag.
+        self._replica_updates.put_nowait((time.monotonic(), updates))
 
     async def _apply_replica_updates(self) -> None:
         while True:
-            batches = [await self._replica_updates.get()]
+            queued = [await self._replica_updates.get()]
             while not self._replica_updates.empty():
-                batches.append(self._replica_updates.get_nowait())
+                queued.append(self._replica_updates.get_nowait())
+            _record_lag("peer_apply", queued[0][0])
+            batches = [updates for _, updates in queued]
             try:
                 await self._evict_stale_requests()
                 for update in [update for batch in batches for update in batch]:
@@ -430,20 +448,25 @@ class Ingress:
             session_replication_writer_id=self.writer_id if ttl else None,
         )
         self.peers = _PeerBroadcast(args.peer)
+        self.ongoing = asyncio.Semaphore(args.max_ongoing_requests)
+        self.lifecycle_shards: List[asyncio.Queue] = []
         self.tracker: Optional[KVTokenTracker] = None
         self.replicas: List[Replica] = []
         self.pending_registrations = []
-        self.lifecycle_queue: asyncio.Queue = asyncio.Queue()
 
     async def handle(self, reader, writer):
-        lifecycle_task = asyncio.create_task(self._apply_lifecycle(writer))
+        shard_tasks = []
+        for _ in range(self.args.lifecycle_shards):
+            queue: asyncio.Queue = asyncio.Queue()
+            self.lifecycle_shards.append(queue)
+            shard_tasks.append(asyncio.create_task(self._apply_lifecycle(queue)))
         try:
             while True:
                 kind, body = await _ipc_read_frame(reader)
                 if kind == SELECT:
                     asyncio.create_task(self._select(writer, body))
                 elif kind == LIFECYCLE_BATCH:
-                    self.lifecycle_queue.put_nowait(body)
+                    self._queue_lifecycle(body)
                 elif kind == REGISTER:
                     self.pending_registrations.append(_ipc_decode_register(body))
                 elif kind == REGISTER_DONE:
@@ -451,7 +474,8 @@ class Ingress:
         except asyncio.IncompleteReadError:
             pass
         finally:
-            lifecycle_task.cancel()
+            for task in shard_tasks:
+                task.cancel()
 
     async def handle_peer(self, reader, writer):
         """Ray's ``LLMRouter.on_replica_updates`` RPC from one peer ingress."""
@@ -496,6 +520,10 @@ class Ingress:
         )
 
     async def _select(self, writer, body):
+        async with self.ongoing:
+            await self._select_one(writer, body)
+
+    async def _select_one(self, writer, body):
         request_id, session_id, max_tokens, token_ids = _ipc_decode_select(body)
         try:
             replica, selection = await choose_replicas(
@@ -509,16 +537,29 @@ class Ingress:
             reply = struct.pack("<BH", 0, len(message)) + message
         _ipc_write_frame(writer, SELECT_REPLY, _ipc_encode_id(request_id) + reply)
 
-    async def _apply_lifecycle(self, writer):
+    def _queue_lifecycle(self, body):
+        shards = {}
+        for event in _ipc_decode_lifecycle(body):
+            index = hash(event[1][0]) % len(self.lifecycle_shards)
+            shards.setdefault(index, []).append(event)
+        now = time.monotonic()
+        for index, events in shards.items():
+            self.lifecycle_shards[index].put_nowait((now, events))
+
+    async def _apply_lifecycle(self, queue):
+        """One engine replica's ``on_lifecycle_events`` RPCs, applied in order."""
         while True:
-            body = await self.lifecycle_queue.get()
-            await self.tracker.on_lifecycle_events(_ipc_decode_lifecycle(body))
+            enqueued_at, events = await queue.get()
+            _record_lag("lifecycle", enqueued_at)
+            await self.tracker.on_lifecycle_events(events)
 
 
 async def _print_stats():
     while True:
         await asyncio.sleep(STATS_INTERVAL_S)
-        print(json.dumps({"t": round(time.time(), 1), **STATS}), flush=True)
+        maxima = {f"{name}_lag_ms_max": round(value, 1) for name, value in LAG_MAX.items()}
+        LAG_MAX.clear()
+        print(json.dumps({"t": round(time.time(), 1), **STATS, **maxima}), flush=True)
 
 
 def _peer_decode(body):
@@ -586,6 +627,18 @@ async def main():
     parser.add_argument("--socket", required=True)
     parser.add_argument("--indexer-threads", type=int, default=4)
     parser.add_argument("--session-affinity-ttl-secs", type=float, default=None)
+    parser.add_argument(
+        "--max-ongoing-requests",
+        type=int,
+        default=1000,
+        help="Selections allowed on the loop at once (Ray: LLMRouter max_ongoing_requests).",
+    )
+    parser.add_argument(
+        "--lifecycle-shards",
+        type=int,
+        default=1024,
+        help="Concurrent lifecycle appliers (Ray: one RPC in flight per engine replica).",
+    )
     parser.add_argument(
         "--peer-socket",
         help="Unix socket this ingress accepts peer broadcasts on (multi-ingress runs).",
