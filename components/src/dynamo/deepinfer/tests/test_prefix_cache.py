@@ -774,11 +774,16 @@ def check_ssd(d: Driver) -> None:
     assert len(set(slots)) == len(slots)
     assert cache._ssd.num_free == cache._ssd.capacity - len(slots)
     assert cache._num_ssd == sum(b.tier.name == "SSD" for b in blocks)
+    assert cache._num_host == len(on_host)
     for b in blocks:
         assert b.users == 0 and not b.reading and b.write is None
         assert b.ssd_state.name == ("DONE" if b.ssd_slot >= 0 else "NONE")
         kids = [c for c in blocks if c.parent is b]
-        assert b.children == len(kids)
+        assert b.children == len(kids) == len(b.kids())
+        assert {id(k) for k in b.kids()} == {id(c) for c in kids}
+        assert (b.kid is None) == (not kids) and (b.more_kids is None) == (
+            len(kids) < 2
+        )
         assert b.gpu_children == sum(c.tier.name == "GPU" for c in kids)
         assert b.host_children == sum(c.tier.name == "HOST" for c in kids)
         assert all(c.tier >= b.tier for c in kids)
@@ -914,28 +919,131 @@ def test_promotion_while_the_write_is_in_flight_keeps_the_original_bytes(tmp_pat
     d.close()
 
 
-def test_writes_over_the_cap_stay_unwritten_and_drop_on_host_eviction(
+def test_writes_over_the_cap_wait_their_turn_unless_evicted_first(
     tmp_path, io, monkeypatch
 ):
     from dynamo.deepinfer.kv_cache import prefix
 
     monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", 1)
-    d = Driver(ssd_runner(tmp_path, rows=2))
-    for i in (1, 2, 3):
+    d = Driver(ssd_runner(tmp_path, rows=3))
+    for i in (1, 2, 3, 4):
         d.run(f"r{i}", one_block(i))
-    h1, h2, h3 = (chain(one_block(i), 1)[0] for i in (1, 2, 3))
+    h1, h2, h3, h4 = (chain(one_block(i), 1)[0] for i in (1, 2, 3, 4))
     io.hold = True
     d.events.clear()
     evict_all(d)
-    # r1 is written; r2 is over the cap and unwritten, so its row went to r3.
-    assert d.cache._blocks[h1].ssd_state.name == "WRITING"
-    assert h2 not in d.cache._blocks and removed(d) == [as_u64(h2)]
-    assert d.cache._blocks[h3].ssd_state.name == "NONE"
-    assert d.cache._blocks[h3].tier.name == "HOST"
+    blocks = d.cache._blocks
+    # r4's demotion took the row of r1 (queued, unwritten, unpinned) before its
+    # turn; r2 is written, and r3 and r4 wait.
+    assert h1 not in blocks and removed(d) == [as_u64(h1)]
+    assert [blocks[h].ssd_state.name for h in (h2, h3, h4)] == [
+        "WRITING",
+        "NONE",
+        "NONE",
+    ]
+    assert len(d.cache._pending_writes) == 2  # r1's stale entry was skipped
+    io.hold = False
+    io.release()
+    for _ in range(4):
+        d.apply()
+    assert [blocks[h].ssd_state.name for h in (h2, h3, h4)] == ["DONE"] * 3
+    assert not d.cache._pending_writes and d.cache.ssd_stores == 3
+    check_ssd(d)
+    d.close()
+
+
+def test_a_drained_write_waits_for_the_copies_queued_before_it(
+    tmp_path, io, monkeypatch
+):
+    from dynamo.deepinfer.kv_cache import prefix
+
+    monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", 1)
+    d = Driver(ssd_runner(tmp_path, rows=3))
+    for i in (1, 2, 3):
+        d.run(f"r{i}", one_block(i))
+    host, ssd = d.cache._host, d.cache._ssd
+    store, ssd_store = host.store, ssd.store
+    log: list[tuple[Any, ...]] = []
+    fence_event = object()
+
+    def spy_store(*args, **kw):
+        log.append(("copy", event := store(*args, **kw)))
+        return event
+
+    def spy_ssd_store(rows, slots, after=None, tag=None):
+        log.append(("write", after))
+        return ssd_store(rows, slots, after=after, tag=tag)
+
+    host.store, ssd.store = spy_store, spy_ssd_store
+    host.fence = lambda: log.append(("fence", fence_event)) or fence_event
+    io.hold = True
+    evict_all(d)
+    # The first write rides on the copy made in its own pass.
+    seen = len(log)
     io.hold = False
     io.release()
     d.apply()
-    assert d.cache._blocks[h1].ssd_state.name == "DONE"
+    # The next write is started by a poll, with no copy of its own: it waits for
+    # a fence taken after the copies queued so far.
+    assert [e[0] for e in log[:seen]].index("copy") < [e[0] for e in log[:seen]].index(
+        "write"
+    )
+    assert [e[0] for e in log[seen:]] == ["fence", "write"]
+    assert log[seen + 1][1] is fence_event
+    for _ in range(3):
+        d.apply()
+    check_ssd(d)
+    d.close()
+
+
+def test_a_burst_over_the_cap_is_written_root_first_within_the_cap(
+    tmp_path, io, monkeypatch
+):
+    from dynamo.deepinfer.kv_cache import prefix
+
+    monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", 3)
+    d = Driver(ssd_runner(tmp_path, rows=12))
+    p = prompt(1800, salt=1)
+    d.run("a", p)
+    blocks = [d.cache._blocks[h] for h in chain(p, 12)]
+    calls = spy_io(d)
+    io.hold = True
+    evict_all(d)
+    # Ancestors go first: the root three are written, the other nine wait.
+    assert [b.ssd_state.name for b in blocks] == ["WRITING"] * 3 + ["NONE"] * 9
+    assert len(d.cache._pending_writes) == 9 and d.cache._ssd.inflight_writes == 3
+    for _ in range(6):
+        io.release()
+        d.apply()
+        assert d.cache._ssd.inflight_writes <= 3
+    io.hold = False
+    io.release()
+    d.apply()
+    assert [b.ssd_state.name for b in blocks] == ["DONE"] * 12
+    by_slot = {b.ssd_slot: b.index for b in blocks}
+    assert [by_slot[slot[0]] for _, slot in calls] == list(range(12))
+    check_ssd(d)
+    d.close()
+
+
+def test_pending_writes_are_bounded_and_the_deepest_are_forgotten(
+    tmp_path, io, monkeypatch
+):
+    from dynamo.deepinfer.kv_cache import prefix
+
+    monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", 1)
+    d = Driver(ssd_runner(tmp_path, rows=8))
+    p = prompt(1200, salt=1)
+    d.run("a", p)
+    io.hold = True
+    evict_all(d)
+    # The root is written; of the seven waiting, four fit (4 x cap): the
+    # deepest three are forgotten.
+    assert sorted(e[0] for e in d.cache._pending_writes) == [1, 2, 3, 4]
+    io.hold = False
+    io.release()
+    for _ in range(12):
+        d.apply()
     check_ssd(d)
     d.close()
 
@@ -1031,12 +1139,16 @@ def test_gpu_leaf_with_a_complete_copy_goes_to_ssd_when_host_is_full(tmp_path, i
     d.run("p3", p)  # p is the more recent
     d.events.clear()
     calls = spy_io(d)
+    io.hold = True
+    d.cache.ensure_free(d.bm.get_num_free_blocks() + 1)  # q (the coldest) to host
     evict_all(d)
-    # q takes the only host row (its write pins it); p has nowhere but the SSD.
+    # q holds the only host row (its write pins it); p has nowhere but the SSD.
     assert d.cache._blocks[hq].tier.name == "HOST"
     assert d.cache._blocks[hp].tier.name == "SSD"
     assert d.cache._blocks[hp].snapshot >= 0 and not removed(d)
     assert [kind for kind, _ in calls] == ["store"]  # q's write only
+    io.hold = False
+    io.release()
     d.apply()
     check_ssd(d)
     d.close()
@@ -1256,27 +1368,20 @@ def test_read_is_dropped_when_the_slot_changed_under_it(tmp_path, io):
     d.close()
 
 
-def stuck_chain(tmp_path, monkeypatch):
-    """A two-block chain whose parent was too late for the write cap (so it has
-    no SSD copy) and whose child is on SSD, with the host full of them."""
-    from dynamo.deepinfer.kv_cache import prefix
+def test_unwritten_parent_of_an_ssd_block_does_not_pin_its_host_row(tmp_path, io):
+    from dynamo.deepinfer.kv_cache.prefix import _Evicted
 
-    monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", 1)
     d = Driver(ssd_runner(tmp_path, rows=2))
     p = prompt(520, salt=1)
     d.run("p", p)
     evict_all(d)
-    d.apply()
+    for _ in range(3):
+        d.apply()
     parent, child = (d.cache._blocks[h] for h in chain(p, 2))
+    # A full SSD reclaimed the parent's backup (the coldest) but not its child's.
+    d.cache._evict_ssd(parent, _Evicted())
     assert (parent.tier.name, parent.ssd_state.name) == ("HOST", "NONE")
     assert (child.tier.name, child.ssd_state.name) == ("HOST", "DONE")
-    return d, parent, child
-
-
-def test_unwritten_parent_of_an_ssd_block_does_not_pin_its_host_row(
-    tmp_path, io, monkeypatch
-):
-    d, parent, child = stuck_chain(tmp_path, monkeypatch)
     for i in range(3, 6):
         d.run(f"q{i}", one_block(i))
         evict_all(d)
@@ -1317,8 +1422,9 @@ def test_read_that_does_not_fit_evicts_nothing(tmp_path, io):
     d = Driver(ssd_runner(tmp_path, rows=3, ssd_blocks=64))
     a = prompt(1200, salt=1)
     d.run("a", a)
-    for _ in range(12):
-        evict_all(d)
+    for _ in range(8):  # one leaf at a time, each written before the next
+        d.cache.ensure_free(d.bm.get_num_free_blocks() + 1)
+        d.apply()
         d.apply()
     run = [d.cache._blocks[h] for h in chain(a, 8)]
     assert [x.tier.name for x in run] == ["HOST"] * 3 + ["SSD"] * 5
@@ -1383,6 +1489,27 @@ def test_a_warm_block_that_goes_back_to_ssd_is_cold_again(tmp_path, io):
     d.close()
 
 
+def test_a_block_read_back_from_ssd_is_not_the_first_host_victim(tmp_path, io):
+    d = Driver(ssd_runner(tmp_path, rows=4))
+    a, b = prompt(600, salt=1), prompt(600, salt=2)
+    d.run("a", a)
+    evict_all(d)
+    d.apply()
+    d.run("b", b)
+    evict_all(d)
+    d.apply()
+    ba, bb = ([d.cache._blocks[h] for h in chain(p)] for p in (a, b))
+    assert [x.tier.name for x in ba] == ["HOST", "SSD", "SSD"]
+    d.add("x", a, max_tokens=2)
+    d.apply(aborts=["x"])
+    d.apply()
+    # The read took b's two leaves' rows; b's root is the older host leaf.
+    assert [x.tier.name for x in ba + bb] == ["HOST"] * 3 + ["HOST", "SSD", "SSD"]
+    assert ba[2].ssd_warm and ba[2].last_used > bb[0].last_used
+    assert d.cache._pop_evictable(gpu=False) is bb[0]
+    d.close()
+
+
 def test_closed_cache_still_drops_blocks_with_a_slot(tmp_path, io):
     from dynamo.deepinfer.kv_cache.prefix import _Evicted
 
@@ -1399,20 +1526,32 @@ def test_closed_cache_still_drops_blocks_with_a_slot(tmp_path, io):
     d.close()
 
 
-def test_the_cache_closes_even_if_the_prefill_flow_cannot(tmp_path, io):
+def test_failing_close_steps_do_not_stop_the_rest_and_the_first_error_wins(
+    tmp_path, io, caplog
+):
     d = Driver(ssd_runner(tmp_path, rows=3))
-    closed: list[int] = []
+    steps: list[str] = []
     close = d.cache.close
 
     class Prefill:
         def close(self):
+            steps.append("prefill")
             raise RuntimeError("boom")
 
+    class Transfer:
+        def shutdown(self):
+            steps.append("transfer")
+            raise RuntimeError("second")
+
     d.runner.prefill = Prefill()
-    d.cache.close = lambda: closed.append(1) or close()
-    with pytest.raises(RuntimeError, match="boom"):
+    d.runner.engine.dynamo_transfer = Transfer()
+    d.cache.close = lambda: steps.append("cache") or close()
+    sink_close = d.runner.sink.close
+    d.runner.sink.close = lambda: steps.append("sink") or sink_close()
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="boom"):
         d.runner.close()
-    assert closed == [1] and d.cache._ssd is None
+    assert steps == ["prefill", "cache", "transfer", "sink"]
+    assert d.cache._ssd is None and "second" in caplog.text
 
 
 def test_restart_starts_with_an_empty_ssd_tier(tmp_path, io):
@@ -1462,7 +1601,7 @@ def test_ssd_tier_is_clamped_to_snapshots_and_free_space(
         d = Driver(ssd_runner(tmp_path, rows=3, ssd_blocks=1000))
     assert d.cache._ssd.capacity == 32
     [msg] = [r.getMessage() for r in caplog.records if "clamped" in r.getMessage()]
-    assert "32 of 1000" in msg and "snapshots can serve 32" in msg
+    assert "32 of 1000" in msg and "snapshots can serve only 32" in msg
     d.close()
 
     caplog.clear()
@@ -1479,15 +1618,46 @@ def test_ssd_tier_is_clamped_to_snapshots_and_free_space(
     with caplog.at_level("WARNING"):
         d = Driver(ssd_runner(tmp_path, rows=3, ssd_blocks=20))
     assert d.cache._ssd.capacity == 10
-    assert any("clamped to 10 of 20" in r.getMessage() for r in caplog.records)
+    assert any(
+        "clamped to 10 of 20" in r.getMessage()
+        and "free for this node" in r.getMessage()
+        for r in caplog.records
+    )
     d.close()
 
+    # Two ranks of a node share the directory: each takes half of what is free
+    # (41 blocks, 5% kept back: 19 each). The space is used up as the ranks
+    # start, and left over from a crash: neither changes the share.
+    def statvfs_of_disk(path):
+        used = sum(f.stat().st_blocks * 512 for f in tmp_path.glob("*.kv"))
+        st = tuple(real(path))
+        free = 41 - used // SSD_STRIDE
+        return os.statvfs_result((st[0], SSD_STRIDE, st[2], free, free) + st[5:])
+
+    monkeypatch.setattr(os, "statvfs", statvfs_of_disk)
+    for _ in range(2):  # the second time, with the first run's files in place
+        halves = []
+        for r in (0, 1):
+            halves.append(
+                Driver(
+                    ssd_runner(
+                        tmp_path, rows=3, ssd_blocks=1000, ssd_rank=r, ssd_share=0.5
+                    )
+                )
+            )
+        assert [h.cache._ssd.capacity for h in halves] == [19, 19]
+        for h in halves:  # a crash leaves the files behind: close only the pools
+            os.close(h.cache._ssd._fd)
+            h.cache._ssd._closed = True
+    for f in tmp_path.glob("*.kv"):
+        f.unlink()
+    monkeypatch.setattr(os, "statvfs", statvfs)
     caplog.clear()
     free_blocks = 0
     with caplog.at_level("WARNING"):
         d = Driver(ssd_runner(tmp_path, rows=3, ssd_blocks=20))
     assert d.cache._ssd is None
-    assert any("No room" in r.getMessage() for r in caplog.records)
+    assert any("no free space" in r.getMessage() for r in caplog.records)
     p = prompt(600)
     d.run("a", p)
     assert d.run("b", p) and d.admissions["b"].hit_tokens == 384

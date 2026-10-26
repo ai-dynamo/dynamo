@@ -373,6 +373,8 @@ def test_parse_args_defaults(fake_env):
         assert spec.cache_options["ssd_dir"] == "/ssd" and spec.rank == rank
         assert spec.cache_options["ssd_bytes"] == 2 << 40
         assert spec.cache_options["ssd_rank"] == rank
+        # The ranks of a node split the directory's free space.
+        assert spec.cache_options["ssd_share"] == 1 / tier.ranks_per_node
     assert (
         make_args("--kv-cache-manager", "prefix")
         .rank_specs("e")[0]

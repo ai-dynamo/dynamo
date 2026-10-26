@@ -155,6 +155,8 @@ class DeepInferOptions:
                 "host_bytes": self.prefix_host_bytes,
                 "ssd_dir": self.prefix_ssd_dir,
                 "ssd_bytes": self.prefix_ssd_bytes,
+                # The ranks of a node split the SSD directory's free space.
+                "ssd_share": 1 / self.ranks_per_node,
             }
         events = self.kv_cache_manager != "none"
         per_node = self.ranks_per_node
@@ -258,7 +260,7 @@ def add_deepinfer_arguments(parser: argparse.ArgumentParser) -> None:
         help="Per rank: file space for prefix blocks evicted from host memory, "
         "e.g. 1TiB; 0 turns the SSD tier off. Needs --prefix-host-bytes and "
         "--prefix-ssd-dir. Clamped at startup to what the snapshots can serve and "
-        "to the free space of the directory.",
+        "to this rank's share (1 / ranks per node) of the directory's free space.",
     )
     g.add_argument(
         "--rank0-in-process",

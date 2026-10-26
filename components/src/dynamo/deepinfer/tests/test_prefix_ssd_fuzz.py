@@ -36,11 +36,24 @@ def quiesce(
     fail["load"] = fail["store"] = False
     io.hold = False
     io.release()
-    for _ in range(5):
+    cache = d.cache
+    # Queued writes start a few per poll (and a poll applies the ones before).
+    for _ in range(60):
         d.apply()
         io.release()
+        if not any(b.write for b in cache._blocks.values()) and not any(
+            cache._write_pending(e) for e in cache._pending_writes
+        ):
+            break
     check_ssd(d)
-    cache = d.cache
+    # A queued write stays only when the SSD has no free slot and no copy to
+    # reclaim for one.
+    if any(cache._write_pending(e) for e in cache._pending_writes):
+        assert not cache._ssd._free
+        assert not any(
+            b.ssd_state.name == "DONE" and cache._ssd_victim(b)
+            for b in cache._blocks.values()
+        )
     assert cache._num_unused == sum(b.on_gpu for b in cache._blocks.values())
     for pool in (cache._host, cache._ssd, cache._pool):
         assert len(set(pool._free)) == len(pool._free)
@@ -63,6 +76,7 @@ def test_random_traffic_keeps_the_tiers_consistent(
     gpu_blocks = rnd.choice([32, 40, 48, 64])
     monkeypatch.setenv("DEEPINFER_FAKE_NUM_GPU_BLOCKS", str(gpu_blocks))
     monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", rnd.choice([1, 2, 64]))
+    monkeypatch.setattr(prefix, "SSD_PENDING_WRITES_FACTOR", rnd.choice([0, 1, 4]))
     monkeypatch.setattr(prefix, "SSD_MIN_READ_BLOCKS", rnd.choice([1, 1, 4]))
     d = Driver(
         ssd_runner(
@@ -111,6 +125,8 @@ def test_random_traffic_keeps_the_tiers_consistent(
             for o in d.apply().outputs:
                 if o.finish_reason is not None:
                     live.discard(o.request_id)
+        bound = prefix.SSD_PENDING_WRITES_FACTOR * pool.max_inflight_writes
+        assert len(d.cache._pending_writes) <= bound
         if step == steps // 2:
             quiesce(d, io, live, fail)
     quiesce(d, io, live, fail)

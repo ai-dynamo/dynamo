@@ -18,6 +18,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 # DeepSeek-V4-Flash's packed KV block row: not a multiple of 4096.
 ROW_BYTES = 114048
+STRIDE = 114688
 
 
 def rows_of(n, row_bytes=ROW_BYTES, seed=0):
@@ -37,7 +38,7 @@ def drain(pool, n):
 
 @pytest.fixture
 def pool(tmp_path):
-    p = SSDPool(str(tmp_path / "rank0.kv"), ROW_BYTES, 32)
+    p = SSDPool(str(tmp_path / "rank0.kv"), ROW_BYTES, 32 * STRIDE)
     yield p
     p.close()
 
@@ -61,7 +62,7 @@ def test_rows_round_trip_byte_for_byte(pool):
 
 def test_neighbouring_slots_do_not_overlap(pool):
     # Slots are padded to 4 KiB, so O_DIRECT stays possible later.
-    assert pool.stride == 114688 and pool.stride % 4096 == 0
+    assert pool.stride == STRIDE and pool.stride % 4096 == 0
     assert os.path.getsize(pool.path) == pool.nbytes
     full = [np.full(ROW_BYTES, v, dtype=np.uint8) for v in (1, 2, 3)]
     for row, slot in zip(full, (0, 1, 2)):
@@ -75,24 +76,24 @@ def test_neighbouring_slots_do_not_overlap(pool):
             assert set(data[ROW_BYTES:]) == {0}  # padding stays zero
 
 
-def test_cap_reached_blocks_can_store(tmp_path, monkeypatch):
+def test_inflight_writes_are_counted_until_they_finish(tmp_path):
     gate = threading.Event()
 
     class Event:  # a CUDA event stand-in that holds the write back
         def synchronize(self):
             assert gate.wait(10)
 
-    pool = SSDPool(str(tmp_path / "k"), 4096, 8, max_inflight_writes=2)
+    pool = SSDPool(str(tmp_path / "k"), 4096, 8 * 4096, max_inflight_writes=2)
     try:
-        rows = rows_of(3, 4096)
-        assert pool.can_store()
+        rows = rows_of(2, 4096)
+        assert pool.inflight_writes == 0 and pool.max_inflight_writes == 2
         pool.store(rows[:1], [0], after=Event())
-        assert pool.can_store() and pool.inflight_writes == 1
+        assert pool.inflight_writes == 1
         pool.store(rows[1:2], [1], after=Event())
-        assert not pool.can_store() and pool.inflight_writes == 2
+        assert pool.inflight_writes == 2
         gate.set()
         drain(pool, 2)
-        assert pool.inflight_writes == 0 and pool.can_store()
+        assert pool.inflight_writes == 0
     finally:
         gate.set()
         pool.close()
@@ -105,7 +106,7 @@ def test_store_waits_for_the_event(tmp_path):
         def synchronize(self):
             seen.append("sync")
 
-    pool = SSDPool(str(tmp_path / "k"), 4096, 2)
+    pool = SSDPool(str(tmp_path / "k"), 4096, 2 * 4096)
     try:
         pool.store(rows_of(1, 4096), [0], after=Event())
         drain(pool, 1)
@@ -121,7 +122,7 @@ def test_load_waits_for_the_event(tmp_path):
         def synchronize(self):
             seen.append("sync")
 
-    pool = SSDPool(str(tmp_path / "k"), 4096, 2)
+    pool = SSDPool(str(tmp_path / "k"), 4096, 2 * 4096)
     try:
         (row,) = rows_of(1, 4096)
         pool.store([row], [0])
@@ -149,7 +150,7 @@ def test_torch_rows_without_a_numpy_dtype_are_read_as_bytes(tmp_path, monkeypatc
             assert dtype == "uint8"
             return types.SimpleNamespace(numpy=lambda: self.data)
 
-    pool = SSDPool(str(tmp_path / "k"), 4096, 2)
+    pool = SSDPool(str(tmp_path / "k"), 4096, 2 * 4096)
     try:
         (want,) = rows_of(1, 4096)
         pool.store([Row(want.copy())], [1])
@@ -209,7 +210,7 @@ def test_short_reads_and_writes_are_looped(pool, monkeypatch):
 
 
 def test_read_past_the_end_is_an_error(tmp_path):
-    pool = SSDPool(str(tmp_path / "k"), 4096, 2)
+    pool = SSDPool(str(tmp_path / "k"), 4096, 2 * 4096)
     try:
         os.ftruncate(pool._fd, 0)
         pool.load([1], [np.zeros(4096, dtype=np.uint8)])
@@ -221,10 +222,10 @@ def test_read_past_the_end_is_an_error(tmp_path):
 
 def test_file_is_recreated_empty(tmp_path):
     path = str(tmp_path / "rank0.kv")
-    first = SSDPool(path, 4096, 4)
+    first = SSDPool(path, 4096, 4 * 4096)
     first.store([np.full(4096, 7, dtype=np.uint8)], [2])
     drain(first, 1)
-    second = SSDPool(path, 4096, 4)
+    second = SSDPool(path, 4096, 4 * 4096)
     try:
         assert os.path.getsize(path) == 4 * 4096
         with open(path, "rb") as f:
@@ -239,12 +240,7 @@ def test_file_is_recreated_empty(tmp_path):
 def test_poll_returns_each_ticket_once(pool):
     assert pool.poll() == []
     tickets = [pool.store(rows_of(1, seed=i), [i]) for i in range(5)]
-    got = []
-    while len(got) < 5:
-        tickets[-1].wait(10)
-        for t in tickets:
-            t.wait(10)
-        got += pool.poll()
+    got = drain(pool, 5)
     assert sorted(id(t) for t in got) == sorted(id(t) for t in tickets)
     assert pool.poll() == []
 
@@ -257,10 +253,13 @@ def test_tag_travels_with_the_ticket(pool):
 
 def test_close_waits_deletes_and_is_idempotent(tmp_path):
     path = str(tmp_path / "k")
-    pool = SSDPool(path, 4096, 8)
-    tickets = [pool.store(rows_of(1, 4096, i), [i]) for i in range(8)]
+    pool = SSDPool(path, 4096, 8 * 4096)
+    for i in range(8):
+        pool.store(rows_of(1, 4096, i), [i])
     pool.close()
-    assert all(t.error is None and t.wait(0) for t in tickets)
+    # Everything in flight finished before close returned.
+    done = pool.poll()
+    assert len(done) == 8 and all(t.error is None for t in done)
     assert not os.path.exists(path)
     pool.close()
     late = pool.store(rows_of(1, 4096), [0])
