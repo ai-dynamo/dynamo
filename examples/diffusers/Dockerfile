@@ -15,7 +15,7 @@ ENV UV_LINK_MODE=copy
 
 RUN uv venv /opt/dynamo/venv --python 3.12 \
  && . /opt/dynamo/venv/bin/activate \
- && uv pip install certifi==2026.10.19 pip==26.2.2 setuptools wheel packaging ninja psutil uvloop \
+ && uv pip install certifi==2026.10.23 pip==26.2.2 setuptools wheel packaging ninja psutil uvloop \
  && uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130 \
  && uv pip install flashinfer-python
 
