@@ -284,6 +284,8 @@ impl Control for ControlledService {
 }
 
 impl ProcessFixture for Fixture {
+    const QUARANTINES_ON_READ_ERROR: bool = true;
+
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }

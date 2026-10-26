@@ -195,7 +195,61 @@ fn unsupported_requests_are_rejected_before_dispatch() {
         (
             |r| {
                 r.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
+                    json: Some(json!({"type": "object"})),
+                    ..Default::default()
+                })
+            },
+            "guided decoding",
+        ),
+        (
+            |r| {
+                r.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
                     regex: Some("a+".to_string()),
+                    ..Default::default()
+                })
+            },
+            "guided decoding",
+        ),
+        (
+            |r| {
+                r.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
+                    choice: Some(vec!["yes".to_string(), "no".to_string()]),
+                    ..Default::default()
+                })
+            },
+            "guided decoding",
+        ),
+        (
+            |r| {
+                r.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
+                    grammar: Some("root ::= \"yes\"".to_string()),
+                    ..Default::default()
+                })
+            },
+            "guided decoding",
+        ),
+        (
+            |r| {
+                r.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
+                    structural_tag: Some(json!({"type": "structural_tag"})),
+                    ..Default::default()
+                })
+            },
+            "guided decoding",
+        ),
+        (
+            |r| {
+                r.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
+                    backend: Some("xgrammar".to_string()),
+                    ..Default::default()
+                })
+            },
+            "guided decoding",
+        ),
+        (
+            |r| {
+                r.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
+                    whitespace_pattern: Some(" *".to_string()),
                     ..Default::default()
                 })
             },

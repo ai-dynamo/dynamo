@@ -93,6 +93,9 @@ fn fast_engine_args(engine_type: EngineType) -> MockerConfig {
 }
 
 pub trait ProcessFixture: WireFixture {
+    /// An UNAVAILABLE stream error removes the worker from routing until the router reconciles.
+    const QUARANTINES_ON_READ_ERROR: bool = false;
+
     fn endpoint(&self) -> String;
     fn command(model: &str) -> Command;
     fn configure_request(request: &mut PreprocessedRequest);

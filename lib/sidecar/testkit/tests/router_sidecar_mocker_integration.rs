@@ -331,12 +331,27 @@ async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
 
         let recovery_id = format!("00000000-0000-4000-8000-{:012}", index * 2 + 2);
         let recovered = control.request(&recovery_id, RequestPlan::default());
-        let response = bounded(
-            "HTTP recovery response",
-            frontend.generate(&env.model, &recovery_id, false).send(),
-        )
+        let response = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let response = bounded(
+                    "HTTP recovery response",
+                    frontend.generate(&env.model, &recovery_id, false).send(),
+                )
+                .await
+                .unwrap();
+                if !is_streaming
+                    || !F::QUARANTINES_ON_READ_ERROR
+                    || response.status() == reqwest::StatusCode::OK
+                {
+                    break response;
+                }
+                // A quarantined worker returns after the router reconciles discovery.
+                assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
         .await
-        .unwrap();
+        .expect("HTTP recovery exceeded its deadline");
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let body: Value = response.json().await.unwrap();
         assert_eq!(body["choices"][0]["finish_reason"], "length", "{body}");
@@ -1324,6 +1339,16 @@ async fn trtllm_native_errors_reach_http_and_recover() {
     )
     .await
     .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_native_errors_reach_http_and_recover() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        native_errors_reach_http_and_recover::<lpx::Fixture>(),
+    )
+    .await
+    .expect("HTTP error scenario exceeded its overall deadline");
 }
 
 #[tokio::test]
