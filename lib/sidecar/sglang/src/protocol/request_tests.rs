@@ -4,8 +4,8 @@
 use super::*;
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
-    BackendError, BootstrapInfo, ErrorType, GuidedDecodingOptions, KvHint, KvHintAction,
-    OutputOptions, PrefillResult, SamplingOptions, StopConditions,
+    BackendError, BootstrapInfo, ErrorType, GuidedDecodingOptions, KvHintAction, OutputOptions,
+    PrefillResult, SamplingOptions,
 };
 use serde_json::json;
 
@@ -23,12 +23,82 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
+fn build(
+    request: &PreprocessedRequest,
+    mode: DisaggregationMode,
+) -> Result<pb::GenerateRequest, DynamoError> {
+    build_generate_request(request, "rid", mode, Some("prefill"), Some(5000))
+        .map(|(generate, _)| generate)
+}
+
 fn assert_invalid(error: DynamoError, message: &str) {
     assert_eq!(
         error.error_type(),
         ErrorType::Backend(BackendError::InvalidArgument)
     );
     assert!(error.to_string().contains(message), "{error}");
+}
+
+fn sampling(request: &pb::GenerateRequest) -> &pb::SamplingParams {
+    match request.sampling_params.as_ref().unwrap().value.as_ref() {
+        Some(pb::sampling_params_or_list::Value::One(params)) => params,
+        other => panic!("expected one sampling-params object: {other:?}"),
+    }
+}
+
+fn input_ids(request: &pb::GenerateRequest) -> &[i64] {
+    match request.input_ids.as_ref().unwrap().value.as_ref() {
+        Some(pb::token_ids_or_list::Value::One(ids)) => &ids.ids,
+        other => panic!("expected one token-id list: {other:?}"),
+    }
+}
+
+fn rid(request: &pb::GenerateRequest) -> &str {
+    match request.rid.as_ref().unwrap().value.as_ref() {
+        Some(pb::string_or_list::Value::One(rid)) => rid,
+        other => panic!("expected one rid: {other:?}"),
+    }
+}
+
+/// `(return_logprob, top_logprobs_num, logprob_start_len)`.
+fn logprob_controls(request: &pb::GenerateRequest) -> (bool, i64, i64) {
+    let int = |value: Option<&pb::Int64OrList>| match value.unwrap().value.as_ref() {
+        Some(pb::int64_or_list::Value::One(value)) => *value,
+        other => panic!("expected one integer: {other:?}"),
+    };
+    let enabled = match request.return_logprob.as_ref().unwrap().value.as_ref() {
+        Some(pb::bool_or_list::Value::One(value)) => *value,
+        other => panic!("expected one boolean: {other:?}"),
+    };
+    (
+        enabled,
+        int(request.top_logprobs_num.as_ref()),
+        int(request.logprob_start_len.as_ref()),
+    )
+}
+
+fn lora_path(request: &pb::GenerateRequest) -> Option<&str> {
+    match request.lora_path.as_ref()?.value.as_ref() {
+        Some(pb::optional_string_or_list::Value::One(path)) => path.value.as_deref(),
+        other => panic!("expected one adapter: {other:?}"),
+    }
+}
+
+/// `(bootstrap_host, bootstrap_port, bootstrap_room)` of a single request.
+fn rendezvous(request: &pb::GenerateRequest) -> Option<(String, i64, i64)> {
+    let one = |value: Option<&pb::OptionalInt64OrList>| match value?.value.as_ref()? {
+        pb::optional_int64_or_list::Value::One(value) => value.value,
+        pb::optional_int64_or_list::Value::Many(_) => panic!("expected one integer"),
+    };
+    let host = match request.bootstrap_host.as_ref()?.value.as_ref()? {
+        pb::optional_string_or_list::Value::One(host) => host.value.clone()?,
+        pb::optional_string_or_list::Value::Many(_) => panic!("expected one host"),
+    };
+    Some((
+        host,
+        one(request.bootstrap_port.as_ref())?,
+        one(request.bootstrap_room.as_ref())?,
+    ))
 }
 
 #[test]
@@ -40,14 +110,21 @@ fn request_maps_native_fields_and_full_width_room() {
         bootstrap_room: i64::MAX as u64,
         handoff_id: None,
     });
-    let mapped =
+    let (mapped, handoff) =
         build_generate_request(&request, "rid-1", DisaggregationMode::Decode, None, None).unwrap();
-    assert_eq!(mapped.input_ids, vec![1, 2, 3]);
-    assert_eq!(mapped.rid.as_deref(), Some("rid-1"));
-    assert_eq!(mapped.sampling_params.unwrap().max_new_tokens, Some(8));
+    assert_eq!(input_ids(&mapped), [1, 2, 3]);
+    assert_eq!(rid(&mapped), "rid-1");
+    assert_eq!(mapped.stream, Some(true));
+    assert_eq!(sampling(&mapped).max_new_tokens, Some(8));
     assert_eq!(
-        mapped.disaggregated_params.unwrap().bootstrap_room,
-        i64::MAX
+        rendezvous(&mapped),
+        Some(("prefill".to_string(), 5000, i64::MAX))
+    );
+    assert_eq!(
+        handoff,
+        Some(
+            json!({"bootstrap_host": "prefill", "bootstrap_port": 5000, "bootstrap_room": i64::MAX})
+        )
     );
 }
 
@@ -60,51 +137,18 @@ fn prefill_clamps_generation_and_disables_decode_only_options() {
         prompt_logprobs: Some(3),
         ..Default::default()
     };
-    let mapped = build_generate_request(
-        &request,
-        "rid-2",
-        DisaggregationMode::Prefill,
-        Some("prefill"),
-        Some(5001),
-    )
-    .unwrap();
-    let sampling = mapped.sampling_params.unwrap();
-    assert_eq!(sampling.max_new_tokens, Some(1));
-    assert_eq!(sampling.min_new_tokens, None);
-    assert_eq!(mapped.return_logprob, Some(false));
-    assert_eq!(mapped.top_logprobs_num, Some(0));
-    assert_eq!(mapped.logprob_start_len, Some(-1));
-    assert_eq!(mapped.disaggregated_params.unwrap().bootstrap_port, 5001);
-}
-
-#[test]
-fn prefill_uses_selected_prefill_dp_rank() {
-    let mut request = request();
-    request.routing = Some(RoutingHints {
-        dp_rank: Some(7),
-        prefill_dp_rank: Some(3),
-        ..Default::default()
-    });
-
-    assert_eq!(
-        routed_dp_rank(&request, DisaggregationMode::Prefill),
-        Some(3)
-    );
-    assert_eq!(
-        routed_dp_rank(&request, DisaggregationMode::Aggregated),
-        Some(7)
-    );
-
-    request.routing.as_mut().unwrap().prefill_dp_rank = None;
-    assert_eq!(
-        routed_dp_rank(&request, DisaggregationMode::Prefill),
-        Some(7)
-    );
+    let mapped = build(&request, DisaggregationMode::Prefill).unwrap();
+    assert_eq!(sampling(&mapped).max_new_tokens, Some(1));
+    assert_eq!(sampling(&mapped).min_new_tokens, None);
+    assert_eq!(logprob_controls(&mapped), (false, 0, -1));
+    let (host, port, room) = rendezvous(&mapped).unwrap();
+    assert_eq!((host.as_str(), port), ("prefill", 5000));
+    assert!(room >= 0);
 }
 
 #[test]
 fn prefill_handoff_round_trips_to_decode_request() {
-    let prefill = build_generate_request(
+    let (prefill, handoff) = build_generate_request(
         &request(),
         "rid-prefill",
         DisaggregationMode::Prefill,
@@ -112,44 +156,31 @@ fn prefill_handoff_round_trips_to_decode_request() {
         Some(5001),
     )
     .unwrap();
-    let handoff = prefill.disaggregated_params.unwrap();
+    let handoff = handoff.unwrap();
+    assert_eq!(handoff["bootstrap_host"], "prefill.internal");
+    assert_eq!(handoff["bootstrap_port"], 5001);
 
     let mut decode_request = request();
     decode_request.prefill_result = Some(PrefillResult {
-        disaggregated_params: disaggregated_params_to_json(&handoff),
+        disaggregated_params: handoff,
         prompt_tokens_details: None,
     });
-    let decode = build_generate_request(
-        &decode_request,
-        "rid-decode",
-        DisaggregationMode::Decode,
-        None,
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(decode.disaggregated_params, Some(handoff));
+    let decode = build(&decode_request, DisaggregationMode::Decode).unwrap();
+    assert_eq!(rendezvous(&decode), rendezvous(&prefill));
 }
 
 #[test]
 fn decode_requires_rendezvous_params() {
     let error = build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None)
         .unwrap_err();
-    assert_eq!(error.public_message(), None);
+    assert_invalid(error, "neither bootstrap_info nor prefill_result");
 }
 
 #[test]
 fn request_refusal_is_public() {
     let mut refused = request();
     refused.mm_processor_kwargs = Some(json!({}));
-    let error = build_generate_request(
-        &refused,
-        "rid-5",
-        DisaggregationMode::Aggregated,
-        None,
-        None,
-    )
-    .unwrap_err();
+    let error = build(&refused, DisaggregationMode::Aggregated).unwrap_err();
     assert_eq!(
         error.public_message(),
         Some("multimodal payloads are not supported by SGLang's native Generate RPC")
@@ -158,35 +189,10 @@ fn request_refusal_is_public() {
     let mut embeds = request();
     embeds.token_ids = Vec::new().into();
     embeds.prompt_embeds = Some("embeds".to_string());
-    let error =
-        build_generate_request(&embeds, "rid-6", DisaggregationMode::Aggregated, None, None)
-            .unwrap_err();
+    let error = build(&embeds, DisaggregationMode::Aggregated).unwrap_err();
     assert_eq!(
         error.public_message(),
         Some("prompt_embeds are not supported by SGLang's native gRPC proto")
-    );
-
-    let mut stop = request();
-    stop.stop_conditions.stop_token_ids = Some(vec![u32::MAX]);
-    let error = build_generate_request(&stop, "rid-7", DisaggregationMode::Aggregated, None, None)
-        .unwrap_err();
-    assert_eq!(
-        error.public_message(),
-        Some("stop token ids must fit in i32")
-    );
-}
-
-#[test]
-fn room_above_signed_int64_is_rejected() {
-    let mut request = request();
-    request.bootstrap_info = Some(BootstrapInfo {
-        bootstrap_host: "prefill".to_string(),
-        bootstrap_port: 5000,
-        bootstrap_room: i64::MAX as u64 + 1,
-        handoff_id: None,
-    });
-    assert!(
-        build_generate_request(&request, "rid-4", DisaggregationMode::Decode, None, None,).is_err()
     );
 }
 
@@ -203,6 +209,7 @@ fn sampling_and_stopping_fields_preserve_native_values() {
         presence_penalty: Some(-0.3),
         repetition_penalty: Some(1.1),
         n: Some(1),
+        seed: Some(42),
         ..Default::default()
     };
     request.stop_conditions = StopConditions {
@@ -214,39 +221,36 @@ fn sampling_and_stopping_fields_preserve_native_values() {
         ignore_eos: Some(true),
         ..Default::default()
     };
-    let mapped = build_generate_request(
-        &request,
-        "sampling",
-        DisaggregationMode::Aggregated,
-        None,
-        None,
-    )
-    .unwrap();
+    let mapped = build(&request, DisaggregationMode::Aggregated).unwrap();
+    // The native fields are doubles; the canonical request carries f32.
     assert_eq!(
-        mapped.sampling_params,
-        Some(pb::SamplingParams {
-            temperature: Some(0.7),
-            top_p: Some(0.9),
+        sampling(&mapped),
+        &pb::SamplingParams {
+            temperature: Some(f64::from(0.7_f32)),
+            top_p: Some(f64::from(0.9_f32)),
             top_k: Some(17),
-            min_p: Some(0.05),
-            frequency_penalty: Some(0.2),
-            presence_penalty: Some(-0.3),
-            repetition_penalty: Some(1.1),
+            min_p: Some(f64::from(0.05_f32)),
+            frequency_penalty: Some(f64::from(0.2_f32)),
+            presence_penalty: Some(f64::from(-0.3_f32)),
+            repetition_penalty: Some(f64::from(1.1_f32)),
             max_new_tokens: Some(11),
             min_new_tokens: Some(2),
-            stop: vec!["end".to_string(), "done".to_string()],
-            stop_token_ids: vec![19, 20, 21],
+            stop: Some(pb::StringOrList {
+                value: Some(pb::string_or_list::Value::Many(pb::StringList {
+                    items: vec!["end".to_string(), "done".to_string()],
+                })),
+            }),
+            stop_token_ids: Some(pb::Int64List {
+                items: vec![19, 20, 21],
+            }),
             ignore_eos: Some(true),
             n: Some(1),
-            seed: None,
-            json_schema: None,
-            regex: None,
-            guided_decoding: None,
-        })
+            sampling_seed: Some(42),
+            ..Default::default()
+        }
     );
-    assert_eq!(mapped.stream, Some(true));
-    assert!(mapped.disaggregated_params.is_none());
-    assert!(mapped.session_id.is_none());
+    assert!(mapped.session_params.is_none());
+    assert!(mapped.text.is_none());
 }
 
 #[test]
@@ -255,20 +259,14 @@ fn visible_stop_tokens_stop_in_engine_and_return_only_ids() {
     request.stop_conditions.stop_token_ids = Some(vec![19]);
     request.stop_conditions.stop_token_ids_hidden = Some(vec![200002, 199999]);
     request.stop_conditions.stop_token_ids_visible = Some(vec![200012, 19]);
-    let mapped = build_generate_request(
-        &request,
-        "visible",
-        DisaggregationMode::Aggregated,
-        None,
-        None,
-    )
-    .unwrap();
+    let mapped = build(&request, DisaggregationMode::Aggregated).unwrap();
+    // SGLang keeps a matched stop token in output_ids; the sidecar never asks
+    // for text, which SGLang trims.
     assert_eq!(
-        mapped.sampling_params.unwrap().stop_token_ids,
-        vec![19, 200002, 199999, 200012]
+        sampling(&mapped).stop_token_ids.as_ref().unwrap().items,
+        [19, 200002, 199999, 200012]
     );
-    // SGLang text trims the stop token.
-    assert_eq!(mapped.return_text, None);
+    assert!(mapped.text.is_none());
 }
 
 #[test]
@@ -279,6 +277,8 @@ fn optional_controls_distinguish_absence_from_explicit_zero_or_false() {
             max_tokens: explicit.then_some(0),
             min_tokens: explicit.then_some(0),
             ignore_eos: explicit.then_some(false),
+            stop: explicit.then(Vec::new),
+            stop_token_ids: explicit.then(Vec::new),
             ..Default::default()
         };
         request.sampling_options = SamplingOptions {
@@ -296,17 +296,10 @@ fn optional_controls_distinguish_absence_from_explicit_zero_or_false() {
             include_stop_str_in_output: explicit.then_some(false),
             ..Default::default()
         };
-        let mapped = build_generate_request(
-            &request,
-            "optional",
-            DisaggregationMode::Aggregated,
-            None,
-            None,
-        )
-        .unwrap();
+        let mapped = build(&request, DisaggregationMode::Aggregated).unwrap();
         assert_eq!(
-            mapped.sampling_params,
-            Some(pb::SamplingParams {
+            sampling(&mapped),
+            &pb::SamplingParams {
                 temperature: explicit.then_some(0.0),
                 top_p: explicit.then_some(0.0),
                 top_k: explicit.then_some(-1),
@@ -319,7 +312,7 @@ fn optional_controls_distinguish_absence_from_explicit_zero_or_false() {
                 ignore_eos: explicit.then_some(false),
                 n: explicit.then_some(1),
                 ..Default::default()
-            })
+            }
         );
     }
 }
@@ -336,57 +329,10 @@ fn logprob_requests_preserve_selected_only_and_prompt_opt_in() {
         let mut request = request();
         request.output_options.logprobs = output;
         request.output_options.prompt_logprobs = prompt;
-        let mapped = build_generate_request(
-            &request,
-            "logprobs",
-            DisaggregationMode::Aggregated,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(mapped.return_logprob, Some(enabled));
-        assert_eq!(mapped.top_logprobs_num, Some(count));
-        assert_eq!(mapped.logprob_start_len, Some(start));
-    }
-}
-
-#[test]
-fn values_outside_native_signed_fields_are_rejected() {
-    for (field, message) in [
-        ("token", "token ids must fit in i32"),
-        ("stop", "stop token ids must fit in i32"),
-        ("hidden_stop", "stop token ids must fit in i32"),
-        ("visible_stop", "stop token ids must fit in i32"),
-        ("max_tokens", "max_tokens does not fit in i32"),
-        ("min_tokens", "min_tokens does not fit in i32"),
-        ("logprobs", "requested logprobs does not fit in i32"),
-        ("prompt_logprobs", "requested logprobs does not fit in i32"),
-        ("dp_rank", "routed dp_rank does not fit in i32"),
-    ] {
-        let mut request = request();
-        let overflow = i32::MAX as u32 + 1;
-        match field {
-            "token" => request.token_ids = vec![overflow].into(),
-            "stop" => request.stop_conditions.stop_token_ids = Some(vec![overflow]),
-            "hidden_stop" => request.stop_conditions.stop_token_ids_hidden = Some(vec![overflow]),
-            "visible_stop" => request.stop_conditions.stop_token_ids_visible = Some(vec![overflow]),
-            "max_tokens" => request.stop_conditions.max_tokens = Some(overflow),
-            "min_tokens" => request.stop_conditions.min_tokens = Some(overflow),
-            "logprobs" => request.output_options.logprobs = Some(overflow),
-            "prompt_logprobs" => request.output_options.prompt_logprobs = Some(overflow),
-            "dp_rank" => {
-                request.routing = Some(RoutingHints {
-                    dp_rank: Some(overflow),
-                    ..Default::default()
-                })
-            }
-            _ => unreachable!(),
-        }
-        let error =
-            build_generate_request(&request, field, DisaggregationMode::Aggregated, None, None)
-                .unwrap_err();
-        assert_eq!(error.public_message(), Some(message));
-        assert_invalid(error, message);
+        let mapped = build(&request, DisaggregationMode::Aggregated).unwrap();
+        assert_eq!(logprob_controls(&mapped), (enabled, count, start));
+        // Logprob entries carry token ids, not decoded text.
+        assert!(mapped.return_text_in_logprobs.is_none());
     }
 }
 
@@ -438,10 +384,10 @@ fn unsupported_sampling_controls_are_rejected() {
     ] {
         let mut request = request();
         request.sampling_options = options;
-        let error =
-            build_generate_request(&request, label, DisaggregationMode::Aggregated, None, None)
-                .unwrap_err();
-        assert_invalid(error, label);
+        assert_invalid(
+            build(&request, DisaggregationMode::Aggregated).unwrap_err(),
+            label,
+        );
     }
 }
 
@@ -473,128 +419,102 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
             }
             _ => unreachable!(),
         };
-        let error =
-            build_generate_request(&request, field, DisaggregationMode::Aggregated, None, None)
-                .unwrap_err();
-        assert_invalid(error, message);
-    }
-}
-
-#[test]
-#[allow(deprecated)]
-fn json_and_regex_guides_use_typed_constraints() {
-    for schema in [json!({"type": "string"}), json!(r#"{"type":"string"}"#)] {
-        let mut request = request();
-        request.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
-            json: Some(schema),
-            ..Default::default()
-        });
-        let mapped =
-            build_generate_request(&request, "json", DisaggregationMode::Aggregated, None, None)
-                .unwrap()
-                .sampling_params
-                .unwrap();
-        assert_eq!(mapped.json_schema, None);
-        assert!(mapped.regex.is_none());
-        assert_eq!(
-            mapped.guided_decoding.unwrap().constraint,
-            Some(pb::guided_decoding::Constraint::JsonSchema(
-                r#"{"type":"string"}"#.to_string()
-            ))
+        assert_invalid(
+            build(&request, DisaggregationMode::Aggregated).unwrap_err(),
+            message,
         );
     }
-    let mut request = request();
-    request.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
-        regex: Some("[a-z]+".to_string()),
-        ..Default::default()
-    });
-    let mapped = build_generate_request(
-        &request,
-        "regex",
-        DisaggregationMode::Aggregated,
-        None,
-        None,
-    )
-    .unwrap()
-    .sampling_params
-    .unwrap();
-    assert_eq!(mapped.regex, None);
-    assert!(mapped.json_schema.is_none());
-    assert_eq!(
-        mapped.guided_decoding.unwrap().constraint,
-        Some(pb::guided_decoding::Constraint::Regex("[a-z]+".to_string()))
-    );
-
-    request
-        .sampling_options
-        .guided_decoding
-        .as_mut()
-        .unwrap()
-        .json = Some(json!({"type": "string"}));
-    assert_invalid(
-        build_generate_request(
-            &request,
-            "both-guides",
-            DisaggregationMode::Aggregated,
-            None,
-            None,
-        )
-        .unwrap_err(),
-        "only one guided-decoding constraint",
-    );
 }
 
 #[test]
-fn additional_guides_use_typed_constraints() {
+fn guided_decoding_lowers_to_one_flat_constraint() {
     for (guided, expected) in [
+        (
+            GuidedDecodingOptions {
+                json: Some(json!({"type": "string"})),
+                ..Default::default()
+            },
+            pb::SamplingParams {
+                json_schema: Some(r#"{"type":"string"}"#.to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            GuidedDecodingOptions {
+                json: Some(json!(r#"{"type":"string"}"#)),
+                ..Default::default()
+            },
+            pb::SamplingParams {
+                json_schema: Some(r#"{"type":"string"}"#.to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            GuidedDecodingOptions {
+                regex: Some("[a-z]+".to_string()),
+                ..Default::default()
+            },
+            pb::SamplingParams {
+                regex: Some("[a-z]+".to_string()),
+                ..Default::default()
+            },
+        ),
         (
             GuidedDecodingOptions {
                 choice: Some(vec!["a".to_string(), "b".to_string()]),
                 ..Default::default()
             },
-            pb::guided_decoding::Constraint::Choice(pb::ChoiceConstraint {
-                values: vec!["a".to_string(), "b".to_string()],
-            }),
+            pb::SamplingParams {
+                choice: vec!["a".to_string(), "b".to_string()],
+                ..Default::default()
+            },
         ),
         (
             GuidedDecodingOptions {
                 grammar: Some("root ::= 'a'".to_string()),
                 ..Default::default()
             },
-            pb::guided_decoding::Constraint::Ebnf("root ::= 'a'".to_string()),
+            pb::SamplingParams {
+                ebnf: Some("root ::= 'a'".to_string()),
+                ..Default::default()
+            },
         ),
         (
             GuidedDecodingOptions {
                 structural_tag: Some(json!({"type": "object"})),
                 ..Default::default()
             },
-            pb::guided_decoding::Constraint::StructuralTag(r#"{"type":"object"}"#.to_string()),
+            pb::SamplingParams {
+                structural_tag: Some(r#"{"type":"object"}"#.to_string()),
+                ..Default::default()
+            },
+        ),
+        // An empty choice list is no constraint.
+        (
+            GuidedDecodingOptions {
+                choice: Some(Vec::new()),
+                ..Default::default()
+            },
+            pb::SamplingParams::default(),
         ),
     ] {
         let mut request = request();
+        request.stop_conditions.max_tokens = None;
         request.sampling_options.guided_decoding = Some(guided);
-        let mapped = build_generate_request(
-            &request,
-            "guide",
-            DisaggregationMode::Aggregated,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            mapped
-                .sampling_params
-                .unwrap()
-                .guided_decoding
-                .unwrap()
-                .constraint,
-            Some(expected)
-        );
+        let mapped = build(&request, DisaggregationMode::Aggregated).unwrap();
+        assert_eq!(sampling(&mapped), &expected);
     }
-}
 
-#[test]
-fn unsupported_guide_modifiers_are_rejected() {
+    let mut both = request();
+    both.sampling_options.guided_decoding = Some(GuidedDecodingOptions {
+        json: Some(json!({"type": "string"})),
+        regex: Some("[a-z]+".to_string()),
+        ..Default::default()
+    });
+    assert_invalid(
+        build(&both, DisaggregationMode::Aggregated).unwrap_err(),
+        "only one guided-decoding constraint",
+    );
     for guided in [
         GuidedDecodingOptions {
             backend: Some("xgrammar".to_string()),
@@ -608,30 +528,60 @@ fn unsupported_guide_modifiers_are_rejected() {
         let mut request = request();
         request.sampling_options.guided_decoding = Some(guided);
         assert_invalid(
-            build_generate_request(
-                &request,
-                "guide",
-                DisaggregationMode::Aggregated,
-                None,
-                None,
-            )
-            .unwrap_err(),
+            build(&request, DisaggregationMode::Aggregated).unwrap_err(),
             "backend and whitespace modifiers",
         );
     }
 }
 
 #[test]
+fn empty_guided_constraints_are_rejected_publicly() {
+    for (guided, message) in [
+        (
+            GuidedDecodingOptions {
+                json: Some(json!("")),
+                ..Default::default()
+            },
+            "constraint must not be empty",
+        ),
+        (
+            GuidedDecodingOptions {
+                regex: Some(String::new()),
+                ..Default::default()
+            },
+            "constraint must not be empty",
+        ),
+        (
+            GuidedDecodingOptions {
+                choice: Some(vec!["a".to_string(), String::new()]),
+                ..Default::default()
+            },
+            "choice must contain only non-empty values",
+        ),
+    ] {
+        let mut request = request();
+        request.sampling_options.guided_decoding = Some(guided);
+        let error = build(&request, DisaggregationMode::Aggregated).unwrap_err();
+        assert!(
+            error
+                .public_message()
+                .is_some_and(|public| public.contains(message)),
+            "{error}"
+        );
+        assert_invalid(error, message);
+    }
+}
+
+#[test]
 fn sglang_0521_request_controls_are_forwarded() {
-    let mut request = request();
-    request.sampling_options.seed = Some(42);
-    request.stop_conditions.max_thinking_tokens = Some(17);
-    request.require_reasoning = true;
-    request.routing = Some(RoutingHints {
+    let mut controlled = request();
+    controlled.stop_conditions.max_thinking_tokens = Some(17);
+    controlled.require_reasoning = true;
+    controlled.routing = Some(RoutingHints {
         priority: Some(-3),
         ..Default::default()
     });
-    request.kv_hint = Some(KvHint::new(
+    controlled.kv_hint = Some(KvHint::new(
         "message-1",
         vec![KvHintAction::new(
             "action-1",
@@ -641,19 +591,14 @@ fn sglang_0521_request_controls_are_forwarded() {
         )],
     ));
 
-    let mapped = build_generate_request(
-        &request,
-        "controls",
-        DisaggregationMode::Aggregated,
-        None,
-        None,
-    )
-    .unwrap();
-    assert_eq!(mapped.sampling_params.unwrap().seed, Some(42));
+    let mapped = build(&controlled, DisaggregationMode::Aggregated).unwrap();
     assert_eq!(mapped.priority, Some(-3));
     assert_eq!(mapped.require_reasoning, Some(true));
     assert_eq!(mapped.max_thinking_tokens, Some(17));
-    let hints = mapped.kv_hints.unwrap();
+    let Some(pb::kv_hints_envelope_or_list::Value::One(hints)) = mapped.kv_hints.unwrap().value
+    else {
+        panic!("expected one KV-hint envelope");
+    };
     assert_eq!(hints.protocol_version, "0.1");
     assert_eq!(hints.message_id, "message-1");
     assert_eq!(hints.actions.len(), 1);
@@ -662,50 +607,77 @@ fn sglang_0521_request_controls_are_forwarded() {
     assert_eq!(action.action_type, "kv.fetch");
     assert_eq!(action.action_version, "1.0");
     assert_eq!(
-        dynamo_sidecar_common::struct_to_json(
-            action.payload.clone().unwrap(),
-            "SGLang",
-            "kv hint action payload",
-        )
-        .unwrap(),
+        serde_json::from_str::<Value>(action.payload.as_deref().unwrap()).unwrap(),
         json!({"source": "worker-7"})
     );
+
+    // The Rust server rejects any request that carries max_thinking_tokens
+    // unless it runs with --enable-strict-thinking, so an unset limit stays
+    // off the wire.
+    let mapped = build(&request(), DisaggregationMode::Aggregated).unwrap();
+    assert!(mapped.max_thinking_tokens.is_none());
 }
 
 #[test]
-fn selected_adapter_cache_identity_and_role_rank_are_forwarded() {
+fn adapter_and_cache_identity_are_forwarded_without_routed_rank() {
     let mut request = request();
     request.mdc_sum = Some("model-cache-key".to_string());
     request.routing = Some(RoutingHints {
         lora_name: Some("adapter-a".to_string()),
         dp_rank: Some(0),
-        prefill_dp_rank: Some(3),
-        priority: Some(0),
         ..Default::default()
     });
-    for (mode, rank) in [
-        (DisaggregationMode::Aggregated, 0),
-        (DisaggregationMode::Prefill, 3),
-    ] {
-        let mapped =
-            build_generate_request(&request, "routed", mode, Some("prefill"), Some(5000)).unwrap();
-        assert_eq!(mapped.lora_path.as_deref(), Some("adapter-a"));
-        assert_eq!(mapped.routing_key.as_deref(), Some("model-cache-key"));
-        assert_eq!(mapped.routed_dp_rank, Some(rank));
-    }
-    request.routing = None;
-    request.mdc_sum = None;
-    let mapped = build_generate_request(
-        &request,
-        "unrouted",
-        DisaggregationMode::Aggregated,
-        None,
-        None,
-    )
-    .unwrap();
-    assert!(mapped.lora_path.is_none());
-    assert!(mapped.routing_key.is_none());
+    let mapped = build(&request, DisaggregationMode::Aggregated).unwrap();
+    assert_eq!(lora_path(&mapped), Some("adapter-a"));
+    assert_eq!(mapped.routing_key.as_deref(), Some("model-cache-key"));
+    // The engine serves one DP rank, so no rank is named.
     assert!(mapped.routed_dp_rank.is_none());
+}
+
+/// The engine serves DP rank 0 only, so a request routed to another rank fails.
+#[test]
+fn nonzero_router_rank_is_invalid_argument() {
+    let routed = |dp_rank: Option<u32>, prefill_dp_rank: Option<u32>| {
+        let mut request = request();
+        request.routing = Some(RoutingHints {
+            dp_rank,
+            prefill_dp_rank,
+            ..Default::default()
+        });
+        request
+    };
+    for (mode, dp_rank, prefill_dp_rank) in [
+        (DisaggregationMode::Aggregated, Some(1), None),
+        (DisaggregationMode::Prefill, None, Some(1)),
+        (DisaggregationMode::Decode, Some(1), None),
+    ] {
+        let error = validate_dp_rank(&routed(dp_rank, prefill_dp_rank), mode).unwrap_err();
+        assert_invalid(error, "DP rank 1 was requested");
+    }
+    for (mode, dp_rank, prefill_dp_rank) in [
+        (DisaggregationMode::Aggregated, Some(0), None),
+        // Prefill names its own rank first.
+        (DisaggregationMode::Prefill, Some(1), Some(0)),
+        // Decode names the request's rank, not prefill's.
+        (DisaggregationMode::Decode, Some(0), Some(1)),
+    ] {
+        validate_dp_rank(&routed(dp_rank, prefill_dp_rank), mode).unwrap();
+    }
+}
+
+#[test]
+fn room_above_signed_int64_is_rejected() {
+    let mut request = request();
+    request.bootstrap_info = Some(BootstrapInfo {
+        bootstrap_host: "prefill".to_string(),
+        bootstrap_port: 5000,
+        bootstrap_room: i64::MAX as u64 + 1,
+        handoff_id: None,
+    });
+    assert_invalid(
+        build(&request, DisaggregationMode::Decode).unwrap_err(),
+        "bootstrap_room must fit",
+    );
 }
 
 #[test]
@@ -725,9 +697,14 @@ fn bootstrap_info_precedes_prefill_result_and_aggregated_ignores_both() {
         let params = resolve_disaggregated_params(&request, mode, Some("discovery"), Some(5002))
             .unwrap()
             .unwrap();
-        assert_eq!(params.bootstrap_host, "router-prefill");
-        assert_eq!(params.bootstrap_port, 5000);
-        assert_eq!(params.bootstrap_room, 23);
+        assert_eq!(
+            params,
+            Rendezvous {
+                bootstrap_host: "router-prefill".to_string(),
+                bootstrap_port: 5000,
+                bootstrap_room: 23,
+            }
+        );
     }
     assert!(
         resolve_disaggregated_params(&request, DisaggregationMode::Aggregated, None, None)
