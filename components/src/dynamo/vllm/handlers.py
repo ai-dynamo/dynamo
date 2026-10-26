@@ -120,6 +120,7 @@ from .multimodal_utils.custom_encoder.handoff import external_encoder_request_co
 from .multimodal_utils.custom_encoder.handoff_consumer import (
     ExternalEncoderHandoffConsumer,
 )
+from .multimodal_utils.models.qwen_video_handoff import QWEN_VIDEO_HANDOFF_KEY
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
@@ -4563,6 +4564,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         res,
         multi_modal_data,
         mm_processor_kwargs,
+        video_handoff=None,
     ) -> "Dict[str, Any] | None":
         """The handoff field for the response, or None when there is no handoff.
 
@@ -4576,6 +4578,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             prompt_token_ids=list(res.prompt_token_ids or []),
             mm_processor_kwargs=mm_processor_kwargs,
         )
+        if video_handoff is not None:
+            if video_handoff["prompt_token_ids"] == list(res.prompt_token_ids or []):
+                embedding_params = {
+                    **(embedding_params or {}),
+                    QWEN_VIDEO_HANDOFF_KEY: video_handoff,
+                }
+            else:
+                logger.warning(
+                    "Skipping video handoff: generated prompt layout changed"
+                )
         return self._build_disaggregated_params(
             kv_protocol.decode_request_kv_transfer_params(res),
             embedding_params,
@@ -4605,6 +4617,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
 
         _apply_nvext_cache_salt(request, prompt)
+
+        video_handoff = None
+        if multi_modal_data and "video" in multi_modal_data:
+            (
+                prompt,
+                video_handoff,
+            ) = await self._multimodal_request_processor.prepare_prefill_video_prompt(
+                prompt, multi_modal_data
+            )
 
         # Prefill generates only 1 token. Cap it before the builder, whose vLLM
         # checks reject a client min_tokens above max_tokens=1.
@@ -4683,6 +4704,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         res,
                         multi_modal_data,
                         mm_processor_kwargs,
+                        video_handoff=video_handoff,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
