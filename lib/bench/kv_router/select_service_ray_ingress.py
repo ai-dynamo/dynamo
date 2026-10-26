@@ -33,13 +33,14 @@ import argparse
 import array
 import asyncio
 import hashlib
+import json
 import math
 import os
 import pickle
 import random
 import struct
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
@@ -54,6 +55,10 @@ LIFECYCLE_EVENT_BROADCAST_TIMEOUT_S = 3
 LIFECYCLE_HOOKS = frozenset(
     {"on_prefill_complete", "on_decode_progress", "on_request_completed"}
 )
+
+# Harness counters, printed to the service log every STATS_INTERVAL_S seconds.
+STATS: Counter = Counter()
+STATS_INTERVAL_S = 10
 
 REGISTER, REGISTER_DONE, REGISTERED, SELECT, SELECT_REPLY, LIFECYCLE_BATCH = 1, 2, 3, 4, 5, 6
 PEER_UPDATES, PEER_ACK = 7, 8
@@ -103,12 +108,15 @@ class PeerUpdateForwarder:
                 self._deliver()
             )
         self._updates.put_nowait({"kind": kind, "event": event})
+        STATS[f"{kind}_out"] += 1
 
     async def _deliver(self) -> None:
         while True:
             batch = [await self._updates.get()]
             while not self._updates.empty():
                 batch.append(self._updates.get_nowait())
+            STATS["broadcasts"] += 1
+            STATS["broadcast_updates"] += len(batch)
             try:
                 results = await self._handle.broadcast(
                     "on_replica_updates",
@@ -185,12 +193,15 @@ class KVTokenTracker:
     async def _apply_update(self, update: Dict[str, Any]) -> None:
         if update["kind"] == "session_affinity":
             await self._svc.apply_session_binding(update["event"])
+            STATS["session_affinity_applied"] += 1
             return
         booking = update["event"]
         request_id = booking["selection_id"]
         if request_id in self._requests or request_id in self._completed_request_ids:
+            STATS["load_reservation_skipped"] += 1
             return
         await self._svc.create_reservation(booking)
+        STATS["load_reservation_applied"] += 1
         if request_id in self._completed_request_ids:
             await self._svc.free_reservation(request_id)
             return
@@ -242,6 +253,7 @@ class KVTokenTracker:
             "session_id": session_id,
         }
         selection = await self._svc.select_and_reserve(request)
+        STATS["selects"] += 1
         self._track_request_state(
             request_id, selection["worker_id"], len(token_ids), expected_output_tokens
         )
@@ -283,6 +295,7 @@ class KVTokenTracker:
         self._request_ids_by_worker.setdefault(worker_id, set()).add(request_id)
 
     async def on_lifecycle_events(self, events) -> None:
+        STATS["lifecycle_events"] += len(events)
         for hook_name, args in events:
             if hook_name not in LIFECYCLE_HOOKS:
                 continue
@@ -475,6 +488,7 @@ class Ingress:
             await asyncio.sleep(0.2)
         await self.peers.connect()
         self.tracker.start_replica_broadcast(self.peers)
+        asyncio.create_task(_print_stats())
         _ipc_write_frame(writer, REGISTERED, struct.pack("<I", len(self.replicas)))
         print(
             f"registered {len(self.replicas)} workers; {len(self.args.peer)} peers",
@@ -499,6 +513,12 @@ class Ingress:
         while True:
             body = await self.lifecycle_queue.get()
             await self.tracker.on_lifecycle_events(_ipc_decode_lifecycle(body))
+
+
+async def _print_stats():
+    while True:
+        await asyncio.sleep(STATS_INTERVAL_S)
+        print(json.dumps({"t": round(time.time(), 1), **STATS}), flush=True)
 
 
 def _peer_decode(body):
