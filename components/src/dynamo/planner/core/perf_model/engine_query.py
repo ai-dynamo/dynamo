@@ -388,10 +388,6 @@ class AISCoreEnginePerfModel:
         """Search sustainable per-engine RPS under request/SLA constraints."""
         if request.isl == 0:
             return None
-        if self._execution_profile and (
-            request.accept_length != 1.0 or request.kv_hit_rate not in (None, 0.0)
-        ):
-            return None
         if self._worker_type == "prefill":
             return self._find_prefill_capacity(request)
         if self._worker_type == "decode":

@@ -185,7 +185,7 @@ def _model(config, phase):
     )
 
 
-def _query(model, phase, *, variance=0.0, tokens=8, **options):
+def _query(model, phase, *, tokens=8, **options):
     if phase == "prefill":
         return model.estimate_queued_prefill_time(
             [
@@ -193,7 +193,6 @@ def _query(model, phase, *, variance=0.0, tokens=8, **options):
                     queued_requests=QueuedRequestMetrics(
                         num_prefill_requests=2,
                         sum_prefill_tokens=tokens,
-                        var_prefill_length=variance,
                     )
                 )
             ],
@@ -207,7 +206,6 @@ def _query(model, phase, *, variance=0.0, tokens=8, **options):
                 scheduled_requests=ScheduledRequestMetrics(
                     num_decode_requests=2,
                     sum_decode_kv_tokens=tokens,
-                    var_decode_kv_tokens=variance,
                 )
             )
         ],
@@ -233,14 +231,21 @@ def test_dataset_predicts_after_source_removal_and_capability_rebuild(dataset_pr
     )
 
 
-def test_profile_refuses_missing_or_ambiguous_shapes(dataset_profile):
+def test_profile_returns_unavailable_for_missing_shapes(dataset_profile):
     config, _, phase = dataset_profile
     model = _model(config, phase)
-    assert _query(model, phase, variance=1.0) is None
     assert _query(model, phase, tokens=7) is None
     assert _query(model, phase, tokens=12) is None
+
+
+def test_profile_uses_existing_queue_and_decode_scaling(dataset_profile):
+    config, _, phase = dataset_profile
+    model = _model(config, phase)
     options = {"queue_scale": 0.5} if phase == "prefill" else {"decode_scale": 0.5}
-    assert _query(model, phase, **options) is None
+    # Scaling two four-token requests to one still matches a measured cell.
+    assert _query(model, phase, **options) == pytest.approx(0.006)
+    if phase == "prefill":
+        assert _query(model, phase, tokens=16, kv_hit_rate=0.5) == pytest.approx(0.006)
 
 
 def test_profile_capacity_preserves_batch_geometry(dataset_profile):
@@ -250,7 +255,10 @@ def test_profile_capacity_preserves_batch_geometry(dataset_profile):
     capacity = model.find_engine_capacity_rps(isl=4, osl=1)
     assert capacity is not None
     assert capacity.rps == pytest.approx(2 / 0.006)
-    assert model.find_engine_capacity_rps(isl=4, osl=1, kv_hit_rate=0.5) is None
+    cached_isl = 8 if phase == "prefill" else 4
+    cached = model.find_engine_capacity_rps(isl=cached_isl, osl=1, kv_hit_rate=0.5)
+    assert cached is not None
+    assert cached.rps == pytest.approx(capacity.rps)
 
 
 def test_dataset_role_mismatch_and_tampering_fail(dataset_profile):
@@ -266,9 +274,7 @@ def test_dataset_role_mismatch_and_tampering_fail(dataset_profile):
         _model(config, phase)
 
 
-def test_profile_does_not_turn_mixed_or_synthetic_metrics_into_exact_cells(
-    dataset_profile,
-):
+def test_profile_estimates_next_request_with_existing_planner_logic(dataset_profile):
     config, _, phase = dataset_profile
     model = _model(config, phase)
     observed = ForwardPassMetrics(
@@ -277,32 +283,18 @@ def test_profile_does_not_turn_mixed_or_synthetic_metrics_into_exact_cells(
         scheduled_requests=ScheduledRequestMetrics(
             num_prefill_requests=1 if phase == "prefill" else 0,
             sum_prefill_tokens=4 if phase == "prefill" else 0,
-            num_decode_requests=2 if phase == "decode" else 0,
-            sum_decode_kv_tokens=8 if phase == "decode" else 0,
+            num_decode_requests=1 if phase == "decode" else 0,
+            sum_decode_kv_tokens=4 if phase == "decode" else 0,
         ),
     )
     model.add_observations({("worker", 0): observed})
     assert _query(model, phase) == pytest.approx(0.006)
     if phase == "prefill":
-        assert (
-            model.estimate_queued_prefill_time(
-                [observed], max_num_batched_tokens=8, add_next_request=True
-            )
-            is None
+        estimate = model.estimate_queued_prefill_time(
+            [observed], max_num_batched_tokens=8, add_next_request=True
         )
     else:
-        assert (
-            model.estimate_scheduled_decode_itl([observed], add_next_request=True)
-            is None
+        estimate = model.estimate_scheduled_decode_itl(
+            [observed], add_next_request=True
         )
-        mixed = ForwardPassMetrics(
-            scheduled_requests=ScheduledRequestMetrics(
-                num_decode_requests=2,
-                sum_decode_kv_tokens=8,
-                num_prefill_requests=1,
-                sum_prefill_tokens=4,
-            )
-        )
-        assert (
-            model.estimate_scheduled_decode_itl([mixed], add_next_request=False) is None
-        )
+    assert estimate == pytest.approx(0.006)

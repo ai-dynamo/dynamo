@@ -356,14 +356,6 @@ class PlannerEnginePerfModel:
             return None
         return self._configured_role()["attention_dp"]
 
-    def _uses_execution_profile(self) -> bool:
-        return self._config.ais_perf_model is not None and bool(
-            self._configured_role()
-            .get("estimator_config", {})
-            .get("op_level", {})
-            .get("execution_profile")
-        )
-
     # ------------------------------------------------------------------
     # Observation and bootstrap
     # ------------------------------------------------------------------
@@ -543,28 +535,17 @@ class PlannerEnginePerfModel:
             return None
 
         scale = 1.0 - _clamp_kv_hit_rate(kv_hit_rate)
-        if self._uses_execution_profile():
-            # Preserve measured geometry; synthetic queue redistribution and
-            # prefix discounts cannot qualify an exact measured cell.
-            if (
-                queue_scale != 1.0
-                or scale != 1.0
-                or (add_next_request and self.avg_isl > 0)
-            ):
-                return None
-            fpms = metrics_by_rank
-        else:
-            fpms = [
-                self._synthetic_prefill_fpm(
-                    fpm,
-                    queue_scale=queue_scale,
-                    decode_scale=decode_scale,
-                    include_queued_decode=include_queued_decode,
-                    prefill_scale=scale,
-                    add_next_request=add_next_request,
-                )
-                for fpm in metrics_by_rank
-            ]
+        fpms = [
+            self._synthetic_prefill_fpm(
+                fpm,
+                queue_scale=queue_scale,
+                decode_scale=decode_scale,
+                include_queued_decode=include_queued_decode,
+                prefill_scale=scale,
+                add_next_request=add_next_request,
+            )
+            for fpm in metrics_by_rank
+        ]
         try:
             result = self._engine_model.get_queued_prefill_time(fpms)
         except _ENGINE_MODEL_EXCEPTIONS as e:
@@ -589,41 +570,16 @@ class PlannerEnginePerfModel:
         if self._engine_model is None:
             return None
 
-        if self._uses_execution_profile():
-            if (
-                decode_scale != 1.0
-                or (add_next_request and self.avg_decode_length > 0)
-                or any(
-                    (
-                        include_queued_decode
-                        and (
-                            fpm.queued_requests.num_decode_requests
-                            or fpm.queued_requests.sum_decode_kv_tokens
-                        )
-                    )
-                    or (
-                        include_queued_prefill_as_kv
-                        and (
-                            fpm.queued_requests.num_prefill_requests
-                            or fpm.queued_requests.sum_prefill_tokens
-                        )
-                    )
-                    for fpm in metrics_by_rank
-                )
-            ):
-                return None
-            fpms = metrics_by_rank
-        else:
-            fpms = [
-                self._synthetic_decode_fpm(
-                    fpm,
-                    decode_scale=decode_scale,
-                    include_queued_decode=include_queued_decode,
-                    include_queued_prefill_as_kv=include_queued_prefill_as_kv,
-                    add_next_request=add_next_request,
-                )
-                for fpm in metrics_by_rank
-            ]
+        fpms = [
+            self._synthetic_decode_fpm(
+                fpm,
+                decode_scale=decode_scale,
+                include_queued_decode=include_queued_decode,
+                include_queued_prefill_as_kv=include_queued_prefill_as_kv,
+                add_next_request=add_next_request,
+            )
+            for fpm in metrics_by_rank
+        ]
         try:
             result = self._engine_model.get_scheduled_decode_itl(fpms)
         except _ENGINE_MODEL_EXCEPTIONS as e:

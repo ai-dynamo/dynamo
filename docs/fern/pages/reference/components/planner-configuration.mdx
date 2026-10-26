@@ -202,9 +202,10 @@ Set the paths to the installed snapshot and its selected manifest. For disaggreg
 serving, supply separate `prefill` and `decode` sources. Canonical prepared configs
 containing `estimator_config.op_level.execution_profile` also work through `roles`.
 
-Execution profiles require matching measurements for the requested shape. Missing
-measurements or unsupported batch shapes return unavailable estimates, so Planner
-skips scaling decisions that depend on them.
+Planner applies its existing workload estimates, including queue scaling,
+prefix-cache discounts, and next-request estimates, before querying the profile.
+If AISimulate cannot estimate the resulting shape, Planner skips scaling decisions
+that depend on that estimate.
 
 <ParamField path="aic_interpolation" type="AICInterpolationSpec" default="null">
   AIConfigurator interpolation spec. Populated by the profiler in rapid mode and written onto the Planner ConfigMap; you do not normally set this by hand. When present, the Planner runs the AIC sweep in-process at bootstrap to seed the performance model. See [AICInterpolationSpec](#aicinterpolationspec).
