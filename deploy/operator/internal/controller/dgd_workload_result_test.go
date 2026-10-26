@@ -84,7 +84,8 @@ func crashLoopTestDCD(
 	message string,
 ) *nvidiacomv1beta1.DynamoComponentDeployment {
 	return &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 2},
+		Name:       name,
+		Generation: 2,
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: component,

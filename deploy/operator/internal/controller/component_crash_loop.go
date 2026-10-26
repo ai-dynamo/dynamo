@@ -14,7 +14,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -58,7 +57,7 @@ func mapDeploymentPodToDCDRequests(_ context.Context, obj client.Object) []ctrl.
 	if !ok {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}}}
+	return []ctrl.Request{{Namespace: obj.GetNamespace(), Name: name}}
 }
 
 // dcdPodCrashLoopPredicate admits Deployment Pod events that change a Pod's
