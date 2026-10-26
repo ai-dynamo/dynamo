@@ -212,6 +212,15 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if sampling.use_beam_search.unwrap_or(false) {
         return Err(invalid_argument("beam search is not supported"));
     }
+    if sampling
+        .logit_bias
+        .as_ref()
+        .is_some_and(|bias| !bias.is_empty())
+    {
+        return Err(invalid_argument(
+            "logit_bias is not supported by the LPX sidecar",
+        ));
+    }
     if request.output_options.prompt_logprobs.is_some() {
         return Err(invalid_argument(
             "prompt logprobs are not supported by the LPX sidecar",

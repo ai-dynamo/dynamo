@@ -176,6 +176,12 @@ fn unsupported_requests_are_rejected_before_dispatch() {
             "beam search",
         ),
         (
+            |r| {
+                r.sampling_options.logit_bias = Some(std::collections::HashMap::from([(18, -10.0)]))
+            },
+            "logit_bias",
+        ),
+        (
             |r| r.output_options.prompt_logprobs = Some(1),
             "prompt logprobs",
         ),
@@ -335,6 +341,7 @@ fn bootstrap() -> dynamo_backend_common::BootstrapInfo {
 #[test]
 fn neutral_options_are_accepted() {
     let rows: &[Mutation] = &[
+        |r| r.sampling_options.logit_bias = Some(Default::default()),
         |r| r.sampling_options.guided_decoding = Some(GuidedDecodingOptions::default()),
         |r| r.extra_args = Some(json!({"sampling_options": {"detokenize": false}})),
         |r| r.extra_args = Some(json!({"sampling_options": {"detokenize": true}})),
