@@ -186,14 +186,14 @@ async def validate():
         calls.append(name)
         return payloads[name]
 
-    def decode_video(path, *args, **kwargs):
+    def decode_video(self, data):
         # OpenCV is optional in the base image; this checks the URL caller, not decoding.
-        assert Path(path).read_bytes() == payloads["video"]
+        assert data == payloads["video"]
         return "video-decoded"
 
     with (
         patch.object(utils, "_safe_aiohttp_get", fetch),
-        patch.object(utils, "_load_video_by_cv2", decode_video),
+        patch.object(media_io.VideoMediaIO, "load_bytes", decode_video),
     ):
         image = await utils.async_load_image("https://example.com/image", format="pil")
         assert image.size == (32, 32)
