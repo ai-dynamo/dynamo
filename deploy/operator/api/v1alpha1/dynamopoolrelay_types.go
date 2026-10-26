@@ -15,6 +15,7 @@ type DynamoPoolRelaySpec struct {
 	// ClusterID is the Relay's stable logical cluster ID across restarts.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[^[:space:]\p{Z}\x85\x1c-\x1f](.*[^[:space:]\p{Z}\x85\x1c-\x1f])?$`
 	ClusterID string `json:"clusterId"`
 
 	// Image must contain dynamo.pool_relay with file-source support.

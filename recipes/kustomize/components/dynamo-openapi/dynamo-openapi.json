@@ -1542,6 +1542,45 @@
         }
       ]
     },
+    "nvidia.com.v1alpha1.DynamoPoolRelay": {
+      "properties": {
+        "apiVersion": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "spec": {
+          "properties": {
+            "env": {
+              "items": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "name",
+              "x-kubernetes-patch-strategy": "merge"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "x-kubernetes-group-version-kind": [
+        {
+          "group": "nvidia.com",
+          "kind": "DynamoPoolRelay",
+          "version": "v1alpha1"
+        }
+      ]
+    },
     "nvidia.com.v1alpha1.DynamoWorkerMetadata": {
       "properties": {
         "apiVersion": {

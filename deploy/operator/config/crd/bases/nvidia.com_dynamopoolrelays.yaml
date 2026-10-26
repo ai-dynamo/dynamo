@@ -31,7 +31,7 @@ spec:
       schema:
         openAPIV3Schema:
           description: |-
-            DynamoPoolRelay deploys one active-active Relay group for one DGD.
+            DynamoPoolRelay deploys active-active Relay Pods for one DGD.
             The resource name matches its DGD; the Service name adds the -pool-relay suffix.
           properties:
             apiVersion:
@@ -52,17 +52,18 @@ spec:
             metadata:
               type: object
             spec:
-              description: DynamoPoolRelaySpec runs a Relay for the DGD with the same name and namespace.
+              description: DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
               properties:
                 clusterId:
                   description: ClusterID is the Relay's stable logical cluster ID across restarts.
                   maxLength: 128
                   minLength: 1
+                  pattern: ^[^[:space:]\p{Z}\x85\x1c-\x1f](.*[^[:space:]\p{Z}\x85\x1c-\x1f])?$
                   type: string
                 env:
                   description: |-
-                    Env supplies transport settings when the DGD uses non-default transport.
-                    Relay identity and source settings are reserved for the operator.
+                    Env sets transport and Relay tuning variables on each Pod.
+                    The operator reserves identity and source settings.
                   items:
                     description: EnvVar represents an environment variable present in a Container.
                     properties:
@@ -212,11 +213,11 @@ spec:
                     - name
                   x-kubernetes-list-type: map
                 image:
-                  description: Image contains the dynamo.pool_relay runtime with file sources.
+                  description: Image must contain dynamo.pool_relay with file-source support.
                   minLength: 1
                   type: string
                 imagePullSecrets:
-                  description: ImagePullSecrets let the Relay pod pull an image from the same private registry as its DGD.
+                  description: ImagePullSecrets authenticate pulls of the Relay image from a private registry.
                   items:
                     description: |-
                       LocalObjectReference contains enough information to let you locate the
@@ -236,7 +237,7 @@ spec:
                   type: array
                 replicas:
                   default: 2
-                  description: Replicas are independent active Relay processes, each watching the DGD.
+                  description: Replicas sets the number of active Relay Pods. Each watches the DGD.
                   format: int32
                   minimum: 1
                   type: integer
@@ -245,7 +246,7 @@ spec:
                 - image
               type: object
             status:
-              description: DynamoPoolRelayStatus reports listener availability, not KV or model readiness.
+              description: DynamoPoolRelayStatus reports listener availability. It does not report KV or model readiness.
               properties:
                 availableReplicas:
                   format: int32

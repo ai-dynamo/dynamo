@@ -19,14 +19,17 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+//nolint:gocyclo // This scenario verifies one Relay's dependent lifecycle transitions.
 func TestOneDGDRelayLifecycle(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -38,12 +41,14 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 		}
 	}
 	key := types.NamespacedName{Namespace: "inference", Name: "green"}
+	relayMeta := metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, UID: "relay-uid"}
+	dgdMeta := metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}
 	relay := &v1alpha1.DynamoPoolRelay{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, UID: "relay-uid"},
+		ObjectMeta: relayMeta,
 		Spec:       v1alpha1.DynamoPoolRelaySpec{ClusterID: "east", Image: "relay:test"},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		ObjectMeta: dgdMeta,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
@@ -309,7 +314,7 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 
 	// A shared global runtime namespace cannot identify one DGD by namespace alone.
 	globalDGD := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		ObjectMeta: dgdMeta,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker, GlobalDynamoNamespace: true},
 		}},
@@ -354,12 +359,14 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 	}
 
 	dottedKey := types.NamespacedName{Namespace: key.Namespace, Name: "green.blue"}
+	dottedRelayMeta := metav1.ObjectMeta{Name: dottedKey.Name, Namespace: dottedKey.Namespace, UID: "dotted-relay-uid"}
+	dottedDGDMeta := metav1.ObjectMeta{Name: dottedKey.Name, Namespace: dottedKey.Namespace}
 	dottedRelay := &v1alpha1.DynamoPoolRelay{
-		ObjectMeta: metav1.ObjectMeta{Name: dottedKey.Name, Namespace: dottedKey.Namespace, UID: "dotted-relay-uid"},
+		ObjectMeta: dottedRelayMeta,
 		Spec:       v1alpha1.DynamoPoolRelaySpec{ClusterID: "east", Image: "relay:test"},
 	}
 	dottedDGD := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: dottedKey.Name, Namespace: dottedKey.Namespace},
+		ObjectMeta: dottedDGDMeta,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
@@ -384,10 +391,11 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 
 func TestDiscoveryModeFollowsPodTemplatePrecedence(t *testing.T) {
 	t.Log("DGD spec annotations override metadata discovery defaults")
+	dgdMeta := metav1.ObjectMeta{Annotations: map[string]string{
+		commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "pod",
+	}}
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "pod",
-		}},
+		ObjectMeta: dgdMeta,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Annotations: map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"},
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
@@ -400,9 +408,10 @@ func TestDiscoveryModeFollowsPodTemplatePrecedence(t *testing.T) {
 	}
 
 	t.Log("Reject mixed discovery settings even if a component PodTemplate overrides them")
-	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+	podMeta := metav1.ObjectMeta{Annotations: map[string]string{
 		commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "pod",
-	}}}
+	}}
+	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{ObjectMeta: podMeta}
 	if supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes) {
 		t.Fatal("mixed discovery settings were accepted")
 	}
@@ -427,8 +436,9 @@ func TestDiscoveryModeFollowsPodTemplatePrecedence(t *testing.T) {
 }
 
 func TestRelayEnvironmentOwnership(t *testing.T) {
+	relayMeta := metav1.ObjectMeta{Name: "green", Namespace: "inference"}
 	relay := &v1alpha1.DynamoPoolRelay{
-		ObjectMeta: metav1.ObjectMeta{Name: "green", Namespace: "inference"},
+		ObjectMeta: relayMeta,
 		Spec: v1alpha1.DynamoPoolRelaySpec{
 			ClusterID: "east", Image: "relay:test",
 			Env: []corev1.EnvVar{{Name: "DYN_RELAY_PUBLICATION_THRESHOLD", Value: "32"}},
@@ -447,5 +457,62 @@ func TestRelayEnvironmentOwnership(t *testing.T) {
 	relay.Spec.Env = []corev1.EnvVar{{Name: "DYN_RELAY_CONNECTION_REVISION", Value: "wrong"}}
 	if _, err := render(relay, []string{"green-runtime"}); err == nil {
 		t.Fatal("operator-owned connection revision was accepted")
+	}
+}
+
+func TestRelayClusterIDRejectsSurroundingWhitespace(t *testing.T) {
+	for _, clusterID := range []string{"", " ", " east", "east ", "\teast", "\u00a0east", "\x1ceast"} {
+		t.Run(clusterID, func(t *testing.T) {
+			t.Log("Reject a cluster ID that the Relay CLI cannot accept")
+			relayMeta := metav1.ObjectMeta{Name: "green", Namespace: "inference"}
+			relay := &v1alpha1.DynamoPoolRelay{
+				ObjectMeta: relayMeta,
+				Spec:       v1alpha1.DynamoPoolRelaySpec{ClusterID: clusterID, Image: "relay:test"},
+			}
+			if _, err := render(relay, []string{"green-runtime"}); err == nil {
+				t.Fatalf("accepted cluster ID %q", clusterID)
+			}
+		})
+	}
+}
+
+func TestWithdrawCleansOwnedDeploymentAfterForeignService(t *testing.T) {
+	t.Log("Keep the foreign Service but delete the owned Deployment and withdraw Relay readiness")
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{v1alpha1.AddToScheme, appsv1.AddToScheme, corev1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relayMeta := metav1.ObjectMeta{Name: "green", Namespace: "inference", UID: "relay-uid"}
+	relay := &v1alpha1.DynamoPoolRelay{
+		ObjectMeta: relayMeta,
+		Spec:       v1alpha1.DynamoPoolRelaySpec{ClusterID: "east", Image: "relay:test"},
+	}
+	key := types.NamespacedName{Name: serviceName(relay.Name), Namespace: relay.Namespace}
+	resourceMeta := metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}
+	foreignService := &corev1.Service{ObjectMeta: resourceMeta}
+	deployment := &appsv1.Deployment{ObjectMeta: resourceMeta}
+	if err := controllerutil.SetControllerReference(relay, deployment, scheme); err != nil {
+		t.Fatal(err)
+	}
+	apiClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(relay).
+		WithObjects(relay, foreignService, deployment).Build()
+	r := &reconciler{Client: apiClient, scheme: scheme}
+	if _, err := r.withdraw(ctx, relay, "DGDNotFound", "DGD is missing"); err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("expected foreign Service conflict, got %v", err)
+	}
+	if err := apiClient.Get(ctx, key, foreignService); err != nil {
+		t.Fatalf("foreign Service was removed: %v", err)
+	}
+	if err := apiClient.Get(ctx, key, deployment); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned Deployment remains: %v", err)
+	}
+	if err := apiClient.Get(ctx, types.NamespacedName{Name: relay.Name, Namespace: relay.Namespace}, relay); err != nil {
+		t.Fatal(err)
+	}
+	if condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready"); condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "DGDNotFound" {
+		t.Fatalf("Relay still advertises readiness: %+v", relay.Status)
 	}
 }

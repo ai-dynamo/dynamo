@@ -9,10 +9,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -59,7 +61,8 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		For(&v1alpha1.DynamoPoolRelay{}).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(config, runtimeConfig)).
 		Watches(&v1beta1.DynamoGraphDeployment{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, object client.Object) []ctrl.Request {
-			return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: object.GetNamespace(), Name: object.GetName()}}}
+			key := types.NamespacedName{Namespace: object.GetNamespace(), Name: object.GetName()}
+			return []ctrl.Request{{NamespacedName: key}}
 		})).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
@@ -72,7 +75,9 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamopoolrelays,verbs=get;list;watch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamopoolrelays/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamopoolrelays/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamoworkermetadatas,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps;serviceaccounts,verbs=get;list;watch;create;update
@@ -215,24 +220,31 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 // withdraw removes the publication endpoint before reporting an unresolved source.
 func (r *reconciler) withdraw(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason, message string) (ctrl.Result, error) {
 	name := serviceName(relay.Name)
+	metadata := metav1.ObjectMeta{Name: name, Namespace: relay.Namespace}
+	var cleanupErrors []error
 	for _, object := range []client.Object{
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: relay.Namespace}},
-		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: relay.Namespace}},
+		&corev1.Service{ObjectMeta: metadata},
+		&appsv1.Deployment{ObjectMeta: metadata},
 	} {
 		if err := r.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}
-			return ctrl.Result{}, err
+			cleanupErrors = append(cleanupErrors, err)
+			continue
 		}
 		if !metav1.IsControlledBy(object, relay) {
-			return ctrl.Result{}, fmt.Errorf("%T %s is not owned by DynamoPoolRelay %s", object, name, relay.Name)
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("%T %s is not owned by DynamoPoolRelay %s", object, name, relay.Name))
+			continue
 		}
 		if err := r.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, err
+			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
-	return ctrl.Result{}, r.setStatus(ctx, relay, false, reason, message, "", 0)
+	if err := r.setStatus(ctx, relay, false, reason, message, "", 0); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+	return ctrl.Result{}, errors.Join(cleanupErrors...)
 }
 
 // apply changes only resources controlled by this Relay; foreign objects are never adopted.
@@ -355,7 +367,6 @@ func (r *reconciler) setStatus(ctx context.Context, relay *v1alpha1.DynamoPoolRe
 	return nil
 }
 
-// sourceNamespaces follows the DGD's published worker runtime namespaces.
 func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) []string {
 	unique := map[string]struct{}{}
 	for i := range dgd.Spec.Components {
@@ -403,8 +414,14 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
 		return nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
 	}
-	if relay.Spec.ClusterID == "" || relay.Spec.Image == "" {
-		return nil, fmt.Errorf("clusterId and image are required")
+	clusterID := relay.Spec.ClusterID
+	if clusterID == "" || strings.TrimFunc(clusterID, func(r rune) bool {
+		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
+	}) != clusterID {
+		return nil, fmt.Errorf("clusterId must be non-empty and have no surrounding whitespace")
+	}
+	if relay.Spec.Image == "" {
+		return nil, fmt.Errorf("image is required")
 	}
 	replicas := ptr.Deref(relay.Spec.Replicas, 2)
 	if replicas < 1 {
@@ -473,6 +490,7 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	podLabels := metadata.DeepCopy().Labels
 	podLabels["nvidia.com/dynamo-discovery-backend"] = "kubernetes"
 	podLabels["nvidia.com/dynamo-discovery-enabled"] = "true"
+	probeHandler := corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: relayPort, Service: new("dynamo.kvrelay.v1.KvEventRelay")}}
 	container := corev1.Container{
 		Name: mainContainer, Image: relay.Spec.Image,
 		Command:      []string{"python3", "-m", "dynamo.pool_relay"},
@@ -484,18 +502,23 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")},
 			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
 		},
-		StartupProbe:   &corev1.Probe{ProbeHandler: corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: relayPort, Service: ptr.To("dynamo.kvrelay.v1.KvEventRelay")}}, PeriodSeconds: 5, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 60},
-		ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: relayPort, Service: ptr.To("dynamo.kvrelay.v1.KvEventRelay")}}, PeriodSeconds: 10, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 3},
+		StartupProbe:   &corev1.Probe{ProbeHandler: probeHandler, PeriodSeconds: 5, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 60},
+		ReadinessProbe: &corev1.Probe{ProbeHandler: probeHandler, PeriodSeconds: 10, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 3},
 	}
+	sourceReference := corev1.LocalObjectReference{Name: name}
+	sourceConfigMap := &corev1.ConfigMapVolumeSource{LocalObjectReference: sourceReference}
+	sourceVolume := corev1.VolumeSource{ConfigMap: sourceConfigMap}
+	sourcesVolume := corev1.Volume{Name: "relay-sources", VolumeSource: sourceVolume}
+	podMeta := metav1.ObjectMeta{Labels: podLabels}
 	deployment := &appsv1.Deployment{ObjectMeta: *metadata.DeepCopy(), Spec: appsv1.DeploymentSpec{
-		Replicas: ptr.To(replicas), Selector: &metav1.LabelSelector{MatchLabels: labels},
-		Strategy: appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType, RollingUpdate: &appsv1.RollingUpdateDeployment{MaxUnavailable: ptr.To(intstr.FromInt32(0)), MaxSurge: ptr.To(intstr.FromInt32(1))}},
-		Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels}, Spec: corev1.PodSpec{
+		Replicas: new(replicas), Selector: &metav1.LabelSelector{MatchLabels: labels},
+		Strategy: appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType, RollingUpdate: &appsv1.RollingUpdateDeployment{MaxUnavailable: new(intstr.FromInt32(0)), MaxSurge: new(intstr.FromInt32(1))}},
+		Template: corev1.PodTemplateSpec{ObjectMeta: podMeta, Spec: corev1.PodSpec{
 			ServiceAccountName:            name,
 			ImagePullSecrets:              append([]corev1.LocalObjectReference(nil), relay.Spec.ImagePullSecrets...),
-			TerminationGracePeriodSeconds: ptr.To(int64(60)),
+			TerminationGracePeriodSeconds: new(int64(60)),
 			Containers:                    []corev1.Container{container},
-			Volumes:                       []corev1.Volume{{Name: "relay-sources", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}},
+			Volumes:                       []corev1.Volume{sourcesVolume},
 		}},
 	}}
 	return []client.Object{serviceAccount, role, binding, configMap, service, deployment}, nil

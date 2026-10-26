@@ -786,7 +786,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `clusterId` _string_ | ClusterID is the Relay's stable logical cluster ID across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br /> |
+| `clusterId` _string_ | ClusterID is the Relay's stable logical cluster ID across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br />Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$` <br /> |
 | `image` _string_ | Image must contain dynamo.pool_relay with file-source support. |  | MinLength: 1 <br /> |
 | `imagePullSecrets` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core) array_ | ImagePullSecrets authenticate pulls of the Relay image from a private registry. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | Replicas sets the number of active Relay Pods. Each watches the DGD. | 2 | Minimum: 1 <br />Optional: \{\} <br /> |

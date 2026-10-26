@@ -58,14 +58,15 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	relayMeta := metav1.ObjectMeta{Name: "green", Namespace: "default", UID: "relay-uid"}
 	relay := &v1alpha1.DynamoPoolRelay{
-		ObjectMeta: metav1.ObjectMeta{Name: "green", Namespace: "default", UID: "relay-uid"},
+		ObjectMeta: relayMeta,
 		Spec:       v1alpha1.DynamoPoolRelaySpec{ClusterID: "east", Image: "relay:test"},
 	}
 	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
 	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
 	var firstResourceVersion string
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		objects, err := render(relay, []string{"green-runtime"})
 		if err != nil {
 			t.Fatal(err)
@@ -144,11 +145,21 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := types.NamespacedName{Namespace: relay.Namespace, Name: relay.Name}
-	if err := apiClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: key.Namespace}}); err != nil {
+	namespace := &corev1.Namespace{}
+	namespace.Name = key.Namespace
+	if err := apiClient.Create(ctx, namespace); err != nil {
 		t.Fatal(err)
 	}
+	t.Log("Reject Unicode whitespace at API admission")
+	invalidRelay := relay.DeepCopy()
+	invalidRelay.Name = "invalid-cluster-id"
+	invalidRelay.Spec.ClusterID = "\u00a0east"
+	if err := apiClient.Create(ctx, invalidRelay); !apierrors.IsInvalid(err) {
+		t.Fatalf("expected invalid cluster ID to be rejected, got %v", err)
+	}
+	dgdMeta := metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		ObjectMeta: dgdMeta,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},

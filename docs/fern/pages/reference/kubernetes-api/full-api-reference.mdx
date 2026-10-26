@@ -1336,7 +1336,7 @@ DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and nam
 
 <ParamField path="clusterId" type="string">
 ClusterID is the Relay's stable logical cluster ID across restarts.
-**Validation:** MaxLength: 128  MinLength: 1
+**Validation:** MaxLength: 128  MinLength: 1  Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$`
 </ParamField>
 
 <ParamField path="image" type="string">
