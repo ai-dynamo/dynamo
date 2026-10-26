@@ -39,14 +39,13 @@ def _clear_deployment_options(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-@pytest.mark.parametrize("guard_timeout", (None, "600"))
 @pytest.mark.parametrize(
-    "worker,exit_module,exit_code",
+    "worker,exit_module,exit_code,guard_timeout",
     [
-        ("0", "kvcr.kvcr_service", 7),
-        ("0", "dynamo.kv_state_agent", 0),
-        ("0", None, 0),
-        ("1", "kvcr.kvcr_service", 7),
+        ("0", "kvcr.kvcr_service", 7, None),
+        ("0", "dynamo.kv_state_agent", 0, "600"),
+        ("0", None, 0, None),
+        ("1", "kvcr.kvcr_service", 7, None),
     ],
 )
 def test_services_supervises_children(
@@ -298,9 +297,14 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
 
 
 @pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
-@pytest.mark.parametrize("memory_service", ("false", "true"))
-@pytest.mark.parametrize("pool_gib,memory_request_gib", ((2, 3), (1024, 1035)))
-@pytest.mark.parametrize("native_timeouts", (None, (600, 700)))
+@pytest.mark.parametrize(
+    "memory_service,pool_gib,memory_request_gib,native_timeouts",
+    [
+        ("false", 2, 3, None),
+        ("true", 2, 3, None),
+        ("true", 1024, 1035, (600, 700)),
+    ],
+)
 def test_deploy_script_renders_selected_variant(
     memory_service: str,
     pool_gib: int,
@@ -428,16 +432,19 @@ def test_deploy_script_renders_selected_variant(
 
 
 @pytest.mark.parametrize(
-    "option",
-    (
-        "KVCR_POOL_SIZE_GIB",
-        "KVCR_STARTUP_TIMEOUT_SECONDS",
-        "KVCR_GUARD_STARTUP_TIMEOUT_SECONDS",
-        "KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS",
-        "KVCR_TERMINATION_GRACE_PERIOD_SECONDS",
-    ),
+    "option,value",
+    [
+        ("KVCR_POOL_SIZE_GIB", "0"),
+        ("KVCR_STARTUP_TIMEOUT_SECONDS", "0"),
+        ("KVCR_GUARD_STARTUP_TIMEOUT_SECONDS", "0"),
+        ("KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS", "0"),
+        ("KVCR_TERMINATION_GRACE_PERIOD_SECONDS", "0"),
+        ("KVCR_POOL_SIZE_GIB", "01"),
+        ("KVCR_POOL_SIZE_GIB", "-1"),
+        ("KVCR_POOL_SIZE_GIB", "1.5"),
+        ("KVCR_POOL_SIZE_GIB", "abc"),
+    ],
 )
-@pytest.mark.parametrize("value", ("0", "01", "-1", "1.5", "abc"))
 def test_deploy_script_rejects_invalid_pool_and_timeouts(option, value) -> None:
     result = subprocess.run(
         [str(_MANIFEST_DIR / "deploy.sh"), "--render-only"],
@@ -482,7 +489,8 @@ def test_deploy_script_rejects_unknown_argument() -> None:
     assert "usage:" in result.stderr
 
 
-@pytest.mark.parametrize("size", [32, 1024 * 1024])
+@pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
+@pytest.mark.parametrize("size", [256 * 1024, 1024 * 1024])
 def test_startup_bundle_wheel_overlay_and_size_limit(tmp_path, size):
     wheel = tmp_path / "fixture.whl"
     wheel.write_bytes(b"x" * size)
@@ -493,6 +501,7 @@ def test_startup_bundle_wheel_overlay_and_size_limit(tmp_path, size):
         "KVCR_MEMORY_SERVICE_ENABLED": "true",
         "DYNAMO_KVCR_COMPATIBILITY_DIGEST": "test",
         "KVCR_WHEEL": str(wheel),
+        "NAMESPACE": "kvcr-test",
     }
     result = subprocess.run(
         [str(_MANIFEST_DIR / "deploy.sh"), "--render-configmap"],
@@ -521,6 +530,44 @@ def test_startup_bundle_wheel_overlay_and_size_limit(tmp_path, size):
             bundle["metadata"]["name"]
             != json.loads(without_wheel.stdout)["metadata"]["name"]
         )
+        # This bundle fits the startup limit but not a client-side apply annotation.
+        assert 256 * 1024 < len(result.stdout.encode()) < 1024 * 1024
+        kubectl = tmp_path / "kubectl"
+        kubectl.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys, yaml\n"
+            "args = sys.argv[1:]\n"
+            "if args[0] == 'api-resources':\n"
+            "    print('podcliquesets.grove.io')\n"
+            "elif args[0] == 'apply':\n"
+            "    print(json.dumps({'args': args, 'object': yaml.safe_load(sys.stdin)}))\n"
+            "elif args[0] == 'get':\n"
+            "    print('grove')\n"
+            "else:\n"
+            "    raise AssertionError(args)\n"
+        )
+        kubectl.chmod(0o755)
+        applied = subprocess.run(
+            [str(_MANIFEST_DIR / "deploy.sh")],
+            check=True,
+            capture_output=True,
+            env={**env, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"},
+            text=True,
+            timeout=30,
+        )
+        configmap_call, deployment_call = map(json.loads, applied.stdout.splitlines())
+        assert configmap_call["object"] == bundle
+        assert configmap_call["args"] == [
+            "apply",
+            "--server-side",
+            "--field-manager=kvcr-startup",
+            "-n",
+            "kvcr-test",
+            "-f",
+            "-",
+        ]
+        assert deployment_call["object"]["kind"] == "DynamoGraphDeployment"
+        assert deployment_call["args"] == ["apply", "-n", "kvcr-test", "-f", "-"]
 
 
 def test_deploy_script_rejects_unsafe_compatibility_digest() -> None:

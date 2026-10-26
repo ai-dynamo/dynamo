@@ -400,7 +400,14 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
     deployment_spec.namespace = namespace
     # The deployment helper normally applies this immutable bundle before the DGD.
     # Keep it, like deploy.sh does: other deployments can share its content hash.
-    _kubectl(namespace, "apply", "-f", str(tmp_path / "kvcr-startup.json"))
+    _kubectl(
+        namespace,
+        "apply",
+        "--server-side",
+        "--field-manager=kvcr-startup",
+        "-f",
+        str(tmp_path / "kvcr-startup.json"),
+    )
     logger.info(
         "KVCR_TEST start image=%s namespace=%s ucx_device=%s",
         image,

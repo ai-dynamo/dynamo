@@ -126,7 +126,8 @@ case "${1:-}" in
       exit 1
     fi
     if [ "$KVCR_MEMORY_SERVICE_ENABLED" = true ]; then
-      startup_configmap | kubectl apply -n "$NAMESPACE" -f -
+      # Avoid the client-side last-applied annotation's 256 KiB limit for wheels.
+      startup_configmap | kubectl apply --server-side --field-manager=kvcr-startup -n "$NAMESPACE" -f -
     fi
     render | kubectl apply -n "$NAMESPACE" -f -
     provider=
