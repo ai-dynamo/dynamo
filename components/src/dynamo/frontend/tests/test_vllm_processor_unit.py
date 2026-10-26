@@ -2419,6 +2419,17 @@ class TestRoutedEnginePath:
         assert "BackendInvalidArgument" not in excinfo.value.message
 
     @pytest.mark.asyncio
+    async def test_invalid_argument_rejection_propagates(self, vllm_processor_module):
+        class _RefusingEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise InvalidArgument("use --enable-multimodal")
+
+        processor = _make_processor(vllm_processor_module, _RefusingEngine())
+
+        with pytest.raises(InvalidArgument, match="--enable-multimodal"):
+            await _run_generate(processor, _base_preproc())
+
+    @pytest.mark.asyncio
     async def test_genuine_internal_failure_is_still_internal(
         self, vllm_processor_module
     ):
@@ -3072,6 +3083,14 @@ def test_parallel_tool_calls_survive_split_start_marker(tokenizer):
             (_GLM_TWO_CALLS[end:split], []),
             (_GLM_TWO_CALLS[split:], []),
         ],
+    )
+
+
+def test_tool_call_opener_split_at_reasoning_end(tokenizer):
+    split = _GLM_TWO_CALLS.index("</think>") + len("</think><tool")
+    _assert_two_glm_calls_streamed(
+        tokenizer,
+        [(_GLM_TWO_CALLS[:split], []), (_GLM_TWO_CALLS[split:], [])],
     )
 
 

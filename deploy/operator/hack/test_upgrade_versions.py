@@ -25,14 +25,18 @@ class UpgradeVersionTest(unittest.TestCase):
             ("1.6.0", "1.5.0", "1.6.0"),
             ("1.6.0", "1.6.0", "1.6.0"),
             ("1.7.0", "1.6.0", "1.6.0"),
+            ("1.7.0", "1.5.0", "1.6.0"),
+            ("1.7.0", "1.5.0", None),
         ]:
             with self.subTest(current=current, reconciled=reconciled):
                 validate_versions(current, reconciled, previous)
 
     def test_premature_skipped_and_major_bumps_fail(self):
         for current, reconciled, previous in [
-            ("1.7.0", "1.5.0", "1.6.0"),
-            ("1.7.0", "1.5.0", None),
+            ("1.7.0", "1.4.0", None),
+            ("1.8.0", "1.6.0", None),
+            ("1.8.0", "1.5.0", "1.7.0"),
+            ("1.6.0", "1.7.0", None),
             ("1.8.0", "1.7.0", "1.6.0"),
             ("2.0.0", "1.9.0", "1.9.0"),
         ]:
@@ -87,16 +91,14 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             },
         )
 
-        # Make the version marker valid so the missing matrix is the only blocker.
+    def test_regeneration_cannot_skip_a_minor(self):
         (self.root / fixtures.CHART).write_text("appVersion: 1.7.0\n")
-        (self.tree / "RECONCILED_VERSION").write_text("1.6.0\n")
-        with (
-            patch.object(
-                fixtures.subprocess, "check_output", return_value="appVersion: 1.6.0\n"
-            ),
-            self.assertRaisesRegex(ValueError, "Incomplete release matrix"),
-        ):
-            fixtures.check("base")
+        (self.tree / "RECONCILED_VERSION").write_text("1.5.0\n")
+        fixtures.check()
+        with patch.object(fixtures.subprocess, "run") as capture:
+            with self.assertRaisesRegex(ValueError, "skips a minor"):
+                fixtures.regenerate(release_tag="v1.7.0")
+            capture.assert_not_called()
 
     def capture_api_outputs(self, command, *, env, **kwargs):
         # Model the capture boundary only; production admission/reconciliation is tested by clustertest.

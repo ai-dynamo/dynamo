@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
 )
 
 func TestFrontendDefaultsStartupProbeVersionGate(t *testing.T) {
@@ -39,9 +38,9 @@ func TestFrontendDefaultsStartupProbeVersionGate(t *testing.T) {
 			t.Log("Check the version-gated startup allowance")
 			if tt.wantEnabled {
 				require.Equal(t, &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+					HTTPGet: &corev1.HTTPGetAction{
 						Path: "/live", Port: intstr.FromString("http"),
-					}},
+					},
 					PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 30,
 				}, container.StartupProbe)
 			} else {
@@ -68,7 +67,7 @@ func TestFrontendSidecarProbeOverride(t *testing.T) {
 			override := &corev1.Probe{ProbeHandler: tt.handler, PeriodSeconds: 5, FailureThreshold: 90}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
-				RuntimeVersionOverride: "1.6.0", FrontendSidecar: ptr.To("frontend"),
+				RuntimeVersionOverride: "1.6.0", FrontendSidecar: new("frontend"),
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
 					{Name: commonconsts.MainContainerName, Image: "worker:1.6.0"},
 					{

@@ -13,7 +13,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -43,9 +42,7 @@ func setupTestWithClusterRole(clusterRoleName string) client.Client {
 
 	// Pre-create ClusterRole
 	clusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: clusterRoleName,
-		},
+		Name: clusterRoleName,
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -144,9 +141,7 @@ func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
 	_, scheme := setupTest()
 
 	clusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testClusterRoleName,
-		},
+		Name: testClusterRoleName,
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -157,26 +152,22 @@ func TestEnsureServiceAccountWithRBAC_AlreadyExists(t *testing.T) {
 	}
 
 	existingSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testServiceAccountName,
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       testServiceAccountName,
-			},
+		Name:      testServiceAccountName,
+		Namespace: testNamespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       testServiceAccountName,
 		},
 	}
 
 	existingRB := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRoleBindingName,
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       testServiceAccountName,
-			},
+		Name:      testRoleBindingName,
+		Namespace: testNamespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       testServiceAccountName,
 		},
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
@@ -236,9 +227,7 @@ func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
 	_, scheme := setupTest()
 
 	clusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testClusterRoleName,
-		},
+		Name: testClusterRoleName,
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -249,26 +238,22 @@ func TestEnsureServiceAccountWithRBAC_UpdateRoleBinding(t *testing.T) {
 	}
 
 	existingSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testServiceAccountName,
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       testServiceAccountName,
-			},
+		Name:      testServiceAccountName,
+		Namespace: testNamespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       testServiceAccountName,
 		},
 	}
 
 	existingRB := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRoleBindingName,
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       testServiceAccountName,
-			},
+		Name:      testRoleBindingName,
+		Namespace: testNamespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       testServiceAccountName,
 		},
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
@@ -369,9 +354,7 @@ func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *
 	_, scheme := setupTest()
 
 	clusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testClusterRoleName,
-		},
+		Name: testClusterRoleName,
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -382,14 +365,12 @@ func TestEnsureServiceAccountWithRBAC_ServiceAccountExistsRoleBindingDoesNot(t *
 	}
 
 	existingSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testServiceAccountName,
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       testServiceAccountName,
-			},
+		Name:      testServiceAccountName,
+		Namespace: testNamespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       testServiceAccountName,
 		},
 	}
 
@@ -442,7 +423,7 @@ func TestEnsureServiceAccountWithRBAC_Idempotency(t *testing.T) {
 	ctx := context.Background()
 
 	// Execute multiple times
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		err := manager.EnsureServiceAccountWithRBAC(
 			ctx,
 			testNamespace,
@@ -529,9 +510,7 @@ func TestEnsureServiceAccountWithRBAC_DifferentClusterRoles(t *testing.T) {
 	_, scheme := setupTest()
 
 	clusterRole1 := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "cluster-role-1",
-		},
+		Name: "cluster-role-1",
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -542,9 +521,7 @@ func TestEnsureServiceAccountWithRBAC_DifferentClusterRoles(t *testing.T) {
 	}
 
 	clusterRole2 := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "cluster-role-2",
-		},
+		Name: "cluster-role-2",
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -647,9 +624,7 @@ func TestEnsureServiceAccountWithRBAC_RoleRefChange(t *testing.T) {
 	_, scheme := setupTest()
 
 	oldClusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "old-cluster-role",
-		},
+		Name: "old-cluster-role",
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -660,9 +635,7 @@ func TestEnsureServiceAccountWithRBAC_RoleRefChange(t *testing.T) {
 	}
 
 	newClusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "new-cluster-role",
-		},
+		Name: "new-cluster-role",
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -673,17 +646,13 @@ func TestEnsureServiceAccountWithRBAC_RoleRefChange(t *testing.T) {
 	}
 
 	existingSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testServiceAccountName,
-			Namespace: testNamespace,
-		},
+		Name:      testServiceAccountName,
+		Namespace: testNamespace,
 	}
 
 	existingRB := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRoleBindingName,
-			Namespace: testNamespace,
-		},
+		Name:      testRoleBindingName,
+		Namespace: testNamespace,
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
 			Name:      testServiceAccountName,
@@ -740,9 +709,7 @@ func TestEnsureServiceAccountWithRBAC_SubjectWrongNamespace(t *testing.T) {
 	_, scheme := setupTest()
 
 	clusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testClusterRoleName,
-		},
+		Name: testClusterRoleName,
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -753,17 +720,13 @@ func TestEnsureServiceAccountWithRBAC_SubjectWrongNamespace(t *testing.T) {
 	}
 
 	existingSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testServiceAccountName,
-			Namespace: testNamespace,
-		},
+		Name:      testServiceAccountName,
+		Namespace: testNamespace,
 	}
 
 	existingRB := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRoleBindingName,
-			Namespace: testNamespace,
-		},
+		Name:      testRoleBindingName,
+		Namespace: testNamespace,
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
 			Name:      testServiceAccountName,
@@ -823,9 +786,7 @@ func TestEnsureServiceAccountWithRBAC_SubjectWrongKind(t *testing.T) {
 	_, scheme := setupTest()
 
 	clusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testClusterRoleName,
-		},
+		Name: testClusterRoleName,
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -836,17 +797,13 @@ func TestEnsureServiceAccountWithRBAC_SubjectWrongKind(t *testing.T) {
 	}
 
 	existingSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testServiceAccountName,
-			Namespace: testNamespace,
-		},
+		Name:      testServiceAccountName,
+		Namespace: testNamespace,
 	}
 
 	existingRB := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRoleBindingName,
-			Namespace: testNamespace,
-		},
+		Name:      testRoleBindingName,
+		Namespace: testNamespace,
 		Subjects: []rbacv1.Subject{{
 			Kind:      "User", // Wrong kind
 			Name:      testServiceAccountName,
@@ -906,9 +863,7 @@ func TestEnsureServiceAccountWithRBAC_RoleRefKindChange(t *testing.T) {
 	_, scheme := setupTest()
 
 	clusterRole := &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testClusterRoleName,
-		},
+		Name: testClusterRoleName,
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"nvidia.com"},
@@ -919,17 +874,13 @@ func TestEnsureServiceAccountWithRBAC_RoleRefKindChange(t *testing.T) {
 	}
 
 	existingSA := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testServiceAccountName,
-			Namespace: testNamespace,
-		},
+		Name:      testServiceAccountName,
+		Namespace: testNamespace,
 	}
 
 	existingRB := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRoleBindingName,
-			Namespace: testNamespace,
-		},
+		Name:      testRoleBindingName,
+		Namespace: testNamespace,
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
 			Name:      testServiceAccountName,
