@@ -101,9 +101,6 @@ spec:
           resources:
             claims:
             - name: gpu
-            requests:
-              # Qwen3-VL-2B weights are about 4 GiB; leave room for the LoRA adapter and logs.
-              ephemeral-storage: 8Gi
           workingDir: /workspace/examples/backends/vllm
         resourceClaims:
         - name: gpu

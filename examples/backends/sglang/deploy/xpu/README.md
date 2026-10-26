@@ -64,7 +64,6 @@ The files ending in `_dra.yaml` require:
 |--------|--------|-----------|
 | GPU Allocation | `nvidia.com/gpu` resource limit | DRA `ResourceClaimTemplate` or `gpu.intel.com/xe` resource limit |
 | Device Target | Default (CUDA) | `--device xpu` flag |
-| CUDA Graph | Enabled | `--disable-cuda-graph` |
 | DeviceClass | `nvidia.com` | `gpu.intel.com` |
 | Disagg KV Transfer | Default | `hostIPC: true`, `UCX_TLS=ze_ipc,...` |
 

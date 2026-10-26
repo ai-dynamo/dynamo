@@ -44,10 +44,8 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --device
           - xpu
-          - --disable-cuda-graph
           - --disaggregation-mode
           - decode
           - --disaggregation-transfer-backend
@@ -72,6 +70,9 @@ spec:
           resources:
             claims:
             - name: gpu
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 8Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu
@@ -93,10 +94,8 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --device
           - xpu
-          - --disable-cuda-graph
           - --disaggregation-mode
           - prefill
           - --disaggregation-transfer-backend
@@ -121,6 +120,9 @@ spec:
           resources:
             claims:
             - name: gpu
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 8Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu

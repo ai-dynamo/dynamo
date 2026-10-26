@@ -63,7 +63,7 @@ spec:
             "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode":
             "thorough", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds":
             5, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu":
-            1, "decode_engine_num_gpu": 1}'
+            1, "decode_engine_num_gpu": 1, "max_gpu_budget": 3}'
           command:
           - python3
           - -m
@@ -99,10 +99,8 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --device
           - xpu
-          - --disable-cuda-graph
           - --disaggregation-mode
           - decode
           - --disaggregation-transfer-backend
@@ -127,6 +125,9 @@ spec:
           resources:
             claims:
             - name: gpu
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 8Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu
@@ -148,10 +149,8 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --device
           - xpu
-          - --disable-cuda-graph
           - --disaggregation-mode
           - prefill
           - --disaggregation-transfer-backend
@@ -176,6 +175,9 @@ spec:
           resources:
             claims:
             - name: gpu
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 8Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu

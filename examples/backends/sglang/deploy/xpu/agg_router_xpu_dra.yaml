@@ -55,10 +55,8 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --device
           - xpu
-          - --disable-cuda-graph
           - --kv-events-config
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
           command:

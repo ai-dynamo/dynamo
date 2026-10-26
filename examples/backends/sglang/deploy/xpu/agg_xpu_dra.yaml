@@ -43,10 +43,8 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --device
           - xpu
-          - --disable-cuda-graph
           command:
           - python3
           - -m
