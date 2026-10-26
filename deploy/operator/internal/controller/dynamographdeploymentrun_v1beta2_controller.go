@@ -439,8 +439,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"aisimulate"},
 							Args: []string{
-								"recommend", "--stack", "dynamo", "--config", dgdrRunInputPath,
-								"--output", "dgdr_run", "--output-dir", execution.SnapshotPath,
+								"recommend", "--stack", "dynamo",
+								"--config", dgdrRunInputPath,
+								"--output", "dgdr_run",
+								"--output-dir", execution.SnapshotPath,
+								"--overwrite",
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: dgdrRunInputVolume, MountPath: dgdrRunInputMountPath, ReadOnly: true},

@@ -132,7 +132,8 @@ func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1bet
 func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
 	run := dgdrRunForTest(t, map[string]any{
-		"search_space": map[string]any{"hardware_sku": "h100_sxm", "gpu_budget": 16},
+		"engine":       map[string]any{"hardware": "h100_sxm"},
+		"optimization": map[string]any{"constraints": map[string]any{"max_candidate_gpus": 12}},
 		"dgdr_run": map[string]any{
 			"max_candidates": 7,
 			"runtime_image":  "example.com/custom-vllm-runtime:1.2.3",
@@ -178,6 +179,18 @@ func assertDGDRRunJobIsolation(
 	publisher := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunPublisherContainer)
 	if sweeper.Image != plannerImage {
 		t.Fatalf("sweeper image = %q, want operator-configured planner image %q", sweeper.Image, plannerImage)
+	}
+	if want := []string{"aisimulate"}; !reflect.DeepEqual(sweeper.Command, want) {
+		t.Fatalf("sweeper command = %q, want %q", sweeper.Command, want)
+	}
+	if want := []string{
+		"recommend", "--stack", "dynamo",
+		"--config", dgdrRunInputPath,
+		"--output", "dgdr_run",
+		"--output-dir", "/work/results",
+		"--overwrite",
+	}; !reflect.DeepEqual(sweeper.Args, want) {
+		t.Fatalf("sweeper args = %q, want %q", sweeper.Args, want)
 	}
 	if publisher.Image != operatorImage || publisher.ImagePullPolicy != corev1.PullAlways {
 		t.Fatalf("publisher image = %q/%s, want configured operator image/Always", publisher.Image, publisher.ImagePullPolicy)
@@ -244,8 +257,12 @@ func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job, hardwar
 	if output["derive_runtime_images"] != true {
 		t.Fatalf("derive_runtime_images = %v, want true for a backend search", output["derive_runtime_images"])
 	}
-	if got := input["search_space"].(map[string]any)["hardware_sku"]; got != "h100_sxm" {
-		t.Fatalf("search_space.hardware_sku = %v, want authoritative input override h100_sxm", got)
+	if got := input["engine"].(map[string]any)["hardware"]; got != "h100_sxm" {
+		t.Fatalf("engine.hardware = %v, want authoritative input override h100_sxm", got)
+	}
+	constraints := input["optimization"].(map[string]any)["constraints"].(map[string]any)
+	if got := constraints["max_candidate_gpus"]; got != float64(12) {
+		t.Fatalf("optimization.constraints.max_candidate_gpus = %v, want authoritative input override 12", got)
 	}
 	if !reflect.DeepEqual(hardware.calls, []nvidiacomv1beta1.GPUSKUType{"h200_sxm"}) {
 		t.Fatalf("hardware discovery calls = %v, want the admitted typed SKU h200_sxm", hardware.calls)
@@ -284,9 +301,7 @@ func assertDGDRRunPendingStatus(t *testing.T, stored *nvidiacomv1beta2.DynamoGra
 
 func TestV1beta2RunControllerOwnsOnlyLifecycleStatus(t *testing.T) {
 	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
-	f := newDGDRRunFixture(t, hardware, dgdrRunForTest(t, map[string]any{
-		"search_space": map[string]any{"hardware_sku": "h200_sxm", "gpu_budget": 8},
-	}))
+	f := newDGDRRunFixture(t, hardware, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 	job := f.job()
 
@@ -336,9 +351,7 @@ func TestV1beta2RunControllerOwnsOnlyLifecycleStatus(t *testing.T) {
 }
 
 func TestV1beta2RunControllerClassifiesPublisherProtocolFailure(t *testing.T) {
-	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{
-		"search_space": map[string]any{"hardware_sku": "h200_sxm", "gpu_budget": 8},
-	}))
+	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 	job := f.job()
 	pod := &corev1.Pod{
