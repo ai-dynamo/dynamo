@@ -113,16 +113,18 @@ func withRunDiagnostics(t *testing.T, data []byte, message, runError string) []b
 
 func TestParseSnapshotValidation(t *testing.T) {
 	bad := map[string]string{
-		"schema":        `{"schemaVersion":2,"run":{"phase":"Running","terminal":false}}`,
-		"phase":         `{"schemaVersion":1,"run":{"phase":"Weird","terminal":false}}`,
-		"terminal flag": `{"schemaVersion":1,"run":{"phase":"Succeeded","terminal":false}}`,
-		"duplicate":     `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"},{"id":"a","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
-		"no manifest":   `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized"}]}`,
-		"no error":      `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialization_failed"}]}`,
-		"unsafe id":     `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"Not_Valid","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
-		"long id":       `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"%s","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
-		"wrong kind":    `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"kind: ConfigMap\\nspec: {}\\n"}]}`,
-		"empty id":      `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
+		"schema":                  `{"schemaVersion":2,"run":{"phase":"Running","terminal":false}}`,
+		"phase":                   `{"schemaVersion":1,"run":{"phase":"Weird","terminal":false}}`,
+		"terminal flag":           `{"schemaVersion":1,"run":{"phase":"Succeeded","terminal":false}}`,
+		"duplicate":               `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"},{"id":"a","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
+		"no manifest":             `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized"}]}`,
+		"materialized with error": `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n","error":"boom"}]}`,
+		"no error":                `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialization_failed"}]}`,
+		"failed with manifest":    `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialization_failed","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n","error":"boom"}]}`,
+		"unsafe id":               `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"Not_Valid","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
+		"long id":                 `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"%s","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
+		"wrong kind":              `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"a","outcome":"materialized","manifest":"kind: ConfigMap\\nspec: {}\\n"}]}`,
+		"empty id":                `{"schemaVersion":1,"run":{"phase":"Running","terminal":false},"candidates":[{"id":"","outcome":"materialized","manifest":"apiVersion: nvidia.com/v1beta1\\nkind: DynamoGraphDeployment\\nspec: {}\\n"}]}`,
 	}
 	bad["long id"] = strings.Replace(bad["long id"], "%s", strings.Repeat("a", 64), 1)
 	for name, doc := range bad {

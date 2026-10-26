@@ -55,7 +55,7 @@ func (s *InputStore) Load() Input {
 func (s *InputStore) accept(snap *Snapshot) (changed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := checkProgress(s.input.Snapshot, snap); err != nil {
+	if err := checkTransition(s.input.Snapshot, snap); err != nil {
 		s.input.Err = err
 		return false
 	}
@@ -82,13 +82,15 @@ func sameContent(a, b *Snapshot) bool {
 	return reflect.DeepEqual(left, right)
 }
 
-// checkProgress rejects a snapshot that moves progress backwards relative to the
-// previously accepted one: an older round, or fewer evaluated points within the same
-// round. A terminal snapshot is exempt from the evaluated check because its count is the
-// search's final total, not the live counter.
-func checkProgress(previous, next *Snapshot) error {
+// checkTransition rejects changes after a terminal snapshot and progress that moves
+// backwards. A terminal snapshot is exempt from the evaluated check because its count is
+// the search's final total, not the live counter.
+func checkTransition(previous, next *Snapshot) error {
 	if previous == nil {
 		return nil
+	}
+	if previous.Run.Terminal && !sameContent(previous, next) {
+		return violation("snapshot changed after terminal phase %q", previous.Run.Phase)
 	}
 	if next.Progress.Round < previous.Progress.Round {
 		return violation("snapshot round regressed from %d to %d", previous.Progress.Round, next.Progress.Round)

@@ -183,6 +183,9 @@ func ParseSnapshot(data []byte) (*Snapshot, error) {
 		seen[candidate.ID] = struct{}{}
 		switch candidate.Outcome {
 		case OutcomeMaterialized:
+			if candidate.Error != "" {
+				return nil, violation("materialized candidate %q has an error", candidate.ID)
+			}
 			if candidate.Manifest == "" {
 				return nil, violation("materialized candidate %q has no manifest", candidate.ID)
 			}
@@ -190,6 +193,9 @@ func ParseSnapshot(data []byte) (*Snapshot, error) {
 				return nil, err
 			}
 		case OutcomeMaterializationFailed:
+			if candidate.Manifest != "" {
+				return nil, violation("failed candidate %q has a manifest", candidate.ID)
+			}
 			if candidate.Error == "" {
 				return nil, violation("failed candidate %q has no error", candidate.ID)
 			}

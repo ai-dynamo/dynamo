@@ -66,12 +66,20 @@ func TestChangedSnapshotIsStoredAndEnqueuedOnce(t *testing.T) {
 }
 
 func TestRewriteWithOnlyANewTimestampIsNotAChange(t *testing.T) {
-	o, _, dir, enqueued := newObserver(t)
-	writeSnapshot(t, dir, withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), "2026-10-05T21:35:12Z"))
-	o.Check()
-	writeSnapshot(t, dir, withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), "2026-10-05T21:35:14Z"))
-	if o.Check() || *enqueued != 1 {
-		t.Fatalf("a new timestamp alone is not a semantic change: enqueued=%d", *enqueued)
+	for _, phase := range []string{PhaseRunning, PhaseSucceeded} {
+		t.Run(phase, func(t *testing.T) {
+			o, _, dir, enqueued := newObserver(t)
+
+			t.Log("Accept the first snapshot")
+			writeSnapshot(t, dir, withTimestamp(t, snapshotJSON(t, phase, cand{id: "a"}), "2026-10-05T21:35:12Z"))
+			o.Check()
+
+			t.Log("Rewrite the same snapshot with only a new timestamp")
+			writeSnapshot(t, dir, withTimestamp(t, snapshotJSON(t, phase, cand{id: "a"}), "2026-10-05T21:35:14Z"))
+			if o.Check() || *enqueued != 1 {
+				t.Fatalf("a new timestamp alone is not a semantic change: enqueued=%d", *enqueued)
+			}
+		})
 	}
 }
 
@@ -121,6 +129,41 @@ func TestTerminalSnapshotMayReportItsFinalEvaluatedTotal(t *testing.T) {
 	writeProgress(t, dir, PhaseSucceeded, 3, 7)
 	if !o.Check() || store.Load().Err != nil || !store.Load().Snapshot.Run.Terminal {
 		t.Fatalf("terminal snapshot rejected: %+v", store.Load())
+	}
+}
+
+func TestTerminalSnapshotCannotBeReplaced(t *testing.T) {
+	tests := []struct {
+		name        string
+		replacement []byte
+	}{
+		{name: "return to running", replacement: snapshotJSON(t, PhaseRunning, cand{id: "a"})},
+		{name: "change final candidates", replacement: snapshotJSON(t, PhaseSucceeded, cand{id: "a"}, cand{id: "b"})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			o, store, dir, enqueued := newObserver(t)
+
+			t.Log("Accept the terminal snapshot")
+			writeSnapshot(t, dir, snapshotJSON(t, PhaseSucceeded, cand{id: "a"}))
+			if !o.Check() {
+				t.Fatal("terminal snapshot was not accepted")
+			}
+
+			t.Log("Attempt to replace the latched terminal state")
+			writeSnapshot(t, dir, test.replacement)
+			if o.Check() || *enqueued != 1 {
+				t.Fatalf("replacement must not be stored: enqueued=%d", *enqueued)
+			}
+
+			input := store.Load()
+			if !errors.Is(input.Err, ErrProtocolViolation) {
+				t.Fatalf("err = %v, want protocol violation", input.Err)
+			}
+			if input.Snapshot.Run.Phase != PhaseSucceeded || len(input.Snapshot.Candidates) != 1 {
+				t.Fatalf("terminal snapshot was replaced: %+v", input.Snapshot)
+			}
+		})
 	}
 }
 
