@@ -100,47 +100,47 @@ kubectl get pods -n <namespace> -l nvidia.com/dynamo-graph-deployment-name=<dgd>
 
 ## Write a Profile Config
 
-Apply one `NsightOperatorProfileConfig` per test, before you deploy the DGD; only pods created after the config exists
-are profiled. This config follows Nsight's
+Apply one `NsightOperatorProfileConfig` for each DGD you profile, before you deploy that DGD; only pods created after
+the config exists are profiled. This config follows Nsight's
 [per-tenant storage example](https://docs.nvidia.com/nsight-operator/UserGuide/index.html#per-tenant-storage-with-nsightcloudstorageconfig)
-and uses the field names of Nsight Operator 26.3. Replace `mytest` everywhere with your DGD name, `my-test-ns` with your
-namespace, and `team-s3` with your storage config. Keep one rule for each component you want to record.
+and uses the field names of Nsight Operator 26.3. Replace `my-dgd` everywhere with your DGD name, `my-namespace` with
+your namespace, and `team-s3` with your storage config. Keep one rule for each component you want to record.
 
 ```yaml
 apiVersion: nvidia.com/v1
 kind: NsightOperatorProfileConfig
 metadata:
-  name: nsys-mytest
-  namespace: my-test-ns
+  name: nsys-my-dgd
+  namespace: my-namespace
 spec:
   nsightToolConfigs:
-  - name: mytest-cpu           # frontend: OS runtime calls, Python stacks, NVTX
+  - name: my-dgd-cpu           # frontend: OS runtime calls, Python stacks, NVTX
     coordinator: true          # record only between profiler-start and its stop
     nsightToolCommand: profile --start-later=true
     nsightToolArgs: "-t nvtx,osrt --python-sampling=true"
     opentelemetryTrace: false  # no OpenTelemetry trace mirroring
-  - name: mytest-gpu           # workers: adds CUDA API calls and every kernel
+  - name: my-dgd-gpu           # workers: adds CUDA API calls and every kernel
     coordinator: true
     nsightToolCommand: profile --start-later=true
     nsightToolArgs: "-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true"
     opentelemetryTrace: false
   injectionRules:              # rule names must be unique in the namespace
-  - name: mytest-frontend
-    nsightToolConfigRef: mytest-cpu
-    nsightTags: [mytest]                # literal text; the same tag on every rule
+  - name: my-dgd-frontend
+    nsightToolConfigRef: my-dgd-cpu
+    nsightTags: [my-dgd]                # literal text; the same tag on every rule
     cloudStorageConfigRef: team-s3      # omit to use Nsight's in-cluster storage
     podObjectSelector:
       matchLabels:
-        nvidia.com/dynamo-graph-deployment-name: mytest
+        nvidia.com/dynamo-graph-deployment-name: my-dgd
         nvidia.com/dynamo-component-type: frontend
     processIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.]frontend( .*)?$']
-  - name: mytest-decode
-    nsightToolConfigRef: mytest-gpu
-    nsightTags: [mytest]
+  - name: my-dgd-decode
+    nsightToolConfigRef: my-dgd-gpu
+    nsightTags: [my-dgd]
     cloudStorageConfigRef: team-s3
     podObjectSelector:
       matchLabels:
-        nvidia.com/dynamo-graph-deployment-name: mytest
+        nvidia.com/dynamo-graph-deployment-name: my-dgd
         nvidia.com/dynamo-component-type: decode
     processIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.](vllm|sglang|trtllm)( .*)?$']
 ```
@@ -148,8 +148,9 @@ spec:
 - **Tags.** Every rule uses the same literal tag, the DGD name, so one window profiles every selected component over
   the same period. A tag holds one profiling session at a time. For separate windows per component, give each rule its
   own tag.
-- **Names.** Nsight looks up tool configs by name across the whole namespace, so tests that share a namespace need
-  their own tool-config names. Do not name the config `dynamo-profile-config`, which Nsight's helper writes and deletes.
+- **Names.** Nsight looks up tool configs by name across the whole namespace, so give each profile config in a
+  namespace its own tool-config names. Do not name the config `dynamo-profile-config`, which Nsight's helper writes and
+  deletes.
 - **Patterns.** They match Dynamo's launch commands, `python -m dynamo.<module>` and `python3 -m dynamo.<module>`, so
   helper commands such as `python3 -c ...` are not wrapped. Write `[.]` rather than `\.`: on Nsight Operator 26.2, a
   backslash in a pattern silently disabled injection.
@@ -180,8 +181,8 @@ same release as the operator. Deploy the DGD after the profile config, wait unti
 start your load. Then run:
 
 ```bash
-NS=my-test-ns
-T=mytest
+NS=my-namespace
+T=my-dgd
 python3 nsight_operator.py autoconfigure -n $NS
 python3 nsight_operator.py --tag $T status                # one collection agent per selected pod
 python3 nsight_operator.py --tag $T session-begin --title $T
