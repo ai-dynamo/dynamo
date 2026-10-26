@@ -1,0 +1,147 @@
+# Router Host Layer
+
+This module is the router's host layer. It embeds the selection core from `lib/kv-router`
+(scoring, queues, load tracking) and adds what a running request needs around it: session
+affinity, booking ownership, dispatch, cancellation, and the optional encode and prefill hops.
+For which processes embed it and where their boundaries are, see
+[`components/src/dynamo/router/AGENTS.md`](../../../../components/src/dynamo/router/AGENTS.md).
+The module map and the rules for changing this code are in [`AGENTS.md`](AGENTS.md).
+
+## Layer map
+
+```text
+Frontend pipeline (entrypoint/input/common.rs, PreprocessedRouting::build_pipeline)
+  preprocessor → migration → detokenizer → EncoderRouter → PrefillRouter → RoutingHost
+                                              │                 │                │
+                       round-robin PushRouter ┘   prefill RoutingHost ┐          │ decode or aggregated
+                                                                      ▼          ▼
+RoutingHost                       one per worker set; selects, books, dispatches, cleans up
+ ├─ policy: Kv(KvRouter) | Builtin | Direct | DeviceAwareWeighted
+ ├─ PushRouter (lib/runtime)       discovery membership, fault detection, transport
+ ├─ AffinityCoordinator            session affinity (crate::session_affinity)
+ └─ KvRouter                       KV candidate state; selects and books, never dispatches
+     ├─ Indexer                    which blocks each worker holds
+     ├─ RequestLeaseManager        booking leases, reaper
+     └─ EmbeddedSelection → SelectionService / SelectionCore (lib/kv-router)
+                                   classify, queue, score, admit, account load
+```
+
+Discovery builds the pipeline once per Decode or Aggregated worker set
+(`discovery/watcher.rs`). Only a Decode set gets a real `PrefillRouter`; every other set gets a
+disabled one that always passes requests through. Prefill worker sets, and Encode worker sets
+that serve no model type of their own, build no pipeline: they are reached only through these
+hops.
+
+## Per-stage roles
+
+| Stage | Router | Selection | Books | Notes |
+|---|---|---|---|---|
+| Aggregated | `RoutingHost` of the aggregated set | KV or builtin | Yes (KV) | Owns the request's classifier lifecycle. |
+| Decode | `RoutingHost` of the decode set | KV with the decode profile written by `PrefillRouter` | Yes (KV) | Owns the request's classifier lifecycle. |
+| Prefill | `PrefillRouter` → prefill `RoutingHost` | KV or builtin; a prefill card that declares `router_config` overrides the decode set's mode | Yes (KV) | Never starts the classifier; a prefill retry must leave a parked decode lifecycle alone. |
+| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | On failure, falls back to inline encoding downstream. |
+
+### Prefill hop
+
+- Sends a copy of the request with `max_tokens = 1` under its own cancellation context, so
+  prefill survives a client disconnect once decode depends on its KV.
+- If the prefill worker publishes bootstrap information, prefill runs in the background and
+  decode is routed immediately. Otherwise the hop waits for `disaggregated_params`.
+- A prefill that finishes the whole request (for example EOS on the one-token step) is returned
+  directly; decode does not run.
+- `into_decode_request` writes the handoff into the decode request: `bootstrap_info` or
+  `prefill_result`, `routing.prefill_worker_id`, `migration_link`, and `staged_kv_cleanup = true`.
+- Merges the prefill worker's KV-transfer topology constraints into the decode request's
+  `routing_constraints`.
+- Rewrites the decode request's `router_config_override`. `assume_kv_reuse` and
+  `track_prefill_tokens` set decode's load accounting. Decode's overlap credit is fixed when the
+  selection policy is built, from the worker role and whether conditional disaggregation is
+  enabled; the per-request override no longer reaches scoring.
+
+### Conditional disaggregation
+
+1. Strip any client-supplied bypass annotation: only the router may bypass remote prefill.
+2. Preview decode with `RoutingHost::preview_kv_route`: advisory, no booking, no affinity binding.
+3. The policy decides from prompt and cached tokens, plus the prefill pool's load when the
+   policy needs it.
+4. If a decode busy threshold is configured, a busy or unknown decode worker vetoes the bypass.
+5. On bypass, `plan_kv_route_from_preview` admits the previewed worker (re-selected with
+   admission and pinned to it), and `dispatch_kv_plan` sends the request with the bypass
+   annotation. Otherwise the request takes the remote prefill path.
+
+A failed decision falls back to remote prefill, except for `Cancelled` and `InvalidArgument`
+errors, which return to the client.
+
+## What selection reads from a request
+
+| Input | Source |
+|---|---|
+| Request id, cancellation | the `Context` around the request |
+| Policy class | context metadata key `policy-class` (header `x-dynamo-meta-policy-class`) |
+| Session-affinity id | the `Context`, set by the HTTP layer |
+| Agent session context | `PreprocessedRequest::agent_context` |
+| Tokens, multimodal block info | `PreprocessedRequest::block_mm_routing_info` |
+| Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
+| Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
+| Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
+| Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
+
+## Admission modes
+
+`SelectionCore` has four `SelectionAdmission` modes; `KvRouter` uses the first three:
+
+- **Advisory**: no queue and no booking. Used by previews and load probes.
+- **Query**: queued and admitted, but books nothing.
+- **Lease**: queued, admitted, and booked; the caller owns the booking handle. Every dispatched
+  KV route uses it.
+- **Book**: queued, admitted, and booked as a reservation the core holds under a selection id.
+  Used by `SelectionCore::select_and_reserve_with_policy_class` (the standalone selection
+  service), not by this module.
+
+A request annotated `query_instance_id` returns its selection without dispatching or updating
+router state.
+
+## Booking lifecycle (KV)
+
+1. **Admit.** A `Lease` admission returns a `BookingHandle` for one scheduler attempt.
+2. **Own.** `KvRequestCleanup` commits the handle and registers a local `RequestAttemptLease`
+   with the `RequestLeaseManager`, plus an approximate-LRU lease when the approximate indexer is
+   on. A `RoutePlan` (preview or plan path) holds this cleanup until dispatch.
+3. **Track.** At dispatch, `RequestGuard` takes ownership. The first output tokens mark prefill
+   complete on the booking, and output progress keeps the lease alive.
+4. **Release.** Stream end, error, or drop releases the lease, which enqueues the scheduler
+   release. `finish()` waits for the scheduler to acknowledge it.
+5. **Expire.** The reaper reclaims a lease that sees no progress for one active-request expiry
+   interval.
+
+`register_detached` is the other registration: the booking is tracked by request id and
+released by `KvRouter::free`, not by a handle. `KvRouter::add_request` uses it.
+
+Booking descriptors carry the attempt id, so late cleanup from an old attempt cannot release a
+newer booking that reused the same request id and worker.
+
+## Cancellation
+
+- By default a client disconnect cancels selection and dispatch at once.
+- A decode request with `staged_kv_cleanup` set is the exception: it still reaches its worker,
+  because only that decode worker's KV-transfer-complete path frees the blocks remote prefill
+  staged for it. The stages it still runs share one `CleanupBudget`, which starts the first
+  time a stage sees the stopped context. When the budget runs out, the stage gives up and logs
+  that the staged blocks will sit until they expire.
+- A request that took the conditional bypass reached decode without staged KV, so it cancels
+  normally.
+
+## Prefill activation
+
+`PrefillRouter` resolves its state from one snapshot:
+
+- **Active**: run the prefill hop.
+- **Pending**: a target is set but its binding is still being built. Fail closed with a
+  retryable error; a decode-only worker cannot run the request without the hop.
+- **Untargeted**: no prefill target. Pass through to the next stage.
+
+`ModelManager::reconcile_discovery_topology` sets the target only when the namespace has
+exactly one prefill worker set and one decode worker set. The encoder target follows the
+`encoder_result_handoff` rules there. In Direct mode the prefill hop requires
+`routing.prefill_worker_id`. See [`../discovery/AGENTS.md`](../discovery/AGENTS.md) for worker-set
+admission and succession.
