@@ -8,16 +8,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Identifies one connection attempt to a Relay replica.
 ///
 /// A replacement connection receives a new token. Late updates or disconnects from the old
 /// connection cannot change the replacement's state.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StreamToken<R> {
     relay: R,
-    epoch: Arc<()>,
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -31,7 +31,7 @@ pub enum ApplyError {
 }
 
 struct RelayStream<P> {
-    epoch: Arc<()>,
+    generation: u64,
     pools: Option<HashSet<P>>,
 }
 
@@ -61,18 +61,24 @@ impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> RelayPoolViews<R, P, V> {
     /// Begin a new stream, invalidating the previous stream and its pool views for this Relay.
     /// The replacement is not live until its first complete snapshot arrives.
     pub fn open(&mut self, relay: R) -> StreamToken<R> {
+        static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+        let generation = NEXT_GENERATION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .expect("relay stream generation overflow")
+            + 1;
         if let Some(previous) = self.relays.remove(&relay) {
             self.remove_relay_views(&relay, previous.pools);
         }
-        let epoch = Arc::new(());
         self.relays.insert(
             relay.clone(),
             RelayStream {
-                epoch: epoch.clone(),
+                generation,
                 pools: None,
             },
         );
-        StreamToken { relay, epoch }
+        StreamToken { relay, generation }
     }
 
     /// Replace one Relay's entire pool view. A pool omitted here is withdrawn from that Relay.
@@ -183,7 +189,7 @@ impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> RelayPoolViews<R, P, V> {
             .relays
             .get_mut(&stream.relay)
             .ok_or(ApplyError::StaleStream)?;
-        if !Arc::ptr_eq(&relay.epoch, &stream.epoch) {
+        if relay.generation != stream.generation {
             return Err(ApplyError::StaleStream);
         }
         Ok(relay)
@@ -269,6 +275,30 @@ mod tests {
             receiver.pool_views(&pool).next().map(|(_, value)| *value),
             Some(22)
         );
+    }
+
+    #[test]
+    fn reconnect_after_disconnect_rejects_the_old_token() {
+        let mut receiver = RelayPoolViews::<&str, u64, u64>::new();
+        let old = receiver.open("relay-a");
+        receiver.disconnect(&old).unwrap();
+
+        let current = receiver.open("relay-a");
+        assert_ne!(old.generation, current.generation);
+        assert_eq!(receiver.disconnect(&old), Err(ApplyError::StaleStream));
+        receiver.replace_snapshot(&current, [(1, 10)]).unwrap();
+        assert_eq!(receiver.pool_views(&1).count(), 1);
+    }
+
+    #[test]
+    fn token_from_another_receiver_is_stale() {
+        let mut first = RelayPoolViews::<&str, u64, u64>::new();
+        let old = first.open("relay-a");
+
+        let mut second = RelayPoolViews::<&str, u64, u64>::new();
+        let current = second.open("relay-a");
+        assert_ne!(old.generation, current.generation);
+        assert_eq!(second.disconnect(&old), Err(ApplyError::StaleStream));
     }
 
     #[test]
