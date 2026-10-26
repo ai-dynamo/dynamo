@@ -9,22 +9,52 @@ The module map and the rules for changing this code are in [`AGENTS.md`](AGENTS.
 
 ## Layer map
 
+The frontend pipeline (`entrypoint/input/common.rs`, `PreprocessedRouting::build_pipeline`)
+runs these stages in order:
+
 ```text
-Frontend pipeline (entrypoint/input/common.rs, PreprocessedRouting::build_pipeline)
-  preprocessor → migration → detokenizer → EncoderRouter → PrefillRouter → RoutingHost
-                                              │                 │                │
-                       round-robin PushRouter ┘   prefill RoutingHost ┐          │ decode or aggregated
-                                                                      ▼          ▼
-RoutingHost                       one per worker set; selects, books, dispatches, cleans up
- ├─ policy: Kv(KvRouter) | Builtin | Direct | DeviceAwareWeighted
- ├─ PushRouter (lib/runtime)       discovery membership, fault detection, transport
- ├─ AffinityCoordinator            session affinity (crate::session_affinity)
- └─ KvRouter                       KV candidate state; selects and books, never dispatches
-     ├─ Indexer                    which blocks each worker holds
-     ├─ RequestLeaseManager        booking leases, reaper
-     └─ EmbeddedSelection → SelectionService / SelectionCore (lib/kv-router)
-                                   classify, queue, score, admit, account load
+preprocessor → migration → detokenizer → EncoderRouter → PrefillRouter → RoutingHost
+                                             │                 │                │
+                      round-robin PushRouter ┘   prefill RoutingHost ┐          │ decode or aggregated
+                                                                     ▼          ▼
 ```
+
+A `RoutingHost` serves one worker set. What it holds (composition, not call order):
+
+```text
+RoutingHost
+ ├─ inner: PushRouter (lib/runtime)  discovery membership, fault detection, transport
+ ├─ policy: RoutingPolicy
+ │   ├─ Kv(KvRouter)                 KV candidate state; selects and books, never dispatches
+ │   │   ├─ Indexer                  which blocks each worker holds
+ │   │   ├─ RequestLeaseManager      booking leases, reaper
+ │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/kv-router)
+ │   │                               classify, queue, score, admit, account load
+ │   ├─ Builtin                      round-robin, random, power-of-two, least-loaded
+ │   ├─ Direct                       the worker the request names
+ │   └─ DeviceAwareWeighted
+ ├─ affinity: AffinityCoordinator    session affinity (optional; crate::session_affinity)
+ ├─ hosted_occupancy                 in-flight tracking for load-based builtin modes (optional)
+ ├─ lora: LoraRouting                LoRA filter (optional)
+ └─ request_metrics
+```
+
+What a KV request does in `RoutingHost::generate` (call order):
+
+```text
+1. validate request-supplied worker pins against discovery
+2. decode or aggregated: start, or resume after migration, the classifier lifecycle
+3. affinity: acquire the session's slot (hard mode pins the worker; soft mode prefers it)
+4. KvRouter → SelectionCore: select and book the worker (Lease admission)
+5. track: RequestGuard takes ownership of the booking and records the routing decision
+6. PushRouter: dispatch to the worker
+7. affinity: bind the session to the worker once the stream starts
+   (if dispatch fails under hard affinity and the worker is gone, invalidate the binding)
+```
+
+A query-only request (`query_instance_id`) skips step 2, only looks up the session's target in
+step 3 without acquiring it, selects with `Query` admission in step 4 so nothing is booked, and
+returns the selection instead of steps 5–7.
 
 Discovery builds the pipeline once per Decode or Aggregated worker set
 (`discovery/watcher.rs`). Only a Decode set gets a real `PrefillRouter`; every other set gets a
