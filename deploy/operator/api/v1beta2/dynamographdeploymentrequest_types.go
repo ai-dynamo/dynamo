@@ -190,7 +190,7 @@ type ObjectiveSpec struct {
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
 	// Metric is the scalar target when mode is Optimize.
-	// When omitted in Optimize mode, admission defaults it to Throughput.
+	// When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 

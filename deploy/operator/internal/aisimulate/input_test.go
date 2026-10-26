@@ -29,11 +29,10 @@ import (
 
 func ptrTo[T any](v T) *T { return &v }
 
-// defaultedSpec is a model-only Request as it looks after structural and admission defaults:
-// the fixed-concurrency workload, the scalar metric and discovered hardware. It
-// has no SLA bounds and no KV-load range; withSLA and withKVRange add them.
+// defaultedSpec is a model-only Request after structural and admission defaults:
+// fixed-concurrency traffic, the scalar objective with latency bounds, and discovered hardware.
 func defaultedSpec() *v1beta2.DynamoGraphDeploymentRequestSpec {
-	metric := v1beta2.ObjectiveMetric("Throughput")
+	metric := v1beta2.ObjectiveMetric("ThroughputPerGPU")
 	return &v1beta2.DynamoGraphDeploymentRequestSpec{
 		Model:    &v1beta2.ModelSpec{Name: "meta-llama/Llama-3.1-8B-Instruct"},
 		Backends: []v1beta2.Backend{v1beta2.BackendVLLM, v1beta2.BackendSGLang, v1beta2.BackendTRTLLM},
@@ -43,14 +42,24 @@ func defaultedSpec() *v1beta2.DynamoGraphDeploymentRequestSpec {
 			OutputTokens: ptrTo(int32(128)),
 			Load:         &v1beta2.StaticLoadSpec{Concurrency: ptrTo(int32(10))},
 		}},
-		Objective:      &v1beta2.ObjectiveSpec{Mode: v1beta2.ObjectiveModeOptimize, Metric: &metric},
+		Objective: &v1beta2.ObjectiveSpec{
+			Mode:   v1beta2.ObjectiveModeOptimize,
+			Metric: &metric,
+			SLA:    &v1beta2.ObjectiveSLASpec{TTFTMs: ptrTo(2000.0), ITLMs: ptrTo(30.0)},
+		},
 		Recommendation: &v1beta2.RecommendationSpec{MaxCandidates: 1},
 	}
 }
 
-// withSLA adds the latency bounds the earlier defaults used to supply.
+// withSLA restores the model-only latency defaults after a test changes them.
 func withSLA(spec *v1beta2.DynamoGraphDeploymentRequestSpec) *v1beta2.DynamoGraphDeploymentRequestSpec {
 	spec.Objective.SLA = &v1beta2.ObjectiveSLASpec{TTFTMs: ptrTo(2000.0), ITLMs: ptrTo(30.0)}
+	return spec
+}
+
+// withoutSLA models a caller that explicitly opted out with objective.sla: {}.
+func withoutSLA(spec *v1beta2.DynamoGraphDeploymentRequestSpec) *v1beta2.DynamoGraphDeploymentRequestSpec {
+	spec.Objective.SLA = &v1beta2.ObjectiveSLASpec{}
 	return spec
 }
 
@@ -109,7 +118,8 @@ func nested(t *testing.T, input map[string]any, path ...string) any {
 
 func TestLowerModelOnlyRequest(t *testing.T) {
 	want := `{"engine":{"backend":{"choices":["vllm","sglang","trtllm"]},"hardware":"h200_sxm","model":"meta-llama/Llama-3.1-8B-Instruct","workers":{"aggregated":{},"decode":{},"prefill":{}}},` +
-		`"optimization":{"constraints":{"max_candidate_gpus":8},"target":"throughput"},` +
+		`"evaluation":{"sla":{"itl_ms":30,"ttft_ms":2000}},` +
+		`"optimization":{"constraints":{"max_candidate_gpus":8},"strict_sla":true,"target":"throughput_per_gpu"},` +
 		`"traffic":{"load":{"concurrency":10,"type":"concurrency"},"source":{"input_tokens":1024,"output_tokens":128,"type":"synthetic"},"stop":{"requests":1000}}}`
 	if got := encode(t, lower(t, defaultedSpec())); got != want {
 		t.Fatalf("effective input\n got: %s\nwant: %s", got, want)
@@ -275,22 +285,22 @@ func TestStrictSLADerivation(t *testing.T) {
 			t.Fatal("strict_sla not derived")
 		}
 	})
-	t.Run("model-only derives nothing", func(t *testing.T) {
-		input := lower(t, defaultedSpec())
+	t.Run("an absent SLA derives nothing", func(t *testing.T) {
+		spec := defaultedSpec()
+		spec.Objective.SLA = nil
+		input := lower(t, spec)
 		if nested(t, input, "optimization", "strict_sla") != nil || nested(t, input, "evaluation", "sla") != nil {
 			t.Fatalf("model-only input has SLA keys: %s", encode(t, input))
 		}
 	})
 	t.Run("an empty SLA derives nothing", func(t *testing.T) {
-		spec := defaultedSpec()
-		spec.Objective.SLA = &v1beta2.ObjectiveSLASpec{}
-		input := lower(t, spec)
+		input := lower(t, withoutSLA(defaultedSpec()))
 		if nested(t, input, "optimization", "strict_sla") != nil || nested(t, input, "evaluation", "sla") != nil {
 			t.Fatalf("an empty SLA produced SLA keys: %s", encode(t, input))
 		}
 	})
 	t.Run("an override bound alone does not derive it", func(t *testing.T) {
-		input := lower(t, withInputOverrides(defaultedSpec(), `{"evaluation":{"sla":{"ttft_ms":500}}}`))
+		input := lower(t, withInputOverrides(withoutSLA(defaultedSpec()), `{"evaluation":{"sla":{"ttft_ms":500}}}`))
 		if nested(t, input, "evaluation", "sla", "ttft_ms") != 500.0 || nested(t, input, "optimization", "strict_sla") != nil {
 			t.Fatalf("unexpected optimization input: %s", encode(t, input))
 		}
@@ -328,7 +338,7 @@ func TestInputOverridesApplyOnceAfterDerivedDefaults(t *testing.T) {
 		}
 	})
 	t.Run("nothing is derived from values only overrides introduce", func(t *testing.T) {
-		input := lower(t, withInputOverrides(defaultedSpec(), `{"traffic":{"load":{"fraction":{"range":{"min":0.1,"max":1}}}},"evaluation":{"sla":{"ttft_ms":500}}}`))
+		input := lower(t, withInputOverrides(withoutSLA(defaultedSpec()), `{"traffic":{"load":{"fraction":{"range":{"min":0.1,"max":1}}}},"evaluation":{"sla":{"ttft_ms":500}}}`))
 		if nested(t, input, "optimizer") != nil || nested(t, input, "optimization", "strict_sla") != nil {
 			t.Fatalf("a field was derived from override-only values: %s", encode(t, input))
 		}
