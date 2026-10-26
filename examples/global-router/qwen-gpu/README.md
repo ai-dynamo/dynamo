@@ -78,3 +78,51 @@ For a pod, the script also writes its result to `/dev/termination-log`. Inspect
 worker readiness and `nvidia-smi` independently: CUDA engine processes and resident
 GPU memory distinguish this deployment from an advertised model name alone.
 The smoke test is functional validation, not a throughput benchmark.
+
+## Regional ALB
+
+`alb.py` renders a separate CloudFormation stack containing one internet-facing
+ALB, a listener on HTTP port 80, a target group, a NodePort Service selecting the
+Global Ingress replicas, and narrowly scoped security-group rules. ALB ingress
+accepts only the approved bastion's public IPv4 `/32`; broad ranges and private
+source ranges are rejected. The ALB can send only TCP traffic to the configured
+NodePort within the existing VPC. Node security groups admit that port from the
+ALB security group. There is no public NodePort ingress rule.
+
+The ALB targets the existing reserved GPU node instance IDs through NodePort
+30800. Kubernetes forwards to healthy Global Ingress pods, so pod replacement and
+replica changes require no target-group edits. Node identities remain managed by
+the independent compute stacks. Refresh the operator-local target IDs if nodes
+are intentionally replaced. This example does not install a load-balancer
+controller or grant a new AWS IAM role.
+
+Supply an operator-local JSON file with `bastionCidr`, `vpcId`, `vpcCidr`,
+`publicSubnetIds` (at least two availability zones), `gpuInstanceIds`,
+`gpuSecurityGroups`, `clusterName`, `kubectlProviderServiceToken`, and optionally
+`namespace` and `nodePort`. Keep real identifiers outside Git and image contexts.
+The namespace and Global Ingress deployment must already exist. The configured
+NodePort must be free in the cluster.
+
+```bash
+python3 examples/global-router/qwen-gpu/alb.py \
+  --config /path/to/alb.local.json > /tmp/qwen-alb.json
+aws cloudformation create-stack \
+  --region "$AWS_REGION" --stack-name example-qwen-alb \
+  --template-body file:///tmp/qwen-alb.json
+```
+
+Wait for stack completion and healthy targets, then use its `Url` output from
+the approved bastion. Requests may route to any ready regional GPU pool. These
+HTTP endpoints are restricted test endpoints; no TLS certificate or vanity DNS
+name is provisioned by this example.
+
+```bash
+curl "$BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-4B-Instruct-2507","messages":[{"role":"user","content":"What is 7 times 8?"}],"max_tokens":64,"temperature":0}'
+```
+
+Run `smoke.py` against every regional `Url`. Check security-group rules and
+confirm that requests from an unapproved source cannot reach the listener. Remove
+short-lived validation pods and their temporary RBAC after collecting evidence;
+keep the serving and ALB stacks deployed for interactive use.
