@@ -27,7 +27,7 @@ defines three roles. To profile a Dynamo deployment, each role does the followin
 
 | Role | Does | How often |
 |---|---|---|
-| Cluster admin | Installs the Nsight Operator chart, as in [Install Operator](https://docs.nvidia.com/nsight-operator/GettingStarted/index.html#cluster-admin-install-operator), and limits its injector webhook to opted-in namespaces | Once per cluster |
+| Cluster admin | Installs the Nsight Operator chart, as in [Install Operator](https://docs.nvidia.com/nsight-operator/GettingStarted/index.html#cluster-admin-install-operator), and [limits its injector webhook to opted-in namespaces](https://docs.nvidia.com/nsight-operator/InstallationGuide/index.html#multi-tenant-configuration) with `clusterWideInjectionFilter` | Once per cluster |
 | Namespace admin | Creates the S3 storage config ([external S3](https://docs.nvidia.com/nsight-operator/UserGuide/index.html#using-external-s3)); without auto-provisioning, also the coordinator and gateway | Once per namespace |
 | Developer or coding agent | Applies a profile config, deploys the DGD, and captures with `nsight_operator.py` | Once per test |
 
