@@ -52,7 +52,7 @@ struct RegisteredPool {
 async fn register_pool(discovery: &GlobalDiscoveryClient, dgd: &str) -> RegisteredPool {
     let sse = format!("data: {}\n\ndata: [DONE]\n\n", chat_chunk(dgd));
     let (server, requests) = scripted_pool_frontend(sse.leak()).await;
-    discovery
+    let _lease = discovery
         .register_pool(&PoolRegistration {
             key: PoolKey {
                 site_id: "aws-ohio".into(),
