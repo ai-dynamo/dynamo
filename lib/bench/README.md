@@ -29,6 +29,7 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | `mooncake_bench` | `mooncake` |
 | `active_sequences_bench` | `active-sequences` |
 | `approximate_lru_bench` | `approximate-lru` |
+| `select_service_bench` | `select-service` |
 | `dc_ckf_consumer_bench` | `dc-ckf-consumer` |
 | `dc_ckf_relay_bench` | `dc-ckf-relay` |
 
@@ -165,3 +166,9 @@ cargo bench --package dynamo-bench --bench offline_replay_bench \
 See [kv_router/INDEXER_BENCH.md](kv_router/INDEXER_BENCH.md) for trace
 acquisition, benchmark commands, and results for the `mooncake_bench` suite:
 `concurrent-radix-tree-compressed` and `nested-map`.
+
+## Selection service load benchmark
+
+See [kv_router/SELECT_SERVICE_BENCH.md](kv_router/SELECT_SERVICE_BENCH.md) for
+`select_service_bench`: closed-loop traffic from mocker engines against the HTTP
+selection service or Ray Serve LLM-style ingress replicas, with a local run script.
