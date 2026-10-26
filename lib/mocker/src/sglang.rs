@@ -130,6 +130,15 @@ impl ResponseMetadata {
         meta_info
     }
 
+    /// The requested prompt logprobs as `meta_info` keys, empty when none
+    /// were requested. Transports that stream them before the terminal
+    /// response read them here.
+    pub fn prompt_logprobs(&self) -> Map<String, Value> {
+        let mut meta_info = Map::new();
+        self.insert_prompt_logprobs(&mut meta_info);
+        meta_info
+    }
+
     fn insert_prompt_logprobs(&self, meta_info: &mut Map<String, Value>) {
         let Some(prompt_tokens) = self.prompt_logprob_tokens.as_deref() else {
             return;
@@ -240,5 +249,21 @@ mod tests {
                 .get("input_token_logprobs")
                 .is_none()
         );
+        // They remain available to transports that send them earlier.
+        let prompt = metadata.prompt_logprobs();
+        assert_eq!(
+            prompt["input_token_logprobs"],
+            response["meta_info"]["input_token_logprobs"]
+        );
+        assert_eq!(
+            prompt["input_top_logprobs"],
+            response["meta_info"]["input_top_logprobs"]
+        );
+        let selected_only = ResponseMetadata::new(
+            "request-2",
+            &[10, 11],
+            LogprobOptions::new(true, 0, -1).unwrap(),
+        );
+        assert!(selected_only.prompt_logprobs().is_empty());
     }
 }
