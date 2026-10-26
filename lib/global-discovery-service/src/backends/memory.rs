@@ -14,8 +14,8 @@ use std::time::Duration;
 use crate::pool_discovery::watch::{Directory, Snapshot, WatchStream};
 use crate::pool_discovery::{
     Completeness, LeasePolicy, PoolDiscoveryError, PoolEvent, PoolRecord, PoolRegistrar,
-    Registration, ReplicaEndpoint, ReplicaEvent, ReplicaId, ReplicaRegistrar, Revision,
-    VerifiedRelayIdentity, WatchEvent,
+    Registration, ReplicaEndpoint, ReplicaEvent, ReplicaId, Revision, VerifiedRelayIdentity,
+    WatchEvent,
 };
 use async_trait::async_trait;
 use dynamo_global_router_shared::PoolKey;
@@ -70,7 +70,10 @@ impl MemoryPoolStore {
     /// Fails unless `heartbeat_interval` is above zero and `lease_duration`
     /// is longer than it.
     pub fn new(lease: LeasePolicy) -> anyhow::Result<Self> {
-        check_lease(&lease)?;
+        anyhow::ensure!(
+            !lease.heartbeat_interval.is_zero() && lease.lease_duration > lease.heartbeat_interval,
+            "the lease duration must be longer than the heartbeat interval, which must be above zero"
+        );
         Ok(Self {
             lease,
             pools: Arc::default(),
@@ -101,16 +104,6 @@ impl Drop for MemoryPoolStore {
     fn drop(&mut self) {
         self.stop.cancel();
     }
-}
-
-/// `heartbeat_interval` must be above zero and `lease_duration` longer than
-/// it, so the sweep has a period and a registration outlives one interval.
-fn check_lease(lease: &LeasePolicy) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !lease.heartbeat_interval.is_zero() && lease.lease_duration > lease.heartbeat_interval,
-        "the lease duration must be longer than the heartbeat interval, which must be above zero"
-    );
-    Ok(())
 }
 
 /// Removes expired records and publishes `Removed` for each.
@@ -294,218 +287,6 @@ impl Directory<ReplicaEndpoint, ReplicaId> for StaticReplicaDirectory {
     }
 }
 
-/// Router replicas in memory: the ones from configuration, and the ones
-/// that register (`POST /routers`). A registration expires `lease_duration`
-/// after its last renewal, and while it lasts it replaces a configured
-/// replica with the same ID. A restarted process lists only the configured
-/// replicas until the others register again, so lists are `Estimated`.
-///
-/// Any authenticated caller may register any replica ID: like
-/// [`MemoryPoolStore`], V1 assumes a trusted network.
-pub struct MemoryReplicaStore {
-    lease: LeasePolicy,
-    replicas: Arc<Mutex<Replicas>>,
-    /// Sent while holding the `replicas` lock, as in [`MemoryPoolStore`].
-    events: broadcast::Sender<ReplicaEvent>,
-    sweeping: OnceLock<()>,
-    stop: CancellationToken,
-}
-
-struct Replicas {
-    configured: HashMap<ReplicaId, ReplicaEndpoint>,
-    registered: HashMap<ReplicaId, RegisteredReplica>,
-}
-
-struct RegisteredReplica {
-    endpoint: ReplicaEndpoint,
-    expires_at: Instant,
-}
-
-impl Replicas {
-    /// A live registration, else the configured replica.
-    fn served(&self, id: &ReplicaId, now: Instant) -> Option<&ReplicaEndpoint> {
-        self.registered
-            .get(id)
-            .filter(|registered| registered.expires_at > now)
-            .map(|registered| &registered.endpoint)
-            .or_else(|| self.configured.get(id))
-    }
-
-    fn snapshot(&self, now: Instant) -> Snapshot<ReplicaEndpoint> {
-        let registered = |id: &ReplicaId| {
-            self.registered
-                .get(id)
-                .is_some_and(|registered| registered.expires_at > now)
-        };
-        Snapshot {
-            items: self
-                .registered
-                .values()
-                .filter(|registered| registered.expires_at > now)
-                .map(|registered| registered.endpoint.clone())
-                .chain(
-                    self.configured
-                        .values()
-                        .filter(|endpoint| !registered(&endpoint.replica))
-                        .cloned(),
-                )
-                .collect(),
-            completeness: Completeness::Estimated,
-        }
-    }
-}
-
-impl MemoryReplicaStore {
-    /// `configured` replicas are listed until shutdown. Fails, like
-    /// [`MemoryPoolStore::new`], for a lease without room for heartbeats.
-    pub fn new(configured: Vec<ReplicaEndpoint>, lease: LeasePolicy) -> anyhow::Result<Self> {
-        check_lease(&lease)?;
-        let configured = configured
-            .into_iter()
-            .map(|endpoint| (endpoint.replica.clone(), endpoint))
-            .collect();
-        Ok(Self {
-            lease,
-            replicas: Arc::new(Mutex::new(Replicas {
-                configured,
-                registered: HashMap::new(),
-            })),
-            events: broadcast::channel(EVENT_BUFFER).0,
-            sweeping: OnceLock::new(),
-            stop: CancellationToken::new(),
-        })
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Replicas> {
-        self.replicas.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Every trait method runs in a Tokio runtime, so the spawn is safe.
-    fn ensure_sweeping(&self) {
-        self.sweeping.get_or_init(|| {
-            tokio::spawn(sweep_replicas(
-                Arc::clone(&self.replicas),
-                self.events.clone(),
-                self.lease.heartbeat_interval,
-                self.stop.clone(),
-            ));
-        });
-    }
-}
-
-impl Drop for MemoryReplicaStore {
-    fn drop(&mut self) {
-        self.stop.cancel();
-    }
-}
-
-/// Removes expired registrations. A configured replica goes back to its
-/// configured address; any other replica is `Removed`.
-async fn sweep_replicas(
-    replicas: Arc<Mutex<Replicas>>,
-    events: broadcast::Sender<ReplicaEvent>,
-    every: Duration,
-    stop: CancellationToken,
-) {
-    let mut ticks = tokio::time::interval(every);
-    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            biased;
-            () = stop.cancelled() => return,
-            _ = ticks.tick() => {}
-        }
-        let now = Instant::now();
-        let mut replicas = replicas.lock().unwrap_or_else(PoisonError::into_inner);
-        let Replicas {
-            configured,
-            registered,
-        } = &mut *replicas;
-        registered.retain(|id, registered| {
-            let live = registered.expires_at > now;
-            if !live {
-                // No subscribers is not an error.
-                match configured.get(id) {
-                    None => {
-                        let _ = events.send(WatchEvent::Removed(id.clone()));
-                    }
-                    Some(endpoint) if *endpoint != registered.endpoint => {
-                        let _ = events.send(WatchEvent::Added(endpoint.clone()));
-                    }
-                    Some(_) => {}
-                }
-            }
-            live
-        });
-    }
-}
-
-#[async_trait]
-impl ReplicaRegistrar for MemoryReplicaStore {
-    /// An unchanged registration only renews its lease. A new or changed one
-    /// is an `Added` event.
-    async fn register(
-        &self,
-        endpoint: ReplicaEndpoint,
-    ) -> Result<Registration, PoolDiscoveryError> {
-        self.ensure_sweeping();
-        let now = Instant::now();
-        let mut replicas = self.lock();
-        let unchanged = match replicas.registered.get(&endpoint.replica) {
-            // Only a live registration of the same endpoint makes this a
-            // renewal. Watchers may still hold an expired registration whose
-            // fallback the sweep has not published yet, so replacing one is
-            // always a change.
-            Some(previous) => previous.expires_at > now && previous.endpoint == endpoint,
-            None => replicas.configured.get(&endpoint.replica) == Some(&endpoint),
-        };
-        replicas.registered.insert(
-            endpoint.replica.clone(),
-            RegisteredReplica {
-                endpoint: endpoint.clone(),
-                expires_at: now + self.lease.lease_duration,
-            },
-        );
-        if !unchanged {
-            // No subscribers is not an error.
-            let _ = self.events.send(WatchEvent::Added(endpoint));
-        }
-        Ok(Registration { lease: self.lease })
-    }
-}
-
-#[async_trait]
-impl Directory<ReplicaEndpoint, ReplicaId> for MemoryReplicaStore {
-    async fn check_connection(&self) -> Result<(), PoolDiscoveryError> {
-        Ok(())
-    }
-
-    async fn list(&self) -> Result<Snapshot<ReplicaEndpoint>, PoolDiscoveryError> {
-        Ok(self.lock().snapshot(Instant::now()))
-    }
-
-    async fn get(&self, key: &ReplicaId) -> Result<Option<ReplicaEndpoint>, PoolDiscoveryError> {
-        Ok(self.lock().served(key, Instant::now()).cloned())
-    }
-
-    async fn list_and_watch(
-        &self,
-        cancel_token: Option<CancellationToken>,
-    ) -> Result<WatchStream<ReplicaEndpoint, ReplicaId>, PoolDiscoveryError> {
-        self.ensure_sweeping();
-        let replicas = Arc::clone(&self.replicas);
-        let events = self.events.clone();
-        Ok(watch_stream(
-            move || {
-                let replicas = replicas.lock().unwrap_or_else(PoisonError::into_inner);
-                (events.subscribe(), Some(replicas.snapshot(Instant::now())))
-            },
-            cancel_token.unwrap_or_default(),
-            self.stop.clone(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::pool_discovery::{
@@ -668,10 +449,6 @@ mod tests {
                 MemoryPoolStore::new(lease).is_err(),
                 "{heartbeat_interval}s / {lease_duration}s"
             );
-            assert!(
-                MemoryReplicaStore::new(Vec::new(), lease).is_err(),
-                "{heartbeat_interval}s / {lease_duration}s"
-            );
         }
     }
 
@@ -702,118 +479,5 @@ mod tests {
         ));
         cancel.cancel();
         assert!(watch.next().await.is_none());
-    }
-
-    fn router(id: &str, url: &str) -> ReplicaEndpoint {
-        ReplicaEndpoint {
-            replica: ReplicaId(id.to_owned()),
-            url: Url::parse(url).unwrap(),
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_registered_router_is_listed_until_its_lease_ends() {
-        let store = MemoryReplicaStore::new(Vec::new(), LEASE).unwrap();
-        let replica = router("ohio/global-router-0", "http://10.42.0.5:50051");
-        let mut watch = store.list_and_watch(None).await.unwrap();
-        assert!(
-            matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.items.is_empty())
-        );
-
-        let registration = store.register(replica.clone()).await.unwrap();
-        assert_eq!(registration.lease, LEASE);
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == replica));
-
-        // Heartbeats every 10 s keep the 15 s lease alive; renewing an
-        // unchanged registration is not a change.
-        for _ in 0..3 {
-            tokio::time::advance(Duration::from_secs(10)).await;
-            store.register(replica.clone()).await.unwrap();
-        }
-        assert_eq!(
-            store.list().await.unwrap().items,
-            std::slice::from_ref(&replica)
-        );
-
-        // Without heartbeats it ends: reads skip it, then the sweep removes it.
-        tokio::time::advance(Duration::from_secs(16)).await;
-        assert!(store.get(&replica.replica).await.unwrap().is_none());
-        assert!(
-            matches!(watch.next().await, Some(Ok(WatchEvent::Removed(id))) if id == replica.replica)
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn replacing_a_registration_the_sweep_has_not_removed_is_a_change() {
-        let configured = router("ohio/global-router-0", "http://10.42.0.5:50051");
-        let moved = router("ohio/global-router-0", "http://10.42.0.9:50051");
-        let store = MemoryReplicaStore::new(vec![configured.clone()], LEASE).unwrap();
-        // Sweeps run every 5 s from here.
-        let mut watch = store.list_and_watch(None).await.unwrap();
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == configured));
-        assert!(matches!(
-            watch.next().await,
-            Some(Ok(WatchEvent::Resync(_)))
-        ));
-
-        tokio::time::advance(Duration::from_secs(2)).await;
-        store.register(moved.clone()).await.unwrap();
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == moved));
-
-        // At 18 s the registration has expired (at 17 s), but the last sweep
-        // ran at 15 s, so watchers still hold `moved`. Registering the
-        // configured address again must tell them.
-        for _ in 0..16 {
-            tokio::time::advance(Duration::from_secs(1)).await;
-        }
-        store.register(configured.clone()).await.unwrap();
-        let event = tokio::time::timeout(Duration::from_secs(1), watch.next())
-            .await
-            .expect("watchers must learn the configured address again");
-        assert!(matches!(event, Some(Ok(WatchEvent::Added(r))) if r == configured));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_registration_replaces_a_configured_router_while_it_lasts() {
-        let configured = router("ohio/global-router-0", "http://10.42.0.5:50051");
-        let moved = router("ohio/global-router-0", "http://10.42.0.9:50051");
-        let other = router("west/global-router-0", "http://10.43.0.5:50051");
-        let store = MemoryReplicaStore::new(vec![configured.clone()], LEASE).unwrap();
-        let mut watch = store.list_and_watch(None).await.unwrap();
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == configured));
-        assert!(matches!(
-            watch.next().await,
-            Some(Ok(WatchEvent::Resync(_)))
-        ));
-
-        // Registering the configured address is not a change.
-        store.register(configured.clone()).await.unwrap();
-        store.register(moved.clone()).await.unwrap();
-        store.register(other.clone()).await.unwrap();
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == moved));
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == other));
-        assert_eq!(
-            store.get(&configured.replica).await.unwrap(),
-            Some(moved.clone())
-        );
-
-        // When the registrations end, the configured address comes back and
-        // the other replica goes.
-        tokio::time::advance(Duration::from_secs(16)).await;
-        let mut changes = Vec::new();
-        for _ in 0..2 {
-            changes.push(watch.next().await.unwrap().unwrap());
-        }
-        assert!(
-            changes
-                .iter()
-                .any(|event| matches!(event, WatchEvent::Added(r) if *r == configured))
-        );
-        assert!(
-            changes
-                .iter()
-                .any(|event| matches!(event, WatchEvent::Removed(id) if *id == other.replica))
-        );
-        assert_eq!(store.list().await.unwrap().items, [configured]);
     }
 }

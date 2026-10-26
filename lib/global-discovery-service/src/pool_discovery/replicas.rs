@@ -15,15 +15,10 @@
 //!
 //! The Relay reads a `ReplicaDirectory` in every mode, filled from
 //! `GET /routers`. In Kubernetes mode the service's own directory reads the
-//! router's EndpointSlices that MCS imports. Without MCS, router replicas
-//! register with the service instead ([`ReplicaRegistrar`], served as
-//! `POST /routers`).
+//! router's EndpointSlices that MCS imports.
 
-use async_trait::async_trait;
 use url::Url;
 
-use super::PoolDiscoveryError;
-use super::registrar::Registration;
 use super::watch::{Directory, WatchEvent};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -38,14 +33,3 @@ pub struct ReplicaEndpoint {
 
 pub type ReplicaDirectory = dyn Directory<ReplicaEndpoint, ReplicaId>;
 pub type ReplicaEvent = WatchEvent<ReplicaEndpoint, ReplicaId>;
-
-/// Write side behind `RegisterRouter`. A router replica calls `register` on
-/// a timer, and each call is also its heartbeat, as with
-/// [`super::PoolRegistrar`]. Only stores that cannot find router replicas
-/// themselves take registrations: in Kubernetes mode, the router Service's
-/// EndpointSlices that MCS imports already list every replica.
-#[async_trait]
-pub trait ReplicaRegistrar: Send + Sync {
-    async fn register(&self, endpoint: ReplicaEndpoint)
-    -> Result<Registration, PoolDiscoveryError>;
-}

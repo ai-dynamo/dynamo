@@ -6,9 +6,8 @@
 //! - `POST /pools`: a PoolRelay registers its pool. It calls this on a timer,
 //!   and each call is also the pool's heartbeat.
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
-//! - `POST /routers`: a Global Router replica registers itself, on a timer
-//!   like `POST /pools`. Only a store that cannot list router replicas
-//!   itself takes it; the MCS store answers `501`, since MCS lists them.
+//! - `POST /routers`: `RegisterRouter` from the design, not available yet.
+//!   It answers `501` with the reason (see [`RouterSource`]).
 //! - `GET /pools`: the pools a Global Router routes to.
 //! - `GET /healthz`: OK while the service can answer from its store. Use it
 //!   for readiness; liveness needs only the TCP port.
@@ -29,8 +28,8 @@ use std::sync::Arc;
 
 use crate::pool_discovery::{
     Capacity, Completeness, LeasePolicy, PeerCredentials, PoolDirectory, PoolDiscoveryError,
-    PoolRecord, PoolRegistrar, RelayAuthenticator, ReplicaDirectory, ReplicaEndpoint, ReplicaId,
-    ReplicaRegistrar, Revision, verify,
+    PoolRecord, PoolRegistrar, RelayAuthenticator, ReplicaDirectory, ReplicaEndpoint, Revision,
+    verify,
 };
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
@@ -48,13 +47,25 @@ use url::Url;
 pub struct DiscoveryStore {
     pub pools: Arc<PoolDirectory>,
     pub routers: Arc<ReplicaDirectory>,
+    /// Where `routers` comes from. `POST /routers` gives it as the reason.
+    pub router_source: RouterSource,
     /// `None` when pools are announced another way, as with MCS.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
-    /// `None` when the store lists router replicas itself, as with MCS.
-    pub router_registrar: Option<Arc<dyn ReplicaRegistrar>>,
-    /// Names the caller of `POST /pools` and `POST /routers` from its
-    /// connection.
+    /// Names the caller of `POST /pools` from its connection.
     pub authenticator: Arc<dyn RelayAuthenticator>,
+}
+
+/// Where the service finds router replicas. Router replicas cannot register
+/// yet: `POST /routers` answers `501`. With MCS they need not. Without it,
+/// how a router proves it is a router, and what it sends, are not decided.
+/// Until then every caller would be trusted, and a fake router entry would
+/// make every PoolRelay stream its pool's state to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouterSource {
+    /// `--router` configuration, in the memory store.
+    Configured,
+    /// The router Service's EndpointSlices that MCS imports.
+    Mcs,
 }
 
 pub fn router(store: DiscoveryStore) -> Router {
@@ -131,37 +142,20 @@ async fn list_routers(State(store): State<Arc<DiscoveryStore>>) -> Response {
     }
 }
 
-async fn register_router(
-    State(store): State<Arc<DiscoveryStore>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(registration): Json<RouterRegistration>,
-) -> Response {
-    let Some(registrar) = &store.router_registrar else {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
+/// `RegisterRouter` from the design. It reads no body: the answer is the
+/// same for any request.
+async fn register_router(State(store): State<Arc<DiscoveryStore>>) -> Response {
+    let reason = match store.router_source {
+        RouterSource::Mcs => {
             "router replicas need not register with this store: it lists them from the router \
-             Service's EndpointSlices, which MCS imports",
-        )
-            .into_response();
+             Service's EndpointSlices, which MCS imports"
+        }
+        RouterSource::Configured => {
+            "router registration is not implemented yet: how a router proves it is a router, \
+             and what it sends, are not decided. List router replicas with --router"
+        }
     };
-    // The same check as `POST /pools`. A router replica needs no identity
-    // beyond passing it.
-    if let Err(error) = verify(
-        &*store.authenticator,
-        &PeerCredentials::PeerAddress(peer.ip()),
-    )
-    .await
-    {
-        return error_response(error);
-    }
-    let endpoint = match registration.into_endpoint() {
-        Ok(endpoint) => endpoint,
-        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
-    };
-    match registrar.register(endpoint).await {
-        Ok(registration) => Json(LeaseView::from(registration.lease)).into_response(),
-        Err(error) => error_response(error),
-    }
+    (StatusCode::NOT_IMPLEMENTED, reason).into_response()
 }
 
 /// Lists what `GET /pools` and `GET /routers` would serve. A Kubernetes store
@@ -305,27 +299,8 @@ impl From<Capacity> for WireCapacity {
     }
 }
 
-/// `POST /routers` body: one entry of `GET /routers`.
-#[derive(Debug, Deserialize)]
-struct RouterRegistration {
-    replica: String,
-    url: Url,
-}
-
-impl RouterRegistration {
-    fn into_endpoint(self) -> Result<ReplicaEndpoint, &'static str> {
-        if self.replica.trim().is_empty() {
-            return Err("replica must not be blank");
-        }
-        Ok(ReplicaEndpoint {
-            replica: ReplicaId(self.replica),
-            url: self.url,
-        })
-    }
-}
-
-/// `POST /pools` and `POST /routers` reply: when to register again, and how
-/// long a registration lasts.
+/// `POST /pools` reply: when to register again, and how long a registration
+/// lasts.
 #[derive(Serialize)]
 struct LeaseView {
     heartbeat_interval_s: u64,
@@ -414,7 +389,7 @@ mod tests {
 
     use super::*;
     use crate::backends::kubernetes::TrustedNetworkAuthenticator;
-    use crate::backends::memory::{MemoryPoolStore, MemoryReplicaStore};
+    use crate::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 
     const LEASE: LeasePolicy = LeasePolicy {
         heartbeat_interval: Duration::from_secs(5),
@@ -447,12 +422,11 @@ mod tests {
 
     fn memory_store() -> DiscoveryStore {
         let pools = Arc::new(MemoryPoolStore::new(LEASE).unwrap());
-        let routers = Arc::new(MemoryReplicaStore::new(vec![router_replica()], LEASE).unwrap());
         DiscoveryStore {
             pools: pools.clone(),
-            routers: routers.clone(),
+            routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
+            router_source: RouterSource::Configured,
             registrar: Some(pools),
-            router_registrar: Some(routers),
             authenticator: Arc::new(TrustedNetworkAuthenticator),
         }
     }
@@ -474,12 +448,8 @@ mod tests {
     }
 
     async fn post_pool(base: &str, body: &Value) -> (reqwest::StatusCode, Value) {
-        post_json(base, "/pools", body).await
-    }
-
-    async fn post_json(base: &str, path: &str, body: &Value) -> (reqwest::StatusCode, Value) {
         let response = reqwest::Client::new()
-            .post(format!("{base}{path}"))
+            .post(format!("{base}/pools"))
             .header("content-type", "application/json")
             .body(body.to_string())
             .send()
@@ -538,51 +508,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_router_then_list_routers() {
-        let (base, shutdown) = start(memory_store()).await;
-        let west = json!({"replica": "aws-west/global-router-0", "url": "http://10.43.0.5:50051"});
-        let (status, lease) = post_json(&base, "/routers", &west).await;
-        assert_eq!(status, reqwest::StatusCode::OK);
-        assert_eq!(
-            lease,
-            json!({"heartbeat_interval_s": 5, "lease_duration_s": 15})
-        );
-
-        let (_, routers) = get_json(&base, "/routers").await;
-        let mut listed = routers["routers"].as_array().unwrap().clone();
-        listed.sort_by(|a, b| a["replica"].as_str().cmp(&b["replica"].as_str()));
-        assert_eq!(
-            listed,
-            [
-                json!({"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}),
-                json!({"replica": "aws-west/global-router-0", "url": "http://10.43.0.5:50051/"}),
-            ]
-        );
-
-        let blank = json!({"replica": " ", "url": "http://10.43.0.6:50051"});
-        let (status, _) = post_json(&base, "/routers", &blank).await;
-        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
-        shutdown.cancel();
-    }
-
-    #[tokio::test]
-    async fn store_that_lists_routers_says_they_need_not_register() {
-        let mut store = memory_store();
-        store.router_registrar = None;
-        let (base, shutdown) = start(store).await;
-        let response = reqwest::Client::new()
-            .post(format!("{base}/routers"))
-            .header("content-type", "application/json")
-            .body(
+    async fn routers_cannot_register_and_the_answer_says_why() {
+        for (source, reason) in [
+            (RouterSource::Configured, "not decided"),
+            (RouterSource::Mcs, "need not register"),
+        ] {
+            let mut store = memory_store();
+            store.router_source = source;
+            let (base, shutdown) = start(store).await;
+            // Any body gets the same answer.
+            for body in [
                 json!({"replica": "aws-west/global-router-0", "url": "http://10.43.0.5:50051"})
                     .to_string(),
-            )
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
-        assert!(response.text().await.unwrap().contains("MCS"));
-        shutdown.cancel();
+                String::new(),
+            ] {
+                let response = reqwest::Client::new()
+                    .post(format!("{base}/routers"))
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::NOT_IMPLEMENTED,
+                    "{source:?}"
+                );
+                assert!(
+                    response.text().await.unwrap().contains(reason),
+                    "{source:?}"
+                );
+            }
+            // Listing still works.
+            let (status, _) = get_json(&base, "/routers").await;
+            assert_eq!(status, reqwest::StatusCode::OK);
+            shutdown.cancel();
+        }
     }
 
     #[tokio::test]
@@ -637,8 +597,8 @@ mod tests {
         let (base, shutdown) = start(DiscoveryStore {
             pools: Arc::new(Down),
             routers: Arc::new(Down),
+            router_source: RouterSource::Mcs,
             registrar: None,
-            router_registrar: None,
             authenticator: Arc::new(TrustedNetworkAuthenticator),
         })
         .await;

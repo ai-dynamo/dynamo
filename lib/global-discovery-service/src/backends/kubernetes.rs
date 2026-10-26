@@ -46,9 +46,8 @@
 //! let store = DiscoveryStore {
 //!     pools: Arc::new(McsPoolDirectory::new(client.clone(), mcs, suffix, true, locations)),
 //!     routers: Arc::new(EndpointSliceReplicaDirectory::imported(client, &router, mcs)),
+//!     router_source: RouterSource::Mcs,
 //!     registrar: None,
-//!     // `POST /routers` answers that router replicas need not register.
-//!     router_registrar: None,
 //!     authenticator: Arc::new(TrustedNetworkAuthenticator),
 //! };
 //! service::serve(listener, store, shutdown).await?;

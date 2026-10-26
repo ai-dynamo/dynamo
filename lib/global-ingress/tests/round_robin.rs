@@ -18,7 +18,7 @@ use dynamo_global_discovery_client::{
 use dynamo_global_discovery_service::backends::kubernetes::TrustedNetworkAuthenticator;
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::pool_discovery::LeasePolicy;
-use dynamo_global_discovery_service::service::{self, DiscoveryStore};
+use dynamo_global_discovery_service::service::{self, DiscoveryStore, RouterSource};
 use dynamo_global_router::{DiscoveryPoolCatalog, PoolCatalog};
 use reqwest::StatusCode;
 use tokio_util::sync::CancellationToken;
@@ -33,8 +33,8 @@ async fn discovery_service() -> (Server, GlobalDiscoveryClient) {
     let store = DiscoveryStore {
         pools: pools.clone(),
         routers: Arc::new(StaticReplicaDirectory::new(Vec::new())),
+        router_source: RouterSource::Configured,
         registrar: Some(pools),
-        router_registrar: None,
         authenticator: Arc::new(TrustedNetworkAuthenticator),
     };
     let (listener, url) = common::bind().await;
