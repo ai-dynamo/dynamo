@@ -41,6 +41,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-yaml \
         wget \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # NGC does not publish a Rust toolchain image. Keep this setup aligned with
@@ -57,7 +59,7 @@ RUN ARCH_ALT=$(case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
         *) echo "unsupported TARGETARCH: ${TARGETARCH:-unset}" >&2; exit 1 ;; \
     esac) && \
     RUSTARCH="${ARCH_ALT}-unknown-linux-gnu" && \
-    wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.29.2/${RUSTARCH}/rustup-init" && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
@@ -155,6 +157,8 @@ FROM ${BASE_IMAGE} AS runtime-base
 # The base ships its own uid-1000 `ubuntu` user, so drop it to free the uid.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816ubuntu0.24.04.1 \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && { userdel -r ubuntu 2>/dev/null || true; } \
     && useradd --create-home --uid 1000 --gid 0 dynamo
@@ -179,6 +183,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libssl3t64 \
         openssl \
     && apt-get clean \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # The entrypoint script comes first so it does not wait behind the compile.
