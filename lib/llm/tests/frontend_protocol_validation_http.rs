@@ -110,7 +110,12 @@ async fn assert_anthropic_error(
     message: &str,
 ) {
     assert_eq!(response.status(), expected.status());
+    let request_id = response.headers()["request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
     let body: Value = response.json().await.unwrap();
+    assert_eq!(body["request_id"], request_id);
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], expected.anthropic_type());
     assert!(
@@ -128,7 +133,12 @@ async fn assert_anthropic_status(
     message: &str,
 ) {
     assert_eq!(response.status(), status);
+    let request_id = response.headers()["request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
     let body: Value = response.json().await.unwrap();
+    assert_eq!(body["request_id"], request_id);
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], error_type);
     assert!(

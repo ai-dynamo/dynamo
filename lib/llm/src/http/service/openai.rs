@@ -3807,6 +3807,7 @@ async fn chat_completions(
             stream_handle,
             activity_rx,
             error_signal,
+            true,
         );
         let terminal = terminal.clone();
         // Arm the cancellation fallback before Axum can take ownership of the
