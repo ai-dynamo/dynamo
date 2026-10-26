@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""VA-stable client memory ownership for one GMS V1 socket domain."""
+"""VA-stable client memory ownership for one GMS V1 socket domain.
+
+The client backs allocations with server-owned slabs, mapped back to back in
+one virtual-address reservation per domain, so an allocation can span
+adjacent slabs and no slab tail is left unusable.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +22,6 @@ from gpu_memory_service.v1 import device as device_identity
 from gpu_memory_service.v1.client.mapping import (
     LocalMapping,
     install_mapping,
-    reserve_and_install_mapping,
     unmap_mapping,
 )
 from gpu_memory_service.v1.client.session import _GMSClientSession
@@ -57,8 +61,11 @@ class GMSClientMemoryManager:
         self._session_factory = session_factory
         self._session: _GMSClientSession | None = None
         self._mappings: dict[int, _InstalledMapping] = {}
-        self._regions: dict[int, tuple[int, int]] = {}
-        self._free: dict[int, list[tuple[int, int]]] = {}
+        self._regions: dict[int, int] = {}
+        # Free (va, length) runs over mapped slabs, sorted and coalesced.
+        self._free: list[tuple[int, int]] = []
+        # The domain's VA reservation, (base, size), while it has slabs.
+        self._arena: tuple[int, int] | None = None
         self._lock = threading.RLock()
         self._failure: str | None = None
         self._vmm.ensure_initialized()
@@ -109,12 +116,10 @@ class GMSClientMemoryManager:
                 )
             aligned_size = self._align(size)
             try:
-                for mapping in self._ordered_mappings():
-                    va = self._carve(mapping.base, size, aligned_size)
-                    if va is not None:
-                        return va
-                slab = self._add_slab(aligned_size)
-                va = self._carve(slab.base, size, aligned_size)
+                va = self._carve(size, aligned_size)
+                if va is None:
+                    self._add_slab(aligned_size)
+                    va = self._carve(size, aligned_size)
                 if va is None:
                     raise RuntimeError("new GMS slab has no room for the allocation")
                 return va
@@ -125,17 +130,17 @@ class GMSClientMemoryManager:
         with self._lock:
             self._check()
             try:
-                slab_base, requested_size = self._regions[va]
+                requested_size = self._regions[va]
             except KeyError:
                 raise RuntimeError(f"GMS does not own VA 0x{va:x}") from None
             if size is not None and size != requested_size:
                 raise RuntimeError("allocator free does not match the GMS mapping")
             try:
-                mapping = self._mappings[slab_base]
                 del self._regions[va]
-                self._put_free(slab_base, va - slab_base, self._align(requested_size))
-                if self._free[slab_base] == [(0, mapping.aligned_size)]:
-                    self._destroy_slab(mapping)
+                self._put_free(va, self._align(requested_size))
+                for mapping in self._ordered_mappings():
+                    if self._is_free(mapping.base, mapping.aligned_size):
+                        self._destroy_slab(mapping)
             except Exception as exc:
                 raise self._latch("GMS mapping destruction failed", exc) from exc
 
@@ -245,33 +250,51 @@ class GMSClientMemoryManager:
         return (size + self._granularity - 1) // self._granularity * self._granularity
 
     def _add_slab(self, aligned_size: int) -> _InstalledMapping:
-        slab_bytes = max(self._slab_size, aligned_size)
+        if self._arena is None:
+            _, total = self._vmm.device_memory_info(self._device)
+            # Room for every slab the GPU can back, plus gaps that freed
+            # slabs leave between the ones still in use.
+            arena_size = self._align(2 * total)
+            self._arena = (
+                int(self._vmm.address_reserve(arena_size, self._granularity)),
+                arena_size,
+            )
+        base, slab_bytes = self._place_slab(aligned_size)
         session = self._require_rw()
         allocation_id = f"allocation-{uuid4()}"
         session.allocate(allocation_id, slab_bytes)
         self._select_device()
-        mapping, handle = reserve_and_install_mapping(
+        mapping = _InstalledMapping(
+            allocation_id, slab_bytes, slab_bytes, base, slab_bytes, handle=0
+        )
+        handle = install_mapping(
             self._vmm,
+            mapping,
             session.export(allocation_id),
-            allocation_id,
-            slab_bytes,
-            slab_bytes,
-            slab_bytes,
-            self._granularity,
             self._device,
             GrantedLockType.RW,
         )
-        installed = _InstalledMapping(
-            mapping.allocation_id,
-            mapping.requested_size,
-            mapping.aligned_size,
-            mapping.base,
-            mapping.reservation_size,
-            handle,
-        )
-        self._mappings[mapping.base] = installed
-        self._free[mapping.base] = [(0, slab_bytes)]
+        installed = replace(mapping, handle=handle)
+        self._mappings[base] = installed
+        self._put_free(base, slab_bytes)
         return installed
+
+    def _place_slab(self, aligned_size: int) -> tuple[int, int]:
+        """Find VA for a new slab that, with any free run ending right before
+        it, can hold ``aligned_size``. Returns the slab's base and size."""
+        arena_base, arena_size = self._arena
+        gaps, cursor = [], arena_base
+        for mapping in self._ordered_mappings():
+            gaps.append((cursor, mapping.base - cursor))
+            cursor = mapping.base + mapping.aligned_size
+        gaps.append((cursor, arena_base + arena_size - cursor))
+        free_ends = {va + length: length for va, length in self._free}
+        for gap_base, gap_length in gaps:
+            needed = self._align(aligned_size - free_ends.get(gap_base, 0))
+            slab_bytes = max(self._slab_size, needed)
+            if slab_bytes <= gap_length:
+                return gap_base, slab_bytes
+        raise RuntimeError("GMS client VA reservation is exhausted")
 
     def _destroy_slab(self, mapping: _InstalledMapping) -> None:
         self._select_device()
@@ -279,45 +302,56 @@ class GMSClientMemoryManager:
             self._unmap(mapping)
         if self._session is not None and self._session.lock_type is GrantedLockType.RW:
             self._session.free(mapping.allocation_id)
-        self._vmm.address_free(mapping.base, mapping.reservation_size)
         del self._mappings[mapping.base]
-        del self._free[mapping.base]
+        self._take_free_range(mapping.base, mapping.aligned_size)
+        if not self._mappings:
+            self._vmm.address_free(*self._arena)
+            self._arena = None
 
-    def _carve(self, slab_base: int, size: int, aligned_size: int) -> int | None:
-        offset = self._take_free(slab_base, aligned_size)
-        if offset is None:
-            return None
-        va = slab_base + offset
-        self._regions[va] = (slab_base, size)
-        return va
-
-    def _take_free(self, slab_base: int, aligned_size: int) -> int | None:
-        holes = self._free[slab_base]
-        for index, (offset, length) in enumerate(holes):
+    def _carve(self, size: int, aligned_size: int) -> int | None:
+        for index, (va, length) in enumerate(self._free):
             if length < aligned_size:
                 continue
-            leftover = length - aligned_size
-            if leftover:
-                holes[index] = (offset + aligned_size, leftover)
+            if length > aligned_size:
+                self._free[index] = (va + aligned_size, length - aligned_size)
             else:
-                del holes[index]
-            return offset
+                del self._free[index]
+            self._regions[va] = size
+            return va
         return None
 
-    def _put_free(self, slab_base: int, offset: int, length: int) -> None:
-        holes = self._free[slab_base]
-        holes.append((offset, length))
-        holes.sort()
-        merged: list[tuple[int, int]] = [holes[0]]
-        for hole_offset, hole_length in holes[1:]:
-            prev_offset, prev_length = merged[-1]
-            prev_end = prev_offset + prev_length
-            hole_end = hole_offset + hole_length
-            if hole_offset <= prev_end:
-                merged[-1] = (prev_offset, max(prev_end, hole_end) - prev_offset)
+    def _is_free(self, va: int, length: int) -> bool:
+        return any(
+            run_va <= va and va + length <= run_va + run_length
+            for run_va, run_length in self._free
+        )
+
+    def _take_free_range(self, va: int, length: int) -> None:
+        """Drop [va, va + length), all free, from the free runs."""
+        runs = []
+        for run_va, run_length in self._free:
+            run_end = run_va + run_length
+            if run_end <= va or va + length <= run_va:
+                runs.append((run_va, run_length))
+                continue
+            if run_va < va:
+                runs.append((run_va, va - run_va))
+            if va + length < run_end:
+                runs.append((va + length, run_end - va - length))
+        self._free = runs
+
+    def _put_free(self, va: int, length: int) -> None:
+        runs = sorted([*self._free, (va, length)])
+        merged: list[tuple[int, int]] = [runs[0]]
+        for run_va, run_length in runs[1:]:
+            prev_va, prev_length = merged[-1]
+            prev_end = prev_va + prev_length
+            if run_va <= prev_end:
+                end = max(prev_end, run_va + run_length)
+                merged[-1] = (prev_va, end - prev_va)
             else:
-                merged.append((hole_offset, hole_length))
-        self._free[slab_base] = merged
+                merged.append((run_va, run_length))
+        self._free = merged
 
     def _check(self) -> None:
         if self._failure is not None:

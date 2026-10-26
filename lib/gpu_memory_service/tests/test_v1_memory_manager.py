@@ -209,7 +209,7 @@ def test_client_slabs_pack_reuse_coalesce_and_remap(tmp_path, monkeypatch) -> No
         small = client.create_mapping(65)
         large = client.create_mapping(400)
         assert len(client.mappings) == 2
-        assert set(vmm.reservations) == {mapping.base for mapping in client.mappings}
+        assert set(vmm.reservations) == {client.mappings[0].base}
         client.destroy_mapping(large, 400)
         assert len(client.mappings) == 1
         assert client.owns(small)
