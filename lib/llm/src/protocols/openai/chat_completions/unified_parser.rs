@@ -92,11 +92,16 @@ pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
         .iter()
         .find_map(|(alias, family)| (*alias == parser).then_some(*family))
         .unwrap_or(parser);
-    dynamo_parsers_v2::canonical_unified_family(parser)
+    // Muse Spark serving is integrated separately in #17068; registry presence alone must not enable it.
+    dynamo_parsers_v2::canonical_unified_family(parser).filter(|family| *family != "muse_spark")
 }
 
 pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    let mut names = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.to_vec();
+    let mut names: Vec<_> = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES
+        .iter()
+        .copied()
+        .filter(|name| canonical_family(name).is_some())
+        .collect();
     names.extend(DYNAMO_FAMILY_ALIASES.iter().map(|(alias, _)| *alias));
     names.sort_unstable();
     names.dedup();
@@ -595,10 +600,10 @@ fn starts_bare_json(content: &str) -> bool {
 /// computes: the rendered prompt ended with the family's reasoning opener, so generated
 /// output starts inside a thought the model will close without ever emitting the
 /// opener. Absent that, the answer is per family.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct StreamPrefill {
     pub starting_state: UnifiedParserStartingState,
-    pub prefix: Option<&'static str>,
+    pub prefix: Option<std::sync::Arc<str>>,
 }
 
 impl From<UnifiedParserStartingState> for StreamPrefill {
@@ -1581,8 +1586,8 @@ impl ChoiceState {
     ) -> anyhow::Result<Self> {
         let prefill = prefill.into();
         let mut parser = create_unified_parser_for_family(family, tools)?;
-        // Harmony needs the consumed assistant header to recognize a generated
-        // `to=` recipient. Other families infer their state from the rendered text.
+        // Harmony restores recipient, channel, and body state from the consumed prompt.
+        // Other families replay only an unfinished structural opener.
         //
         // Streaming guided calls commit per call once the name and argument object opener
         // are unambiguous. A committed fragment cannot later be rejected or recovered as
@@ -1593,11 +1598,16 @@ impl ChoiceState {
         // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
         // guided state at all.
         parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids: if family == "gpt_oss"
-                && matches!(&tool_output_mode, UnifiedToolOutputMode::Native)
-                && prefill.starting_state == UnifiedParserStartingState::None
-            {
-                dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+            prompt_token_ids: if family == "gpt_oss" {
+                let prompt = prefill.prefix.as_deref().or_else(|| {
+                    (matches!(&tool_output_mode, UnifiedToolOutputMode::Native)
+                        && prefill.starting_state == UnifiedParserStartingState::None)
+                        .then_some("<|start|>assistant")
+                });
+                prompt
+                    .map(dynamo_parsers_v2::unified::harmony::encode_harmony)
+                    .transpose()?
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             },
@@ -1609,11 +1619,13 @@ impl ChoiceState {
             tool_output_mode: tool_output_mode.clone(),
             invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
         })?;
-        if let Some(prefix) = prefill.prefix {
+        if family != "gpt_oss"
+            && let Some(prefix) = prefill.prefix
+        {
             // Replay only consumed structural bytes; the grammar retains ownership
             // of an optional channel label that generation has not completed yet.
             let mut output = UnifiedParserOutput::default();
-            parser.parse_into(prefix, &mut output)?;
+            parser.parse_into(&prefix, &mut output)?;
             anyhow::ensure!(
                 output.events.is_empty(),
                 "prompt prefix emitted visible output"
@@ -1889,6 +1901,7 @@ impl ChoiceState {
     fn delta_to_choice(&mut self, index: u32, delta: UnifiedParserEvent) -> ChatChoiceStream {
         let mut choice = empty_choice(index);
         match delta {
+            UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd => {}
             UnifiedParserEvent::Text(text) => {
                 choice.delta.content = Some(ChatCompletionMessageContent::Text(text));
             }
@@ -1962,7 +1975,11 @@ impl ChoiceState {
         let mut run = Vec::new();
         let mut projected = Vec::new();
         for (position, delta) in deltas.into_iter().enumerate() {
-            if !emit_tool_calls && matches!(delta, UnifiedParserEvent::ToolCall(_)) {
+            if matches!(
+                delta,
+                UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd
+            ) || !emit_tool_calls && matches!(delta, UnifiedParserEvent::ToolCall(_))
+            {
                 continue;
             }
             if source_positions.contains(&position) {
@@ -2372,6 +2389,7 @@ fn parse_complete_in_mode(
     let events = dynamo_parsers_v2::assemble(&output.events);
     for event in events {
         match event {
+            UnifiedEvent::MessageStart { .. } | UnifiedEvent::MessageEnd => {}
             UnifiedEvent::Text { text: chunk } => text.push_str(&chunk),
             UnifiedEvent::Reasoning { text: chunk } => {
                 if policy.reasoning_disabled {
@@ -2916,6 +2934,9 @@ where
         prefix: prefill_prefix,
     } = prefill.into();
     let prefill = policy.starting_state(family, prefill);
+    let prefill_prefix = prefill_prefix
+        .filter(|_| family == "gpt_oss" || prefill == UnifiedParserStartingState::Reasoning);
+    let has_consumed_harmony_prefix = family == "gpt_oss" && prefill_prefix.is_some();
     let tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
         let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
@@ -3290,6 +3311,7 @@ where
                     && (prefill == UnifiedParserStartingState::Reasoning
                         || policy.structured_response && prefill == UnifiedParserStartingState::None)
                     && policy.inspects_json_prefill(&guided_tool_constraint)
+                    && !has_consumed_harmony_prefix
                     && !records.get(&original.index).is_some_and(|record| record.detoured)
                 {
                     let text = match original.delta.content.as_ref() {
@@ -3360,6 +3382,7 @@ where
                             UnifiedParserStartingState::Response
                         } else if prefill == UnifiedParserStartingState::Reasoning
                             && policy.inspects_json_prefill(&guided_tool_constraint)
+                            && !has_consumed_harmony_prefix
                         {
                             if policy.structured_response {
                                 match original.delta.content.as_ref() {
@@ -3413,7 +3436,8 @@ where
                         }
                         let choice_prefill = StreamPrefill {
                             starting_state: choice_prefill,
-                            prefix: (choice_prefill == UnifiedParserStartingState::Reasoning).then_some(prefill_prefix).flatten(),
+                            prefix: (choice_prefill == prefill && !records.get(&original.index).is_some_and(|record| record.detoured))
+                                .then(|| prefill_prefix.clone()).flatten(),
                         };
                         match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming) {
                             Ok(mut state) => {
@@ -3987,6 +4011,19 @@ pub(crate) mod tests {
     }
 
     // --- tool_choice -> UnifiedToolOutputMode ------------------------------------
+
+    #[test]
+    fn muse_spark_waits_for_serving_integration() {
+        for alias in ["muse_spark", "muse_spark_open"] {
+            assert_eq!(
+                dynamo_parsers_v2::canonical_unified_family(alias),
+                Some("muse_spark")
+            );
+            assert_eq!(canonical_family(alias), None);
+            assert!(!FAMILY_NAMES.contains(&alias));
+        }
+        assert_eq!(canonical_family("harmony"), Some("gpt_oss"));
+    }
 
     #[test]
     fn gpt_oss_aliases_select_the_unified_route_unless_v1() {
@@ -11636,7 +11673,10 @@ pub(crate) mod tests {
             UnifiedParserStartingState::None,
             UnifiedParserStartingState::Reasoning,
         ] {
-            for family in dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES {
+            for family in dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES
+                .iter()
+                .filter(|family| canonical_family(family).is_some())
+            {
                 for raw in [
                     " \n{\"country\":\"France\"}",
                     "[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]",

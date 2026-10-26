@@ -204,11 +204,25 @@ fn validate_legacy_jail_nvext_choice_count(
 ///
 /// Native Muse channels and the legacy Basic reasoning parser use different
 /// delimiters. Keep both facts until the request's actual route is known.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct PromptReasoningPrefill {
     legacy: bool,
     unified: bool,
-    prefix: Option<&'static str>,
+    prefix: Option<Arc<str>>,
+}
+
+impl std::fmt::Debug for PromptReasoningPrefill {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PromptReasoningPrefill")
+            .field("legacy", &self.legacy)
+            .field("unified", &self.unified)
+            .field(
+                "prefix_bytes",
+                &self.prefix.as_ref().map(|prefix| prefix.len()),
+            )
+            .finish()
+    }
 }
 
 impl From<bool> for PromptReasoningPrefill {
@@ -223,7 +237,7 @@ impl From<bool> for PromptReasoningPrefill {
 }
 
 impl PromptReasoningPrefill {
-    fn for_route(self, route: &ToolProcessingRoute) -> bool {
+    fn for_route(&self, route: &ToolProcessingRoute) -> bool {
         match route {
             ToolProcessingRoute::Unified(_) => self.unified,
             _ => self.legacy,
@@ -5354,17 +5368,40 @@ impl OpenAIPreprocessor {
                 None,
                 Some(family),
             );
+            let bare_guidance = *family == "gpt_oss"
+                && (tool_choice::has_explicit_guided_decoding(request)
+                    || guided_tool_constraint.installs_guided_json()
+                        && !(self.runtime_config.structural_tag.is_some()
+                            && structural_tag::uses_gpt_oss_required_array(
+                                (
+                                    self.tool_call_parser.as_deref(),
+                                    self.runtime_config.reasoning_parser.as_deref(),
+                                ),
+                                &tool_choice::convert_tool_choice(
+                                    request
+                                        .inner
+                                        .tool_choice
+                                        .as_ref()
+                                        .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
+                                ),
+                                request.inner.parallel_tool_calls,
+                            )));
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_policy(
                     stream,
                     tool_definitions,
                     guided_tool_constraint,
                     unified_parser::StreamPrefill {
-                        starting_state: unified_parser::stream_prefill(
-                            family,
-                            prompt_injected_reasoning,
-                        ),
-                        prefix: prompt_prefill.prefix,
+                        starting_state: if bare_guidance {
+                            dynamo_parsers_v2::UnifiedParserStartingState::Response
+                        } else {
+                            unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                        },
+                        prefix: if bare_guidance {
+                            None
+                        } else {
+                            prompt_prefill.prefix.clone()
+                        },
                     },
                     family,
                     guided_tool_streaming,
@@ -6763,6 +6800,17 @@ impl OpenAIPreprocessor {
                 prompt.ends_with("<|channel>thought") || prompt.ends_with("<|channel>")
             }
             Some("muse" | "muse_glimmer") => prompt.ends_with("assistant to=self<|message|>"),
+            Some("gpt_oss") => prompt.rsplit_once("<|start|>").is_some_and(|(_, message)| {
+                message
+                    .split_once("<|message|>")
+                    .is_some_and(|(header, _)| {
+                        header
+                            .split_once("<|channel|>")
+                            .is_some_and(|(_, channel)| {
+                                channel.split_whitespace().next() == Some("analysis")
+                            })
+                    })
+            }),
             _ => prompt.ends_with("<think>"),
         }
     }
@@ -6797,25 +6845,32 @@ impl OpenAIPreprocessor {
         } else {
             unified
         };
-        let prefix =
-            if crate::protocols::openai::chat_completions::unified_parser::configured_family(
-                tool_call_parser,
-                reasoning_parser,
-            ) == Some("gemma4")
-            {
+        let family = crate::protocols::openai::chat_completions::unified_parser::configured_family(
+            tool_call_parser,
+            reasoning_parser,
+        );
+        let prefix = match family {
+            Some("gemma4") => {
                 const HEADER: &str = "<|channel>thought\n";
                 formatted_prompt.and_then(|raw| {
                     ("<|channel>".len()..HEADER.len())
                         .rev()
                         .map(|end| &HEADER[..end])
                         .find(|prefix| raw.ends_with(prefix))
+                        .map(Arc::from)
                 })
-            } else {
-                None
-            };
+            }
+            Some("gpt_oss") => formatted_prompt.and_then(|prompt| {
+                // The Harmony parser owns header/body state, including a continued recipient or channel.
+                prompt
+                    .rfind("<|start|>")
+                    .map(|start| Arc::from(&prompt[start..]))
+            }),
+            _ => None,
+        };
         PromptReasoningPrefill {
             legacy,
-            unified: unified || prefix.is_some(),
+            unified: unified || family == Some("gemma4") && prefix.is_some(),
             prefix,
         }
     }
@@ -6883,6 +6938,8 @@ impl OpenAIPreprocessor {
         if let Some(family) = unified_family {
             let thinking = dynamo_renderer::thinking_bool_from_args(chat_template_args.as_ref());
             return match family {
+                // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
+                "gpt_oss" => false,
                 "gemma4" => thinking != Some(true),
                 "deepseek_v4" | "deepseek_v41" => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
@@ -8819,6 +8876,254 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
+    async fn gpt_oss_disabled_aliases_keep_reasoning_separate() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_disabled_aliases_keep_reasoning_separate"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        let input = "<|channel|>analysis<|message|>private thought<|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>";
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"thinking": false}),
+            serde_json::json!({"enable_thinking": false}),
+            serde_json::json!({"thinking_mode": "disabled"}),
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "user", "content": "hello"}],
+                    "chat_template_kwargs": args,
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(
+                &mut request,
+                Some("gpt_oss"),
+                Some("harmony"),
+            );
+            preprocessor.validate_model_request(&request).unwrap();
+            let reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+                &request,
+                Some("harmony"),
+                Some("gpt_oss"),
+                None,
+                Some("gpt_oss"),
+            );
+            let batch = crate::protocols::openai::chat_completions::unified_parser::parse_complete_with_policy(
+                "gpt_oss", input, &crate::protocols::openai::GuidedToolConstraint::None, &[],
+                crate::protocols::openai::chat_completions::unified_parser::UnifiedRequestPolicy {
+                    reasoning_disabled, ..Default::default()
+                },
+            ).unwrap();
+            assert_eq!(
+                (batch.text.as_str(), batch.reasoning.as_str()),
+                ("answer", "private thought"),
+                "args={args}"
+            );
+            for split in 0..=input.len() {
+                let chunks =
+                    [(&input[..split], false), (&input[split..], true)].map(|(text, terminal)| {
+                        let mut chunk = chat_stream_chunk(0, None);
+                        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                        choice.delta.content =
+                            Some(ChatCompletionMessageContent::Text(text.into()));
+                        choice.finish_reason = terminal.then_some(FinishReason::Stop);
+                        chunk
+                    });
+                let output = preprocessor
+                    .postprocessor_parsing_stream(
+                        futures::stream::iter(chunks),
+                        &request,
+                        false,
+                        false,
+                    )
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                let (content, reasoning) = gpt_oss_stream_text(&output);
+                assert_eq!(content, "answer", "args={args} split={split}");
+                assert_eq!(reasoning, "private thought", "args={args} split={split}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_continuations_keep_the_rendered_channel() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_continuations_keep_the_rendered_channel"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        for (channel, input, content, reasoning, structured, forced) in [
+            ("final", " wörld🙂<|return|>", " wörld🙂", "", false, None),
+            (
+                "analysis",
+                " next<|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>",
+                "answer",
+                " next",
+                false,
+                None,
+            ),
+            (
+                "analysis",
+                "[1,2]<|end|><|start|>assistant<|channel|>final<|message|>{\"answer\":1}<|return|>",
+                "{\"answer\":1}",
+                "[1,2]",
+                true,
+                None,
+            ),
+            (
+                "analysis",
+                "[1,2]<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]<|return|>",
+                "",
+                "[1,2]",
+                false,
+                Some(true),
+            ),
+            (
+                "analysis",
+                "[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]",
+                "",
+                "",
+                false,
+                Some(false),
+            ),
+        ] {
+            preprocessor.formatter = test_prompt_formatter(&format!(
+                "{{% for message in messages %}}<|start|>{{{{ message.role }}}}<|channel|>{channel}<|message|>{{{{ message.content }}}}<|return|>{{% endfor %}}"
+            ));
+            preprocessor.runtime_config.structural_tag = forced
+                .filter(|enabled| *enabled)
+                .map(|_| Default::default());
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "assistant", "content": "Hello"}],
+                    "continue_final_message": true, "add_generation_prompt": false,
+                    "response_format": if structured { serde_json::json!({"type":"json_object"}) } else { serde_json::Value::Null },
+                }))
+                .unwrap();
+            if forced.is_some() {
+                request.inner.tools = Some(serde_json::from_value(serde_json::json!([
+                    {"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}
+                ])).unwrap());
+                request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+            }
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert!(prompt.as_str().ends_with("<|message|>Hello"));
+            for split in (0..=input.len()).filter(|split| input.is_char_boundary(*split)) {
+                let prefill = preprocessor.configured_prompt_prefill(Some(prompt.as_str()));
+                assert!(!format!("{prefill:?}").contains("Hello"));
+                let mut common = preprocessor
+                    .builder(&request)
+                    .unwrap()
+                    .token_ids(vec![1])
+                    .build()
+                    .unwrap();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, prefill.unified)
+                    .unwrap();
+                let route = preprocessor
+                    .tool_processing_route(&request, &constraint)
+                    .unwrap();
+                let chunks =
+                    [(&input[..split], false), (&input[split..], true)].map(|(text, terminal)| {
+                        let mut chunk = chat_stream_chunk(0, None);
+                        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                        choice.delta.content =
+                            Some(ChatCompletionMessageContent::Text(text.into()));
+                        choice.finish_reason = terminal.then_some(FinishReason::Stop);
+                        chunk
+                    });
+                let output = preprocessor
+                    .postprocessor_parsing_stream_with_constraint(
+                        futures::stream::iter(chunks),
+                        &request,
+                        prefill,
+                        constraint,
+                        route,
+                    )
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                assert_eq!(
+                    gpt_oss_stream_text(&output),
+                    (content.into(), reasoning.into()),
+                    "channel={channel} split={split}"
+                );
+                let choices: Vec<_> = output
+                    .iter()
+                    .filter_map(|response| response.data.as_ref())
+                    .flat_map(|data| &data.inner.choices)
+                    .collect();
+                let calls: Vec<_> = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .collect();
+                if forced.is_some() {
+                    let names: Vec<_> = calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                        .collect();
+                    assert_eq!(names, ["lookup"]);
+                    let arguments: String = calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                        .collect();
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                        serde_json::json!({"q":"x"})
+                    );
+                } else {
+                    assert!(calls.is_empty());
+                }
+                assert_eq!(
+                    choices
+                        .iter()
+                        .filter(|choice| choice.finish_reason.is_some())
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    // These cases exercise request policy and consumed prompts, which the parser corpus does not carry.
+    fn gpt_oss_stream_text(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> (String, String) {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        for response in output {
+            assert!(!response.is_error());
+            if let Some(data) = &response.data {
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                        content.push_str(text);
+                    }
+                    if let Some(text) = &choice.delta.reasoning_content {
+                        reasoning.push_str(text);
+                    }
+                }
+            }
+        }
+        (content, reasoning)
+    }
+
+    #[tokio::test]
     async fn eight_family_routes_and_tool_suppression() {
         use crate::protocols::openai::chat_completions::unified_parser;
         let card = ModelDeploymentCard::load_from_disk(
@@ -9136,7 +9441,7 @@ mod tests {
                     .postprocessor_parsing_stream_with_constraint(
                         futures::stream::iter(chunks),
                         &request,
-                        prefill,
+                        prefill.clone(),
                         crate::protocols::openai::GuidedToolConstraint::None,
                         ToolProcessingRoute::Unified("gemma4"),
                     )
@@ -9857,7 +10162,7 @@ mod tests {
                                     .postprocessor_parsing_stream(
                                         stream::iter(input()),
                                         &request,
-                                        prefill,
+                                        prefill.clone(),
                                         structural_tag,
                                     )
                                     .unwrap()
