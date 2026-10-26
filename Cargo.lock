@@ -2505,6 +2505,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-http-server"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "dynamo-runtime",
+ "futures",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "rcgen",
+ "rustls",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.7.0"
 dependencies = [
