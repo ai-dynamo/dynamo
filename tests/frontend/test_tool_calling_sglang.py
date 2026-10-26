@@ -315,7 +315,10 @@ def tool_calling_services(
             frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
             allocated_ports.append(frontend_port)
             with ToolCallingFrontendProcess(
-                request, frontend_port=frontend_port, topology=topology
+                request,
+                frontend_port=frontend_port,
+                topology=topology,
+                extra_env={"DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION": "0"},
             ):
                 logger.info(
                     "Tool calling stack ready (topology=%s frontend=%d worker_system=%d)",
@@ -694,8 +697,30 @@ def assistant_tool_message_from_result(result: StreamResult) -> dict[str, Any]:
 
 
 @pytest.mark.pre_merge
-@pytest.mark.usefixtures("tool_calling_services")
-def test_strict_schema_compatibility_completes(request, tool_calling_topology: str):
+def test_strict_schema_compatibility_completes(
+    request, client: OpenAI, tool_calling_topology: str
+):
+    # The legacy schema leaves unit optional even with strict=true.
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "What's the weather in Paris?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {**TOOLS_WEATHER[0]["function"], "strict": True},
+            }
+        ],
+        "tool_choice": "auto",
+        "stream": False,
+        "max_tokens": 64,
+        "temperature": 0,
+    }
+    with pytest.raises(openai.BadRequestError) as rejected:
+        client.chat.completions.create(**payload)
+    message = str(rejected.value)
+    assert "Invalid schema for function 'get_weather'" in message
+    assert "must include property 'unit'" in message
+
     # The startup policy needs a separate frontend; the real worker can be reused.
     frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
     try:
@@ -711,26 +736,7 @@ def test_strict_schema_compatibility_completes(request, tool_calling_topology: s
                 timeout=60,
                 max_retries=0,
             ) as compat_client:
-                response = compat_client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[
-                        {"role": "user", "content": "What's the weather in Paris?"}
-                    ],
-                    # The legacy schema leaves unit optional even with strict=true.
-                    tools=[
-                        {
-                            "type": "function",
-                            "function": {
-                                **TOOLS_WEATHER[0]["function"],
-                                "strict": True,
-                            },
-                        }
-                    ],
-                    tool_choice="auto",
-                    stream=False,
-                    max_tokens=64,
-                    temperature=0,
-                )
+                response = compat_client.chat.completions.create(**payload)
                 assert len(response.choices) == 1
                 assert response.usage is not None
                 assert response.usage.completion_tokens > 0
