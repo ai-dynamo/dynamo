@@ -195,16 +195,18 @@ python3 nsight_operator.py --tag $T download -o ./reports
 `--delay` gives the load time to warm up. The coordinator starts and stops the window itself, so the CLI does not need
 to stay connected. Reports appear after the delay, the window, and the upload; a 30-second window on one GPU worker
 produced a report of about 100 MB. Each file name carries the tag, the process, and the pod name. An `otlp-converter`
-entry in `status` or `ls` comes from Nsight's OpenTelemetry converter, not from a Dynamo pod.
+entry in `status` or `ls` comes from Nsight's OpenTelemetry converter, not from a Dynamo pod. Open the reports with an
+Nsight Systems version at least as new as the `nsys` that the operator injects.
 
 <Note>
-`autoconfigure` copies the storage key that the gateway uses into `~/.nsight-cloud.conf`. To keep keys off the machine
-that runs the CLI, use [`configure`](https://docs.nvidia.com/nsight-operator/UserGuide/index.html#configure) and
-read reports with your own credentials; see
-[storage access for downloads](https://docs.nvidia.com/nsight-operator/UserGuide/index.html#configuring-storage-access-for-downloads).
-</Note>
+`autoconfigure` copies the gateway's storage key into `~/.nsight-cloud.conf` on the machine that runs the CLI. To keep
+the key off that machine:
 
-Open the reports with an Nsight Systems version at least as new as the `nsys` that the operator injects.
+- Set up the CLI with [`configure`](https://docs.nvidia.com/nsight-operator/UserGuide/index.html#configure) instead
+  of `autoconfigure`.
+- Download reports with your own storage credentials, as described in
+  [Configuring Storage Access for Downloads](https://docs.nvidia.com/nsight-operator/UserGuide/index.html#configuring-storage-access-for-downloads).
+</Note>
 
 ## Pitfalls
 
