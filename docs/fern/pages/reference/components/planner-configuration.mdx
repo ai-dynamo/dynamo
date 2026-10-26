@@ -182,9 +182,9 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 
 Download the AISimulate dataset snapshot into the container image during the image
 build, or mount a local copy before starting Planner. Use the
-generic AISimulate wheel; measurements do not belong inside the wheel. The supported
-dependency pair is Python `0.13.0.dev202610230000000081` and Rust
-`0.13.0-dev.202610230000000081`.
+generic AISimulate wheel; measurements do not belong inside the wheel. Use matching
+AISimulate Python and Rust releases that support execution profiles through the
+common forward-pass query API.
 
 The following configuration illustrates the paths to supply for a prefill role:
 
@@ -203,9 +203,10 @@ serving, supply separate `prefill` and `decode` sources. Canonical prepared conf
 containing `estimator_config.op_level.execution_profile` also work through `roles`.
 
 Planner applies its existing workload estimates, including queue scaling,
-prefix-cache discounts, and next-request estimates, before querying the profile.
-If AISimulate cannot estimate the resulting shape, Planner skips scaling decisions
-that depend on that estimate.
+prefix-cache discounts, and next-request estimates, before calling AISimulate's
+common forward-pass query API. AISimulate selects the profile query internally.
+If it cannot estimate the resulting shape, Planner skips scaling decisions that
+depend on that estimate.
 
 <ParamField path="aic_interpolation" type="AICInterpolationSpec" default="null">
   AIConfigurator interpolation spec. Populated by the profiler in rapid mode and written onto the Planner ConfigMap; you do not normally set this by hand. When present, the Planner runs the AIC sweep in-process at bootstrap to seed the performance model. See [AICInterpolationSpec](#aicinterpolationspec).

@@ -86,7 +86,7 @@ def dataset_profile(request, tmp_path, monkeypatch):
         str(table.relative_to(systems)),
     )
     ops_key = "context_ops" if phase == "prefill" else "generation_ops"
-    # 2 ms per synthetic scope, repeated three times: exactly 6 ms.
+    # Scopes cost 2 ms (4 ms for the longer prompt), each repeated three times.
     profile = dict(
         schema_version=1,
         basis=basis,
@@ -104,11 +104,12 @@ def dataset_profile(request, tmp_path, monkeypatch):
                     ),
                     scale_factor=3.0,
                     cells=[
-                        {
-                            "shape": [batch, 4 if phase == "prefill" else 5, 0],
-                            "latency_ms": 2.0,
-                        }
-                        for batch in (1, 2)
+                        {"shape": [batch, length, 0], "latency_ms": latency}
+                        for batch, length, latency in (
+                            [(1, 4, 2.0), (1, 8, 4.0), (2, 4, 2.0)]
+                            if phase == "prefill"
+                            else [(1, 5, 2.0), (2, 5, 2.0)]
+                        )
                     ],
                 )
             }
@@ -248,13 +249,16 @@ def test_profile_uses_existing_queue_and_decode_scaling(dataset_profile):
         assert _query(model, phase, tokens=16, kv_hit_rate=0.5) == pytest.approx(0.006)
 
 
-def test_profile_capacity_preserves_batch_geometry(dataset_profile):
+def test_profile_capacity_uses_existing_planner_workload(dataset_profile):
     config, _, phase = dataset_profile
     model = _model(config, phase)
     # Context at the midpoint of a one-token decode is exactly four past tokens.
     capacity = model.find_engine_capacity_rps(isl=4, osl=1)
     assert capacity is not None
-    assert capacity.rps == pytest.approx(2 / 0.006)
+    # Existing prefill capacity planning represents each candidate as one
+    # prompt containing all tokens: 1x4 costs 6 ms; 1x8 costs 12 ms.
+    expected = 1 / 0.006 if phase == "prefill" else 2 / 0.006
+    assert capacity.rps == pytest.approx(expected)
     cached_isl = 8 if phase == "prefill" else 4
     cached = model.find_engine_capacity_rps(isl=cached_isl, osl=1, kv_hit_rate=0.5)
     assert cached is not None

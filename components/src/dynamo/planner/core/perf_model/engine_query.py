@@ -194,7 +194,6 @@ class AISCoreEnginePerfModel:
         limits: EnginePerfLimits,
         attention_dp_size: int,
         max_observations: int,
-        execution_profile: bool = False,
     ) -> None:
         if worker_type not in ("prefill", "decode", "aggregated"):
             raise ValueError(f"invalid worker_type {worker_type!r}")
@@ -207,7 +206,6 @@ class AISCoreEnginePerfModel:
         self._limits = limits
         self._attention_dp_size = attention_dp_size
         self._load_averages = _AggLoadAverages(max_observations)
-        self._execution_profile = execution_profile
 
     @classmethod
     def best_available(
@@ -228,11 +226,6 @@ class AISCoreEnginePerfModel:
             limits=limits,
             attention_dp_size=attention_dp_size,
             max_observations=max_observations,
-            execution_profile=bool(
-                ais_config.get("estimator_config", {})
-                .get("op_level", {})
-                .get("execution_profile")
-            ),
         )
 
     def tune_with_fpms(self, iterations: list[list[ForwardPassMetrics]]) -> None:
@@ -262,23 +255,6 @@ class AISCoreEnginePerfModel:
         if self._worker_type == "decode":
             return None
         self._validate_metrics_by_rank(metrics_by_rank)
-
-        if self._execution_profile:
-            queued = metrics_by_rank[0].queued_requests
-            batch = queued.num_prefill_requests
-            tokens = queued.sum_prefill_tokens
-            if batch == 0 and tokens == 0:
-                return 0.0
-            if (
-                batch <= 0
-                or tokens <= 0
-                or tokens % batch
-                or queued.var_prefill_length != 0
-                or tokens > self._limits.max_num_batched_tokens
-                or batch > self._limits.max_num_seqs
-            ):
-                return None
-            return self._profile_prefill_seconds(batch, tokens // batch)
 
         plans = [
             _PrefillChunkPlan.build(
@@ -344,9 +320,6 @@ class AISCoreEnginePerfModel:
             return None
         self._validate_metrics_by_rank(metrics_by_rank)
 
-        if self._execution_profile:
-            return self._estimate_forward_pass_seconds(metrics_by_rank)
-
         estimates: list[ForwardPassMetrics] = []
         for snapshot in metrics_by_rank:
             source = snapshot.scheduled_requests
@@ -401,20 +374,11 @@ class AISCoreEnginePerfModel:
         max_batch = self._prefill_max_batch(prefill_isl)
         if max_batch == 0:
             return None
-        if (
-            self._execution_profile
-            and prefill_isl > self._limits.max_num_batched_tokens
-        ):
-            return None
 
         best: Optional[EngineCapacity] = None
         for batch_size in _capacity_batch_sizes(max_batch):
-            ttft_s = (
-                self._profile_prefill_seconds(batch_size, prefill_isl)
-                if self._execution_profile
-                else self._prefill_time_for_tokens(
-                    _saturating_mul_u32(prefill_isl, batch_size)
-                )
+            ttft_s = self._prefill_time_for_tokens(
+                _saturating_mul_u32(prefill_isl, batch_size)
             )
             if ttft_s is None:
                 return None
@@ -651,51 +615,19 @@ class AISCoreEnginePerfModel:
     def _estimate_forward_pass_seconds(
         self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
-        if self._execution_profile:
-            self._validate_metrics_by_rank(metrics_by_rank)
-            scheduled = metrics_by_rank[0].scheduled_requests
-            # Aggregate prefill moments do not establish equal chunk/prefix pairs.
-            # Decode KV variance does identify a homogeneous single-step batch.
-            batch = scheduled.num_decode_requests
-            kv = scheduled.sum_decode_kv_tokens
-            if (
-                self._worker_type != "decode"
-                or scheduled.num_prefill_requests != 0
-                or scheduled.sum_prefill_tokens != 0
-                or scheduled.sum_prefill_kv_tokens != 0
-                or scheduled.var_decode_kv_tokens != 0
-                or batch < 0
-                or kv < 0
-            ):
-                return None
-            if batch == 0:
-                return 0.0 if kv == 0 else None
-            if kv % batch:
-                return None
-            estimate_ms = self._model.predict_decode_latency_total(batch, kv)
-        else:
-            estimate_ms = self._model.estimate_forward_pass_time_ms(
-                [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
+        estimate_ms = self._model.estimate_forward_pass_time_ms(
+            [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
+        )
+        if estimate_ms is None:
+            return None
+        if not math.isfinite(estimate_ms):
+            raise ValueError(
+                f"AISimulate forward-pass estimate must be finite, got {estimate_ms}"
             )
-        return _forward_pass_seconds(estimate_ms)
-
-    def _profile_prefill_seconds(self, batch: int, length: int) -> Optional[float]:
-        return _forward_pass_seconds(
-            self._model.predict_prefill_latency(batch, length, 0)
+        return _checked_duration_seconds(
+            max(0.0, estimate_ms) / 1000.0,
+            "AISimulate forward-pass estimate",
         )
-
-
-def _forward_pass_seconds(estimate_ms: Optional[float]) -> Optional[float]:
-    if estimate_ms is None:
-        return None
-    if not math.isfinite(estimate_ms):
-        raise ValueError(
-            f"AISimulate forward-pass estimate must be finite, got {estimate_ms}"
-        )
-    return _checked_duration_seconds(
-        max(0.0, estimate_ms) / 1000.0,
-        "AISimulate forward-pass estimate",
-    )
 
 
 def _fpm_to_ais_dict(metrics: ForwardPassMetrics) -> dict[str, Any]:
