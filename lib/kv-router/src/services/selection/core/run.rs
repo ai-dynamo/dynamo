@@ -43,7 +43,7 @@
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
 use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
-use super::hint::{hint_capable_partition, transfer_hint_for_selection};
+use super::hint::transfer_hint_payload;
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
 /// the session initializing routes unpinned (see the module doc).
@@ -316,12 +316,13 @@ impl SelectionCore {
                 .map_err(affinity_error)?,
             _ => affinity_target,
         };
-        // Router hints are attached to bookings only, and only when a worker in
-        // this partition can consume them and the indexer can retain the
-        // matched chain (local, event-driven, no approximate writes).
-        // Read from the published partition snapshot, the same view the hint
-        // builder uses, rather than scanning the catalog per booking.
-        let hint_capable_workers = book && hint_capable_partition(&entry.workers_tx.borrow());
+        // Transfer candidates need a worker in this partition that consumes
+        // router hints and an indexer that can retain the matched chain (local,
+        // event-driven, no approximate writes). Bookings use them for the fetch
+        // hint; when the policy scores fetchable prefixes, every selection
+        // retains them so previews score like bookings.
+        let hint_capable_workers = (book || entry.scores_kv_transfer)
+            && entry.hint_capable_workers.load(Ordering::Relaxed);
         let retain_kv_transfer_chain =
             hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
         if hint_capable_workers && !retain_kv_transfer_chain {
@@ -485,21 +486,23 @@ impl SelectionCore {
             (Some(endpoint), total_kv_blocks)
         };
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
-        let kv_hint = if retain_kv_transfer_chain && response.kv_transfer_candidates.is_some() {
-            transfer_hint_for_selection(
-                &entry.workers_tx.borrow(),
-                response.best_worker,
-                response.target_cached_prefix_blocks,
-                response.kv_transfer_candidates.as_ref(),
-            )
-            .map(|payload| {
-                KvHint::new(
-                    admission.request_id().unwrap_or_default(),
-                    vec![KvHintAction::fetch(KV_HINT_FETCH_ACTION_ID, payload)],
+        // Hints are attached to bookings only, for the source selection chose.
+        let kv_hint = match (
+            book,
+            response.kv_transfer_source,
+            response.kv_transfer_candidates.as_ref(),
+        ) {
+            (true, Some(source), Some(candidates)) => {
+                transfer_hint_payload(&entry.workers_tx.borrow(), source, candidates).map(
+                    |payload| {
+                        KvHint::new(
+                            admission.request_id().unwrap_or_default(),
+                            vec![KvHintAction::fetch(KV_HINT_FETCH_ACTION_ID, payload)],
+                        )
+                    },
                 )
-            })
-        } else {
-            None
+            }
+            _ => None,
         };
 
         // The routing hashes go to exactly one of: the reservation recorded

@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -38,7 +38,8 @@ kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 ckf-diagnostics = ["dynamo-llm/ckf-diagnostics"]
 slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
-# Stable request identities and deterministic replay tie-breaking for parity builds.
+# Replay parity benchmark builds. Deterministic replay itself is the `deterministic`
+# argument of `run_mocker_trace_replay` and needs no feature.
 replay-bench = ["dynamo-mocker/replay-bench"]
 ais-forward-pass = ["dep:aisimulate-core"]
 nvtx = ["dynamo-runtime/nvtx"]
@@ -59,10 +60,10 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisimulate-core = { version = "=0.13.0-dev.2", optional = true, features = ["python"] }
+aisimulate-core = { version = "=0.13.0-dev.202610240000000082", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "=10.0.2" }
+dynamo-parsers = { version = "=10.0.7" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
@@ -103,14 +104,14 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
-# "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10, which is the minimum version in pyproject.toml
+# "abi3-py311" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.11, which is the minimum version in pyproject.toml
 pyo3 = { version = "0.23.4", default-features = false, features = [
   "macros",
   "experimental-async",
   "experimental-inspect",
   "extension-module",
   "py-clone",
-  "abi3-py310"
+  "abi3-py311"
 ] }
 
 pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [

@@ -91,6 +91,10 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
   Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
 
+  In vLLM model workers with the `ai-dynamo` wheel installed, the `dynamo_nixl_telemetry` plugin unsets a false `NIXL_TELEMETRY_ENABLE`, sets `NIXL_TELEMETRY_EXPORTER` to `NOP`, and unsets `NIXL_TELEMETRY_DIR`. NIXL collects transfer statistics in-process without exporting them. An unset or true enable value is left unchanged.
+
+  If you set `VLLM_PLUGINS`, include `dynamo_nixl_telemetry`. Without it, Ray model actors keep the inherited false value. With NIXL 1.4, this can cause disaggregated inference to fail after a KV transfer.
+
   This variable alone does not produce a scrapeable endpoint: set `NIXL_TELEMETRY_EXPORTER` as well. `NIXL_TELEMETRY_PROMETHEUS_PORT` then chooses the port, and while it is optional, leaving it unset lands the exporter on a port the operator already uses. Both are described below.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>1</Badge> <Badge intent="note" minimal>yes</Badge> <Badge intent="note" minimal>on</Badge> <Badge intent="note" minimal>true</Badge> <Badge intent="note" minimal>enable</Badge> <Badge intent="note" minimal>n</Badge> <Badge intent="note" minimal>0</Badge> <Badge intent="note" minimal>no</Badge> <Badge intent="note" minimal>off</Badge> <Badge intent="note" minimal>false</Badge> <Badge intent="note" minimal>disable</Badge></span>
@@ -106,6 +110,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   NIXL telemetry exporter to use, e.g. `prometheus`.
 
   Required for a Prometheus endpoint, with the exact lowercase value `prometheus`. NIXL has no default exporter: when this variable is unset, telemetry is collected in-process without opening a Prometheus port. Other valid exporters, such as `doca`, use their own configuration; an exporter that NIXL cannot load makes agent construction fail.
+
+  In vLLM workers, the `dynamo_nixl_telemetry` plugin replaces this value with `NOP` when `NIXL_TELEMETRY_ENABLE` is false. See the `NIXL_TELEMETRY_ENABLE` entry above.
 
   **Operator preset:** `prometheus` on worker, prefill, and decode pods.
 </ParamField>

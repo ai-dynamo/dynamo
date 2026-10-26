@@ -5,11 +5,11 @@ package dynamo
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"k8s.io/utils/ptr"
 )
 
 // SupportedGroveUpdateStrategies returns the annotation values accepted by rendering and admission.
@@ -20,10 +20,8 @@ func SupportedGroveUpdateStrategies() []string {
 // ParseGroveUpdateStrategy parses an exact, case-sensitive annotation value.
 func ParseGroveUpdateStrategy(value string) (grovev1alpha1.UpdateStrategyType, error) {
 	// Keep admission and rendering on the same supported value set.
-	for _, supported := range SupportedGroveUpdateStrategies() {
-		if value == supported {
-			return grovev1alpha1.UpdateStrategyType(value), nil
-		}
+	if slices.Contains(SupportedGroveUpdateStrategies(), value) {
+		return grovev1alpha1.UpdateStrategyType(value), nil
 	}
 	return "", fmt.Errorf("unsupported Grove update strategy annotation %q=%q: supported values are %q", consts.KubeAnnotationGroveUpdateStrategy, value, SupportedGroveUpdateStrategies())
 }
@@ -39,13 +37,13 @@ func ResolveGroveUpdateStrategy(dgd *v1beta1.DynamoGraphDeployment, existingPCS 
 		if err != nil {
 			return nil, err
 		}
-		desired = ptr.To(strategy)
+		desired = new(strategy)
 	}
 
 	// Retain the strategy that initialized Grove's progress until that update finishes.
 	if existingPCS != nil && existingPCS.Status.UpdateProgress != nil && existingPCS.Status.UpdateProgress.UpdateEndedAt == nil {
 		if existingPCS.Spec.UpdateStrategy != nil {
-			return ptr.To(existingPCS.Spec.UpdateStrategy.Type), nil
+			return new(existingPCS.Spec.UpdateStrategy.Type), nil
 		}
 		return nil, nil
 	}

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Reviewed against Dynamo Rust support commit 8a5e8f4674 and the dependency pin
+# in composition/async-openai-0.42.1.yaml. These are gaps, never approved parity.
+gaps:
+  - endpoint: /v1/chat/completions
+    field: chat_template_kwargs
+    location: '#/components/schemas/NvCreateChatCompletionRequest'
+    source: lib/llm/src/protocols/openai/chat_completions.rs
+    reason: Serde accepts this alias for chat_template_args. New exports describe it with x-dynamo-input-aliases, consumed by alias-aware comparison; ordinary JSON Schema validation does not enforce this extension's value or duplicate-name rules. Older captures omit the metadata. Consult alias-matches.json before interpreting missing-name deltas.
+  - endpoint: /v1/chat/completions
+    field: messages[].function_call.arguments and messages[].tool_calls[].function.arguments
+    location: '#/components/schemas/dynamo_protocols.chat.FunctionCall'
+    source: protocols/src/types/chat.rs
+    dependency: dynamo-protocols
+    reason: The custom deserializer accepts strings or objects and normalizes objects to strings; the derived schema advertises String only.
+  - endpoint: /v1/chat/completions
+    field: messages[role=system].content
+    location: '#/components/schemas/dynamo_protocols.chat.ChatCompletionRequestSystemMessage'
+    source: protocols/src/types/chat.rs
+    dependency: dynamo-protocols
+    reason: Non-empty system tools permit absent/null content. This conditional accepted-input shape is missing from the derived schema.
+  - endpoint: /v1/chat/completions
+    field: messages[].tools and messages[].partial
+    location: '#/components/schemas/dynamo_protocols.chat.ChatCompletionRequestMessage'
+    source: protocols/src/types/chat.rs
+    dependency: dynamo-protocols
+    reason: Custom role-dependent rejection rules are not represented by permissive additionalProperties in the derived schemas.
+  - endpoint: /v1/chat/completions
+    field: messages[].content[].image_url, video_url, audio_url
+    location: '#/components/schemas/dynamo_protocols.chat.ChatCompletionRequestUserMessageContentPart'
+    source: protocols/src/types/chat.rs
+    dependency: dynamo-protocols
+    reason: Empty media URLs normalize to absence before remaining object fields are deserialized. The exported nested type does not express this conditional acceptance.
+  - endpoint: /v1/chat/completions
+    field: '*'
+    location: '#/components/schemas/NvCreateChatCompletionRequest'
+    source: lib/llm/src/protocols/openai/validate.rs
+    reason: Catch-all admission, numeric Rust bounds, aliases and cross-field/custom validation are not comprehensively encoded by the exporter. Absence of a declared field or constraint cannot prove acceptance or rejection.
+  - endpoint: /v1/completions
+    field: '*'
+    location: '#/components/schemas/NvCreateCompletionRequest'
+    source: lib/llm/src/protocols/openai/validate.rs
+    reason: Catch-all admission, numeric Rust bounds and custom/cross-field validation are not comprehensively encoded by the exporter. Completion rejects chat-only common controls even though a generic catch-all may appear permissive.

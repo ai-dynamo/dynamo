@@ -8,13 +8,13 @@ package dynamo
 import (
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 func TestResolveComponentRuntimeStatus(t *testing.T) {
@@ -107,7 +107,7 @@ func TestResolveGroveComponentRuntimeStatusesUsesServingRole(t *testing.T) {
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "decode",
 				ComponentType: v1beta1.ComponentTypeDecode,
-				Replicas:      ptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
 			}},
 		},
@@ -138,4 +138,43 @@ func runtimeStatusTestPodSpec(model string) corev1.PodSpec {
 		Name: commonconsts.MainContainerName,
 		Args: []string{"--model", model},
 	}}}
+}
+
+// TestNativeSidecarStatusDoesNotPredictIdentity covers shell expansion and direct
+// launches after the operator has injected its runtime environment.
+func TestNativeSidecarStatusDoesNotPredictIdentity(t *testing.T) {
+	cases := []struct {
+		name          string
+		command, args []string
+	}{
+		{name: "shell dollar", command: []string{"/bin/sh", "-c"}, args: []string{`exec dynamo-vllm-sidecar --component "$WORKER_NAME"`}},
+		{name: "shell braces", command: []string{"/bin/sh", "-c"}, args: []string{`exec dynamo-vllm-sidecar --component "${WORKER_NAME}"`}},
+		{name: "direct custom aggregated", command: []string{"dynamo-vllm-sidecar"}, args: []string{"--component", "custom-worker"}},
+		{name: "direct decode", command: []string{"dynamo-vllm-sidecar"}, args: []string{"--disaggregation-mode", "decode", "--component", "ignored"}},
+		{name: "image entrypoint"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Render a native sidecar with independent engine flags and injected identity")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: "main", Image: "engine:latest", Command: []string{"vllm-rs"}, Args: []string{"serve", "model", "--served-model-name", "engine-model", "--endpoint", "ns.engine.generate"}}},
+					InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: new(corev1.ContainerRestartPolicyAlways), Command: tc.command, Args: tc.args, Env: []corev1.EnvVar{{Name: "WORKER_NAME", Value: "backend"}}}},
+				}},
+			}
+			original := component.DeepCopy()
+			pod, err := GeneratePodSpecForComponent(component, BackendFrameworkVLLM, nil, &v1beta1.DynamoGraphDeployment{}, RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+			require.Equal(t, "worker", envVarsToMap(pod.InitContainers[0].Env)[commonconsts.DynamoComponentEnvVar])
+
+			t.Log("Leave identity to runtime registration while retaining unrelated power status")
+			status := ResolveComponentRuntimeStatus(pod, map[string]string{commonconsts.KubeAnnotationGPUPowerLimit: "300"})
+			assert.Empty(t, status.RuntimeComponentName)
+			assert.Empty(t, status.ServedModelName)
+			require.NotNil(t, status.GPUPowerLimitWatts)
+			assert.Equal(t, int64(300), *status.GPUPowerLimitWatts)
+			assert.Equal(t, original, component)
+		})
+	}
 }

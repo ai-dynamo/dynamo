@@ -36,8 +36,16 @@ pub(crate) struct NodeMetadata {
     pub node_rank: u32,
     pub nnodes: u32,
     pub dp_size: u32,
+    // SGLang reports model DP and attention DP separately. KV publisher ranks
+    // span their product; default to one when attention DP is not reported.
+    #[serde(default = "default_parallel_size")]
+    pub attn_dp_size: u32,
     pub dist_init_addr: Option<String>,
     pub kv_event_sources: Vec<LocalKvEventSource>,
+}
+
+fn default_parallel_size() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -72,6 +80,14 @@ impl NodeMetadata {
         );
         ensure!(self.dp_size > 0, "GetServerInfo dp_size must be positive");
         ensure!(
+            self.attn_dp_size > 0,
+            "GetServerInfo attn_dp_size must be positive"
+        );
+        let deployment_dp_size = self
+            .dp_size
+            .checked_mul(self.attn_dp_size)
+            .context("GetServerInfo deployment DP size overflow")?;
+        ensure!(
             self.nnodes == 1
                 || self
                     .dist_init_addr
@@ -83,10 +99,10 @@ impl NodeMetadata {
         let mut endpoints = HashSet::new();
         for source in &self.kv_event_sources {
             ensure!(
-                source.dp_rank < self.dp_size,
-                "KV source rank {} is outside dp_size {}",
+                source.dp_rank < deployment_dp_size,
+                "KV source rank {} is outside deployment DP size {}",
                 source.dp_rank,
-                self.dp_size
+                deployment_dp_size
             );
             ensure!(
                 ranks.insert(source.dp_rank),
@@ -113,8 +129,8 @@ impl NodeMetadata {
         block_size: Option<u32>,
     ) -> anyhow::Result<()> {
         ensure!(
-            self.dp_size == dp_size,
-            "GetServerInfo dp_size does not match leader registration"
+            self.dp_size.checked_mul(self.attn_dp_size) == Some(dp_size),
+            "GetServerInfo deployment DP size does not match leader registration"
         );
         for source in &self.kv_event_sources {
             ensure!(
@@ -720,6 +736,20 @@ mod tests {
         assert!(NodeMetadata::from_server_info(&raw).is_err());
         raw["kv_event_sources"][0]["dp_rank"] = json!(4);
         raw["kv_event_sources"][0]["block_size"] = json!(0);
+        assert!(NodeMetadata::from_server_info(&raw).is_err());
+    }
+
+    #[test]
+    fn attention_dp_expands_the_kv_source_rank_space() {
+        let mut raw = node_metadata_json();
+        raw["dp_size"] = json!(1);
+        raw["attn_dp_size"] = json!(8);
+        raw["kv_event_sources"][0]["dp_rank"] = json!(7);
+        let metadata = NodeMetadata::from_server_info(&raw).unwrap().unwrap();
+        metadata.validate_registration(8, Some(64)).unwrap();
+        assert!(metadata.validate_registration(1, Some(64)).is_err());
+
+        raw["kv_event_sources"][0]["dp_rank"] = json!(8);
         assert!(NodeMetadata::from_server_info(&raw).is_err());
     }
 

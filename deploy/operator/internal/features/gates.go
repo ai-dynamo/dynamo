@@ -202,7 +202,7 @@ func New(
 		if detectErr != nil {
 			return Gates{}, detectErr
 		}
-		if gates.Checkpoint, err = resolve(ptr.To(true), snapshotAPIsAvailable,
+		if gates.Checkpoint, err = resolve(new(true), snapshotAPIsAvailable,
 			"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot and SnapshotJob APIs were not both detected in the cluster"); err != nil {
 			return Gates{}, err
 		}

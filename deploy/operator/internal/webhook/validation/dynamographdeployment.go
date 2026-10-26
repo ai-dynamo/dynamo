@@ -92,12 +92,10 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	ratchetRuntimeVersion bool,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: ratchetRuntimeVersion,
-		},
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: ratchetRuntimeVersion,
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
@@ -122,14 +120,12 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: true,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: true,
+		userInfo:              userInfo,
+		operatorPrincipal:     operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
@@ -175,13 +171,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 	// it, and the Disabled variant went away when runtime-version validation
 	// moved to the ratchet flag, so this carries the v1beta1 default.
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                  ctx,
-			mgr:                  v.mgr,
-			runtimeVersionSource: runtimeVersionSourceV1Beta1,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                  ctx,
+		mgr:                  v.mgr,
+		runtimeVersionSource: runtimeVersionSourceV1Beta1,
+		userInfo:             userInfo,
+		operatorPrincipal:    operatorPrincipal,
 	}
 
 	allErrs := validation.validateObjectMetaUpdate(
@@ -202,6 +196,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		&dgd.ObjectMeta,
 		field.NewPath("metadata"),
 		hasIntraPodFailover(&dgd.Spec),
+		dgd.HasLPXComponent(),
 	)...)
 
 	// Validate desired strategy intent; admission has no observed PCS rollout state.
@@ -257,6 +252,7 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	objectMeta *metav1.ObjectMeta,
 	fldPath *field.Path,
 	hasIntraPodFailover bool,
+	hasLPXComponent bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
@@ -278,8 +274,18 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	}
 	// Parse strategy annotations with the same value set used by the renderer.
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists {
-		if _, err := dynamo.ParseGroveUpdateStrategy(value); err != nil {
+		strategy, err := dynamo.ParseGroveUpdateStrategy(value)
+		if err != nil {
 			allErrs = append(allErrs, field.NotSupported(annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy), value, dynamo.SupportedGroveUpdateStrategies()))
+		}
+
+		// OnDelete leaves LPX Pods on stale templates, which the LPX scheduler treats as dependency loss.
+		if hasLPXComponent && strategy == grovev1alpha1.OnDeleteStrategy {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
+				value,
+				`must be "Coherent" or "RollingRecreate" when LPX components are configured`,
+			))
 		}
 	}
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
