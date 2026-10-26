@@ -152,6 +152,28 @@ class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
         return _layer_probe_marker(super().to_dict())
 
 
+class VllmRerankHealthCheckPayload(HealthCheckPayload):
+    """
+    vLLM-specific health check payload for rerank workers.
+
+    ``RerankWorkerHandler.generate`` expects the ``/v1/rerank`` request shape,
+    ``{model, query, documents}``. The probe scores one short query/document
+    pair, so "healthy" means the engine produced a relevance score.
+    """
+
+    def __init__(self, model_name: Optional[str] = None):
+        self.default_payload: dict[str, Any] = {
+            "query": "probe",
+            "documents": ["probe"],
+        }
+        if model_name is not None:
+            self.default_payload["model"] = model_name
+        super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
+
+
 class VllmPrefillHealthCheckPayload(HealthCheckPayload):
     """
     vLLM-specific health check payload for prefill workers in disaggregated mode.

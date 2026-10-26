@@ -19,6 +19,7 @@ from dynamo.vllm.health_check import (
     VllmHealthCheckPayload,
     VllmOmniHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
+    VllmRerankHealthCheckPayload,
 )
 
 pytestmark = [
@@ -36,6 +37,7 @@ PAYLOAD_FACTORIES = [
         VllmEmbeddingHealthCheckPayload,
         id="VllmEmbeddingHealthCheckPayload",
     ),
+    pytest.param(VllmRerankHealthCheckPayload, id="VllmRerankHealthCheckPayload"),
 ]
 
 
@@ -89,3 +91,14 @@ def test_embedding_payload_omits_model_when_no_name():
     assert "model" not in payload
     assert payload.get("input") == "probe"
     assert payload.get(HEALTH_CHECK_KEY) is True
+
+
+def test_rerank_payload_shape_matches_handler_contract():
+    """``VllmRerankHealthCheckPayload`` must produce the ``{model, query,
+    documents}`` shape that ``RerankWorkerHandler.generate`` reads."""
+    payload = VllmRerankHealthCheckPayload(
+        model_name="BAAI/bge-reranker-v2-m3"
+    ).to_dict()
+    assert payload["model"] == "BAAI/bge-reranker-v2-m3"
+    assert payload["query"] == "probe"
+    assert payload["documents"] == ["probe"]

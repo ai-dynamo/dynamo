@@ -293,6 +293,17 @@ class DynamoVllmArgGroup(ArgGroup):
             "Skips KV events, KV router registration, and InstrumentedScheduler injection.",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--rerank-worker",
+            env_var="DYN_VLLM_RERANK_WORKER",
+            default=False,
+            help="Run as a rerank worker, exposing /v1/rerank through vLLM's scoring "
+            "path. Engine must be started with vLLM's --runner pooling. Pass the "
+            "model's score template with --custom-jinja-template (required for "
+            "decoder-only rerankers such as Qwen3-Reranker).",
+        )
+
         # Headless mode for multi-node TP/PP
         add_negatable_bool_argument(
             g,
@@ -621,6 +632,7 @@ class DynamoVllmConfig(ConfigBase):
     embedding_worker_processes: int = 1
     realtime: bool = False
     classify_worker: bool = False
+    rerank_worker: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
@@ -686,6 +698,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_embedding_worker_processes()
         self._validate_realtime_worker_exclusivity()
         self._validate_classify_worker_exclusivity()
+        self._validate_rerank_worker_exclusivity()
         self._validate_custom_encoder()
         self._validate_freeze_gc_after_init()
         self._load_explicit_benchmark_points()
@@ -1047,6 +1060,8 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError("--realtime cannot be combined with --embedding-worker.")
         if self.classify_worker:
             raise ValueError("--realtime cannot be combined with --classify-worker.")
+        if self.rerank_worker:
+            raise ValueError("--realtime cannot be combined with --rerank-worker.")
         for enabled, option in (
             (bool(self.custom_encoder_class), "--custom-encoder-class"),
             (self.gms_shadow_mode, "--gms-shadow-mode"),
@@ -1103,4 +1118,43 @@ class DynamoVllmConfig(ConfigBase):
                 "The pooling-family handler does not forward lora_request to "
                 "engine_client.encode(), so an adapter-targeted request would "
                 "silently run against the base model."
+            )
+
+    def _validate_rerank_worker_exclusivity(self) -> None:
+        """Rerank worker is a pooling role with the same constraints as the
+        classify worker, and registers its own model type."""
+        if not self.rerank_worker:
+            return
+        if self.embedding_worker or self.classify_worker:
+            raise ValueError(
+                "--rerank-worker cannot be combined with --embedding-worker or "
+                "--classify-worker; a worker registers exactly one pooling role."
+            )
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError(
+                "--rerank-worker is only valid with --disaggregation-mode=agg "
+                f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
+                "Pooling models do not have prefill/decode phases."
+            )
+        if self.enable_multimodal:
+            raise ValueError(
+                "--rerank-worker cannot be combined with multimodal flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError(
+                "--rerank-worker cannot be combined with --benchmark-mode. "
+                "Benchmark mode injects InstrumentedScheduler, which is a "
+                "generation scheduler and not compatible with pooling engines."
+            )
+        if self.headless:
+            raise ValueError(
+                "--rerank-worker cannot be combined with --headless. "
+                "Headless mode returns before WorkerFactory.create(), so the "
+                "rerank endpoint would never be registered."
+            )
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError(
+                "--rerank-worker cannot be combined with --enable-lora. "
+                "The rerank handler does not resolve LoRA adapters, so an "
+                "adapter-targeted request would silently run against the base model."
             )

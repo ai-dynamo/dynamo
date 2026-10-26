@@ -133,6 +133,8 @@ def validate_state_agent_worker(config: Any) -> None:
         unsupported = "embedding"
     elif config.classify_worker:
         unsupported = "classify"
+    elif config.rerank_worker:
+        unsupported = "rerank"
     elif config.disaggregation_mode == DisaggregationMode.ENCODE:
         unsupported = "multimodal encode"
     if unsupported is not None:

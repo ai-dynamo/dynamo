@@ -356,6 +356,14 @@ class TestRealtimeWorkerExclusivity:
         with pytest.raises(ValueError, match="classify-worker"):
             config._validate_realtime_worker_exclusivity()
 
+    def test_rerank_combination_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.rerank_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="rerank-worker"):
+            config._validate_realtime_worker_exclusivity()
+
     def test_multimodal_combination_rejected(self):
         config = create_config()
         config.realtime = True
@@ -501,6 +509,66 @@ class TestClassifyWorkerExclusivity:
         config._validate_classify_worker_exclusivity()
 
 
+class TestRerankWorkerExclusivity:
+    """--rerank-worker is a pooling role with the classify-worker constraints,
+    and is exclusive with the other pooling roles."""
+
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.rerank_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        # Must not raise.
+        config._validate_rerank_worker_exclusivity()
+
+    @pytest.mark.parametrize("role", ["embedding_worker", "classify_worker"])
+    def test_other_pooling_role_rejected(self, role):
+        config = create_config()
+        config.rerank_worker = True
+        setattr(config, role, True)
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="one pooling role"):
+            config._validate_rerank_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_disagg_rejected(self, mode):
+        config = create_config()
+        config.rerank_worker = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_rerank_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        ("field", "value", "match"),
+        [
+            ("enable_multimodal", True, "multimodal"),
+            ("benchmark_mode", "agg", "benchmark-mode"),
+            ("headless", True, "headless"),
+            ("engine_args", SimpleNamespace(enable_lora=True), "enable-lora"),
+        ],
+    )
+    def test_incompatible_option_rejected(self, field, value, match):
+        config = create_config()
+        config.rerank_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, field, value)
+        with pytest.raises(ValueError, match=match):
+            config._validate_rerank_worker_exclusivity()
+
+    def test_no_op_when_rerank_worker_disabled(self):
+        config = create_config()
+        config.rerank_worker = False
+        config.benchmark_mode = "agg"
+        config.headless = True
+        config._validate_rerank_worker_exclusivity()
+
+
 @pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
 class TestParseArgsLoraExclusivity:
     """The --enable-lora exclusivity rules must fire on the real CLI path.
@@ -525,6 +593,10 @@ class TestParseArgsLoraExclusivity:
         --realtime rule is independent of that."""
         with pytest.raises(ValueError, match="enable-lora"):
             self._parse(["--classify-worker", "--enable-lora"])
+
+    def test_rerank_worker_with_enable_lora_is_rejected(self):
+        with pytest.raises(ValueError, match="enable-lora"):
+            self._parse(["--rerank-worker", "--enable-lora"])
 
     def test_enable_lora_alone_is_accepted(self):
         config = self._parse(["--enable-lora"])

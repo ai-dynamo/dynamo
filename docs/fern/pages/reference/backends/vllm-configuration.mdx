@@ -190,6 +190,12 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_EMBEDDING_FRONTEND_TOKENIZATION`
 </ParamField>
 
+<ParamField path="--rerank-worker" type="boolean" default="false">
+  Run as a rerank worker that serves `/v1/rerank` through vLLM's scoring path. The vLLM engine must be started with `--runner pooling`. Pass the model's score template with `--custom-jinja-template`; decoder-only rerankers such as Qwen3-Reranker need it to produce accurate scores.
+
+  Environment variable: `DYN_VLLM_RERANK_WORKER`
+</ParamField>
+
 ## Other
 
 <ParamField path="--enable-rl" type="boolean" default="false">
@@ -323,6 +329,7 @@ With `--benchmark-mode` set and no points file, passing a legacy flag together w
 ## Validation rules
 
 - `--embedding-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with `--enable-multimodal` or `--benchmark-mode`.
+- `--rerank-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with `--embedding-worker`, `--classify-worker`, `--enable-multimodal`, `--benchmark-mode`, `--headless`, or `--enable-lora`.
 - `--benchmark-mode` cannot be combined with `--data-parallel-size` greater than `1` unless the model is a mixture-of-experts (MoE) model. The attention-DP self-benchmark needs the data-parallel ranks to run as one coordinated group, which vLLM does only for MoE models; the worker rejects this combination at startup, before it loads the model.
 
 ## Related pages

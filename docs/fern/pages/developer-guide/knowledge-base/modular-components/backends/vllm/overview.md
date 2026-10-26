@@ -71,7 +71,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | **GB200 Support** | ✅ | Container functional on main |
 
 > [!NOTE]
-> vLLM LoRA support applies to generative workers. `--enable-lora` cannot be combined with `--realtime` or `--classify-worker`; embedding and other pooling workers do not expose the LoRA lifecycle endpoints.
+> vLLM LoRA support applies to generative workers. `--enable-lora` cannot be combined with `--realtime`, `--classify-worker`, or `--rerank-worker`; embedding and other pooling workers do not expose the LoRA lifecycle endpoints.
 
 ## Feature Interactions
 

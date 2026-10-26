@@ -325,6 +325,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
         return "embedding"
     if dynamo_config.classify_worker:
         return "classify"
+    if dynamo_config.rerank_worker:
+        return "rerank"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -357,7 +359,11 @@ def update_engine_config_with_dynamo(
 ) -> None:
     """Update engine config based on Dynamo config."""
     if engine_config.enable_prefix_caching is None:
-        if dynamo_config.embedding_worker or dynamo_config.classify_worker:
+        if (
+            dynamo_config.embedding_worker
+            or dynamo_config.classify_worker
+            or dynamo_config.rerank_worker
+        ):
             # Pooling engines never decode, so prefix caching buys nothing —
             # and force-enabling it crashes models vLLM itself would leave it
             # off for (e.g. ModernBERT's hybrid local/global attention dies
