@@ -30,6 +30,7 @@ use reference::pick_default_worker;
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use crate::indexer::ResidentBlockCounts;
 use crate::protocols::{
     SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerConfigLike, WorkerId,
     WorkerSelectionResult, WorkerWithDpRank,
@@ -176,6 +177,7 @@ impl<'a> MaterializedSelectionInput<'a> {
                 has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
                     || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
                     || !request.overlap.tier_overlap_blocks.disk.is_empty(),
+                resident_blocks: None,
             },
             context: WorkerSelectionContext {
                 request,
@@ -463,6 +465,7 @@ fn log_selection<C: WorkerConfigLike>(
 }
 
 #[inline(always)]
+#[expect(clippy::too_many_arguments)]
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
 fn select_worker_with_policy<C: WorkerConfigLike>(
@@ -472,6 +475,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
     block_size: u32,
+    resident_blocks: Option<&ResidentBlockCounts>,
     trace: Option<SelectionTraceSpec>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
     eligibility.validate_pinned_worker_allowed()?;
@@ -490,6 +494,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
 
     let mut input = MaterializedSelectionInput::new(request, block_size);
     input.context.pinned_worker = eligibility.pinned_worker();
+    input.cache_snapshot.resident_blocks = resident_blocks;
     let selected = match state {
         #[cfg(any(test, feature = "bench"))]
         WorkerSelectionPolicyStateRef::Reference(kv_router_config, picker) => {
@@ -537,6 +542,10 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     load: picker_inputs
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
+                    resident_blocks: input
+                        .cache_snapshot
+                        .resident_blocks
+                        .filter(|_| picker_inputs.contains(WorkerInputs::RESIDENT_BLOCKS)),
                 };
                 let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {

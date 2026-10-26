@@ -15,8 +15,8 @@ use crate::config::{ApproximateCachePolicyKind, KvRouterConfig};
 use crate::indexer::{
     ApproximateLruIncarnation, ApproximateLruStats, ApproximateRetentionConfig, KvIndexer,
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers, LowerTierQueryOptions,
-    MatchDetails, RoutingDecisionHashes, SyncIndexer, TieredMatchDetails, TieredMatchProvider,
-    record_unsupported_residency_event,
+    MatchDetails, ResidentBlockCountsHandle, RoutingDecisionHashes, SyncIndexer,
+    TieredMatchDetails, TieredMatchProvider, record_unsupported_residency_event,
 };
 use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, OverlapScores,
@@ -466,9 +466,7 @@ impl Indexer {
             } => {
                 if is_clear {
                     if targets_primary {
-                        primary
-                            .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
-                            .await?;
+                        primary.apply_event_and_wait(event.clone()).await?;
                     }
                     for indexer in lower_tier.all() {
                         indexer.apply_event_and_wait(event.clone()).await?;
@@ -866,6 +864,17 @@ impl Indexer {
             Self::Single { primary, .. } => primary.approximate_lru_stats().await,
             Self::Concurrent { primary, .. } => primary.approximate_lru_stats().await,
             Self::Remote { .. } | Self::None => Ok(ApproximateLruStats::default()),
+        }
+    }
+
+    /// Live per-rank block counts from the local primary, which starts keeping them on the first
+    /// call; `None` without a local primary.
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn track_resident_blocks(&self) -> Option<ResidentBlockCountsHandle> {
+        match self {
+            Self::Single { primary, .. } => Some(primary.track_resident_blocks()),
+            Self::Concurrent { primary, .. } => Some(primary.track_resident_blocks()),
+            Self::Remote { .. } | Self::None => None,
         }
     }
 }
@@ -1296,6 +1305,13 @@ mod tests {
             );
             let flat = indexer.find_matches(sequence).await.unwrap();
             assert_eq!(flat.scores.get(&worker).copied(), Some(2));
+            let counts = indexer.track_resident_blocks().unwrap();
+            flush(&indexer).await;
+            assert_eq!(
+                counts.load().get(worker),
+                Some(2),
+                "{num_threads} thread(s): routed prefix"
+            );
 
             // The recorded prefix is dumped like any other primary state, so a
             // recovering peer inherits it.
@@ -1577,6 +1593,105 @@ mod tests {
                 1,
                 "clear metric mismatch for {num_threads} indexer thread(s)"
             );
+        }
+    }
+
+    async fn wait_until(mut done: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("condition not reached");
+    }
+
+    #[tokio::test]
+    async fn resident_block_counts_track_each_rank() {
+        use crate::protocols::compute_seq_hash_for_block;
+        use crate::test_utils::{make_clear_event_with_dp_rank, make_store_event_with_dp_rank};
+
+        for num_threads in [1, 4] {
+            let indexer = create_indexer(16, num_threads);
+            // Stored before tracking starts, so the rank is backfilled.
+            indexer
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2, 3], 0))
+                .await;
+            flush(&indexer).await;
+            let counts = indexer.track_resident_blocks().unwrap();
+            let held =
+                |worker_id, dp_rank| counts.load().get(WorkerWithDpRank::new(worker_id, dp_rank));
+            for event in [
+                // A repeated store must not count its blocks twice.
+                make_store_event_with_dp_rank(1, &[1, 2, 3], 0),
+                make_store_event_with_dp_rank(1, &[1, 2], 1),
+                make_store_event_with_dp_rank(2, &[1], 0),
+            ] {
+                indexer.apply_event(event).await;
+            }
+            let chain = [LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
+            let tail = ExternalSequenceBlockHash(compute_seq_hash_for_block(&chain)[2]);
+            indexer
+                .apply_event(crate::test_utils::remove_event(1, 1, 0, vec![tail]))
+                .await;
+            flush(&indexer).await;
+            assert_eq!(
+                [held(1, 0), held(1, 1), held(2, 0), held(3, 0)],
+                [Some(2), Some(2), Some(1), None],
+                "{num_threads} indexer thread(s)"
+            );
+
+            // A cleared rank stays known and empty; a removed rank is gone. The clear takes the
+            // path the frontend admits live engine events through.
+            indexer
+                .try_apply_event(make_clear_event_with_dp_rank(2, 0))
+                .await
+                .unwrap();
+            indexer.remove_worker_dp_rank(1, 1).await;
+            flush(&indexer).await;
+            assert_eq!(
+                [held(2, 0), held(1, 1)],
+                [Some(0), None],
+                "{num_threads} indexer thread(s)"
+            );
+            // Clones of the indexer share one set of counters.
+            assert_eq!(
+                indexer
+                    .clone()
+                    .track_resident_blocks()
+                    .unwrap()
+                    .load()
+                    .get(WorkerWithDpRank::new(1, 0)),
+                Some(2)
+            );
+            indexer.remove_worker(1).await;
+            flush(&indexer).await;
+            assert_eq!(held(1, 0), None, "{num_threads} indexer thread(s)");
+        }
+    }
+
+    #[tokio::test]
+    async fn resident_block_counts_withdraw_when_the_primary_stops() {
+        for num_threads in [1, 4] {
+            let indexer = create_indexer(16, num_threads);
+            let counts = indexer.track_resident_blocks().unwrap();
+            indexer
+                .apply_event(crate::test_utils::make_store_event_with_dp_rank(
+                    1,
+                    &[1, 2],
+                    0,
+                ))
+                .await;
+            let worker = WorkerWithDpRank::new(1, 0);
+            flush(&indexer).await;
+            assert_eq!(counts.load().get(worker), Some(2));
+            match &indexer {
+                Indexer::Single { primary, .. } => primary.shutdown(),
+                Indexer::Concurrent { primary, .. } => primary.shutdown(),
+                Indexer::Remote { .. } | Indexer::None => unreachable!(),
+            }
+            // A stopped primary's ranks read None, not counts nothing updates anymore.
+            wait_until(|| counts.load().get(worker).is_none()).await;
         }
     }
 }

@@ -370,7 +370,7 @@ Each worker policy is constructed once per routing partition. An empty bundle re
 
 Worker identity and ordinary request metadata are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
-Routing cache resources start only if a component requests `CACHE`. `serve_indexer` and `enable_session_prefix_index` also require `CACHE`.
+Routing cache resources start only if a component requests `CACHE`. `serve_indexer`, `enable_session_prefix_index`, and `RESIDENT_BLOCKS` also require `CACHE`.
 
 ### Request Context
 
@@ -446,12 +446,20 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
+| `RESIDENT_BLOCKS` | `resident_blocks()` | Blocks the router's indexer tracks for the worker rank, including cached blocks no running request uses; current as of the last event the indexer applied and not clamped to capacity |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
+
+`WorkerCandidate::resident_blocks()` and `WorkerInputView::resident_blocks(row)` return how many blocks the router's indexer holds for the worker rank, including cached blocks no running request uses; use `LOAD` for work in flight. The count is unweighted, not clamped to `total_kv_blocks`, and measures occupancy rather than reusable cache: blocks that prefix matching can no longer reach, such as descendants of an evicted block, count until their own remove events arrive, and a lost remove event inflates the count until the rank is removed. A count is current as of the last event its indexer thread applied, the same freshness as the `CACHE` overlap scores, so it can trail queued events and change between two reads in one selection. A rank reads `None` until its indexer thread has reached the policy's request and holds a block for it, `0` after a clear, and `None` again once the rank or its worker is removed. A component also reads `None` when it did not request `WorkerInputs::RESIDENT_BLOCKS`, with a remote indexer, or after an indexer thread stops, so a worker whose KV events never arrive never looks empty. A policy that requests `RESIDENT_BLOCKS` must also request `CACHE`, because the counts come from the indexer that `CACHE` starts. The router checks this for every policy it builds for a routing partition: the frontend fails to start, and the standalone selection service marks the partition's workers unschedulable with the reason.
+
+What the count contains, and whether router replicas agree on it, depends on the routing mode:
+
+- **KV events:** the device-tier blocks the indexer currently tracks from engine events. Every router replica sees the same counts.
+- **Approximate routing:** the blocks routed to the rank within the TTL, or the distinct full blocks the LRU cache policy retains, which leaves out its partial tail blocks and duplicate copies. Each replica counts only the requests it routed, except a replica that serves its indexer (`serve_indexer`), whose counts also include the routing decisions other replicas send it.
 
 ## Link the Policy Into Dynamo
 
