@@ -9,6 +9,8 @@ import time
 from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
+from sglang.srt.entrypoints.warmup import execute_warmups
+from sglang.srt.environ import envs
 from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
@@ -202,6 +204,17 @@ async def init_decode(
 
     body_failed = True
     try:
+        if config.serving_mode == DisaggregationMode.AGGREGATED and server_args.warmups:
+            warmup_timeout = envs.SGLANG_WARMUP_TIMEOUT.get()
+            await asyncio.wait_for(
+                execute_warmups(
+                    disaggregation_mode=server_args.disaggregation_mode,
+                    warmup_names=server_args.warmups.split(","),
+                    tokenizer_manager=engine.tokenizer_manager,
+                ),
+                timeout=warmup_timeout if warmup_timeout > 0 else 600,
+            )
+
         gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,

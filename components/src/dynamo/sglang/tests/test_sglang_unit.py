@@ -2540,3 +2540,133 @@ def test_main_preserves_worker_failure(monkeypatch):
 
     with pytest.raises(RuntimeError, match="worker failed"):
         sglang_main.main()
+
+
+@pytest.fixture
+def configured_warmup_worker(monkeypatch):
+    """Exercise startup ordering without starting an engine or serving endpoints."""
+    import dynamo.sglang.init_llm as init_llm_mod
+
+    args = SimpleNamespace(
+        node_rank=0,
+        enable_trace=False,
+        warmups="voice_chat,prefill_shapes",
+        disaggregation_mode="null",
+        enable_forward_pass_metrics=False,
+    )
+    config = SimpleNamespace(
+        server_args=args,
+        dynamo_args=SimpleNamespace(
+            namespace="test",
+            component="worker",
+            endpoint="generate",
+            freeze_gc_after_init=False,
+            frontend_decoding=False,
+            use_sglang_tokenizer=False,
+            endpoint_types=["chat"],
+            custom_jinja_template=None,
+        ),
+        serving_mode=DisaggregationMode.AGGREGATED,
+        use_resolved_server_args=lambda _: args,
+    )
+    engine = Mock(server_args=args)
+    events = []
+
+    async def serve(*args, **kwargs):
+        events.append("serve")
+
+    async def register(*args, **kwargs):
+        events.append("register")
+
+    endpoint = Mock(
+        first_token_source=AsyncMock(), serve_endpoint=AsyncMock(side_effect=serve)
+    )
+    runtime = Mock(endpoint=Mock(return_value=endpoint))
+    warmup = AsyncMock(side_effect=lambda **kwargs: events.append("warmup"))
+    teardown = AsyncMock()
+    monkeypatch.setattr(init_llm_mod, "gateway_worker_count", lambda *args: 1)
+    monkeypatch.setattr(
+        init_llm_mod, "setup_sgl_metrics", AsyncMock(return_value=(Mock(), None, {}))
+    )
+    monkeypatch.setattr(init_llm_mod, "DecodeWorkerHandler", Mock())
+    monkeypatch.setattr(init_llm_mod, "SglangHealthCheckPayload", Mock())
+    monkeypatch.setattr(init_llm_mod, "SglangDisaggHealthCheckPayload", Mock())
+    monkeypatch.setattr(init_llm_mod, "parse_endpoint_types", lambda value: value)
+    monkeypatch.setattr(
+        init_llm_mod,
+        "register_model_with_readiness_gate",
+        AsyncMock(side_effect=register),
+    )
+    monkeypatch.setattr(init_llm_mod, "execute_warmups", warmup)
+    monkeypatch.setattr(init_llm_mod, "finish_worker_teardown", teardown)
+    monkeypatch.setattr(init_llm_mod.envs.SGLANG_WARMUP_TIMEOUT, "get", lambda: 30)
+
+    async def start():
+        await init_llm_mod.init_decode(
+            runtime, config, asyncio.Event(), [], snapshot_engine=engine
+        )
+
+    return SimpleNamespace(
+        start=start,
+        config=config,
+        engine=engine,
+        events=events,
+        warmup=warmup,
+        teardown=teardown,
+        module=init_llm_mod,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout,expected", [(30, 30), (0, 600), (-1, 600)])
+async def test_configured_warmups_precede_registration(
+    configured_warmup_worker, monkeypatch, timeout, expected
+):
+    worker = configured_warmup_worker
+    monkeypatch.setattr(
+        worker.module.envs.SGLANG_WARMUP_TIMEOUT, "get", lambda: timeout
+    )
+    wait_for = AsyncMock(wraps=asyncio.wait_for)
+    monkeypatch.setattr(worker.module.asyncio, "wait_for", wait_for)
+    await worker.start()
+    assert worker.events[0] == "warmup"
+    assert "register" in worker.events and "serve" in worker.events
+    worker.warmup.assert_awaited_once_with(
+        disaggregation_mode="null",
+        warmup_names=["voice_chat", "prefill_shapes"],
+        tokenizer_manager=worker.engine.tokenizer_manager,
+    )
+    assert wait_for.call_args.kwargs["timeout"] == expected
+    assert worker.teardown.call_args.kwargs["body_failed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skip_reason", ["unconfigured", "decode"])
+async def test_configured_warmups_skip_other_startups(
+    configured_warmup_worker, skip_reason
+):
+    worker = configured_warmup_worker
+    if skip_reason == "unconfigured":
+        worker.config.server_args.warmups = None
+    else:
+        worker.config.serving_mode = DisaggregationMode.DECODE
+    await worker.start()
+    worker.warmup.assert_not_awaited()
+    assert "register" in worker.events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [ValueError("warmup failed"), asyncio.TimeoutError(), asyncio.CancelledError()],
+)
+async def test_configured_warmup_failure_prevents_registration(
+    configured_warmup_worker, failure
+):
+    worker = configured_warmup_worker
+    worker.warmup.side_effect = failure
+    with pytest.raises(type(failure)):
+        await worker.start()
+    assert worker.events == []
+    worker.teardown.assert_awaited_once()
+    assert worker.teardown.call_args.kwargs["body_failed"] is True
