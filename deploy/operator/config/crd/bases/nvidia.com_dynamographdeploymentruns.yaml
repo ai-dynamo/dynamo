@@ -58,7 +58,8 @@ spec:
             spec:
               description: |-
                 DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
-                Run creators resolve optional Request inputs before persisting the Run.
+                Run creators resolve optional Request inputs and the final AISimulate parameters before
+                persisting the Run. Request admission defaulting does not apply to Runs.
               properties:
                 aisimulate:
                   description: AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
@@ -135,7 +136,7 @@ spec:
                     metric:
                       description: |-
                         Metric is the scalar target when mode is Optimize.
-                        When omitted in Optimize mode, admission defaults it to Throughput.
+                        When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
                       enum:
                         - Throughput
                         - ThroughputPerGPU
@@ -169,8 +170,9 @@ spec:
                       type: string
                     sla:
                       description: |-
-                        SLA defines per-request latency bounds used to calculate goodput. When omitted, no
-                        bounds apply. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+                        SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
+                        omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
+                        defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
                       properties:
                         e2eMs:
                           description: E2EMs is an alternative end-to-end bound in milliseconds.

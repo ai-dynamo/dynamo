@@ -4990,7 +4990,8 @@ See [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus).
 
 <Accordion id="dynamographdeploymentrunspec" title="DynamoGraphDeploymentRunSpec">
 DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
-Run creators resolve optional Request inputs before persisting the Run.
+Run creators resolve optional Request inputs and the final AISimulate parameters before
+persisting the Run. Request admission defaulting does not apply to Runs.
 
 
 **Kind:** `type`
@@ -5334,7 +5335,7 @@ See [ObjectiveMode](#objectivemode).
 </ParamField>
 
 <ParamField path="metric" type="ObjectiveMetric">
-Metric is the scalar target when mode is Optimize. When omitted in Optimize mode, admission defaults it to Throughput.
+Metric is the scalar target when mode is Optimize. When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
 See [ObjectiveMetric](#objectivemetric).
 **Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  Optional: \&#123;\&#125;
 </ParamField>
@@ -5346,7 +5347,7 @@ See [ObjectiveMetric](#objectivemetric).
 </ParamField>
 
 <ParamField path="sla" type="ObjectiveSLASpec">
-SLA defines per-request latency bounds used to calculate goodput. When omitted, no bounds apply. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+SLA defines per-request latency bounds used to calculate goodput. Admission defaults an omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
 See [ObjectiveSLASpec](#objectiveslaspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

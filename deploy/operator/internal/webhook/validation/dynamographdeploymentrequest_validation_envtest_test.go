@@ -722,7 +722,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
 				v1beta2Empty(t, result, "spec", "workload", "static")
-				v1beta2Absent(t, result, "spec", "objective", "sla")
 				expectV1beta2AdmissionDefaults(t, result)
 			},
 		},
