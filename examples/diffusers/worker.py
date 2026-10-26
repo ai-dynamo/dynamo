@@ -524,9 +524,11 @@ class FastVideoBackend:
 
         nvext = request.nvext or VideoNvExt()
         width, height = self._parse_size(request.size)
-        # A request's fps arrives at least 1 (the shared model bounds it), and
-        # --default-fps is checked at startup.
         fps = nvext.fps if nvext.fps is not None else self.args.default_fps
+        # The example image pins an ai-dynamo release whose models do not
+        # bound fps, so check it here until the pin moves.
+        if fps <= 0:
+            raise ValueError("fps must be positive")
 
         num_frames = self._compute_num_frames(request, nvext)
         num_inference_steps = (
