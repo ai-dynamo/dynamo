@@ -29,6 +29,7 @@ use dynamo_runtime::telemetry::{
     LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTerminal, LifecycleTrace, TerminalOutcome,
 };
 use dynamo_runtime::{
+    dynamo_nvtx_mark, dynamo_nvtx_range,
     engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -1283,6 +1284,9 @@ async fn completions_single(
     mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
+    // Handler body only; for a streaming request the SSE stream outlives this range.
+    let _nvtx = dynamo_nvtx_range!("frontend.http.completions.handler");
+
     let request_id = request.id().to_string();
 
     // todo - decide on default
@@ -1314,6 +1318,7 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
+    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
@@ -1322,6 +1327,7 @@ async fn completions_single(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+    drop(nvtx_lookup);
 
     let mut response_collector = inflight_guard.response_collector();
     inflight_guard.request_metrics().attach_to(&mut request);
@@ -1330,6 +1336,8 @@ async fn completions_single(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
+    // Covers preprocessing, routing and the wire handoff to the worker.
+    let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -1340,6 +1348,7 @@ async fn completions_single(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    drop(nvtx_generate);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -1392,6 +1401,10 @@ async fn completions_single(
                 )
             })
             .map(move |mut response| {
+                // Frontend-side SSE conversion for one chunk. The gaps between
+                // consecutive ranges cover both worker time and the frontend's
+                // own unannotated receive/decode path.
+                let _nvtx_chunk = dynamo_nvtx_range!("frontend.http.completions.sse_chunk");
                 // `echo` rides the chunk as typed metadata up to this boundary.
                 if let Some(data) = response.data.as_mut() {
                     data.fold_echo();
@@ -1454,6 +1467,8 @@ async fn completions_single(
                 error_response
             })?;
 
+        // Spans the whole fold, so it includes worker time.
+        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.completions.aggregate");
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
@@ -3322,6 +3337,40 @@ fn push_dispatch_event(
 }
 
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
+/// True when a streaming chunk carries generated model output.
+///
+/// Deliberately narrower than `!is_empty_stream_response`: that predicate exists
+/// to decide what is worth forwarding to the client, so it counts a role-only
+/// opening delta (`{"role": "assistant"}`) as non-empty. Such a delta carries no
+/// generated token, and treating it as one would place the TTFT marker before the
+/// model had produced anything.
+///
+/// Content-based rather than `llm_metrics.chunk_tokens > 0`, which the metrics
+/// path uses: `llm_metrics` is only present when the backend reports it, and a
+/// marker that silently never fires is worse than one placed by inspection.
+fn carries_generated_token(resp: &NvCreateChatCompletionStreamResponse) -> bool {
+    resp.inner.choices.iter().any(|choice| {
+        let ChatCompletionStreamResponseDelta {
+            content,
+            function_call,
+            tool_calls,
+            role: _,
+            refusal,
+            reasoning_content,
+        } = &choice.delta;
+        let content_nonempty = match content {
+            None => false,
+            Some(ChatCompletionMessageContent::Text(t)) => !t.is_empty(),
+            Some(ChatCompletionMessageContent::Parts(p)) => !p.is_empty(),
+        };
+        content_nonempty
+            || reasoning_content.as_ref().is_some_and(|r| !r.is_empty())
+            || refusal.as_ref().is_some_and(|r| !r.is_empty())
+            || tool_calls.as_ref().is_some_and(|t| !t.is_empty())
+            || function_call.is_some()
+    })
+}
+
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
         return false;
@@ -3504,6 +3553,11 @@ async fn chat_completions(
     request_lifecycle: tracing::Span,
     terminal: LifecycleTerminal,
 ) -> Result<Response, ErrorResponse> {
+    // Covers the handler body only: template resolution, validation, engine
+    // dispatch and response commit. For a streaming request the SSE stream
+    // outlives this range, and each chunk is annotated separately below.
+    let _nvtx = dynamo_nvtx_range!("frontend.http.chat.handler");
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -3540,6 +3594,7 @@ async fn chat_completions(
         &request_id,
     );
 
+    let nvtx_validate = dynamo_nvtx_range!("frontend.http.chat.validate");
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3585,6 +3640,9 @@ async fn chat_completions(
     // Selected once: the Beam request normalization below reads this engine's parsing
     // options and dispatch uses this same engine, so the two cannot disagree on the
     // worker set when one served name fronts Beam and non-Beam pools.
+    // The lookup sits inside validation, so this range nests in
+    // frontend.http.chat.validate, whose duration includes it.
+    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
@@ -3593,6 +3651,7 @@ async fn chat_completions(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+    drop(nvtx_lookup);
 
     // Beam route, before generic validation (which rejects what these normalize): a
     // `strict` tool whose schema is outside OpenAI's strict subset is served as
@@ -3615,6 +3674,7 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
+    drop(nvtx_validate);
 
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -3660,6 +3720,9 @@ async fn chat_completions(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
+    // Covers preprocessing, routing and the wire handoff to the worker — everything
+    // between the validated request and a live response stream.
+    let nvtx_generate = dynamo_nvtx_range!("frontend.http.chat.generate");
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -3670,6 +3733,7 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    drop(nvtx_generate);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -3732,8 +3796,14 @@ async fn chat_completions(
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
+            let mut first_chunk = true;
 
             while let Some(mut response) = stream.next().await {
+                // Frontend-side SSE conversion for one chunk. The gaps *between*
+                // consecutive `sse_chunk` ranges cover both the worker producing
+                // the next token and the frontend's own receive/decode path,
+                // which is not annotated — do not read them as pure worker time.
+                let nvtx_chunk = dynamo_nvtx_range!("frontend.http.chat.sse_chunk");
                 events.clear();
                 let semantic_error =
                     set_stream_semantic_error(&response, &producer_error_signal);
@@ -3779,6 +3849,16 @@ async fn chat_completions(
                     continue;
                 }
 
+                // Marked here, not at the top of the loop: the stream is prefixed
+                // with annotation events (`data: None`), can yield empty chunks
+                // that never reach the client, and opens with a role-only delta
+                // that carries no token. This is the first chunk actually carrying
+                // generated output, which is what a TTFT reading wants.
+                if first_chunk && response.data.as_ref().is_some_and(carries_generated_token) {
+                    dynamo_nvtx_mark!("frontend.http.chat.first_chunk");
+                    first_chunk = false;
+                }
+
                 if tool_dispatch_enabled {
                     streaming_tool_dispatch_events(
                         &response,
@@ -3818,6 +3898,10 @@ async fn chat_completions(
                         events.push(Err(e));
                     }
                 }
+
+                // Ends before the yields: everything past this point is the
+                // consumer's time, not the frontend's.
+                drop(nvtx_chunk);
 
                 events.reverse();
                 while let Some(event) = events.pop() {
@@ -3897,6 +3981,9 @@ async fn chat_completions(
                 error_response
             })?;
 
+        // Spans the whole fold, so it includes worker time; the per-token frontend
+        // cost on this path is not separable from the wait for the next token.
+        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.chat.aggregate");
         let mut response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
@@ -10894,6 +10981,86 @@ mod tests {
             llm_metrics: None,
             tool_call_completion: Vec::new(),
         }
+    }
+
+    /// The TTFT marker must not fire on stream scaffolding. The role-only case is
+    /// the one that matters: `is_empty_stream_response` reports it as non-empty
+    /// (it is forwarded to the client), so a marker gated on "forwardable" would
+    /// land before the model produced a token.
+    #[test]
+    fn test_carries_generated_token() {
+        // Scaffolding, not a token.
+        assert!(
+            !carries_generated_token(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(Role::Assistant),
+                None,
+                None
+            )),
+            "role-only opening delta carries no token",
+        );
+        assert!(
+            !carries_generated_token(&make_delta(None, None, None, None, None, None, None, None)),
+            "all-None delta carries no token",
+        );
+        assert!(
+            !carries_generated_token(&make_delta(
+                Some(""),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "empty text from multi-byte token assembly carries no token",
+        );
+
+        // Real generated output, in each of its shapes.
+        assert!(
+            carries_generated_token(&make_delta(
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                Some(Role::Assistant),
+                None,
+                None
+            )),
+            "content alongside the role is a token",
+        );
+        assert!(
+            carries_generated_token(&make_delta(
+                None,
+                Some("thinking"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "reasoning content is generated output",
+        );
+        assert!(
+            carries_generated_token(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("refused"),
+                None
+            )),
+            "a refusal is generated output",
+        );
     }
 
     #[test]
