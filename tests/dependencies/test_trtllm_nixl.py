@@ -70,9 +70,9 @@ def _probe(order):
         "*-linux-gnu/plugins/libplugin_LIBFABRIC.so"
     )
     if any(efa_plugins):
-        assert "LIBFABRIC" in sender.get_plugin_list(), (
-            "EFA plugin must be discoverable in both native/Python load orders"
-        )
+        assert (
+            "LIBFABRIC" in sender.get_plugin_list()
+        ), "EFA plugin must be discoverable in both native/Python load orders"
     source = ctypes.create_string_buffer(bytes(range(256)) * 2048)
     target = ctypes.create_string_buffer(len(source))
     local = [(ctypes.addressof(source), len(source), 0, "")]
