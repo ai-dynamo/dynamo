@@ -59,7 +59,7 @@ func RenderNodeLocal(
 	projections := workload.modelProjections
 
 	// Keep the hybrid GPU clique before the workload's LPU roles.
-	hybrid := projections[0].pipeline == PipelineLPX
+	hybrid := projections[0].pipeline == PipelineHybrid
 	rendered := &WorkloadTemplates{}
 	cyborg := input.Cyborg
 	if hybrid {
@@ -129,7 +129,7 @@ func RenderNodeLocal(
 				RoleName:     conductorTemplateName,
 				PodSpec:      conductorTemplate.Spec,
 				Replicas:     1,
-				MinAvailable: ptr.To(int32(1)),
+				MinAvailable: new(int32(1)),
 				StartsAfter:  agentTemplateNames,
 			},
 		}
@@ -197,7 +197,7 @@ func RenderNodeLocal(
 				RoleName:     agent.TemplateName,
 				PodSpec:      podSpec,
 				Replicas:     replicas,
-				MinAvailable: ptr.To(replicas),
+				MinAvailable: new(replicas),
 			},
 		})
 	}
@@ -225,7 +225,7 @@ func RenderNodeLocal(
 			return nil, err
 		}
 
-		cyborg.Spec.MinAvailable = ptr.To(int32(1))
+		cyborg.Spec.MinAvailable = new(int32(1))
 	}
 
 	// Each workload contributes its own scaling group to the shared PCS.
@@ -237,8 +237,8 @@ func RenderNodeLocal(
 		Name:         plan.ScalingGroupTemplate,
 		CliqueNames:  members,
 		Annotations:  map[string]string{WorkloadDigestAnnotation: workloadDigest},
-		Replicas:     ptr.To(ptr.Deref(input.MinAvailable, 1)),
-		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
+		Replicas:     new(ptr.Deref(input.MinAvailable, 1)),
+		MinAvailable: new(ptr.Deref(input.MinAvailable, 1)),
 	}
 
 	// Keep every LPX role in one backend gang, including the KAI fallback roles.
@@ -254,9 +254,9 @@ func RenderNodeLocal(
 // specs. Agent and projection are nonnil, and projection has validated partitions;
 // nil conductor means no emitted launcher.
 func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, projection *ModelProjection, configMapName, allocation string) {
-	family := projection.configuredBuild.Family
+	family := projection.configuredBuild.family
 	ensureLPUConfigVolume(agentPodSpec, configMapName)
-	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].DevicesPerNode)
+	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].devicesPerNode)
 	if conductorPodSpec != nil {
 		configureLPUConductorPod(conductorPodSpec, configMapName, allocation)
 	}

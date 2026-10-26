@@ -547,6 +547,12 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
 #[tokio::test]
 #[serial_test::serial]
 async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
+    enum Fallback {
+        Overload,
+        Transport,
+        Exit,
+    }
+
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -557,10 +563,12 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
         .component("workers".to_string())
         .unwrap();
 
-    for (index, (mode, transport_fallback)) in [
-        (RouterMode::RoundRobin, false),
-        (RouterMode::PowerOfTwoChoices, false),
-        (RouterMode::RoundRobin, true),
+    for (index, (mode, fallback)) in [
+        (RouterMode::RoundRobin, Fallback::Overload),
+        (RouterMode::PowerOfTwoChoices, Fallback::Overload),
+        (RouterMode::RoundRobin, Fallback::Transport),
+        (RouterMode::RoundRobin, Fallback::Exit),
+        (RouterMode::PowerOfTwoChoices, Fallback::Exit),
     ]
     .into_iter()
     .enumerate()
@@ -569,8 +577,15 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
         let mut client = endpoint.client().await.unwrap();
         tokio::task::yield_now().await;
         let id = endpoint.id();
-        let instances: Vec<_> = [101, 202]
-            .into_iter()
+        let worker_exited = matches!(fallback, Fallback::Exit);
+        let worker_ids = if worker_exited {
+            vec![101, 202, 303]
+        } else {
+            vec![101, 202]
+        };
+        let instances: Vec<_> = worker_ids
+            .iter()
+            .copied()
             .map(|instance_id| Instance {
                 namespace: id.namespace.clone(),
                 component: id.component.clone(),
@@ -585,8 +600,8 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
             .collect();
         let (source_tx, source_rx) = watch::channel(instances.clone());
         client.instance_source = Arc::new(source_rx);
-        client.override_discovered_instances(vec![101, 202]);
-        client.override_instance_avail(vec![101, 202]);
+        client.override_discovered_instances(worker_ids.clone());
+        client.override_instance_avail(worker_ids);
         let load_context = test_load_context(&client).await;
         let dispatch = Arc::new(CompletedBuiltinDispatch::default());
         let inner = PushRouter::from_client_with_dispatch(
@@ -613,7 +628,11 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
         while stream.next().await.is_some() {}
         assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(1); 2]);
 
-        if transport_fallback {
+        if worker_exited {
+            source_tx.send(instances[1..].to_vec()).unwrap();
+            client.override_discovered_instances(vec![202, 303]);
+            client.override_instance_avail(vec![202, 303]);
+        } else if matches!(fallback, Fallback::Transport) {
             // The selection view still contains A, but dispatch can only reach B.
             source_tx.send(instances[1..].to_vec()).unwrap();
             assert!(client.is_instance_discovered(101));
@@ -631,12 +650,18 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
             &[Some(1), Some(1), None],
             "fallback must not inherit the original worker's rank"
         );
+        let dispatched_worker = *dispatch.worker_ids.lock().unwrap().last().unwrap();
+        let expected_target = if worker_exited {
+            AffinityTarget::worker(dispatched_worker)
+        } else {
+            AffinityTarget::new(101, Some(1))
+        };
         assert_eq!(
             affinity
                 .query_target(&SessionAffinityId::new("rank-fallback"), None)
                 .unwrap(),
-            Some(AffinityTarget::new(101, Some(1))),
-            "worker-only fallback must preserve the known ranked affinity target"
+            Some(expected_target),
+            "only a discovered worker should retain its ranked affinity preference"
         );
 
         let mut stream = host
@@ -646,16 +671,16 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
         while stream.next().await.is_some() {}
         assert_eq!(
             dispatch.worker_ids.lock().unwrap().as_slice(),
-            &[101, 101, 202, 202]
+            &[101, 101, dispatched_worker, dispatched_worker]
         );
         assert_eq!(
             dispatch.dp_ranks.lock().unwrap().as_slice(),
             &[Some(1), Some(1), None, None],
-            "dispatched ranks for {mode:?}, transport_fallback={transport_fallback}"
+            "dispatched ranks for {mode:?}, worker_exited={worker_exited}"
         );
-        if transport_fallback {
+        if matches!(fallback, Fallback::Transport) {
             source_tx.send(instances).unwrap();
-        } else {
+        } else if matches!(fallback, Fallback::Overload) {
             client.set_overloaded_instances(&[]);
         }
         let mut stream = host
@@ -663,8 +688,14 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
             .await
             .unwrap();
         while stream.next().await.is_some() {}
-        assert_eq!(dispatch.worker_ids.lock().unwrap().last(), Some(&101));
-        assert_eq!(dispatch.dp_ranks.lock().unwrap().last(), Some(&Some(1)));
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().last(),
+            Some(&expected_target.worker_id)
+        );
+        assert_eq!(
+            dispatch.dp_ranks.lock().unwrap().last(),
+            Some(&expected_target.dp_rank)
+        );
         drop(host);
     }
     runtime.shutdown();
@@ -4514,7 +4545,7 @@ async fn parent_group_binding_resolves_siblings_to_one_key() {
     let (runtime, host) = affinity_mode_host("subagent-group-binding").await;
 
     let key = |request: &SingleIn<PreprocessedRequest>| {
-        host.group_binding_id(request, None)
+        host.group_binding_id(request, None, RequestPhase::Decode)
             .unwrap_or_else(|| {
                 crate::session_affinity::affinity_id(request)
                     .unwrap()
@@ -4588,6 +4619,72 @@ async fn parent_group_binding_offers_siblings_the_committed_worker() {
         "a different parent is a different group"
     );
 
+    runtime.shutdown();
+}
+
+// A child must reuse its parent's prefill placement without changing decode's sibling group.
+#[tokio::test]
+#[serial_test::serial]
+async fn child_prefill_uses_parent_worker_while_decode_keeps_group_binding() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+    let parent = subagent_request("parent-1", None);
+    let (_, hold) = router
+        .select_with_session_affinity(
+            &parent,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    let mut stream = router
+        .bind_affinity(
+            hold,
+            AffinityTarget::new(7, Some(0)),
+            ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::default(),
+                )])),
+                parent.context(),
+            ),
+        )
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let child = subagent_request("child-1", Some("parent-1"));
+    let (selected, hold) = router
+        .select_with_session_affinity(
+            &child,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected, Some(AffinityTarget::new(7, Some(0))));
+    drop(hold);
+    let (decode, hold) = router
+        .select_with_session_affinity(
+            &child,
+            RequestPhase::Decode,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        decode, None,
+        "decode's sibling group must not inherit the parent binding"
+    );
+    drop(hold);
     runtime.shutdown();
 }
 

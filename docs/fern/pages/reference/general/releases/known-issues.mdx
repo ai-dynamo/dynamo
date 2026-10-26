@@ -10,11 +10,47 @@ import { RELEASE_STATS } from "@/components/releases.data";
 
 <ReferenceStyles />
 
-Known issues are mirrored verbatim from each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
+Known issues summarize each release's GitHub release notes. The current release is listed first, with older releases collapsed below; artifact-specific issues sit at the bottom of the page.
+
+<a id="v160"></a>
+
+## v1.6.0 — current release
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Out-of-Vocab Stop Token Crash:** A request whose `stop_token_ids` includes an ID at or above the model's vocabulary size can crash the SGLang scheduler when any request in the batch sets `min_tokens`, failing every request on that worker until it restarts. The issue also affects v1.5.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Snapshot and GMS CUDA Graph Startup Failure:** SGLang workers in Dynamo Snapshot mode or with GPU Memory Service V1 checkpointing fail at startup with a `NotImplementedError` from prefill CUDA graph initialization. The issue also affects v1.5.0. **Workaround:** pass `--disable-cuda-graph` to these workers.
+
+<span className="dynref-badge dynref-badge--blue">SGLang</span> **Redundant Memory Resume Crash:** With GPU Memory Service on SGLang, sending `resume_memory_occupation` twice without a `release_memory_occupation` in between crashes the scheduler. **Workaround:** send each resume only after a matching release.
+
+<span className="dynref-badge dynref-badge--blue">TRT-LLM</span> **Oversized Anthropic Messages Return 500:** On TensorRT-LLM, non-streaming `/v1/messages` requests whose prompt exceeds the engine's `max_num_tokens` return HTTP 500 instead of HTTP 400. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **Omitted Max Tokens Generates to the Context Limit:** On vLLM, a request without `max_tokens` can generate up to the full remaining context window when the model sets no default output length. **Workaround:** set `max_tokens` on every request.
+
+<span className="dynref-badge dynref-badge--blue">vLLM</span> **GMS Persisted KV Standby Wake Failure:** With GPU Memory Service persisted KV failover (`DYN_GMS_PERSIST_KV`), tensor parallelism, and an explicit `--kv-cache-memory-bytes`, the vLLM standby engine fails to adopt the retained KV cache with `StaleMemoryLayoutError`. The issue also affects v1.5.0. **Workaround:** leave `DYN_GMS_PERSIST_KV` unset.
+
+<span className="dynref-badge dynref-badge--blue">CLI</span> **Replay Module Entrypoint Removal:** `python -m dynamo.replay` fails because the replay CLI moved into the AISimulate wheel in v1.5.0. **Workaround:** use `aisimulate predict --stack dynamo --config <file>`. See [the replay guide](../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx).
+
+<span className="dynref-badge dynref-badge--blue">Frontend</span> **Logit Bias Ignored:** The Frontend accepts `logit_bias` on `/v1/chat/completions` and `/v1/completions` but drops it before the engine, so no bias is applied. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Frontend</span> **Request Error Details Dropped:** When a worker rejects a request, the Frontend returns a generic error without the worker's message. The issue also affects v1.5.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Inflated Capacity Estimate Suppresses Scaling:** For aggregated vLLM deployments, a Dynamo Planner regression model seeded from worker self-benchmark data can overestimate per-engine capacity and refuse to scale up under load. **Workaround:** use a pre-published AISimulate performance model.
+
+<span className="dynref-badge dynref-badge--blue">Router</span> **GlobalRouter Pool Requests Find No Endpoints:** On Kubernetes with Grove, requests that the GlobalRouter sends to a pool can fail with no available endpoints even when the pool's worker is healthy. The issue also affects v1.5.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Router</span> **Decode-Only Worker Pin Fails in Disaggregated Serving:** A request that pins only a decode worker fails instead of letting the Router select a prefill worker. The issue also affects v1.5.0. **Workaround:** pin both workers with `x-dynamo-worker-instance-id` and `x-dynamo-prefill-instance-id`, or pin neither.
+
+<span className="dynref-badge dynref-badge--blue">Operator</span> **Brief 404 Errors During Rolling Updates:** Rolling updates of disaggregated deployments with a max surge of 1 and max unavailable of 0 can return HTTP 404 for up to about one second while a worker is replaced. The rollout still completes. The issue also affects v1.5.0. No workaround is available yet.
+
+<span className="dynref-badge dynref-badge--blue">Operator</span> **EFA Network Plugin Not Loaded:** On AWS EFA clusters, SGLang and TensorRT-LLM workers configured from the [EFA on AWS guide](../../../kubernetes/installation/rdma-setup/efa-on-aws.mdx) silently fall back to socket transport because the guide's `LD_LIBRARY_PATH` entry is wrong. The issue also affects v1.5.0. **Workaround:** use `/opt/amazon/ofi-nccl/lib` instead of `/opt/aws-ofi-nccl/lib`.
+
+<span className="dynref-badge dynref-badge--blue">RL</span> **Slime Weight Synchronization Failure:** With the experimental Slime integration, the first weight update from the Slime trainer to SGLang v0.5.21 engines fails with HTTP 400, and restarting the trainer against engines still running from an earlier job also fails. A fix is planned for a future release. No workaround is available yet.
+
+The other v1.5.0 and v1.5.1 known issues are fixed in v1.6.0 or were closed as intended behavior.
 
 <a id="v151"></a>
 
-## v1.5.1 — current release
+## v1.5.1
 
 <span className="dynref-badge dynref-badge--blue">SGLang</span> **SGLang Sidecar Inference 500 Errors:** Every inference request sent to the SGLang sidecar still fails with HTTP 500 and the error `'GenerateReqInput' object has no attribute 'batch_size'`. The cause is a protocol mismatch with the bundled SGLang version that is corrected in upstream SGLang v0.5.19. No workaround is available yet; the fix is targeted for v1.6.0.
 
