@@ -17,11 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::{ArgGroup, Parser};
+use clap::{ArgGroup, Parser, ValueEnum};
 use dynamo_global_discovery_client::GlobalDiscoveryClient;
 use dynamo_global_ingress::{ModelSync, PoolForwardingEngine};
 use dynamo_global_router::{
-    DiscoveryPoolCatalog, Pool, PoolCatalog, RoundRobinSelector, StaticPoolCatalog,
+    DiscoveryPoolCatalog, InFlightTracker, LeastInFlightSelector, Pool, PoolCatalog, PoolSelector,
+    RoundRobinSelector, StaticPoolCatalog,
 };
 use dynamo_global_router_shared::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
 use dynamo_llm::http::service::service_v2::HttpService;
@@ -53,6 +54,17 @@ struct Args {
     /// How long to wait for a pool frontend to accept a connection.
     #[arg(long, default_value_t = 5)]
     connect_timeout_secs: u64,
+    /// How to choose the pool for each request.
+    #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
+    router_policy: RouterPolicy,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RouterPolicy {
+    /// Rotate through the pools serving the request's model.
+    RoundRobin,
+    /// The pool with the fewest requests in flight from this process.
+    LeastInFlight,
 }
 
 fn parse_pool(value: &str) -> Result<Pool, String> {
@@ -121,9 +133,15 @@ async fn main() -> Result<()> {
         .connect_timeout(Duration::from_secs(args.connect_timeout_secs))
         .build()
         .context("build the pool HTTP client")?;
+    let in_flight = Arc::new(InFlightTracker::new());
+    let selector: Arc<dyn PoolSelector> = match args.router_policy {
+        RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
+        RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
+    };
     let engine = Arc::new(PoolForwardingEngine::new(
         catalog.subscribe(),
-        Arc::new(RoundRobinSelector::new()),
+        selector,
+        in_flight,
         http,
     ));
 
@@ -133,7 +151,12 @@ async fn main() -> Result<()> {
     models.apply(&pools.borrow());
     tokio::spawn(models.follow(pools, shutdown.child_token()));
 
-    tracing::info!(host = %args.host, port = args.port, "Global Frontend listening");
+    tracing::info!(
+        host = %args.host,
+        port = args.port,
+        router_policy = ?args.router_policy,
+        "Global Frontend listening"
+    );
     service
         .run(shutdown)
         .await

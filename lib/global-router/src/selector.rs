@@ -3,6 +3,7 @@
 
 use std::borrow::Borrow;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use dynamo_global_router_shared::PoolId;
@@ -10,6 +11,7 @@ use dynamo_runtime::pipeline::BuiltinRoutePicker;
 use url::Url;
 
 use crate::catalog::Pool;
+use crate::load::InFlightTracker;
 
 /// What a selector may know about a request. Routing inputs such as the
 /// session ID or the client's region become fields here.
@@ -60,18 +62,66 @@ impl RoundRobinSelector {
 
 impl PoolSelector for RoundRobinSelector {
     fn select(&self, request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
-        let reachable = candidates
-            .iter()
-            .copied()
-            .filter(|pool| !pool.frontends.is_empty())
-            .collect::<Vec<_>>();
+        let reachable = reachable(candidates);
         let pool = reachable[rotate(&self.pools, request.model, reachable.len())?];
-        let frontend = &pool.frontends[rotate(&self.frontends, &pool.id, pool.frontends.len())?];
-        Some(PoolTarget {
-            pool: pool.id.clone(),
-            frontend: frontend.clone(),
-        })
+        target(&self.frontends, pool)
     }
+}
+
+/// Sends each request to the pool with the fewest requests in flight from
+/// this process, then rotates through that pool's frontends.
+///
+/// A slower pool holds its requests longer, so it shows more in flight and
+/// gets a smaller share. Only this process's requests count: replicas do not
+/// share counts, and the pools' own load reports are not read. Ties go to a
+/// random pool among the tied ones.
+#[derive(Debug)]
+pub struct LeastInFlightSelector {
+    in_flight: Arc<InFlightTracker>,
+    pools: BuiltinRoutePicker,
+    frontends: DashMap<PoolId, BuiltinRoutePicker>,
+}
+
+impl LeastInFlightSelector {
+    /// `in_flight` must be the tracker the forwarding engine counts its
+    /// requests in.
+    pub fn new(in_flight: Arc<InFlightTracker>) -> Self {
+        Self {
+            in_flight,
+            pools: BuiltinRoutePicker::least_loaded(),
+            frontends: DashMap::new(),
+        }
+    }
+}
+
+impl PoolSelector for LeastInFlightSelector {
+    fn select(&self, _request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
+        let reachable = reachable(candidates);
+        // As in `rotate`, candidate positions stand in for worker IDs.
+        let positions = (0..reachable.len() as u64).collect::<Vec<_>>();
+        let position = self.pools.select_worker(&positions, |position| {
+            self.in_flight.get(&reachable[position as usize].id)
+        })?;
+        target(&self.frontends, reachable[position as usize])
+    }
+}
+
+/// The candidates that have a frontend to send to.
+fn reachable<'a>(candidates: &[&'a Pool]) -> Vec<&'a Pool> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|pool| !pool.frontends.is_empty())
+        .collect()
+}
+
+/// `pool`, with the next of its frontends in rotation.
+fn target(frontends: &DashMap<PoolId, BuiltinRoutePicker>, pool: &Pool) -> Option<PoolTarget> {
+    let frontend = &pool.frontends[rotate(frontends, &pool.id, pool.frontends.len())?];
+    Some(PoolTarget {
+        pool: pool.id.clone(),
+        frontend: frontend.clone(),
+    })
 }
 
 /// Advances `key`'s cursor over `count` candidates and returns the chosen
@@ -162,5 +212,42 @@ mod tests {
         }
         assert_eq!(selector.select(&request, &[&empty]), None);
         assert_eq!(selector.select(&request, &[]), None);
+    }
+
+    #[test]
+    fn least_in_flight_picks_the_pool_with_fewest_requests() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let in_flight = Arc::new(InFlightTracker::new());
+        let selector = LeastInFlightSelector::new(in_flight.clone());
+        let request = RoutingRequest::new("qwen");
+
+        let _busy = [in_flight.start(&blue.id), in_flight.start(&blue.id)];
+        let _one = in_flight.start(&green.id);
+        for _ in 0..10 {
+            let target = selector.select(&request, &[&blue, &green]).unwrap();
+            assert_eq!(target.pool, green.id);
+        }
+    }
+
+    #[test]
+    fn least_in_flight_spreads_ties_and_skips_pools_without_frontends() {
+        let empty = pool("draining", "qwen", &[]);
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let selector = LeastInFlightSelector::new(Arc::new(InFlightTracker::new()));
+        let request = RoutingRequest::new("qwen");
+
+        let chosen = (0..64)
+            .map(|_| {
+                selector
+                    .select(&request, &[&empty, &blue, &green])
+                    .unwrap()
+                    .pool
+            })
+            .collect::<Vec<_>>();
+        assert!(!chosen.contains(&empty.id));
+        assert!(chosen.contains(&blue.id) && chosen.contains(&green.id));
+        assert_eq!(selector.select(&request, &[&empty]), None);
     }
 }

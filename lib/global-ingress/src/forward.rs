@@ -5,7 +5,9 @@ use std::io;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dynamo_global_router::{PoolSelector, PoolSnapshot, PoolTarget, RoutingRequest};
+use dynamo_global_router::{
+    InFlightGuard, InFlightTracker, PoolSelector, PoolSnapshot, PoolTarget, RoutingRequest,
+};
 use dynamo_llm::http::service::error::HttpError;
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_llm::protocols::codec::{Message, SseLineCodec};
@@ -98,20 +100,24 @@ fn usage_in_stream() -> ChatCompletionStreamOptions {
 pub struct PoolForwardingEngine {
     pools: watch::Receiver<Arc<PoolSnapshot>>,
     selector: Arc<dyn PoolSelector>,
+    in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
 }
 
 impl PoolForwardingEngine {
-    /// `http` must not set a total request timeout, because a response
-    /// streams for as long as the pool generates.
+    /// Each request counts in `in_flight` from its pool choice until its
+    /// response stream ends. `http` must not set a total request timeout,
+    /// because a response streams for as long as the pool generates.
     pub fn new(
         pools: watch::Receiver<Arc<PoolSnapshot>>,
         selector: Arc<dyn PoolSelector>,
+        in_flight: Arc<InFlightTracker>,
         http: reqwest::Client,
     ) -> Self {
         Self {
             pools,
             selector,
+            in_flight,
             http,
         }
     }
@@ -136,6 +142,7 @@ impl PoolForwardingEngine {
         let (mut body, context) = request.into_parts();
         let ctx = context.context();
         let target = self.select(body.model())?;
+        let in_flight = self.in_flight.start(&target.pool);
         let url = route_url(&target.frontend, R::ROUTE)?;
         body.request_stream();
 
@@ -147,7 +154,13 @@ impl PoolForwardingEngine {
         if let Some(session) = session {
             pool_request = pool_request.header(HEADER_DYNAMO_SESSION_ID, session.as_str());
         }
-        tracing::debug!(request_id = ctx.id(), pool = %target.pool, %url, "forwarding request");
+        tracing::debug!(
+            request_id = ctx.id(),
+            pool = %target.pool,
+            %url,
+            in_flight = self.in_flight.get(&target.pool),
+            "forwarding request"
+        );
         // TODO: retry the next pool when this one rejects the request before
         // its first byte (HLD 2.2.2, priority retry).
         let response = pool_request
@@ -165,7 +178,7 @@ impl PoolForwardingEngine {
             }
             .into());
         }
-        let events = pool_events::<R::Response>(response, ctx.clone());
+        let events = pool_events::<R::Response>(response, ctx.clone(), in_flight);
         Ok(ResponseStream::new(Box::pin(events), ctx))
     }
 }
@@ -212,13 +225,17 @@ fn route_url(frontend: &Url, route: &[&str]) -> Result<Url, DynamoError> {
 ///
 /// `SseLineCodec` consumes `data: [DONE]` without emitting it, so a pool that
 /// closes its body cleanly before `[DONE]` looks like a finished stream.
+///
+/// The request stays counted in flight until the stream ends or is dropped.
 fn pool_events<T: DeserializeOwned + Send + 'static>(
     response: reqwest::Response,
     ctx: Arc<dyn AsyncEngineContext>,
+    in_flight: InFlightGuard,
 ) -> impl Stream<Item = Annotated<T>> + Send {
     let body = StreamReader::new(response.bytes_stream().map_err(io::Error::other));
     let mut messages = FramedRead::new(body, SseLineCodec::new());
     async_stream::stream! {
+        let _in_flight = in_flight;
         loop {
             let message = tokio::select! {
                 biased;

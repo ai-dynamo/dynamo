@@ -10,13 +10,17 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
+use axum::body::Body;
+use axum::routing;
 use common::{
     MODEL, Server, bind, chat, chat_chunk, client, http_service, ok_json, pool, post,
     scripted_pool_frontend, serve, sse_data,
 };
-use dynamo_global_router::{Pool, PoolSnapshot};
+use dynamo_global_router::{InFlightTracker, Pool, PoolSnapshot};
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
+use futures::{StreamExt, stream};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -270,4 +274,87 @@ async fn a_pool_error_mid_stream_ends_the_client_stream_with_an_error() {
         events.last().unwrap().get("error").is_some(),
         "the client must see an error frame: {events:?}"
     );
+}
+
+/// A pool frontend that sends one chunk and then never finishes.
+async fn stalled_pool_frontend() -> Server {
+    let first = format!("data: {}\n\n", chat_chunk("he"));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        routing::post(move || {
+            let first = first.clone();
+            async move {
+                let body = stream::once(async move { Ok::<_, std::io::Error>(first) })
+                    .chain(stream::pending());
+                (
+                    [("content-type", "text/event-stream")],
+                    Body::from_stream(body),
+                )
+            }
+        }),
+    );
+    let (listener, url) = bind().await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let shutdown = cancel.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await
+    });
+    Server { url, cancel }
+}
+
+async fn wait_for_in_flight(in_flight: &InFlightTracker, pool: &Pool, expected: u64) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while in_flight.get(&pool.id) != expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "in flight stayed at {}, expected {expected}",
+            in_flight.get(&pool.id)
+        )
+    });
+}
+
+#[tokio::test]
+async fn requests_count_in_flight_until_their_stream_ends() {
+    let echo = echo_pool_frontend().await;
+    let stalled = stalled_pool_frontend().await;
+    let (echo_pool, stalled_pool) = (
+        pool("echo", MODEL, &echo.url),
+        pool("stalled", "stalled-model", &stalled.url),
+    );
+    let in_flight = Arc::new(InFlightTracker::new());
+    let (_pools, receiver) = watch::channel(Arc::new(PoolSnapshot::new(vec![
+        echo_pool.clone(),
+        stalled_pool.clone(),
+    ])));
+    let global = common::counting_global_frontend(receiver, in_flight.clone()).await;
+
+    // A finished stream stops counting.
+    let response = post(
+        &global.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hello", true),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.text().await.unwrap();
+    wait_for_in_flight(&in_flight, &echo_pool, 0).await;
+
+    // So does one the client abandons.
+    let mut response = post(
+        &global.url,
+        "v1/chat/completions",
+        &chat("stalled-model", "hi", true),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.chunk().await.unwrap().expect("the first chunk");
+    assert_eq!(in_flight.get(&stalled_pool.id), 1);
+    drop(response);
+    wait_for_in_flight(&in_flight, &stalled_pool, 0).await;
 }

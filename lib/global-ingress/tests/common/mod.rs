@@ -13,7 +13,7 @@ use axum::Router;
 use axum::http::HeaderMap;
 use axum::routing;
 use dynamo_global_ingress::{ModelSync, PoolForwardingEngine};
-use dynamo_global_router::{Pool, PoolSnapshot, RoundRobinSelector};
+use dynamo_global_router::{InFlightTracker, Pool, PoolSnapshot, RoundRobinSelector};
 use dynamo_global_router_shared::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
 use dynamo_llm::http::service::service_v2::HttpService;
 use reqwest::StatusCode;
@@ -80,11 +80,20 @@ pub async fn serve(service: HttpService, listener: TcpListener, url: Url) -> Ser
 
 /// A Global Frontend that routes round robin over the pools `pools` publishes.
 pub async fn global_frontend(pools: watch::Receiver<Arc<PoolSnapshot>>) -> Server {
+    counting_global_frontend(pools, Arc::new(InFlightTracker::new())).await
+}
+
+/// [`global_frontend`], counting its requests in `in_flight`.
+pub async fn counting_global_frontend(
+    pools: watch::Receiver<Arc<PoolSnapshot>>,
+    in_flight: Arc<InFlightTracker>,
+) -> Server {
     let (listener, url) = bind().await;
     let service = http_service(&url);
     let engine = Arc::new(PoolForwardingEngine::new(
         pools.clone(),
         Arc::new(RoundRobinSelector::new()),
+        in_flight,
         client(),
     ));
     let mut models = ModelSync::new(service.clone(), engine);

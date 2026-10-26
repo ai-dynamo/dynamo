@@ -11,8 +11,12 @@
 
 mod catalog;
 mod discovery;
+mod load;
 mod selector;
 
 pub use catalog::{Pool, PoolCatalog, PoolSnapshot, StaticPoolCatalog};
 pub use discovery::DiscoveryPoolCatalog;
-pub use selector::{PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest};
+pub use load::{InFlightGuard, InFlightTracker};
+pub use selector::{
+    LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
+};
