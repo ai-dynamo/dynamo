@@ -30,28 +30,20 @@ process-local variant requests one share per GPU node; the memory-service
 variant requests two shares per node because both `main` and `kvcr-services`
 use RDMA. Set
 `DYNAMO_RDMA_RESOURCE=rdma/ib` or another cluster-specific resource name when
-required. Both containers use `UCX_TLS=rc_x,cuda` to prevent TCP payload
-fallback and satisfy NIXL's transport checks on GPU hosts. Set
-`DYNAMO_UCX_NET_DEVICES=all` when the device plugin assigns a single HCA to each
-container. UCX then uses that container's assigned device, which can differ
-between `main` and `kvcr-services`. For a shared RDMA resource that exposes the
-same HCA everywhere, pin the GPU-local HCA and port, such as `mlx5_0:1`, after
-checking its availability in every engine and sidecar.
+required. `UCX_TLS=rc_x,cuda` prevents TCP payload fallback. Set
+`DYNAMO_UCX_NET_DEVICES=all` for per-container single-HCA allocations, or pin
+an HCA and port exposed in every engine and sidecar, such as `mlx5_0:1`.
 
 The image tag must contain a Dynamo semantic release version. Pin the same
 image by digest for every component, for example
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:REPLACE_ME`. Until KVCR is
 available in a Dynamo release image, build that image from matching Dynamo,
-KVCR, and vLLM revisions. Use [KVCR tag
-`v0.1.1`](https://github.com/ai-dynamo/kvcr/tree/v0.1.1) as the base, or the
-upcoming `v0.2` release when available. The memory-service variant requires KVCR's
+KVCR, and vLLM revisions. The memory-service variant requires KVCR's
 `--health-port`, `--health-host`, `--health-dependency-url`, and
-`--startup-timeout-seconds` flags. vLLM's KVCR secondary tier must support
-`kvcr_service_socket_path` and forward `startup_timeout_seconds` to
-`KVCRConfig`. With a `v0.1.1` base, use the health-enabled wheel overlay below;
-the released tag does
-not contain those health flags. Record the exact Dynamo, KVCR, and vLLM commit
-IDs with the image digest used for every qualified deployment.
+`--startup-timeout-seconds` flags, which are not all present in `v0.1.1`.
+vLLM's KVCR tier must accept `kvcr_service_socket_path` and forward
+`startup_timeout_seconds` to `KVCRConfig`. Record the three commit IDs and
+image digest used for each deployment.
 
 `DYNAMO_KVCR_COMPATIBILITY_DIGEST` is an opaque layout version shared by the
 engine and memory service. Change it whenever model, dtype, block layout, or
@@ -77,17 +69,10 @@ containers. To test it without rebuilding the existing compatible runtime image,
 build a pure-Python wheel from the KVCR feature tree and export
 `KVCR_WHEEL=/absolute/path/to/kvcr-0.1.1-py3-none-any.whl` before deployment.
 The script mounts it through `PYTHONPATH` in both containers; it does not install
-packages or supply native dependencies. Rebuild the runtime image when NIXL,
-CUDA, UCX, or other dependencies must change. Without `KVCR_WHEEL`, the installed
-KVCR must already support the health flags.
-
-For KVCR builds using pinned registration, including the asynchronous Guard
-preparation introduced in KVCR PR 116, remove inherited
-`UCX_REG_NONBLOCK_MEM_TYPES=host` and `UCX_IB_ODP_PREFETCH=n` settings from the
-runtime image. Verify both variables are unset in the engine and memory-service
-containers. A KVCR wheel overlay does not remove image environment settings or
-add vLLM's timeout-forwarding support. Rebuild the image if it retains these
-settings or lacks that support.
+packages, update vLLM, or change image environment settings. Rebuild the image
+for native dependency or vLLM changes. Without `KVCR_WHEEL`, the installed KVCR
+must support the flags above. For pinned registration, ensure
+`UCX_REG_NONBLOCK_MEM_TYPES` and `UCX_IB_ODP_PREFETCH` are unset in both containers.
 
 `deploy.sh` applies an immutable, content-addressed ConfigMap containing
 `services.sh`, Dynamo's shared `launch_utils.sh`, and the optional wheel before
@@ -134,34 +119,20 @@ children, not a timeout implemented by the shell helper. For a planned shutdown,
 drain and stop engines before their service; the wrapper does not impose
 cross-container shutdown ordering.
 
-The main container waits up to `KVCR_STARTUP_TIMEOUT_SECONDS` (default: 120)
-for KVCR `/ready` on port 9092 before launching vLLM.
-Native initialization has two separate budgets, both defaulting to 30 seconds:
+Memory-service settings accept positive decimal integers without leading zeros:
 
-- `KVCR_GUARD_STARTUP_TIMEOUT_SECONDS` supplies the service's
-  `--startup-timeout-seconds` argument. During promotion, Guard preparation
-  and activation each receive this budget.
-- `KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS` supplies the vLLM secondary tier's
-  `startup_timeout_seconds` value for engine-side NIXL initialization.
+| Variable | Default | Controls |
+|---|---:|---|
+| `KVCR_POOL_SIZE_GIB` | 2 | Guard pool capacity per worker, in GiB |
+| `KVCR_STARTUP_TIMEOUT_SECONDS` | 120 | HTTP `/ready` wait before launching vLLM |
+| `KVCR_GUARD_STARTUP_TIMEOUT_SECONDS` | 30 | Guard preparation and activation, each with this budget |
+| `KVCR_ENGINE_STARTUP_TIMEOUT_SECONDS` | 30 | Engine-side NIXL initialization |
+| `KVCR_TERMINATION_GRACE_PERIOD_SECONDS` | 30 | Pod termination grace for drain and cleanup |
 
-Increasing the HTTP readiness wait does not increase either native budget.
-Set `KVCR_POOL_SIZE_GIB` (default: 2) to change each worker's Guard pool.
-The shared-memory volume is pool size plus 1 GiB. The sidecar memory request
-adds 1% of pool size, rounded up to a whole GiB; its limit adds another 1 GiB.
-This covers the 100 MiB recovery journal, process overhead, and kernel metadata
-charged for the tmpfs allocation. For example, a 1 TiB pool requests 1035 GiB
-with a 1036 GiB limit; a fixed 2 GiB allowance was insufficient at that size.
-The engine's separate CPU offload buffer remains
-2 GiB. Larger pools need enough unallocated node memory and a startup timeout
-covering eager page allocation; for a 1 TiB pool, set `KVCR_POOL_SIZE_GIB=1024`
-and measure readiness before choosing the timeout. Large pools also take longer
-to unmap and free during shutdown. Set `KVCR_TERMINATION_GRACE_PERIOD_SECONDS`
-(default: 30) to cover engine drain and pool cleanup. All five settings accept
-positive decimal integers without leading zeros. Health readiness precedes
-engine-side NIXL registration, model loading, and inference readiness.
-
-For the 1 TiB case, validation on two B200 nodes used the following settings with
-more than 1035 GiB of schedulable memory available on each worker node:
+Timeouts are in seconds and independent. HTTP readiness is not inference readiness.
+Shared memory is pool size + 1 GiB; the sidecar requests pool size + 1%
+(rounded up to GiB), with a limit 1 GiB above that. Engine CPU offload stays 2 GiB.
+For a 1 TiB pool, reserve 1035 GiB per sidecar (1036 GiB limit), for example:
 
 ```bash
 KVCR_MEMORY_SERVICE_ENABLED=true KVCR_POOL_SIZE_GIB=1024 \
@@ -216,6 +187,5 @@ the standard `test_output` directory). It verifies that the workers are on
 separate hosts, one source engine restarts while its KVCR sidecar remains up,
 the Guard serves the preserved cache to the other engine, the response matches,
 the KVCR transfer metrics increase, and the selected active HCA carries the
-transfer. With `DYNAMO_UCX_NET_DEVICES=all`, the test requires exactly one
-allocated active RDMA port per measured container and reads the source and
-target counters from their respective devices.
+transfer. With `DYNAMO_UCX_NET_DEVICES=all`, each measured container must expose
+exactly one active RDMA port; its counters are read independently.
