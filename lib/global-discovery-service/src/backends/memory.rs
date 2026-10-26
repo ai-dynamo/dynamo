@@ -451,7 +451,14 @@ impl ReplicaRegistrar for MemoryReplicaStore {
         self.ensure_sweeping();
         let now = Instant::now();
         let mut replicas = self.lock();
-        let changed = replicas.served(&endpoint.replica, now) != Some(&endpoint);
+        let unchanged = match replicas.registered.get(&endpoint.replica) {
+            // Only a live registration of the same endpoint makes this a
+            // renewal. Watchers may still hold an expired registration whose
+            // fallback the sweep has not published yet, so replacing one is
+            // always a change.
+            Some(previous) => previous.expires_at > now && previous.endpoint == endpoint,
+            None => replicas.configured.get(&endpoint.replica) == Some(&endpoint),
+        };
         replicas.registered.insert(
             endpoint.replica.clone(),
             RegisteredReplica {
@@ -459,7 +466,7 @@ impl ReplicaRegistrar for MemoryReplicaStore {
                 expires_at: now + self.lease.lease_duration,
             },
         );
-        if changed {
+        if !unchanged {
             // No subscribers is not an error.
             let _ = self.events.send(WatchEvent::Added(endpoint));
         }
@@ -734,6 +741,36 @@ mod tests {
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Removed(id))) if id == replica.replica)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replacing_a_registration_the_sweep_has_not_removed_is_a_change() {
+        let configured = router("ohio/global-router-0", "http://10.42.0.5:50051");
+        let moved = router("ohio/global-router-0", "http://10.42.0.9:50051");
+        let store = MemoryReplicaStore::new(vec![configured.clone()], LEASE).unwrap();
+        // Sweeps run every 5 s from here.
+        let mut watch = store.list_and_watch(None).await.unwrap();
+        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == configured));
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Resync(_)))
+        ));
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        store.register(moved.clone()).await.unwrap();
+        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == moved));
+
+        // At 18 s the registration has expired (at 17 s), but the last sweep
+        // ran at 15 s, so watchers still hold `moved`. Registering the
+        // configured address again must tell them.
+        for _ in 0..16 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        store.register(configured.clone()).await.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), watch.next())
+            .await
+            .expect("watchers must learn the configured address again");
+        assert!(matches!(event, Some(Ok(WatchEvent::Added(r))) if r == configured));
     }
 
     #[tokio::test(start_paused = true)]
