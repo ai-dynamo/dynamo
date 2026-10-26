@@ -8,20 +8,20 @@ package runtime
 import (
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 )
 
 func TestGateEnabled(t *testing.T) {
 	t.Log("define a feature introduced by Dynamo runtime 1.4.0")
 	gate := Gate{
 		Name:              "TestFeature",
-		MinRuntimeVersion: versionoverride.Version{Major: 1, Minor: 4, Patch: 0},
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 4, Patch: 0},
 	}
 
 	t.Log("define versions below, at, and above the feature threshold")
 	tests := []struct {
 		name    string
-		version *versionoverride.Version
+		version *runtimeversion.Version
 		want    bool
 	}{
 		{
@@ -29,16 +29,16 @@ func TestGateEnabled(t *testing.T) {
 		},
 		{
 			name:    "older runtime",
-			version: &versionoverride.Version{Major: 1, Minor: 3, Patch: 9},
+			version: &runtimeversion.Version{Major: 1, Minor: 3, Patch: 9},
 		},
 		{
 			name:    "minimum supported runtime",
-			version: &versionoverride.Version{Major: 1, Minor: 4, Patch: 0},
+			version: &runtimeversion.Version{Major: 1, Minor: 4, Patch: 0},
 			want:    true,
 		},
 		{
 			name:    "newer runtime",
-			version: &versionoverride.Version{Major: 2, Minor: 0, Patch: 0},
+			version: &runtimeversion.Version{Major: 2, Minor: 0, Patch: 0},
 			want:    true,
 		},
 	}

@@ -15,21 +15,21 @@
  * limitations under the License.
  */
 
-// Package aisimulate lowers a v1beta2 DynamoGraphDeploymentRequest spec into the native
-// AISimulate input that a Run executes.
+// Package aisimulate lowers a v1beta2 NativeSearchInput snapshot into the native AISimulate
+// input that a Run executes.
 //
-// Lowering sits below the Request reconciler. Admission does not call it: spec.aisimulate.parameters
-// is opaque there, and the validation of the lowered input belongs to the schema of the AISimulate
-// release the Request selects. The reconciler lowers the Request once and freezes the output into the
-// Run, which executes that object as it is.
+// Admission does not lower the input: spec.aisimulate.inputOverrides is opaque there, and validating
+// the result belongs to the schema bundled in the operator's configured planner image. The Request
+// reconciler snapshots the accepted input into an immutable Run. The Run reconciler lowers that
+// snapshot once, records the result in status.aisimulate.input and passes the same document to the Job.
 //
 // Lower works in three steps. The typed spec (model, backends, hardware, workload, objective)
 // is first translated into the native input, the "underlay". The derived defaults that no API
 // field carries are then added to it: the request count, a bounded trial budget for a
 // KV-load range search, and goal.strict_sla when an SLA bound is set. Last,
-// spec.aisimulate.parameters is applied on top as a JSON Merge Patch (RFC 7386): native
+// spec.aisimulate.inputOverrides is applied on top as a JSON Merge Patch (RFC 7386): native
 // objects merge recursively, arrays and scalars replace the value, and null deletes it. The
-// parameters are authoritative: they win on every path they name, including the derived
+// input overrides are authoritative: they win on every path they name, including the derived
 // defaults, and are applied once, last.
 //
 // The document stays unstructured (map[string]any) because its schema belongs to the

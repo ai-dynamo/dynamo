@@ -176,33 +176,23 @@ type ObjectiveSpec struct {
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
 	// SLA defines per-request latency bounds used to calculate goodput. When omitted, no
-	// bounds apply. spec.aisimulate.parameters.goal.sla overrides the bounds it names.
+	// bounds apply. spec.aisimulate.inputOverrides.goal.sla overrides the bounds it names.
 	// +optional
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }
 
-// AISimulateSpec selects the AISimulate execution artifact and supplies native input.
+// AISimulateSpec supplies native input to the AISimulate version in the operator's configured
+// planner image.
 type AISimulateSpec struct {
-	// Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-	// persists the configured override or a version-matched Dynamo planner image.
-	// +optional
-	// +kubebuilder:validation:MinLength=1
-	Image string `json:"image,omitempty"`
-
-	// VersionOverride declares the AISimulate compatibility version as three numeric parts
-	// (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required
-	// when the image tag is not a version and wins over a version in the tag.
-	// +optional
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
-	VersionOverride string `json:"versionOverride,omitempty"`
-
-	// Parameters contains native AISimulate input. Field names and nesting use
-	// the upstream AISimulate JSON contract, including snake_case names.
+	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
+	// the typed fields. It uses the upstream AISimulate JSON contract, including
+	// snake_case names. Values here take precedence, and null deletes a lowered
+	// field. The operator runs the AISimulate version from its configured planner
+	// image; Requests and Runs cannot select a different image or version.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
-	Parameters *runtime.RawExtension `json:"parameters,omitempty"`
+	InputOverrides *runtime.RawExtension `json:"inputOverrides,omitempty"`
 }
 
 // RecommendationSpec controls bounded projection into DGDC resources.
@@ -238,7 +228,7 @@ type NativeSearchInput struct {
 	// When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;
 	// an explicit empty workload receives the same shape from admission. An explicit
 	// workload.static: {} opts out of that shape, leaving the workload to
-	// spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the
+	// spec.aisimulate.inputOverrides.workload. spec.aisimulate.inputOverrides.workload overrides the
 	// fields it names.
 	// The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a
 	// KV-load ratio search.
@@ -251,7 +241,7 @@ type NativeSearchInput struct {
 	// +optional
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
-	// AISimulate selects the execution artifact and supplies native AISimulate input.
+	// AISimulate supplies native input to the operator's AISimulate execution bundle.
 	// +optional
 	AISimulate *AISimulateSpec `json:"aisimulate,omitempty"`
 

@@ -5,16 +5,16 @@
 
 package runtime
 
-import "github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
+import "github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 
 // Gate controls runtime-version-dependent operator behavior.
 type Gate struct {
 	Name              string
-	MinRuntimeVersion versionoverride.Version
+	MinRuntimeVersion runtimeversion.Version
 }
 
 // Enabled reports whether a known runtime version meets the feature threshold.
-func (g Gate) Enabled(version *versionoverride.Version) bool {
+func (g Gate) Enabled(version *runtimeversion.Version) bool {
 	if version == nil {
 		return false
 	}

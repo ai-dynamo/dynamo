@@ -59,7 +59,6 @@ func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 
 // WithV1beta2 sets the defaults of v1beta2 Requests and returns the defaulter.
 func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
-	options.AISimulateImage = defaultPlannerImageFor(d.OperatorVersion, options.AISimulateImage)
 	d.v1beta2 = options
 	return d
 }

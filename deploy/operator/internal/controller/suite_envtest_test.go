@@ -28,10 +28,6 @@ import (
 
 const admissionBypassUsername = "operatorenv-controller-admission-bypass"
 
-// The controller specs create native v1beta2 Requests without an image or hardware. Admission
-// completes them from the operator's configuration, as it does in production.
-const controllerAISimulateImage = "registry.example/aisimulate:1.2.0"
-
 type fixedHardwareDiscoverer struct{}
 
 func (fixedHardwareDiscoverer) Discover(context.Context, nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
@@ -59,8 +55,7 @@ func setupProductionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOpti
 		OperatorVersion:   opts.OperatorVersion,
 		OperatorPrincipal: opts.OperatorPrincipal,
 		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
-			AISimulateImage: controllerAISimulateImage,
-			Hardware:        fixedHardwareDiscoverer{},
+			Hardware: fixedHardwareDiscoverer{},
 		},
 	})
 }

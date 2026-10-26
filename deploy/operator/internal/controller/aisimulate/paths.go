@@ -51,7 +51,7 @@ var (
 const TargetPareto = "pareto"
 
 // has reports whether obj contains the path, even with a null value. Applied to
-// spec.aisimulate.parameters it tells whether the caller named a key, including to delete
+// spec.aisimulate.inputOverrides it tells whether the caller named a key, including to delete
 // it.
 func has(obj map[string]any, path ...string) bool {
 	_, found, _ := unstructured.NestedFieldNoCopy(obj, path...)

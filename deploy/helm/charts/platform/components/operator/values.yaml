@@ -117,9 +117,6 @@ controllerManager:
     # derives dynamo-planner:<chart appVersion>, which only exists for GA
     # releases.
     dgdrDefaultImage: ""
-    # AISimulate runner image put into v1beta2 DGDR spec.aisimulate.image when unset.
-    # Empty derives nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operator-version>.
-    dgdrAISimulateDefaultImage: ""
     resources:
       limits:
         cpu: 1024m

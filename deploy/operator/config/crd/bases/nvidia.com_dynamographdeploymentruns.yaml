@@ -61,28 +61,17 @@ spec:
                 Run creators resolve optional Request inputs before persisting the Run.
               properties:
                 aisimulate:
-                  description: AISimulate selects the execution artifact and supplies native AISimulate input.
+                  description: AISimulate supplies native input to the operator's AISimulate execution bundle.
                   properties:
-                    image:
+                    inputOverrides:
                       description: |-
-                        Image selects a Dynamo-compatible AISimulate runner. When omitted, admission
-                        persists the configured override or a version-matched Dynamo planner image.
-                      minLength: 1
-                      type: string
-                    parameters:
-                      description: |-
-                        Parameters contains native AISimulate input. Field names and nesting use
-                        the upstream AISimulate JSON contract, including snake_case names.
+                        InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
+                        the typed fields. It uses the upstream AISimulate JSON contract, including
+                        snake_case names. Values here take precedence, and null deletes a lowered
+                        field. The operator runs the AISimulate version from its configured planner
+                        image; Requests and Runs cannot select a different image or version.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
-                    versionOverride:
-                      description: |-
-                        VersionOverride declares the AISimulate compatibility version as three numeric parts
-                        (for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required
-                        when the image tag is not a version and wins over a version in the tag.
-                      minLength: 1
-                      pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
-                      type: string
                   type: object
                 backends:
                   description: Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
@@ -176,7 +165,7 @@ spec:
                     sla:
                       description: |-
                         SLA defines per-request latency bounds used to calculate goodput. When omitted, no
-                        bounds apply. spec.aisimulate.parameters.goal.sla overrides the bounds it names.
+                        bounds apply. spec.aisimulate.inputOverrides.goal.sla overrides the bounds it names.
                       properties:
                         e2eMs:
                           description: E2EMs is an alternative end-to-end bound in milliseconds.
@@ -224,7 +213,7 @@ spec:
                     When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;
                     an explicit empty workload receives the same shape from admission. An explicit
                     workload.static: {} opts out of that shape, leaving the workload to
-                    spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the
+                    spec.aisimulate.inputOverrides.workload. spec.aisimulate.inputOverrides.workload overrides the
                     fields it names.
                     The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a
                     KV-load ratio search.
@@ -286,6 +275,17 @@ spec:
             status:
               description: DynamoGraphDeploymentRunStatus represents one search execution's observed state.
               properties:
+                aisimulate:
+                  description: AISimulate reports the effective input executed by AISimulate.
+                  properties:
+                    input:
+                      description: |-
+                        Input is the fully lowered AISimulate input after typed fields, derived defaults and
+                        spec.aisimulate.inputOverrides have been merged. Field names and nesting use the
+                        upstream AISimulate JSON contract.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                  type: object
                 candidateRefs:
                   description: |-
                     CandidateRefs identifies the current bounded DGDC projection. List order

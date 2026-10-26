@@ -32,7 +32,7 @@ const (
 )
 
 // applyDefaults adds the derived defaults to the typed underlay, before the native
-// parameters are applied. spec.aisimulate.parameters is the final overlay: it overrides or
+// input overrides are applied. spec.aisimulate.inputOverrides is the final overlay: it overrides or
 // deletes any derived value, and nothing is derived in response to what it introduces.
 // A native change that needs a matching change elsewhere (a request_count next to
 // num_request_ratio, a strict_sla next to a new SLA bound) must make it itself.

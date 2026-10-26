@@ -92,9 +92,6 @@ spec:
         {{- with .Values.controllerManager.manager.dgdrDefaultImage }}
         - {{ printf "--dgdr-default-image=%s" . | quote }}
         {{- end }}
-        {{- with .Values.controllerManager.manager.dgdrAISimulateDefaultImage }}
-        - {{ printf "--dgdr-aisimulate-default-image=%s" . | quote }}
-        {{- end }}
         - --dgdr-v1beta2-enabled={{ .Values.dgdrV1Beta2.enabled }}
         command:
         - /manager

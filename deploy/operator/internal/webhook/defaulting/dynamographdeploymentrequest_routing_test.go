@@ -20,7 +20,6 @@ package defaulting
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -55,45 +54,7 @@ func carrierRequest() *nvidiacomv1beta1.DynamoGraphDeploymentRequest {
 	}
 }
 
-func aisimulateImageOf(t *testing.T, raw []byte) string {
-	t.Helper()
-	var spec map[string]any
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		t.Fatalf("decode carrier: %v", err)
-	}
-	aisimulate, _ := spec["aisimulate"].(map[string]any)
-	image, _ := aisimulate["image"].(string)
-	return image
-}
-
 func TestDGDRDefaulter_RoutesByRequestedVersion(t *testing.T) {
-	for _, tt := range []struct {
-		name    string
-		options DGDRV1beta2Options
-		want    string
-	}{
-		{
-			name: "an omitted image is derived from the operator version",
-			want: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0",
-		},
-		{
-			name:    "an explicit default image overrides derivation",
-			options: DGDRV1beta2Options{AISimulateImage: "registry.example/aisimulate:custom"},
-			want:    "registry.example/aisimulate:custom",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			d := NewDGDRDefaulter("1.6.0", "").WithV1beta2(tt.options)
-			dgdr := carrierRequest()
-			if err := d.Default(ctxForRequest(admissionv1.Create, "v1beta2"), dgdr); err != nil {
-				t.Fatalf("Default() error = %v", err)
-			}
-			if got := aisimulateImageOf(t, dgdr.Spec.V1Beta2.Raw); got != tt.want {
-				t.Fatalf("aisimulate.image = %q, want %q", got, tt.want)
-			}
-		})
-	}
-
 	d := NewDGDRDefaulter("1.6.0", "").WithV1beta2(DGDRV1beta2Options{})
 
 	t.Run("RequestKind decides, not the converted Kind", func(t *testing.T) {
@@ -103,6 +64,9 @@ func TestDGDRDefaulter_RoutesByRequestedVersion(t *testing.T) {
 		}
 		if dgdr.Spec.Image != "" {
 			t.Fatalf("v1beta1 image defaulting touched a v1beta2 request: %q", dgdr.Spec.Image)
+		}
+		if !bytes.Contains(dgdr.Spec.V1Beta2.Raw, []byte(`"backends"`)) {
+			t.Fatalf("native v1beta2 defaults were not applied: %s", dgdr.Spec.V1Beta2.Raw)
 		}
 	})
 

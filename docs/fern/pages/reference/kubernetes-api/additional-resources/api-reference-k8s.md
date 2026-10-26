@@ -3226,11 +3226,28 @@ Package v1beta2 contains API Schema definitions for the nvidia.com v1beta2 API g
 
 
 
+#### AISimulateRunStatus
+
+
+
+AISimulateRunStatus reports the exact native input used for this execution.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `input` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Input is the fully lowered AISimulate input after typed fields, derived defaults and<br />spec.aisimulate.inputOverrides have been merged. Field names and nesting use the<br />upstream AISimulate JSON contract. |  | Type: object <br />Optional: \{\} <br /> |
+
+
 #### AISimulateSpec
 
 
 
-AISimulateSpec selects the AISimulate execution artifact and supplies native input.
+AISimulateSpec supplies native input to the AISimulate version in the operator's configured
+planner image.
 
 
 
@@ -3242,9 +3259,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `image` _string_ | Image selects a Dynamo-compatible AISimulate runner. When omitted, admission<br />persists the configured override or a version-matched Dynamo planner image. |  | MinLength: 1 <br />Optional: \{\} <br /> |
-| `versionOverride` _string_ | VersionOverride declares the AISimulate compatibility version as three numeric parts<br />(for example 0.13.0), not a semver version: no v prefix, pre-release or build suffix. It is required<br />when the image tag is not a version and wins over a version in the tag. |  | MinLength: 1 <br />Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
-| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters contains native AISimulate input. Field names and nesting use<br />the upstream AISimulate JSON contract, including snake_case names. |  | Type: object <br />Optional: \{\} <br /> |
+| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISimulate JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The operator runs the AISimulate version from its configured planner<br />image; Requests and Runs cannot select a different image or version. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### Backend
@@ -3438,9 +3453,9 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;<br />an explicit empty workload receives the same shape from the schema. An explicit<br />workload.static: \{\} opts out of that shape, leaving the workload to<br />spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the<br />fields it names.<br />The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a<br />KV-load ratio search. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;<br />an explicit empty workload receives the same shape from admission. An explicit<br />workload.static: \{\} opts out of that shape, leaving the workload to<br />spec.aisimulate.inputOverrides.workload. spec.aisimulate.inputOverrides.workload overrides the<br />fields it names.<br />The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a<br />KV-load ratio search. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search.<br />When omitted, admission supplies the object. Its mode defaults to Optimize, and admission<br />supplies the conditional scalar metric. |  | Optional: \{\} <br /> |
-| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate selects the execution artifact and supplies native AISimulate input. |  | Optional: \{\} <br /> |
+| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies native input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
 
 
@@ -3480,9 +3495,9 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;<br />an explicit empty workload receives the same shape from the schema. An explicit<br />workload.static: \{\} opts out of that shape, leaving the workload to<br />spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the<br />fields it names.<br />The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a<br />KV-load ratio search. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;<br />an explicit empty workload receives the same shape from admission. An explicit<br />workload.static: \{\} opts out of that shape, leaving the workload to<br />spec.aisimulate.inputOverrides.workload. spec.aisimulate.inputOverrides.workload overrides the<br />fields it names.<br />The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a<br />KV-load ratio search. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search.<br />When omitted, admission supplies the object. Its mode defaults to Optimize, and admission<br />supplies the conditional scalar metric. |  | Optional: \{\} <br /> |
-| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate selects the execution artifact and supplies native AISimulate input. |  | Optional: \{\} <br /> |
+| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies native input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
 | `v1beta1` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta1 losslessly preserves a native v1beta1 spec while this object is<br />represented through v1beta2. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta1 API. |  | Type: object <br />Optional: \{\} <br /> |
 
@@ -3543,9 +3558,9 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;<br />an explicit empty workload receives the same shape from the schema. An explicit<br />workload.static: \{\} opts out of that shape, leaving the workload to<br />spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the<br />fields it names.<br />The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a<br />KV-load ratio search. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;<br />an explicit empty workload receives the same shape from admission. An explicit<br />workload.static: \{\} opts out of that shape, leaving the workload to<br />spec.aisimulate.inputOverrides.workload. spec.aisimulate.inputOverrides.workload overrides the<br />fields it names.<br />The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a<br />KV-load ratio search. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search.<br />When omitted, admission supplies the object. Its mode defaults to Optimize, and admission<br />supplies the conditional scalar metric. |  | Optional: \{\} <br /> |
-| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate selects the execution artifact and supplies native AISimulate input. |  | Optional: \{\} <br /> |
+| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies native input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
 
 
@@ -3565,6 +3580,7 @@ _Appears in:_
 | `phase` _[DGDRRunPhase](#dgdrrunphase)_ | Phase is a concise presentation state. Conditions remain authoritative. |  | Enum: [Pending Running Succeeded Failed] <br />Optional: \{\} <br /> |
 | `jobRef` _[ResourceReference](#resourcereference)_ | JobRef identifies the controller-owned Job for this run. |  | Optional: \{\} <br /> |
 | `progress` _[DGDRRunProgress](#dgdrrunprogress)_ | Progress contains branch-aware optimizer and evaluation outcome counters. |  | Optional: \{\} <br /> |
+| `aisimulate` _[AISimulateRunStatus](#aisimulaterunstatus)_ | AISimulate reports the effective input executed by AISimulate. |  | Optional: \{\} <br /> |
 | `candidateRefs` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core) array_ | CandidateRefs identifies the current bounded DGDC projection. List order<br />represents rank, best first, for scalar searches. |  | Optional: \{\} <br /> |
 | `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when execution started. |  | Optional: \{\} <br /> |
 | `completionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CompletionTime is present only after a terminal outcome. |  | Optional: \{\} <br /> |
@@ -3686,9 +3702,9 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;<br />an explicit empty workload receives the same shape from the schema. An explicit<br />workload.static: \{\} opts out of that shape, leaving the workload to<br />spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the<br />fields it names.<br />The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a<br />KV-load ratio search. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10;<br />an explicit empty workload receives the same shape from admission. An explicit<br />workload.static: \{\} opts out of that shape, leaving the workload to<br />spec.aisimulate.inputOverrides.workload. spec.aisimulate.inputOverrides.workload overrides the<br />fields it names.<br />The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a<br />KV-load ratio search. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization or a multi-objective Pareto search.<br />When omitted, admission supplies the object. Its mode defaults to Optimize, and admission<br />supplies the conditional scalar metric. |  | Optional: \{\} <br /> |
-| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate selects the execution artifact and supplies native AISimulate input. |  | Optional: \{\} <br /> |
+| `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies native input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
 
 
@@ -3759,10 +3775,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `mode` _[ObjectiveMode](#objectivemode)_ | Mode selects scalar optimization or a Pareto search. | Optimize | Enum: [Optimize Pareto] <br />Optional: \{\} <br /> |
+| `mode` _[ObjectiveMode](#objectivemode)_ | Mode selects scalar optimization or a Pareto search. |  | Enum: [Optimize Pareto] <br />Optional: \{\} <br /> |
 | `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is Optimize.<br />When omitted in Optimize mode, admission defaults it to Throughput. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />Optional: \{\} <br /> |
 | `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics lists two or more distinct scalar targets when mode is Pareto. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />MaxItems: 7 <br />MinItems: 2 <br />Optional: \{\} <br /> |
-| `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. When omitted, no<br />bounds apply. spec.aisimulate.parameters.goal.sla overrides the bounds it names. |  | Optional: \{\} <br /> |
+| `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. When omitted, no<br />bounds apply. spec.aisimulate.inputOverrides.goal.sla overrides the bounds it names. |  | Optional: \{\} <br /> |
 
 
 #### RecommendationSpec
@@ -3781,7 +3797,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `maxCandidates` _integer_ | MaxCandidates is the maximum number of DGDCs owned by one run. Scalar<br />candidates are ordered best first; Pareto candidates have no scalar rank.<br />This field does not limit internal trials. | 1 | Maximum: 100 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxCandidates` _integer_ | MaxCandidates is the maximum number of DGDCs owned by one run. Scalar<br />candidates are ordered best first; Pareto candidates have no scalar rank.<br />This field does not limit internal trials. |  | Maximum: 100 <br />Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### ResourceReference
@@ -3855,7 +3871,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines one of AISimulate's synthetic workload shapes. Its fields are not<br />defaulted individually: the default belongs to spec.workload as a whole, so an<br />explicit workload object keeps exactly the fields it names. | \{ concurrency:10 isl:1024 osl:128 \} | Optional: \{\} <br /> |
+| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines one of AISimulate's synthetic workload shapes. Its fields are not<br />defaulted individually: the default belongs to spec.workload as a whole, so an<br />explicit workload object keeps exactly the fields it names. |  | Optional: \{\} <br /> |
 
 
 

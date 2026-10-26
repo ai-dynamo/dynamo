@@ -653,7 +653,7 @@ func isGoodputMetric(metric v1beta2.ObjectiveMetric) bool {
 	return metric == "Goodput" || metric == "GoodputPerGPU"
 }
 
-type fuzzAISimulateParameters struct {
+type fuzzAISimulateInputOverrides struct {
 	Search   *fuzzAISimulateSearch   `json:"search,omitempty"`
 	Workload *fuzzAISimulateWorkload `json:"workload,omitempty"`
 }
@@ -671,20 +671,20 @@ type fuzzAISimulateWorkload struct {
 func fuzzAISimulateSpec(s *v1beta2.AISimulateSpec, c randfill.Continue) {
 	c.FillNoCustom(s)
 
-	// Exercise both absent and typed object parameter payloads.
+	// Exercise both absent and typed object input override payloads.
 	if c.Bool() {
-		s.Parameters = nil
+		s.InputOverrides = nil
 		return
 	}
 
 	// Marshal a typed test input instead of generating arbitrary RawExtension bytes.
-	parameters := &fuzzAISimulateParameters{}
-	c.Fill(parameters)
-	raw, err := json.Marshal(parameters)
+	overrides := &fuzzAISimulateInputOverrides{}
+	c.Fill(overrides)
+	raw, err := json.Marshal(overrides)
 	if err != nil {
 		panic(err)
 	}
-	s.Parameters = &runtime.RawExtension{Raw: raw}
+	s.InputOverrides = &runtime.RawExtension{Raw: raw}
 }
 
 func marshalFuzzEnvelope(value any) *apiextensionsv1.JSON {

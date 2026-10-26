@@ -127,12 +127,12 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 
 func TestResolveDefaultsV1beta2(t *testing.T) {
 	d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}
-	got, err := DGDRV1beta2Options{Hardware: d, AISimulateImage: "registry.example.com/aisimulate:1.2.0"}.
+	got, err := DGDRV1beta2Options{Hardware: d}.
 		resolveDefaults(context.Background(), admissionv1.Create, nil, modelOnlySpecV1beta2())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.aisimulateImage != "registry.example.com/aisimulate:1.2.0" || got.hardware.sku != "h200_sxm" || got.hardware.budget != 8 {
+	if got.hardware.sku != "h200_sxm" || got.hardware.budget != 8 {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -150,8 +150,7 @@ func v1beta2Envelope(t *testing.T, spec *nvidiacomv1beta2.DynamoGraphDeploymentR
 
 func TestDefaultEnvelopeV1beta2(t *testing.T) {
 	options := DGDRV1beta2Options{
-		AISimulateImage: "registry.example.com/aisimulate:1.2.0",
-		Hardware:        &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}},
+		Hardware: &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}},
 	}
 	dgdr := v1beta2Envelope(t, modelOnlySpecV1beta2())
 
@@ -164,9 +163,6 @@ func TestDefaultEnvelopeV1beta2(t *testing.T) {
 	}
 	if got.Hardware == nil || got.Hardware.GPU == nil || *got.Hardware.GPU.SKU != "h200_sxm" || *got.Hardware.GPU.Budget != 8 {
 		t.Fatalf("hardware not defaulted: %+v", got.Hardware)
-	}
-	if got.AISimulate == nil || got.AISimulate.Image != "registry.example.com/aisimulate:1.2.0" {
-		t.Fatalf("image not defaulted: %+v", got.AISimulate)
 	}
 	if got.Objective == nil || got.Objective.Metric == nil {
 		t.Fatalf("objective metric not defaulted: %+v", got.Objective)

@@ -50,10 +50,10 @@ const (
 // API version because the canonical names belong to v1beta1.
 //
 // Admission owns every v1beta2 default, and each default has this one owner: backends,
-// objective.mode, the scalar metric, recommendation.maxCandidates, workload.static, the
-// cluster hardware and the AISimulate image. workload.static: {} opts out of the static
-// workload. objective.sla has no default: an omitted SLA stays absent.
-// spec.aisimulate.parameters never changes a default. It overrides the defaulted typed
+// objective.mode, the scalar metric, recommendation.maxCandidates, workload.static and the
+// cluster hardware. workload.static: {} opts out of the static workload. objective.sla has no
+// default: an omitted SLA stays absent.
+// spec.aisimulate.inputOverrides never changes a default. It overrides the defaulted typed
 // values later, when the input is lowered.
 
 // defaultDynamoGraphDeploymentRequestV1beta2 defaults the v1beta2 spec that dgdr carries in
@@ -123,8 +123,6 @@ func decodeOldSpecV1beta2(
 type dynamoGraphDeploymentRequestV1beta2DefaultOptions struct {
 	// hardware is the GPU identity and budget discovered from the cluster.
 	hardware hardwareDefaultsV1beta2
-	// aisimulateImage is the operator's resolved AISimulate image.
-	aisimulateImage string
 }
 
 // hardwareDefaultsV1beta2 is the hardware the cluster can offer for the values a Request omits.
@@ -178,15 +176,6 @@ func defaultNativeSearchInputV1beta2(
 	}
 	defaultObjectiveSpecV1beta2(input.Objective)
 
-	// The operator image is persisted with the Request, so spec.aisimulate is created to
-	// carry it.
-	if input.AISimulate == nil && opts.aisimulateImage != "" {
-		input.AISimulate = &nvidiacomv1beta2.AISimulateSpec{}
-	}
-	if input.AISimulate != nil {
-		defaultAISimulateSpecV1beta2(input.AISimulate, opts.aisimulateImage)
-	}
-
 	if input.Recommendation == nil {
 		input.Recommendation = &nvidiacomv1beta2.RecommendationSpec{}
 	}
@@ -230,7 +219,7 @@ func defaultStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpe
 
 // defaultObjectiveSpecV1beta2 defaults the mode and gives an Optimize objective without a
 // metric the default scalar target. It reads the typed objective alone: a goal.target in
-// spec.aisimulate.parameters overrides the completed typed value when the input is lowered,
+// spec.aisimulate.inputOverrides overrides the completed typed value when the input is lowered,
 // so it never suppresses this default.
 func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	if objective.Mode == "" {
@@ -238,12 +227,6 @@ func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	}
 	if objective.Mode == nvidiacomv1beta2.ObjectiveModeOptimize && objective.Metric == nil {
 		objective.Metric = ptr.To(defaultMetricV1beta2)
-	}
-}
-
-func defaultAISimulateSpecV1beta2(aisimulate *nvidiacomv1beta2.AISimulateSpec, image string) {
-	if aisimulate.Image == "" && image != "" {
-		aisimulate.Image = image
 	}
 }
 

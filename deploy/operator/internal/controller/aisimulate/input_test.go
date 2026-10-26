@@ -60,14 +60,14 @@ func withKVRange(spec *v1beta2.DynamoGraphDeploymentRequestSpec) *v1beta2.Dynamo
 	return spec
 }
 
-func withParameters(spec *v1beta2.DynamoGraphDeploymentRequestSpec, parameters string) *v1beta2.DynamoGraphDeploymentRequestSpec {
-	spec.AISimulate = &v1beta2.AISimulateSpec{Parameters: &runtime.RawExtension{Raw: []byte(parameters)}}
+func withInputOverrides(spec *v1beta2.DynamoGraphDeploymentRequestSpec, overrides string) *v1beta2.DynamoGraphDeploymentRequestSpec {
+	spec.AISimulate = &v1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: []byte(overrides)}}
 	return spec
 }
 
 func lower(t *testing.T, spec *v1beta2.DynamoGraphDeploymentRequestSpec) map[string]any {
 	t.Helper()
-	input, err := Lower(spec)
+	input, err := Lower(&spec.NativeSearchInput)
 	if err != nil {
 		t.Fatalf("Lower: %v", err)
 	}
@@ -85,7 +85,7 @@ func encode(t *testing.T, input map[string]any) string {
 
 func underlay(t *testing.T, spec *v1beta2.DynamoGraphDeploymentRequestSpec) map[string]any {
 	t.Helper()
-	input, err := Underlay(spec)
+	input, err := Underlay(&spec.NativeSearchInput)
 	if err != nil {
 		t.Fatalf("Underlay: %v", err)
 	}
@@ -111,14 +111,14 @@ func TestLowerModelOnlyRequest(t *testing.T) {
 }
 
 func TestLowerIsDeterministicAndDoesNotMutateTheSpec(t *testing.T) {
-	const parameters = `{"sweep":{"max_trials":100},"workload":{"request_count":5}}`
-	spec := withParameters(defaultedSpec(), parameters)
+	const overrides = `{"sweep":{"max_trials":100},"workload":{"request_count":5}}`
+	spec := withInputOverrides(defaultedSpec(), overrides)
 	first, second := encode(t, lower(t, spec)), encode(t, lower(t, spec))
 	if first != second {
 		t.Fatalf("not deterministic:\n%s\n%s", first, second)
 	}
-	if string(spec.AISimulate.Parameters.Raw) != parameters {
-		t.Fatalf("parameters mutated: %s", spec.AISimulate.Parameters.Raw)
+	if string(spec.AISimulate.InputOverrides.Raw) != overrides {
+		t.Fatalf("overrides mutated: %s", spec.AISimulate.InputOverrides.Raw)
 	}
 }
 
@@ -128,7 +128,7 @@ func TestLowerExplicitRequest(t *testing.T) {
 	spec.Backends = []v1beta2.Backend{v1beta2.BackendVLLM, v1beta2.BackendSGLang}
 	spec.Workload.Static = &v1beta2.StaticWorkloadSpec{ISL: ptrTo(int32(4000)), OSL: ptrTo(int32(1000)), RequestRate: ptrTo(10.0)}
 	spec.Objective.Metric = &metric
-	spec = withParameters(spec, `{"workload":{"request_count":1000},"sweep":{"max_trials":100}}`)
+	spec = withInputOverrides(spec, `{"workload":{"request_count":1000},"sweep":{"max_trials":100}}`)
 
 	want := `{"goal":{"sla":{"itl_ms":30,"ttft_ms":2000},"strict_sla":true,"target":"throughput"},` +
 		`"search_space":{"backend":["vllm","sglang"],"gpu_budget":8,"hardware_sku":"h200_sxm","model_name":"meta-llama/Llama-3.1-8B-Instruct"},` +
@@ -174,25 +174,25 @@ func TestMergePatchSemantics(t *testing.T) {
 
 func TestNativeValuesWinOverTheTypedUnderlay(t *testing.T) {
 	t.Run("a native null deletes a typed field", func(t *testing.T) {
-		input := lower(t, withParameters(defaultedSpec(), `{"workload":{"isl":null}}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"workload":{"isl":null}}`))
 		if nested(t, input, "workload", "isl") != nil {
 			t.Fatalf("isl survived a native null: %s", encode(t, input))
 		}
 	})
 	t.Run("a native value overrides a typed field", func(t *testing.T) {
-		input := lower(t, withParameters(defaultedSpec(), `{"workload":{"isl":8000},"search_space":{"gpu_budget":16}}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"workload":{"isl":8000},"search_space":{"gpu_budget":16}}`))
 		if nested(t, input, "workload", "isl") != 8000.0 || nested(t, input, "search_space", "gpu_budget") != 16.0 {
 			t.Fatalf("native values did not win: %s", encode(t, input))
 		}
 	})
 	t.Run("a native target overrides the typed metric", func(t *testing.T) {
-		input := lower(t, withParameters(defaultedSpec(), `{"goal":{"target":"ttft"}}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"goal":{"target":"ttft"}}`))
 		if nested(t, input, "goal", "target") != "ttft" {
 			t.Fatalf("typed metric beat the native target: %s", encode(t, input))
 		}
 	})
 	t.Run("a native SLA bound overrides only the bound it names", func(t *testing.T) {
-		input := lower(t, withParameters(withSLA(defaultedSpec()), `{"goal":{"sla":{"ttft_ms":500}}}`))
+		input := lower(t, withInputOverrides(withSLA(defaultedSpec()), `{"goal":{"sla":{"ttft_ms":500}}}`))
 		if nested(t, input, "goal", "sla", "ttft_ms") != 500.0 || nested(t, input, "goal", "sla", "itl_ms") != 30.0 {
 			t.Fatalf("unexpected SLA: %s", encode(t, input))
 		}
@@ -206,7 +206,7 @@ func TestRequestCountDefault(t *testing.T) {
 		}
 	})
 	t.Run("a native ratio deletes the derived count itself", func(t *testing.T) {
-		input := lower(t, withParameters(defaultedSpec(), `{"workload":{"num_request_ratio":10,"request_count":null}}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"workload":{"num_request_ratio":10,"request_count":null}}`))
 		if nested(t, input, "workload", "request_count") != nil || nested(t, input, "workload", "num_request_ratio") != 10.0 {
 			t.Fatalf("unexpected workload: %s", encode(t, input))
 		}
@@ -219,7 +219,7 @@ func TestRequestCountDefault(t *testing.T) {
 		}
 	})
 	t.Run("native null deletes the default", func(t *testing.T) {
-		input := lower(t, withParameters(defaultedSpec(), `{"workload":{"request_count":null}}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"workload":{"request_count":null}}`))
 		if nested(t, input, "workload", "request_count") != nil {
 			t.Fatal("request_count re-added after a native null")
 		}
@@ -227,7 +227,7 @@ func TestRequestCountDefault(t *testing.T) {
 	t.Run("native deleting the typed ratio does not derive a count", func(t *testing.T) {
 		spec := defaultedSpec()
 		spec.Workload.Static.NumRequestRatio = ptrTo(5.0)
-		input := lower(t, withParameters(spec, `{"workload":{"num_request_ratio":null}}`))
+		input := lower(t, withInputOverrides(spec, `{"workload":{"num_request_ratio":null}}`))
 		if nested(t, input, "workload", "request_count") != nil {
 			t.Fatalf("a count was derived after the native overlay: %s", encode(t, input))
 		}
@@ -264,10 +264,10 @@ func TestMaxTrialsDefault(t *testing.T) {
 		}
 	})
 	t.Run("native value or null wins", func(t *testing.T) {
-		if nested(t, lower(t, withParameters(withKVRange(defaultedSpec()), `{"sweep":{"max_trials":7}}`)), "sweep", "max_trials") != 7.0 {
+		if nested(t, lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"sweep":{"max_trials":7}}`)), "sweep", "max_trials") != 7.0 {
 			t.Fatal("native max_trials ignored")
 		}
-		if nested(t, lower(t, withParameters(withKVRange(defaultedSpec()), `{"sweep":{"max_trials":null}}`)), "sweep", "max_trials") != nil {
+		if nested(t, lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"sweep":{"max_trials":null}}`)), "sweep", "max_trials") != nil {
 			t.Fatal("max_trials re-added after a native null")
 		}
 	})
@@ -294,45 +294,45 @@ func TestStrictSLADerivation(t *testing.T) {
 		}
 	})
 	t.Run("a native bound alone does not derive it", func(t *testing.T) {
-		input := lower(t, withParameters(defaultedSpec(), `{"goal":{"sla":{"ttft_ms":500}}}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"goal":{"sla":{"ttft_ms":500}}}`))
 		if nested(t, input, "goal", "sla", "ttft_ms") != 500.0 || nested(t, input, "goal", "strict_sla") != nil {
 			t.Fatalf("unexpected goal: %s", encode(t, input))
 		}
 	})
 	t.Run("native value is kept", func(t *testing.T) {
-		if nested(t, lower(t, withParameters(withSLA(defaultedSpec()), `{"goal":{"strict_sla":false}}`)), "goal", "strict_sla") != false {
+		if nested(t, lower(t, withInputOverrides(withSLA(defaultedSpec()), `{"goal":{"strict_sla":false}}`)), "goal", "strict_sla") != false {
 			t.Fatal("native strict_sla overridden")
 		}
 	})
 	t.Run("is not revisited after the native overlay", func(t *testing.T) {
-		input := lower(t, withParameters(withSLA(defaultedSpec()), `{"goal":{"sla":{"ttft_ms":null,"itl_ms":null}}}`))
+		input := lower(t, withInputOverrides(withSLA(defaultedSpec()), `{"goal":{"sla":{"ttft_ms":null,"itl_ms":null}}}`))
 		if nested(t, input, "goal", "strict_sla") != true {
 			t.Fatalf("the derived strict_sla changed after native bounds were deleted: %s", encode(t, input))
 		}
 	})
 }
 
-func TestParametersApplyOnceAfterDerivedDefaults(t *testing.T) {
+func TestInputOverridesApplyOnceAfterDerivedDefaults(t *testing.T) {
 	t.Run("sweep null removes the complete derived sweep", func(t *testing.T) {
-		input := lower(t, withParameters(withKVRange(defaultedSpec()), `{"sweep":null}`))
+		input := lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"sweep":null}`))
 		if nested(t, input, "sweep") != nil {
 			t.Fatalf("sweep survived a native null: %s", encode(t, input))
 		}
 	})
 	t.Run("max_trials null removes only max_trials", func(t *testing.T) {
-		input := lower(t, withParameters(withKVRange(defaultedSpec()), `{"sweep":{"max_trials":null,"seed":3}}`))
+		input := lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"sweep":{"max_trials":null,"seed":3}}`))
 		if nested(t, input, "sweep", "max_trials") != nil || nested(t, input, "sweep", "seed") != 3.0 {
 			t.Fatalf("unexpected sweep: %s", encode(t, input))
 		}
 	})
 	t.Run("a native max_trials replaces the derived value", func(t *testing.T) {
-		input := lower(t, withParameters(withKVRange(defaultedSpec()), `{"sweep":{"max_trials":7}}`))
+		input := lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"sweep":{"max_trials":7}}`))
 		if nested(t, input, "sweep", "max_trials") != 7.0 {
 			t.Fatalf("unexpected sweep: %s", encode(t, input))
 		}
 	})
-	t.Run("nothing is derived from values only parameters introduce", func(t *testing.T) {
-		input := lower(t, withParameters(defaultedSpec(), `{"workload":{"kv_load_ratio":[0,1]},"goal":{"sla":{"ttft_ms":500}}}`))
+	t.Run("nothing is derived from values only overrides introduce", func(t *testing.T) {
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"workload":{"kv_load_ratio":[0,1]},"goal":{"sla":{"ttft_ms":500}}}`))
 		if nested(t, input, "sweep") != nil || nested(t, input, "goal", "strict_sla") != nil {
 			t.Fatalf("a field was derived from native-only values: %s", encode(t, input))
 		}
@@ -378,21 +378,23 @@ func TestUnderlayKVLoadRatioShapes(t *testing.T) {
 	}
 }
 
-func TestParametersMustBeAnObject(t *testing.T) {
-	for _, parameters := range []string{`[1]`, `"x"`, `3`, `{`} {
-		if _, err := Lower(withParameters(defaultedSpec(), parameters)); err == nil {
-			t.Errorf("Lower accepted parameters %s", parameters)
+func TestInputOverridesMustBeAnObject(t *testing.T) {
+	for _, overrides := range []string{`[1]`, `"x"`, `3`, `{`} {
+		spec := withInputOverrides(defaultedSpec(), overrides)
+		if _, err := Lower(&spec.NativeSearchInput); err == nil {
+			t.Errorf("Lower accepted overrides %s", overrides)
 		}
 	}
-	for _, parameters := range []string{``, `null`, `{}`} {
-		if _, err := Lower(withParameters(defaultedSpec(), parameters)); err != nil {
-			t.Errorf("Lower rejected parameters %q: %v", parameters, err)
+	for _, overrides := range []string{``, `null`, `{}`} {
+		spec := withInputOverrides(defaultedSpec(), overrides)
+		if _, err := Lower(&spec.NativeSearchInput); err != nil {
+			t.Errorf("Lower rejected overrides %q: %v", overrides, err)
 		}
 	}
 }
 
 func TestHasPath(t *testing.T) {
-	parameters := map[string]any{
+	overrides := map[string]any{
 		"goal":     map[string]any{"target": nil, "sla": map[string]any{"ttft_ms": 1.0}},
 		"workload": map[string]any{"isl": 8.0},
 	}
@@ -407,12 +409,12 @@ func TestHasPath(t *testing.T) {
 		"goal.target.deeper":  false,
 		"workload.isl.deeper": false,
 	} {
-		if got := has(parameters, strings.Split(path, ".")...); got != want {
+		if got := has(overrides, strings.Split(path, ".")...); got != want {
 			t.Errorf("has(%s) = %v, want %v", path, got, want)
 		}
 	}
 	if has(nil, "goal") {
-		t.Error("nothing is named in nil parameters")
+		t.Error("nothing is named in nil overrides")
 	}
 }
 

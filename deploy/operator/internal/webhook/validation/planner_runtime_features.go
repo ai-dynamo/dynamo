@@ -13,7 +13,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -117,7 +117,7 @@ func rolePodTemplatesPlannerRuntimeErrorDetail(planners []plannerRuntimeContract
 
 	minimum := runtimefeatures.PlannerDGDComponentStatus.MinRuntimeVersion.String()
 	for _, planner := range planners {
-		version, err := versionoverride.Resolve(planner.image, planner.runtimeVersionOverride)
+		version, err := runtimeversion.Resolve(planner.image, planner.runtimeVersionOverride)
 		if err != nil {
 			return fmt.Sprintf(
 				"role-specific PodTemplates require every planner component to use Dynamo runtime %s or later; planner component %q has no resolvable runtime version: %v",

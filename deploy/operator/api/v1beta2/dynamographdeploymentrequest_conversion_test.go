@@ -109,9 +109,7 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 					SLA:     &ObjectiveSLASpec{TTFTMs: new(2000.0), ITLMs: new(30.0)},
 				},
 				AISimulate: &AISimulateSpec{
-					Image:           "nvcr.io/nvidia/aisimulate:latest",
-					VersionOverride: "1.0.0",
-					Parameters:      &runtime.RawExtension{Raw: []byte(`{"search_method":"grid"}`)},
+					InputOverrides: &runtime.RawExtension{Raw: []byte(`{"search_method":"grid"}`)},
 				},
 				Recommendation: &RecommendationSpec{MaxCandidates: 3},
 			},

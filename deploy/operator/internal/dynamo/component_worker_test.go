@@ -9,14 +9,14 @@ import (
 	"testing"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"github.com/stretchr/testify/require"
 )
 
 func TestWorkerDefaultsCanaryHealthCheckVersionGate(t *testing.T) {
 	tests := []struct {
 		name           string
-		runtimeVersion *versionoverride.Version
+		runtimeVersion *runtimeversion.Version
 		wantEnabled    string
 	}{
 		{
@@ -25,17 +25,17 @@ func TestWorkerDefaultsCanaryHealthCheckVersionGate(t *testing.T) {
 		},
 		{
 			name:           "older runtime",
-			runtimeVersion: &versionoverride.Version{Major: 1, Minor: 4, Patch: 9},
+			runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 4, Patch: 9},
 			wantEnabled:    "false",
 		},
 		{
 			name:           "minimum supported runtime",
-			runtimeVersion: &versionoverride.Version{Major: 1, Minor: 5, Patch: 0},
+			runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
 			wantEnabled:    "true",
 		},
 		{
 			name:           "newer runtime",
-			runtimeVersion: &versionoverride.Version{Major: 2, Minor: 0, Patch: 0},
+			runtimeVersion: &runtimeversion.Version{Major: 2, Minor: 0, Patch: 0},
 			wantEnabled:    "true",
 		},
 	}
@@ -64,7 +64,7 @@ func TestWorkerDefaultsCanaryHealthCheckVersionGate(t *testing.T) {
 func TestWorkerDefaultsLivenessFailureThresholdVersionGate(t *testing.T) {
 	tests := []struct {
 		name             string
-		runtimeVersion   *versionoverride.Version
+		runtimeVersion   *runtimeversion.Version
 		wantFailureCount int32
 	}{
 		{
@@ -73,17 +73,17 @@ func TestWorkerDefaultsLivenessFailureThresholdVersionGate(t *testing.T) {
 		},
 		{
 			name:             "older runtime",
-			runtimeVersion:   &versionoverride.Version{Major: 1, Minor: 4, Patch: 9},
+			runtimeVersion:   &runtimeversion.Version{Major: 1, Minor: 4, Patch: 9},
 			wantFailureCount: 1,
 		},
 		{
 			name:             "minimum supported runtime",
-			runtimeVersion:   &versionoverride.Version{Major: 1, Minor: 5, Patch: 0},
+			runtimeVersion:   &runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
 			wantFailureCount: 3,
 		},
 		{
 			name:             "newer runtime",
-			runtimeVersion:   &versionoverride.Version{Major: 2, Minor: 0, Patch: 0},
+			runtimeVersion:   &runtimeversion.Version{Major: 2, Minor: 0, Patch: 0},
 			wantFailureCount: 3,
 		},
 	}
