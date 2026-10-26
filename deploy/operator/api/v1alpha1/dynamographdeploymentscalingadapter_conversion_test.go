@@ -59,7 +59,7 @@ func dgdsaRoundTripFromV1alpha1(t *testing.T, src *DynamoGraphDeploymentScalingA
 
 func TestDGDSA_RoundTripFromV1beta1_Minimal(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{Name: "adapter", Namespace: "ns"},
+		Name: "adapter", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 			Replicas: 3,
 			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -77,12 +77,10 @@ func TestDGDSA_RoundTripFromV1beta1_Minimal(t *testing.T) {
 func TestDGDSA_RoundTripFromV1beta1_FullStatus(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC))
 	src := &v1beta1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "adapter-full",
-			Namespace:   "ns",
-			Labels:      map[string]string{"team": "infra"},
-			Annotations: map[string]string{"foo": "bar"},
-		},
+		Name:        "adapter-full",
+		Namespace:   "ns",
+		Labels:      map[string]string{"team": "infra"},
+		Annotations: map[string]string{"foo": "bar"},
 		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 			Replicas: 5,
 			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
@@ -104,7 +102,7 @@ func TestDGDSA_RoundTripFromV1beta1_FullStatus(t *testing.T) {
 
 func TestDGDSA_RoundTripFromV1alpha1_Minimal(t *testing.T) {
 	src := &DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{Name: "adapter", Namespace: "ns"},
+		Name: "adapter", Namespace: "ns",
 		Spec: DynamoGraphDeploymentScalingAdapterSpec{
 			Replicas: 2,
 			DGDRef: DynamoGraphDeploymentServiceRef{
@@ -122,12 +120,10 @@ func TestDGDSA_RoundTripFromV1alpha1_Minimal(t *testing.T) {
 func TestDGDSA_RoundTripFromV1alpha1_FullStatus(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC))
 	src := &DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "adapter-full",
-			Namespace:   "ns",
-			Labels:      map[string]string{"team": "infra"},
-			Annotations: map[string]string{"foo": "bar"},
-		},
+		Name:        "adapter-full",
+		Namespace:   "ns",
+		Labels:      map[string]string{"team": "infra"},
+		Annotations: map[string]string{"foo": "bar"},
 		Spec: DynamoGraphDeploymentScalingAdapterSpec{
 			Replicas: 5,
 			DGDRef: DynamoGraphDeploymentServiceRef{

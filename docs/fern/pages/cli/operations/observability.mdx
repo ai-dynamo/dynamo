@@ -313,10 +313,11 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm \
 ```bash
 curl --silent --show-error http://localhost:8000/live | jq
 curl --silent --show-error http://localhost:8000/health | jq
+curl --silent --show-error 'http://localhost:8000/health?instances=true' | jq
 ```
 
-`/live` reports whether the HTTP service is running. `/health` reports frontend readiness and the
-worker endpoints and instances currently visible through discovery.
+`/live` reports whether the HTTP service is running. `/health` reports frontend readiness. Add
+`instances=true` to also list the worker endpoints and instances currently visible through discovery.
 
 </Step>
 <Step title="Check a worker" id="check-worker-health">

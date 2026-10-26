@@ -27,7 +27,8 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEventSink,
+    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
+    RawKvEventSink, ReplayRequestContext,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
@@ -170,6 +171,17 @@ impl ResponseReplayTable {
 struct KvEventSinkAdapter(KvEventPublisher);
 
 impl KvCacheEventSink for KvEventSinkAdapter {
+    fn publish_batch_with_metadata(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        self.0
+            .publish_batch_with_session_ids(
+                events
+                    .into_iter()
+                    .map(|event| (event.event, event.storage_tier, event.session_id))
+                    .collect(),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to send KV event batch: {}", e))
+    }
+
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
         self.0
             .publish(event)
@@ -655,6 +667,8 @@ impl MockerExecutionContext {
                     {
                         Ok(sink) => {
                             let source_config = Some(KvEventSourceConfig::Zmq {
+                                liveness: None,
+                                expected_rank: None,
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
                                 topic: String::new(),
                                 image_token_id: None,
@@ -922,6 +936,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             uuid: Some(request_uuid),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
+            replay_context: request
+                .agent_context
+                .as_ref()
+                .map(|context| context.session_id.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(|id| ReplayRequestContext {
+                    session_id: Some(id.to_owned()),
+                    ..Default::default()
+                }),
             ..Default::default()
         };
 

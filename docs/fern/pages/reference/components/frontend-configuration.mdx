@@ -815,7 +815,7 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/embeddings` | Text embeddings |
 | `POST` | `/v1/responses` | Responses API |
 | `POST` | `/v1/responses/input_tokens` | Estimated input token count for the Responses API |
-| `POST` | `/v1/images/generations` | Image generation |
+| `POST` | `/v1/images/generations` | Image generation; the response carries [image accounting](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md#image-accounting) |
 | `POST` | `/v1/images/edits` | Image editing; see [Image API Compatibility](#image-api-compatibility) |
 | `POST` | `/v1/videos/generations` | Video generation |
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
@@ -874,6 +874,20 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   When truthy, `/v1/chat/completions` and `/v1/completions` ignore and drop unknown top-level
   request fields instead of rejecting the request. This does not forward arbitrary fields to a
   backend. Named passthrough fields remain subject to their normal validation and handling.
+</ParamField>
+
+<ParamField path="DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION" type="boolean" default="false">
+  When truthy, the frontend skips Dynamo's preflight validation of function parameter schemas
+  with explicit `strict: true`. This applies to `/v1/chat/completions`, `/v1/responses` (including
+  namespace tools), and strict tools converted from `/v1/messages`. The setting affects all
+  models served by the frontend process. The value is captured during HTTP frontend startup;
+  restart the process after changing it. Use this compatibility mode for legacy requests
+  accepted before strict-schema preflight was introduced, including schemas with optional
+  properties, open objects, or `oneOf`. Submitted schemas and `strict` declarations remain
+  unchanged. The preflight's schema structure, reference, depth, and size checks are skipped;
+  basic tool validation and HTTP body limits remain active. This does not disable
+  structured-output guidance or downstream
+  processor and backend checks, so a schema can still fail later in the request pipeline.
 </ParamField>
 
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">

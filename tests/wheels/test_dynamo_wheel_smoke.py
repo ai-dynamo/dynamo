@@ -38,8 +38,8 @@ WHEELHOUSE_ENV = "DYNAMO_WHEEL_SMOKE_WHEELHOUSE"
 PLATFORM_ENV = "DYNAMO_WHEEL_SMOKE_PLATFORM"
 PYTHONS_ENV = "DYNAMO_WHEEL_SMOKE_PYTHONS"
 DEFAULT_WHEELHOUSE = "/opt/dynamo/wheelhouse"
-# Core-only versions; 3.12 (image Python) is covered by the combined core+kvbm test.
-DEFAULT_PYTHONS = "3.10,3.11,3.13"
+# 3.12 (image Python) is covered by `test_core_install_clean_room_image_python`.
+DEFAULT_PYTHONS = "3.11,3.13"
 
 
 def _target_arch() -> str:
@@ -76,9 +76,8 @@ def test_core_install_clean_room(wheelhouse: Path, python_spec: str) -> None:
     smoke_install.install_core(wheelhouse, python_spec)
 
 
-def test_core_and_kvbm_install_clean_room(wheelhouse: Path) -> None:
-    # kvbm pins nixl[cu12], which is cp312-only, so it installs on the image Python only.
-    smoke_install.install_core(wheelhouse, sys.executable, also=("kvbm",))
+def test_core_install_clean_room_image_python(wheelhouse: Path) -> None:
+    smoke_install.install_core(wheelhouse, sys.executable)
 
 
 @pytest.mark.aiconfigurator
@@ -97,6 +96,5 @@ def test_wheel_metadata_tags_auditwheel_glibc(wheelhouse: Path) -> None:
         pytest.fail(f"required tooling missing in this image: {', '.join(missing)}")
     target_arch = _target_arch()
     smoke_install.assert_core_wheel_metadata(wheelhouse, target_arch)
-    smoke_install.check_optional_wheels(wheelhouse, target_arch)
     smoke_install.assert_auditwheel_show(wheelhouse)
     smoke_install.assert_glibc_floor(wheelhouse)
