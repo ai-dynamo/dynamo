@@ -4,9 +4,11 @@
 """Runs inside one region's load-generator Job.
 
 Installs aiperf and fetches the dataset and tokenizer first, so every region
-starts loading at the shared ``START_AT``. Then runs aiperf against the local
-Global Ingress and prints one ``BENCH_SUMMARY`` line: client metrics over the
-measurement window, and how many requests each local pool frontend served.
+starts aiperf at the shared ``START_AT``. aiperf then rebuilds the traces,
+which takes a few minutes and varies by region, so the measurement window is
+absolute: ``WINDOW_OFFSET_S`` after ``START_AT``, for ``MEASURE_S``. Prints one
+``BENCH_SUMMARY`` line: client metrics over that window, and how many requests
+each local pool frontend served.
 """
 
 import json
@@ -36,9 +38,10 @@ def metric(record, name):
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def window_summary(records, settle_s, measure_s):
-    """Client metrics for requests that finished in the measurement window,
-    which starts ``settle_s`` after the first profiling request."""
+def window_summary(records, start, end):
+    """Client metrics for requests that finished in ``[start, end)``, epoch
+    seconds. Every region uses the same window, so they measure while all of
+    them are loading the fleet."""
     profiling = [
         record
         for record in records
@@ -51,8 +54,7 @@ def window_summary(records, settle_s, measure_s):
     ]
     if not starts:
         return {"completed_requests": 0, "profiling_errors": 0}
-    start = min(starts) / 1e9 + settle_s
-    end = start + measure_s
+    measure_s = end - start
     finished = [
         record
         for record in profiling
@@ -70,6 +72,8 @@ def window_summary(records, settle_s, measure_s):
     input_tokens = [v for v in input_tokens if v is not None]
     return {
         "window": [start, end],
+        # Profiling must already be under way when the window opens.
+        "profiling_started": min(starts) / 1e9,
         "completed_requests": len(finished),
         "profiling_errors": sum(1 for r in profiling if r.get("error")),
         "requests_per_second": len(finished) / measure_s,
@@ -125,11 +129,12 @@ def main():
                     records.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
+    window_start = float(os.environ["START_AT"]) + float(os.environ["WINDOW_OFFSET_S"])
     summary = {
         "aiperf_exit": code,
         "began": began,
         "client": window_summary(
-            records, float(os.environ["SETTLE_S"]), float(os.environ["MEASURE_S"])
+            records, window_start, window_start + float(os.environ["MEASURE_S"])
         ),
         "pool_requests": {stem: after[stem] - before[stem] for stem in pools},
     }

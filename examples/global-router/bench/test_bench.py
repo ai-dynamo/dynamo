@@ -114,13 +114,14 @@ class WindowSummaryTest(unittest.TestCase):
 
     def test_counts_requests_finishing_inside_the_window(self):
         records = [
-            self.record(100, 105, 1.0),  # during settle
+            self.record(100, 105, 1.0),  # before the window
             self.record(100, 115, 2.0),
             self.record(105, 125, 3.0),
             self.record(110, 140, 4.0),  # after the window
             self.record(110, 120, 9.0, error={"code": 503}),
         ]
-        summary = loadgen_run.window_summary(records, settle_s=10, measure_s=20)
+        summary = loadgen_run.window_summary(records, start=110, end=130)
+        self.assertEqual(summary["profiling_started"], 100)
         self.assertEqual(summary["completed_requests"], 2)
         self.assertEqual(summary["profiling_errors"], 1)
         self.assertEqual(summary["requests_per_second"], 0.1)

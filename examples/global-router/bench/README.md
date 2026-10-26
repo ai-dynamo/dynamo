@@ -30,8 +30,13 @@ Write an operator-local JSON file outside Git with:
 - `pools`: `stem` and `mockerArgs` for each pool, for example
   `["--speedup-ratio", "0.4", "--max-num-seqs", "16"]`.
 - `nodegroup`: `instanceType`, `count`, `diskGiB`.
-- `load`: `dataset`, `datasetRepo`, `entries`, `warmupRequests`, `settleS`,
-  `measureS`, `graceS`, `aiperfWorkers`, `recordProcessors`, `cpu`, `memory`.
+- `load`: `dataset`, `datasetRepo`, `entries`, `warmupRequests`,
+  `profilingS`, `windowOffsetS`, `measureS`, `graceS`, `aiperfWorkers`,
+  `recordProcessors`, `cpu`, `memory`. aiperf rebuilds the AgentX traces
+  before profiling, which takes minutes and varies by region, so every region
+  measures the same absolute window: `windowOffsetS` after the shared start,
+  for `measureS`. `profilingS` must keep profiling running past that window
+  in every region.
 
 ### Run
 

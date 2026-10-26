@@ -196,7 +196,8 @@ def control_manifest(cfg, member, policy):
 
 def aiperf_config(cfg, concurrency):
     """The AgentX harness shape: replay the public Claude Code traces at a fixed
-    concurrency, with a warmup, then one window of settle + measure."""
+    concurrency, with a warmup, then one profiling phase long enough to cover
+    the shared measurement window in every region."""
     load = cfg["load"]
     return {
         "schemaVersion": "2.0",
@@ -227,7 +228,7 @@ def aiperf_config(cfg, concurrency):
             },
             "profiling": {
                 "type": "concurrency",
-                "duration": load["settleS"] + load["measureS"],
+                "duration": load["profilingS"],
                 "concurrency": concurrency,
                 "gracePeriod": load["graceS"],
             },
@@ -255,7 +256,7 @@ def loadgen_manifest(cfg, label, concurrency, start_at):
         "DATASET_REPO": load["datasetRepo"],
         "TOKENIZER": cfg["model"],
         "START_AT": str(start_at),
-        "SETTLE_S": str(load["settleS"]),
+        "WINDOW_OFFSET_S": str(load["windowOffsetS"]),
         "MEASURE_S": str(load["measureS"]),
         "METRICS_URLS": ",".join(
             f"{pool['stem']}=http://{pool['stem']}-frontend:8000/metrics"
@@ -495,7 +496,6 @@ def main():
             sub.add_argument("action", choices=["up", "down"])
             sub.add_argument("--concurrency", type=int)
             sub.add_argument("--start-at", type=float, help="Shared UTC epoch seconds")
-            sub.add_argument("--cpu-samples", type=int, default=40)
     commands.add_parser("hub")
     table = commands.add_parser("table")
     table.add_argument("--label", required=True)
@@ -510,8 +510,11 @@ def main():
     if args.command == "table":
         directory = args.evidence / "results" / args.label
         results = {
-            path.stem: json.loads(path.read_text())
-            for path in sorted(directory.glob("*.json"))
+            member["region"]: json.loads(
+                (directory / f"{member['region']}.json").read_text()
+            )
+            for member in cfg["regions"]
+            if (directory / f"{member['region']}.json").exists()
         }
         rows, pools = combine(results)
         print(json.dumps({"rows": rows, "pool_requests": pools}, indent=2))
@@ -526,10 +529,17 @@ def main():
             path = args.evidence / f"{member['region']}-{name}-template.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(render_nodegroup(cfg, member), indent=2))
+            existing = cluster.aws(
+                member["region"],
+                "cloudformation",
+                "list-stacks",
+                "--query",
+                "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName",
+            )
             cluster.aws(
                 member["region"],
                 "cloudformation",
-                "create-stack",
+                "update-stack" if name in existing else "create-stack",
                 "--stack-name",
                 name,
                 "--template-body",
@@ -573,13 +583,14 @@ def main():
             sys.exit("loadgen up needs --concurrency and --start-at")
         manifest = loadgen_manifest(cfg, args.label, args.concurrency, args.start_at)
         print(json.dumps(cluster.deploy(member, name, manifest, args.evidence)))
-        # Sample container CPU on the bench nodes for the whole run.
-        delay = max(0, int(args.start_at - time.time()))
-        script = f"sleep {delay}\n" + cpu_sampler_script(
-            cfg["namespace"], args.cpu_samples, 15
-        )
+        # Sample pod CPU on the bench nodes over the measurement window only:
+        # aiperf's trace rebuild before it uses every core it has.
+        load = cfg["load"]
+        delay = max(0, int(args.start_at + load["windowOffsetS"] - time.time()))
+        samples = load["measureS"] // 15
+        script = f"sleep {delay}\n" + cpu_sampler_script(cfg["namespace"], samples, 15)
         command_id = ssm_send(
-            member, bench_nodes(member), script, delay + args.cpu_samples * 15 + 600
+            member, bench_nodes(member), script, delay + samples * 15 + 600
         )
         record = args.evidence / "results" / args.label / f"{member['region']}.cpu-command"
         record.parent.mkdir(parents=True, exist_ok=True)
