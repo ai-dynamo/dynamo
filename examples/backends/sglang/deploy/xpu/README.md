@@ -64,15 +64,19 @@ The files ending in `_dra.yaml` require:
 |--------|--------|-----------|
 | GPU Allocation | `nvidia.com/gpu` resource limit | DRA `ResourceClaimTemplate` or `gpu.intel.com/xe` resource limit |
 | Device Target | Default (CUDA) | `--device xpu` flag |
+| Attention Backend | Default | `--attention-backend intel_xpu` (the default Triton backend returned garbage tokens such as `!!!!` in testing) |
 | DeviceClass | `nvidia.com` | `gpu.intel.com` |
 | Disagg KV Transfer | Default | `hostIPC: true`, `UCX_TLS=ze_ipc,...` |
+
+> [!NOTE]
+> The SGLang workers run through `bash -c` and unset `DYN_FORWARDPASS_METRIC_PORT` before launch. The operator injects this variable, which turns on forward pass metrics, and the XPU SGLang build crashes on the first request because those metrics use `torch.cuda.Event`.
 
 > [!NOTE]
 > Do not hardcode `ZE_AFFINITY_MASK` in these examples. DRA or the Intel device plugin selects the allocated device.
 
 `agg_router_xpu_dra.yaml` starts two workers and requires two GPUs. `disagg_planner_xpu_dra.yaml` starts two decode workers and one prefill worker and requires three GPUs.
 
-The Planner template includes bootstrap profile data for `Qwen/Qwen3-0.6B` because the current XPU SGLang build does not publish live forward pass metrics. Replace this data with measurements from your target XPU hardware before tuning production scaling.
+The Planner template sets `pre_deployment_sweeping_mode` to `none`, so it ships no profile data, and `max_gpu_budget` to 3 to match the three GPUs above. The XPU SGLang build does not publish live forward pass metrics, so the Planner has no live latency data from these workers.
 
 ## Deploy
 

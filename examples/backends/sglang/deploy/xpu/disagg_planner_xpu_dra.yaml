@@ -5,26 +5,6 @@
 # Requires 3 GPU devices: 1 prefill replica and 2 decode replicas.
 # Increasing the replica count requires additional GPU capacity.
 
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: planner-profile-data-xpu
-data:
-  prefill_raw_data.json: |
-    {
-      "prefill_isl":          [128, 256, 512, 1024, 2048],
-      "prefill_ttft":         [12,  18,  30,  55,   105],
-      "prefill_thpt_per_gpu": [9800, 8500, 6200, 3800, 2000]
-    }
-  decode_raw_data.json: |
-    {
-      "x_kv_usage":       [0.1, 0.1, 0.1, 0.1, 0.3, 0.3, 0.3, 0.3, 0.5, 0.5, 0.5, 0.5, 0.7, 0.7, 0.7, 0.7, 0.9, 0.9, 0.9, 0.9],
-      "y_context_length": [128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048, 128, 512, 1024, 2048],
-      "z_itl":            [5, 6, 7, 9, 6, 7, 8, 10, 7, 8, 10, 12, 8, 10, 12, 15, 10, 12, 15, 20],
-      "z_thpt_per_gpu":   [4500, 4000, 3500, 2800, 4200, 3700, 3200, 2500, 3800, 3300, 2800, 2200, 3400, 2900, 2400, 1800, 2800, 2400, 1900, 1400],
-      "max_kv_tokens": 32768
-    }
----
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
 metadata:
@@ -61,9 +41,9 @@ spec:
           - --config
           - '{"environment": "kubernetes", "backend": "sglang", "optimization_target": "sla",
             "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode":
-            "thorough", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds":
-            5, "profile_results_dir": "/workspace/profiling_results", "prefill_engine_num_gpu":
-            1, "decode_engine_num_gpu": 1, "max_gpu_budget": 3}'
+            "none", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds":
+            5, "prefill_engine_num_gpu": 1, "decode_engine_num_gpu": 1, "max_gpu_budget":
+            3}'
           command:
           - python3
           - -m
@@ -74,14 +54,6 @@ spec:
           image: my-registry/dynamo-planner:my-tag
           imagePullPolicy: IfNotPresent
           name: main
-          volumeMounts:
-          - mountPath: /workspace/profiling_results
-            name: planner-profile-data-xpu
-            readOnly: true
-        volumes:
-        - configMap:
-            name: planner-profile-data-xpu
-          name: planner-profile-data-xpu
     replicas: 1
     type: planner
   - name: decode
@@ -90,29 +62,25 @@ spec:
         hostIPC: true
         containers:
         - args:
-          - --model-path
-          - Qwen/Qwen3-0.6B
-          - --served-model-name
-          - Qwen/Qwen3-0.6B
-          - --page-size
-          - "16"
-          - --tp
-          - "1"
-          - --trust-remote-code
-          - --device
-          - xpu
-          - --disaggregation-mode
-          - decode
-          - --disaggregation-transfer-backend
-          - nixl
-          - --disaggregation-bootstrap-port
-          - "12345"
-          - --host
-          - 0.0.0.0
+          # XPU SGLang has no forward-pass metrics support (it uses torch.cuda.Event), and the
+          # operator injects DYN_FORWARDPASS_METRIC_PORT, so unset it before launch.
+          - |
+            unset DYN_FORWARDPASS_METRIC_PORT
+            exec python3 -m dynamo.sglang \
+              --model-path Qwen/Qwen3-0.6B \
+              --served-model-name Qwen/Qwen3-0.6B \
+              --page-size 16 \
+              --tp 1 \
+              --trust-remote-code \
+              --device xpu \
+              --attention-backend intel_xpu \
+              --disaggregation-mode decode \
+              --disaggregation-transfer-backend nixl \
+              --disaggregation-bootstrap-port 12345 \
+              --host 0.0.0.0
           command:
-          - python3
-          - -m
-          - dynamo.sglang
+          - /bin/bash
+          - -c
           env:
           - name: UCX_TLS
             value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
@@ -140,29 +108,25 @@ spec:
         hostIPC: true
         containers:
         - args:
-          - --model-path
-          - Qwen/Qwen3-0.6B
-          - --served-model-name
-          - Qwen/Qwen3-0.6B
-          - --page-size
-          - "16"
-          - --tp
-          - "1"
-          - --trust-remote-code
-          - --device
-          - xpu
-          - --disaggregation-mode
-          - prefill
-          - --disaggregation-transfer-backend
-          - nixl
-          - --disaggregation-bootstrap-port
-          - "12345"
-          - --host
-          - 0.0.0.0
+          # XPU SGLang has no forward-pass metrics support (it uses torch.cuda.Event), and the
+          # operator injects DYN_FORWARDPASS_METRIC_PORT, so unset it before launch.
+          - |
+            unset DYN_FORWARDPASS_METRIC_PORT
+            exec python3 -m dynamo.sglang \
+              --model-path Qwen/Qwen3-0.6B \
+              --served-model-name Qwen/Qwen3-0.6B \
+              --page-size 16 \
+              --tp 1 \
+              --trust-remote-code \
+              --device xpu \
+              --attention-backend intel_xpu \
+              --disaggregation-mode prefill \
+              --disaggregation-transfer-backend nixl \
+              --disaggregation-bootstrap-port 12345 \
+              --host 0.0.0.0
           command:
-          - python3
-          - -m
-          - dynamo.sglang
+          - /bin/bash
+          - -c
           env:
           - name: UCX_TLS
             value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
