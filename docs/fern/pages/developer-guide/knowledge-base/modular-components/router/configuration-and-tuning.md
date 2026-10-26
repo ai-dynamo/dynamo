@@ -372,11 +372,8 @@ The configured value is the idle timeout. It is independent of
 option to keep affinity disabled.
 
 Set `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES` on the frontend to change the
-maximum number of entries per session-affinity table (default: `65536`). The value
-must be a positive integer; invalid values prevent affinity initialization. The
-limit applies independently to each table, including separate prefill and decode
-tables. Raising it allows more sessions to retain bindings and increases memory
-use; it does not rebalance existing bindings.
+entry limit per session-affinity table (default: `65536`). Prefill and decode
+tables have separate limits.
 
 With `DYN_LORA_ENABLED`, session affinity is supported in KV mode. It is rejected
 at startup with random or round-robin routing; the other router modes are not

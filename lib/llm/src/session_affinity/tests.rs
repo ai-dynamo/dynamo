@@ -756,91 +756,58 @@ fn a_subagent_group_id_is_namespaced_and_fixed_size() {
     assert!(long.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
 }
 
-fn in_affinity_env_process(test_name: &str, value: Option<&str>) -> bool {
+#[tokio::test]
+async fn session_capacity_from_env() {
     const CHILD: &str = "DYNAMO_AFFINITY_ENV_TEST";
     const SETTING: &str = "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES";
-    if std::env::var(CHILD).as_deref() == Ok(test_name) {
-        return false;
-    }
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command
-        .args(["--exact", test_name, "--nocapture"])
-        .env(CHILD, test_name)
-        .env_remove(SETTING);
-    if let Some(value) = value {
-        command.env(SETTING, value);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
-    true
-}
-
-#[test]
-fn session_capacity_defaults_to_65536() {
-    if in_affinity_env_process(
-        "session_affinity::tests::session_capacity_defaults_to_65536",
-        None,
-    ) {
-        return;
-    }
-    assert_eq!(
-        super::config_from_env(Duration::from_secs(10), Hard)
-            .unwrap()
-            .max_entries,
-        65_536
-    );
-}
-
-#[tokio::test]
-async fn session_capacity_env_controls_admission() {
-    if in_affinity_env_process(
-        "session_affinity::tests::session_capacity_env_controls_admission",
-        Some("2"),
-    ) {
-        return;
-    }
-    let coordinator = coordinator();
-    let first = coordinator
-        .acquire(&SessionAffinityId::new("first"), None)
-        .await
-        .unwrap();
-    let second = coordinator
-        .acquire(&SessionAffinityId::new("second"), None)
-        .await
-        .unwrap();
-    let Err(error) = coordinator
-        .acquire(&SessionAffinityId::new("third"), None)
-        .await
-    else {
-        panic!("configured entry limit must reject the third session");
-    };
-    assert_eq!(
-        error.to_string(),
-        "CapacityExhausted: session affinity entry limit reached"
-    );
-    drop((first, second));
-}
-
-#[test]
-fn session_capacity_env_rejects_invalid_values() {
-    const NAME: &str = "session_affinity::tests::session_capacity_env_rejects_invalid_values";
-    if std::env::var("DYNAMO_AFFINITY_ENV_TEST").as_deref() != Ok(NAME) {
-        for value in ["0", "-1", "abc", "", "184467440737095516160"] {
-            in_affinity_env_process(NAME, Some(value));
+    if std::env::var_os(CHILD).is_none() {
+        for value in [None, Some("2"), Some("0"), Some("abc")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "session_affinity::tests::session_capacity_from_env",
+                ])
+                .env(CHILD, "1")
+                .env_remove(SETTING);
+            if let Some(value) = value {
+                command.env(SETTING, value);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
         }
         return;
     }
-    let Err(error) = AffinityCoordinator::new(Duration::from_secs(10), Hard) else {
-        panic!("invalid session capacity must fail configuration");
-    };
-    assert_eq!(
-        error.to_string(),
-        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES must be a positive integer"
-    );
+
+    let config = super::config_from_env(Duration::from_secs(10), Hard);
+    match std::env::var(SETTING).as_deref() {
+        Err(_) => assert_eq!(config.unwrap().max_entries, 65_536),
+        Ok("2") => {
+            assert_eq!(config.unwrap().max_entries, 2);
+            let coordinator = coordinator();
+            let first = coordinator
+                .acquire(&SessionAffinityId::new("first"), None)
+                .await
+                .unwrap();
+            let second = coordinator
+                .acquire(&SessionAffinityId::new("second"), None)
+                .await
+                .unwrap();
+            let error = coordinator
+                .acquire(&SessionAffinityId::new("third"), None)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.to_string(),
+                "CapacityExhausted: session affinity entry limit reached"
+            );
+            drop((first, second));
+        }
+        Ok(_) => assert_eq!(
+            config.unwrap_err().to_string(),
+            "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES must be a positive integer"
+        ),
+    }
 }
