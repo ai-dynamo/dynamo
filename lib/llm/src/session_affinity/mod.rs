@@ -4,9 +4,14 @@
 mod coordinator;
 mod replica_sync;
 
-use std::time::Duration;
+use std::{env, num::NonZeroUsize, time::Duration};
 
-use dynamo_runtime::{component::Client, pipeline::Error};
+use anyhow::Context;
+use dynamo_kv_router::services::selection::affinity::SessionAffinityConfig;
+use dynamo_runtime::{
+    component::Client, config::environment_names::router::DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES,
+    pipeline::Error,
+};
 
 #[cfg(test)]
 pub(crate) use coordinator::to_table;
@@ -18,6 +23,26 @@ pub(crate) use dynamo_kv_router::services::selection::affinity::{
 pub use dynamo_kv_router::services::selection::affinity::{
     MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode,
 };
+
+pub(crate) fn config_from_env(
+    ttl: Duration,
+    mode: SessionAffinityMode,
+) -> Result<SessionAffinityConfig, Error> {
+    let mut config = SessionAffinityConfig::new(ttl).with_mode(mode);
+    match env::var(DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES) {
+        Ok(value) => {
+            config.max_entries = value
+                .parse::<NonZeroUsize>()
+                .with_context(|| {
+                    format!("{DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES} must be a positive integer")
+                })?
+                .get();
+        }
+        Err(env::VarError::NotPresent) => {}
+        Err(error) => return Err(error).context(DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES),
+    }
+    Ok(config)
+}
 
 pub type LlmResponse =
     crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>;
