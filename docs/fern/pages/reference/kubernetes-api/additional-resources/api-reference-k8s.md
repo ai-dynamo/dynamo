@@ -3549,6 +3549,11 @@ DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR 
 Run creators resolve optional Request inputs and the final AISimulate parameters before
 persisting the Run. Request admission defaulting does not apply to Runs.
 
+On a Run, spec.aisimulate.parameters is the complete resolved native AISimulate input, frozen when
+the Request controller created the Run. The Run executes that object as it is. It is not lowered
+from the typed fields again: they are copies of the Request, and lowering them would bring back
+keys that a JSON merge patch null had deleted from the stored input.
+
 
 
 _Appears in:_

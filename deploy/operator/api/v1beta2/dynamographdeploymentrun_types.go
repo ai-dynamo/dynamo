@@ -24,10 +24,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
-// Run creators resolve optional Request inputs and the final AISimulate parameters before
-// persisting the Run. Request admission defaulting does not apply to Runs.
+// DynamoGraphDeploymentRunSpec is an immutable snapshot of an accepted DGDR spec.
+// Request admission resolves its structural defaults before the Request controller copies it;
+// Request admission defaulting does not apply to Runs.
 // +kubebuilder:validation:XValidation:rule="has(self.model)",message="model is required"
+//
+// The Run reconciler lowers this immutable typed snapshot plus inputOverrides exactly once and
+// records the resulting public recommendation input in status.aisimulate.input.
 type DynamoGraphDeploymentRunSpec struct {
 	NativeSearchInput `json:",inline"`
 }
