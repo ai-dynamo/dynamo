@@ -78,6 +78,7 @@ pub(super) async fn start_zmq_listener(
             &tx,
             &next_event_id,
             worker_id,
+            expected_rank,
             recovery,
             cancellation_token,
         )
@@ -162,10 +163,8 @@ pub(super) async fn start_zmq_listener(
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
-                if let Some(expected_rank) = expected_rank
-                    && (batch.data_parallel_rank.is_none() || dp_rank != expected_rank)
-                {
-                    tracing::warn!(%zmq_endpoint, dp_rank, expected_rank, "Ignoring mismatched KV source rank");
+                if is_mismatched_rank(batch.data_parallel_rank, expected_rank) {
+                    tracing::warn!(%zmq_endpoint, dp_rank, ?expected_rank, "Ignoring mismatched KV source rank");
                     continue;
                 }
                 last_message = tokio::time::Instant::now();
@@ -217,6 +216,11 @@ pub(super) async fn start_zmq_listener(
         exit_reason,
         messages_processed
     );
+}
+
+/// A source dedicated to one rank ignores batches without its rank label or with another rank.
+pub(super) fn is_mismatched_rank(rank: Option<i32>, expected_rank: Option<u32>) -> bool {
+    expected_rank.is_some_and(|expected_rank| rank.map(i32::cast_unsigned) != Some(expected_rank))
 }
 
 /// Shared by live and recovery ingestion so both use one normalizer and event ID allocator.

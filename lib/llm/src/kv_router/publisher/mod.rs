@@ -83,8 +83,10 @@ pub enum KvEventSourceConfig {
         /// Source rank when this socket is dedicated to one DP rank.
         expected_rank: Option<u32>,
         /// Expected source rank and negotiated heartbeat timeout.
+        /// Cannot be combined with `recovery`.
         liveness: Option<(u32, std::time::Duration)>,
         /// Opt-in replay recovery that gates readiness on verified continuity.
+        /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
     },
 }
@@ -148,6 +150,10 @@ impl KvEventSource {
                 liveness,
                 recovery,
             } => {
+                anyhow::ensure!(
+                    recovery.is_none() || liveness.is_none(),
+                    "KV replay recovery and heartbeat liveness cannot be combined"
+                );
                 let listener_handle =
                     component
                         .drt()

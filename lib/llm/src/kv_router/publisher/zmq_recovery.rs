@@ -4,7 +4,7 @@
 //! Opt-in replay recovery for a rank's ZMQ KV event listener.
 
 use super::PublisherInput;
-use super::zmq_listener::{decode_zmq_kv_batch, normalize_batch};
+use super::zmq_listener::{decode_zmq_kv_batch, is_mismatched_rank, normalize_batch};
 use crate::utils::zmq::multipart_message;
 use dynamo_kv_router::{protocols::*, zmq_wire::*};
 use dynamo_runtime::transports::zmq::ipv6_option_for;
@@ -200,6 +200,7 @@ pub(super) async fn recovering_listener(
     tx: &mpsc::UnboundedSender<PublisherInput>,
     next_event_id: &AtomicU64,
     worker_id: WorkerId,
+    expected_rank: Option<u32>,
     mut config: ZmqRecoveryConfig,
     cancel: tokio_util::sync::CancellationToken,
 ) {
@@ -212,7 +213,7 @@ pub(super) async fn recovering_listener(
             biased;
             _ = cancel.cancelled() => return,
             result = recovery_session(
-                endpoint, topic, &mut config, &mut cursor, &mut deadline, normalizer, tx, next_event_id, worker_id,
+                endpoint, topic, &mut config, &mut cursor, &mut deadline, normalizer, tx, next_event_id, worker_id, expected_rank,
             ) => result,
         };
         let error = match result {
@@ -340,6 +341,7 @@ async fn recovery_session(
     tx: &mpsc::UnboundedSender<PublisherInput>,
     next_event_id: &AtomicU64,
     worker_id: WorkerId,
+    expected_rank: Option<u32>,
 ) -> Result<SessionEnd> {
     // Replay from the cursor refills anything buffered by an earlier connection.
     cursor.clear_pending();
@@ -415,7 +417,7 @@ async fn recovery_session(
                                 is_success = false;
                                 revoke(&config.status, deadline, timeout);
                             }
-                            apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, true).await?;
+                            apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, true).await?;
                         }
                     }
                     ReplayFrame::End => {
@@ -425,7 +427,7 @@ async fn recovery_session(
                             let Some(message) = live.next().now_or_never() else { break };
                             let message = message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??;
                             if let Some((sequence, payload)) = live_batch(message) {
-                                apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, !is_success).await?;
+                                apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, !is_success).await?;
                             }
                         }
                         // Replay is contiguous, so only a late first batch proves loss.
@@ -463,19 +465,10 @@ async fn recovery_session(
                     revoke(&config.status, deadline, timeout);
                     next_replay = Some(Instant::now());
                 }
-                apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, !is_success).await?;
+                apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, !is_success).await?;
             },
         }
     }
-}
-
-fn check_rank(rank: Option<i32>, worker: WorkerWithDpRank) -> Result<()> {
-    if rank.is_some_and(|rank| rank < 0 || rank as u32 != worker.dp_rank) {
-        return Err(terminal(anyhow::anyhow!(
-            "KV batch belongs to the wrong DP rank"
-        )));
-    }
-    Ok(())
 }
 
 /// Applies batches in sequence order, handling bad events as ordinary live ingestion does.
@@ -488,21 +481,23 @@ async fn apply_in_order(
     tx: &mpsc::UnboundedSender<PublisherInput>,
     next_event_id: &AtomicU64,
     worker: WorkerWithDpRank,
+    expected_rank: Option<u32>,
     needs_ack: bool,
 ) -> Result<()> {
-    if sequence > cursor.next()
-        && let Ok(batch) = decode_event_batch(&payload)
-    {
-        check_rank(batch.data_parallel_rank, worker)?;
-    }
     cursor.insert(sequence, payload)?;
     while let Some(payload) = cursor.pending.remove(&cursor.next) {
         cursor.bytes -= payload.len();
         let sequence = cursor.next;
         match decode_zmq_kv_batch(vec![Vec::new(), sequence.to_be_bytes().to_vec(), payload]) {
             Err(error) => tracing::warn!(%error, sequence, "Failed to decode ZMQ KV batch"),
+            Ok(decoded) if is_mismatched_rank(decoded.batch.data_parallel_rank, expected_rank) => {
+                tracing::warn!(
+                    sequence,
+                    ?expected_rank,
+                    "Ignoring mismatched KV source rank"
+                );
+            }
             Ok(decoded) => {
-                check_rank(decoded.batch.data_parallel_rank, worker)?;
                 let events = normalize_batch(decoded.batch, normalizer, worker, next_event_id);
                 if needs_ack {
                     tokio::time::timeout(INACTIVITY_TIMEOUT, apply(tx, events))
@@ -571,7 +566,7 @@ mod socket_tests {
                 Arc::new(AtomicU64::new(0)),
                 None,
                 None,
-                None,
+                Some(0),
                 None,
                 Some(ZmqRecoveryConfig {
                     replay_endpoint: replay.get_socket().get_last_endpoint().unwrap().unwrap(),
@@ -790,23 +785,19 @@ mod socket_tests {
     }
 
     #[tokio::test]
-    async fn undecodable_batch_is_skipped_while_wrong_rank_and_failed_application_fail() {
+    async fn undecodable_and_wrong_rank_batches_are_skipped_while_failed_application_fails() {
+        let unlabeled =
+            rmp_serde::to_vec(&(0.0_f64, vec![vec!["AllBlocksCleared"]], None::<i32>)).unwrap();
         let mut f = Fixture::new(Duration::from_secs(5));
         let id = f.request(0).await;
         f.send(&id, 0, b"not msgpack".to_vec()).await;
-        f.send(&id, 1, payload(0)).await;
+        f.send(&id, 1, payload(1)).await;
+        f.send(&id, 2, unlabeled).await;
+        f.send(&id, 3, payload(0)).await;
         f.send(&id, -1, vec![]).await;
         assert_eq!(f.ack().await.len(), 1);
         f.ack().await;
         f.status(KvStreamStatus::Success).await;
-
-        let mut f = Fixture::new(Duration::from_secs(5));
-        let id = f.request(0).await;
-        f.send(&id, 500, payload(1)).await;
-        assert!(matches!(
-            f.final_status().await,
-            KvStreamStatus::Failed { .. }
-        ));
 
         let mut f = Fixture::new(Duration::from_secs(5));
         let id = f.request(0).await;
