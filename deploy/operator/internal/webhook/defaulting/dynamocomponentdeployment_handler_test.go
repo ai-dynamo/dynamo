@@ -24,7 +24,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -40,7 +39,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 			name: "CREATE defaults empty spec name from metadata name",
 			ctx:  admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Name: "worker",
 			},
 			want: "worker",
 		},
@@ -48,7 +47,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 			name: "CREATE preserves explicit spec name",
 			ctx:  admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Name: "worker",
 				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 						ComponentName: "custom",
@@ -61,7 +60,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 			name: "UPDATE does not default empty spec name",
 			ctx:  admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Name: "worker",
 			},
 			want: "",
 		},
@@ -69,7 +68,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 			name: "missing admission request fails closed",
 			ctx:  context.Background(),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Name: "worker",
 			},
 			wantErr: true,
 		},
@@ -96,7 +95,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 
 func TestDCDDefaulter_DefaultsMultinodeRoleReplicasOnUpdate(t *testing.T) {
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Name: "worker",
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},

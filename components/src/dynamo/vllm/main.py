@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import functools
+import gc
 import json
 import logging
 import os
@@ -20,6 +22,7 @@ from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
@@ -39,7 +42,11 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.topology import (
+    TopologyConfig,
+    apply_topology_config,
+    read_topology_config,
+)
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -572,6 +579,16 @@ def setup_kv_event_publisher(
     return kv_publishers if kv_publishers else None
 
 
+@functools.cache
+def _worker_topology_config() -> TopologyConfig:
+    """Read this worker's topology once.
+
+    The KV state-agent attachment and every model registration then publish the
+    same island, and a later read cannot wait on or exit for a changed file.
+    """
+    return read_topology_config()
+
+
 async def setup_kv_state_attachment_owner(
     config: Config,
     generate_endpoint: Endpoint,
@@ -582,6 +599,7 @@ async def setup_kv_state_attachment_owner(
         generate_endpoint,
         vllm_config,
         _resolve_image_token_id(config, vllm_config),
+        topology_domains=_worker_topology_config().topology_domains,
     )
 
 
@@ -855,6 +873,32 @@ def setup_vllm_engine(
     )
 
 
+_gc_frozen_after_init = False
+
+
+def maybe_freeze_gc_after_init(enabled: bool) -> None:
+    """Freeze this process's GC heap once, before the model is registered.
+
+    vLLM calls ``freeze_gc_heap()`` in EngineCore, each GPU worker and its own
+    API server. Dynamo replaces the API server with this process, which holds
+    the engine client, tokenizer and config (~1M tracked objects), so without
+    a freeze every gen2 collection re-walks them on the request loop. Runs at
+    most once per process: the collect blocks, and the frontend only routes
+    here after ``register_model`` returns.
+    """
+    global _gc_frozen_after_init
+    if not enabled or _gc_frozen_after_init:
+        return
+    start = time.perf_counter()
+    freeze_gc_heap()
+    _gc_frozen_after_init = True
+    logger.info(
+        "Froze %d GC-tracked objects in the worker process after init (%.0f ms)",
+        gc.get_freeze_count(),
+        (time.perf_counter() - start) * 1000,
+    )
+
+
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -976,12 +1020,14 @@ async def register_vllm_model(
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
 
     # Set topology and KV transfer policy for topology-aware routing
-    apply_topology_config(runtime_config)
+    apply_topology_config(runtime_config, _worker_topology_config())
 
     # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(
         config.frontend_decoding
     )
+
+    maybe_freeze_gc_after_init(config.freeze_gc_after_init)
 
     await register_model(
         model_input,

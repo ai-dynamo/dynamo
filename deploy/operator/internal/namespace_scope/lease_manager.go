@@ -87,10 +87,9 @@ func NewLeaseManager(config *rest.Config, namespace string, operatorVersion stri
 	//          maxFailures = 3 - 1 = 2 → operator exits after 20s of failures
 	//          This leaves 10s buffer before lease expires at 30s
 	rawMaxFailures := int(leaseDuration / renewInterval)
-	maxFailures := rawMaxFailures - 1
-	if maxFailures < 1 {
-		maxFailures = 1 // Always allow at least 1 failure for transient issues
-	}
+	maxFailures := max(rawMaxFailures-1,
+		// Always allow at least 1 failure for transient issues
+		1)
 
 	return &LeaseManager{
 		client:          client,
@@ -173,10 +172,8 @@ func (lm *LeaseManager) createOrUpdateLease(ctx context.Context) error {
 	leaseDurationSeconds := int32(lm.leaseDuration.Seconds())
 
 	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      LeaseName,
-			Namespace: lm.namespace,
-		},
+		Name:      LeaseName,
+		Namespace: lm.namespace,
 		Spec: coordinationv1.LeaseSpec{
 			HolderIdentity:       &lm.holderIdentity,
 			LeaseDurationSeconds: &leaseDurationSeconds,

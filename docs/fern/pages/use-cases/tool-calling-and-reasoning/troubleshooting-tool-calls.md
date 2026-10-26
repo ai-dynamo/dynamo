@@ -19,7 +19,7 @@ what the response will look like, so you can capture and share useful
 diagnostic info.
 
 > [!IMPORTANT]
->  Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint. For multi-channel reasoning models (`harmony`, `kimi_k2`, `kimi_k25`, `gemma4`), the recipe recovers only the assistant-content channel; the reasoning channel is not surfaced in `logprobs.content`. If the worker is the SGLang backend, `logprobs: true` is rejected by default because SGLang's tokenizer manager detokenizes top-k tokens serially, causing latency degradation. Set `DYN_SGL_ALLOW_TOP_LOGPROBS=1` in the SGLang worker's `env:` to opt in, then remove it and re-apply once the repro is captured. Tracked at [sgl-project/sglang#24447](https://github.com/sgl-project/sglang/pull/24447).
+>  Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint. For multi-channel reasoning models (`harmony`, `kimi_k2`, `kimi_k25`, `gemma4`), the recipe recovers only the assistant-content channel; the reasoning channel is not surfaced in `logprobs.content`.
 
 ## The request
 
@@ -115,11 +115,11 @@ the parser configuration, or the parser logic.
 
 ## Parser Generation Routing
 
-To select a parser generation, set `DYN_PARSER_VERSION=1` or `DYN_PARSER_VERSION=2`. Leave it unset or use `auto` to keep the existing family defaults. The aliases `v1` and `v2` are not accepted.
+To select a parser generation, set `DYN_PARSER_VERSION=1` or `DYN_PARSER_VERSION=2`. Leave it unset or use `auto` to prefer a compatible V2 parser, falling back to V1 when no compatible V2 configuration exists. The aliases `v1` and `v2` are not accepted.
 
 | `DYN_PARSER_VERSION` | Selection |
 | --- | --- |
-| Unset or `auto` | Existing family defaults |
+| Unset or `auto` | Compatible V2 parser when available; otherwise V1 |
 | `1` | V1 |
 | `2` | V2 |
 
@@ -128,16 +128,21 @@ Unsupported values stop startup. Explicit selections validate the configured too
 | Configured family | Unset or `auto` selection |
 | --- | --- |
 | Muse Glimmer | V2 |
-| DeepSeek V4.1 | V2 when both `tool_call_parser` and `reasoning_parser` are `deepseek_v41` |
-| DeepSeek V4 | Original V1 route |
-| Gemma 4 | Original V1 route |
-| GLM 4.7 | Original V1 route; its reasoning name may be `glm45` |
-| Kimi K2 / K2.5 | Original V1 route; configure the matching tool and reasoning names |
-| Kimi K3 | Original V1 route |
-| Qwen3 Coder | Original V1 route; pair `qwen3_coder` with `qwen3` |
-| Other parser names | Existing family-specific route |
+| DeepSeek V4.1 | V2 |
+| DeepSeek V4 | V2 |
+| Gemma 4 | V2 |
+| GLM 4.7 | V2; its reasoning name may be `glm45` |
+| Kimi K2 / K2.5 | V2; `kimi_k2` and `kimi_k25` resolve to the same family |
+| Kimi K3 | V2 |
+| Qwen3 Coder | V2; `qwen3_coder` and `qwen3` resolve to the same family, with the reasoning-only `qwen3` exception below |
+| Qwen3 / QwQ with only the `qwen3` reasoning parser | Existing V1 route; explicit `2` selects the Qwen3 Coder grammar |
+| Other parser names or incompatible pairs | Existing V1 route |
 
-Version `2` uses a compatible unified parser for streaming and batch when either the tool-call parser or reasoning parser identifies a supported family. When both are configured, they must resolve to the same family. The DeepSeek V4.1 pair uses V2 by default for streaming and batch. With unset settings or `auto`, Muse streaming requests with named/required tool choices or structural tags retain their existing V1 handling; Muse batch responses use V2. Set `DYN_PARSER_VERSION=2` to require V2 for supported request modes. Tool-only and reasoning-only V1 configurations keep their existing parsers under the original family defaults.
+For supported configurations other than reasoning-only `qwen3`, unset, `auto`, and version `2` use a compatible unified parser for streaming, batch, and content decoding when either the tool-call parser or reasoning parser identifies a supported family. When both are configured, they must resolve to the same family. Unset and `auto` fall back to the existing V1 route for unavailable or incompatible configurations; explicit `2` rejects them. A runtime V2 parse failure does not retry through V1. Explicit `1` keeps supported configurations on the legacy parser.
+
+A reasoning-only `qwen3` configuration stays on V1 under unset and `auto`, including the deprecated false setting, because Qwen3 thinking and QwQ models can emit Hermes tool-call JSON. Configuring `qwen3_coder` as the tool-call parser selects the unified Coder grammar by default. Explicit `DYN_PARSER_VERSION=2` retains its existing behavior for reasoning-only `qwen3`.
+
+The deprecated `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2=false` setting retains its mapping to `auto`, so it now prefers compatible V2 parsers. Use `DYN_PARSER_VERSION=1` for rollback.
 
 Explicit V1 and V2 apply the same generation selection to streaming and batch. Streaming passes output chunks to the selected parser as they arrive; partial tool-call deltas depend on the family and output shape. Batch parsing waits for the complete response before constructing `message.content`, `message.reasoning_content`, and `message.tool_calls`. `tool_choice: none` suppresses tool calls while the selected content decoder removes recognized native markup from visible content.
 
@@ -147,7 +152,7 @@ On the default Kimi K3 route, a prompt ending with the XTML reasoning opener `<|
 
 ## Known limitations and follow-up
 
-This revision pins the latest published `dynamo-parsers-v2` crate, version 0.7.17. It includes the merged quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326), along with the Kimi tool-ID and call-boundary fixes from [frontend-crates #332](https://github.com/ai-dynamo/frontend-crates/pull/332). The five Dynamo regression tests that were ignored for 0.7.13 are enabled and pass against 0.7.17. The targeted `cargo test --locked -p dynamo-llm quoted_ -- --nocapture` run passed 13 unit tests, one aggregator test, and two integration tests. The every-split Muse structured-response case also passes in `cargo test --locked -p dynamo-llm response_format_explicit_reasoning_without_prompt_prefill -- --nocapture`. These checks do not cover every parser path.
+This revision pins `dynamo-parsers-v2` version 0.7.24. The earlier 0.7.17 update included the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and the Kimi tool-ID and call-boundary fixes from [frontend-crates #332](https://github.com/ai-dynamo/frontend-crates/pull/332). Targeted parser regressions do not establish qualification of every parser path.
 
 A separate quoted native tool-call opener case can still cut off the rest of an answer under V2, in streaming and batch requests. The exact regression remains follow-up work tracked with related native Qwen3 and Kimi streaming changes in [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577). With generic `<think>` prompt prefill, splitting `thought</think>` after `thought<` can also leave the remaining tool JSON in reasoning; this behavior is present on the existing V1 route as well. Both cases still need qualification before they can be claimed as fixed.
 

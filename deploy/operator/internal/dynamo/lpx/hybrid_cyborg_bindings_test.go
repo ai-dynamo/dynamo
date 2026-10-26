@@ -26,10 +26,10 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	fixture.selectedPropSyncChains = nil
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline:        PipelineLPX,
+		Pipeline:        PipelineHybrid,
 		Models:          []string{"default"},
 		RuntimeBuildRef: "model-build",
-		BuildSnapshot:   normalizeTestSnapshot(t, snapshot),
+		Build:           snapshot,
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]
@@ -98,7 +98,7 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 				fixture.partitions[index].id = uint32(index)
 			}
 			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-			projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineLPX)
+			projection := projectTestBuild(t, snapshot, PipelineHybrid)
 			projection.stage = testRenderComponentName
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
@@ -162,13 +162,13 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			}
 			fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 5, deviceType: manifestcapnp.DeviceType_cuda})
 			fixture.selectedPropSyncChains = [][]uint32{{2, 3}}
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
 			})
 			require.NoError(t, err)
-			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.Family)
+			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.family)
 
 			t.Log("Render the hybrid workload with an authored Cyborg configuration mount")
 			projections[0].stage = testRenderComponentName
@@ -196,9 +196,9 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/configs"})
 			require.Contains(t, cyborg.Spec.PodSpec.Volumes, corev1.Volume{
 				Name: lpuConfigVolumeName,
-				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: servers.Name},
-				}},
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					Name: servers.Name,
+				},
 			})
 			require.NotEmpty(t, cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash])
 		})

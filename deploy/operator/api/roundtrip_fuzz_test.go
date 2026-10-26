@@ -43,6 +43,7 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -65,6 +66,7 @@ import (
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 )
 
 var (
@@ -177,10 +179,22 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		func(v *v1beta1.OptimizationType, c randfill.Continue) {
 			*v = oneOf(c, v1beta1.OptimizationTypeLatency, v1beta1.OptimizationTypeThroughput)
 		},
+		fuzzAlphaDGDR,
+		fuzzAlphaDGDRNativeSpec,
+		fuzzAlphaDGDRNativeStatus,
 		fuzzAlphaDGDRSpec,
 		fuzzAlphaDGDRStatus,
+		fuzzBetaDGDR,
+		fuzzBetaDGDRNativeSpec,
+		fuzzBetaDGDRNativeStatus,
 		fuzzBetaDGDRSpec,
 		fuzzBetaDGDRStatus,
+		fuzzBeta2DGDR,
+		fuzzBeta2DGDRNativeSpec,
+		fuzzBeta2DGDRNativeStatus,
+		fuzzBeta2DGDRSpec,
+		fuzzBeta2DGDRStatus,
+		fuzzAISimulateSpec,
 		fuzzBetaDGDROverrides,
 		// PlacementStatus (v1alpha1 + v1beta1): pick admissible values so the
 		// round-trip fuzzer exercises Placement without producing shapes the CRD
@@ -219,13 +233,44 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 	}
 }
 
-func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
-	c.FillNoCustom(s)
+func fuzzAlphaDGDR(r *v1alpha1.DynamoGraphDeploymentRequest, c randfill.Continue) {
+	c.FillNoCustom(r)
+	if c.Bool() {
+		return
+	}
 
+	var spec v1beta2.DynamoGraphDeploymentRequestNativeSpec
+	c.Fill(&spec)
+	r.Spec = v1alpha1.DynamoGraphDeploymentRequestSpec{
+		V1Beta2: marshalFuzzEnvelope(spec),
+	}
+	r.Status = v1alpha1.DynamoGraphDeploymentRequestStatus{}
+	if c.Bool() {
+		return
+	}
+
+	var status v1beta2.DynamoGraphDeploymentRequestNativeStatus
+	c.Fill(&status)
+	r.Status.V1Beta2 = marshalFuzzEnvelope(status)
+}
+
+func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeSpec)
+	s.V1Beta2 = nil
+}
+
+func fuzzAlphaDGDRNativeSpec(s *v1alpha1.DynamoGraphDeploymentRequestNativeSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+	if s.ProfilingConfig == nil {
+		s.ProfilingConfig = &v1alpha1.ProfilingConfigSpec{}
+	}
+
+	s.Model = fmt.Sprintf("model-%d", c.Uint32())
 	s.Backend = oneOf(c, "auto", "vllm", "sglang", "trtllm")
 
 	// Empty resources do not survive the alpha resources to beta profiling job projection.
-	if s.ProfilingConfig.Resources != nil &&
+	if s.ProfilingConfig != nil &&
+		s.ProfilingConfig.Resources != nil &&
 		len(s.ProfilingConfig.Resources.Requests) == 0 &&
 		len(s.ProfilingConfig.Resources.Limits) == 0 &&
 		len(s.ProfilingConfig.Resources.Claims) == 0 {
@@ -252,6 +297,11 @@ func fuzzAlphaDGDRSpec(s *v1alpha1.DynamoGraphDeploymentRequestSpec, c randfill.
 }
 
 func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeStatus)
+	s.V1Beta2 = nil
+}
+
+func fuzzAlphaDGDRNativeStatus(s *v1alpha1.DynamoGraphDeploymentRequestNativeStatus, c randfill.Continue) {
 	c.FillNoCustom(s)
 
 	s.State = oneOf(c,
@@ -265,9 +315,36 @@ func fuzzAlphaDGDRStatus(s *v1alpha1.DynamoGraphDeploymentRequestStatus, c randf
 	)
 }
 
+func fuzzBetaDGDR(r *v1beta1.DynamoGraphDeploymentRequest, c randfill.Continue) {
+	c.FillNoCustom(r)
+	if c.Bool() {
+		return
+	}
+
+	var spec v1beta2.DynamoGraphDeploymentRequestNativeSpec
+	c.Fill(&spec)
+	r.Spec = v1beta1.DynamoGraphDeploymentRequestSpec{
+		V1Beta2: marshalFuzzEnvelope(spec),
+	}
+	r.Status = v1beta1.DynamoGraphDeploymentRequestStatus{}
+	if c.Bool() {
+		return
+	}
+
+	var status v1beta2.DynamoGraphDeploymentRequestNativeStatus
+	c.Fill(&status)
+	r.Status.V1Beta2 = marshalFuzzEnvelope(status)
+}
+
 func fuzzBetaDGDRSpec(s *v1beta1.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeSpec)
+	s.V1Beta2 = nil
+}
+
+func fuzzBetaDGDRNativeSpec(s *v1beta1.DynamoGraphDeploymentRequestNativeSpec, c randfill.Continue) {
 	c.FillNoCustom(s)
 
+	s.Model = fmt.Sprintf("model-%d", c.Uint32())
 	s.Backend = oneOf(c, v1beta1.BackendTypeAuto, v1beta1.BackendTypeVllm, v1beta1.BackendTypeSglang, v1beta1.BackendTypeTrtllm)
 
 	if s.Workload != nil && s.SLA == nil && (s.Workload.ISL != nil || s.Workload.OSL != nil) {
@@ -388,6 +465,11 @@ func fuzzDGDRProfilingContainerNames(c randfill.Continue) []string {
 }
 
 func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeStatus)
+	s.V1Beta2 = nil
+}
+
+func fuzzBetaDGDRNativeStatus(s *v1beta1.DynamoGraphDeploymentRequestNativeStatus, c randfill.Continue) {
 	c.FillNoCustom(s)
 
 	s.Phase = oneOf(c, v1beta1.DGDRPhasePending, v1beta1.DGDRPhaseProfiling, v1beta1.DGDRPhaseReady, v1beta1.DGDRPhaseDeploying, v1beta1.DGDRPhaseDeployed, v1beta1.DGDRPhaseFailed)
@@ -404,6 +486,213 @@ func fuzzBetaDGDRStatus(s *v1beta1.DynamoGraphDeploymentRequestStatus, c randfil
 			s.ProfilingResults = nil
 		}
 	}
+}
+
+func fuzzBeta2DGDR(r *v1beta2.DynamoGraphDeploymentRequest, c randfill.Continue) {
+	c.FillNoCustom(r)
+	if c.Bool() {
+		return
+	}
+
+	var spec v1beta1.DynamoGraphDeploymentRequestNativeSpec
+	c.Fill(&spec)
+	r.Spec = v1beta2.DynamoGraphDeploymentRequestSpec{
+		V1Beta1: marshalFuzzEnvelope(spec),
+	}
+	r.Status = v1beta2.DynamoGraphDeploymentRequestStatus{}
+	if c.Bool() {
+		return
+	}
+
+	var status v1beta1.DynamoGraphDeploymentRequestNativeStatus
+	c.Fill(&status)
+	r.Status.V1Beta1 = marshalFuzzEnvelope(status)
+}
+
+func fuzzBeta2DGDRSpec(s *v1beta2.DynamoGraphDeploymentRequestSpec, c randfill.Continue) {
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeSpec)
+	s.V1Beta1 = nil
+}
+
+func fuzzBeta2DGDRStatus(s *v1beta2.DynamoGraphDeploymentRequestStatus, c randfill.Continue) {
+	c.Fill(&s.DynamoGraphDeploymentRequestNativeStatus)
+	s.V1Beta1 = nil
+}
+
+func fuzzBeta2DGDRNativeSpec(s *v1beta2.DynamoGraphDeploymentRequestNativeSpec, c randfill.Continue) {
+	c.FillNoCustom(&s.NativeSearchInput)
+
+	// Keep the required model and all enum-backed values inside their admitted domains.
+	s.Model = &v1beta2.ModelSpec{Name: fmt.Sprintf("model-%d", c.Uint32())}
+	if c.Bool() {
+		backendCount := 1 + c.Intn(3)
+		s.Backends = []v1beta2.Backend{v1beta2.BackendVLLM, v1beta2.BackendSGLang, v1beta2.BackendTRTLLM}[:backendCount]
+	} else {
+		s.Backends = nil
+	}
+	fuzzBeta2Hardware(s.Hardware, c)
+	fuzzBeta2Workload(s.Workload, c)
+	fuzzBeta2Objective(s.Objective, c)
+
+	// Keep the optional candidate bound inside its admitted range.
+	if s.Recommendation != nil {
+		s.Recommendation.MaxCandidates = int32(1 + c.Intn(100))
+	}
+}
+
+func fuzzBeta2DGDRNativeStatus(s *v1beta2.DynamoGraphDeploymentRequestNativeStatus, c randfill.Continue) {
+	c.FillNoCustom(s)
+	for i := range s.Conditions {
+		s.Conditions[i].Type = fmt.Sprintf("Condition%d", i)
+		s.Conditions[i].Status = oneOf(c, metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionUnknown)
+		s.Conditions[i].ObservedGeneration = c.Int63()
+		s.Conditions[i].Reason = fmt.Sprintf("Reason%d", i)
+	}
+}
+
+func fuzzBeta2Hardware(hardware *v1beta2.HardwareSpec, c randfill.Continue) {
+	if hardware == nil || hardware.GPU == nil {
+		return
+	}
+	if hardware.GPU.SKU != nil {
+		*hardware.GPU.SKU = fmt.Sprintf("gpu-%d", c.Uint32())
+	}
+	if hardware.GPU.Budget != nil {
+		*hardware.GPU.Budget = int32(1 + c.Intn(1024))
+	}
+}
+
+func fuzzBeta2Workload(workload *v1beta2.WorkloadSpec, c randfill.Continue) {
+	if workload == nil || workload.Static == nil {
+		return
+	}
+
+	static := workload.Static
+	static.ISL = oneOfPtr(c, int32(1), int32(4000), int32(131072))
+	static.OSL = oneOfPtr(c, int32(1), int32(1000), int32(16384))
+	static.NumRequestRatio = oneOfPtr(c, 0.5, 1.0, 1000.0)
+	static.RequestRate = nil
+	static.Concurrency = nil
+	static.KVLoadRatio = nil
+	switch c.Intn(4) {
+	case 1:
+		static.RequestRate = oneOfPtr(c, 0.1, 1.0, 100.0)
+	case 2:
+		static.Concurrency = oneOfPtr(c, int32(1), int32(32), int32(1024))
+	case 3:
+		if c.Bool() {
+			static.KVLoadRatio = v1beta2.KVLoadRatio{0.5}
+		} else {
+			static.KVLoadRatio = v1beta2.KVLoadRatio{0.0, 1.0}
+		}
+	}
+}
+
+func fuzzBeta2Objective(objective *v1beta2.ObjectiveSpec, c randfill.Continue) {
+	if objective == nil {
+		return
+	}
+
+	metrics := []v1beta2.ObjectiveMetric{
+		"Throughput",
+		"ThroughputPerGPU",
+		"ThroughputPerUser",
+		"TTFT",
+		"E2ELatency",
+		"Goodput",
+		"GoodputPerGPU",
+	}
+	fuzzBeta2SLA(objective.SLA, c)
+	switch c.Intn(3) {
+	case 0:
+		*objective = v1beta2.ObjectiveSpec{}
+	case 1:
+		objective.Mode = v1beta2.ObjectiveModeOptimize
+		objective.Metrics = nil
+		objective.Metric = oneOfPtr(c, metrics...)
+		if objective.Metric != nil && isGoodputMetric(*objective.Metric) {
+			ensureBeta2SLA(objective, c)
+		}
+	case 2:
+		objective.Mode = v1beta2.ObjectiveModePareto
+		objective.Metric = nil
+		metricCount := 2 + c.Intn(len(metrics)-1)
+		objective.Metrics = append(objective.Metrics[:0], metrics[:metricCount]...)
+		if slices.ContainsFunc(objective.Metrics, isGoodputMetric) {
+			ensureBeta2SLA(objective, c)
+		}
+	}
+}
+
+func fuzzBeta2SLA(sla *v1beta2.ObjectiveSLASpec, c randfill.Continue) {
+	if sla == nil {
+		return
+	}
+
+	*sla = v1beta2.ObjectiveSLASpec{}
+	switch c.Intn(3) {
+	case 1:
+		sla.TTFTMs = oneOfPtr(c, 1.0, 2000.0)
+		sla.ITLMs = oneOfPtr(c, 1.0, 30.0)
+	case 2:
+		sla.E2EMs = oneOfPtr(c, 1.0, 30000.0)
+	}
+}
+
+func ensureBeta2SLA(objective *v1beta2.ObjectiveSpec, c randfill.Continue) {
+	if objective.SLA == nil {
+		objective.SLA = &v1beta2.ObjectiveSLASpec{}
+	}
+	if objective.SLA.TTFTMs == nil && objective.SLA.ITLMs == nil && objective.SLA.E2EMs == nil {
+		ttft := oneOf(c, 1.0, 2000.0)
+		objective.SLA.TTFTMs = &ttft
+	}
+}
+
+func isGoodputMetric(metric v1beta2.ObjectiveMetric) bool {
+	return metric == "Goodput" || metric == "GoodputPerGPU"
+}
+
+type fuzzAISimulateParameters struct {
+	Search   *fuzzAISimulateSearch   `json:"search,omitempty"`
+	Workload *fuzzAISimulateWorkload `json:"workload,omitempty"`
+}
+
+type fuzzAISimulateSearch struct {
+	MaxTrials int32 `json:"max_trials,omitempty"`
+	StrictSLA bool  `json:"strict_sla,omitempty"`
+}
+
+type fuzzAISimulateWorkload struct {
+	RequestCount int32             `json:"request_count,omitempty"`
+	Custom       map[string]string `json:"custom,omitempty"`
+}
+
+func fuzzAISimulateSpec(s *v1beta2.AISimulateSpec, c randfill.Continue) {
+	c.FillNoCustom(s)
+
+	// Exercise both absent and typed object parameter payloads.
+	if c.Bool() {
+		s.Parameters = nil
+		return
+	}
+
+	// Marshal a typed test input instead of generating arbitrary RawExtension bytes.
+	parameters := &fuzzAISimulateParameters{}
+	c.Fill(parameters)
+	raw, err := json.Marshal(parameters)
+	if err != nil {
+		panic(err)
+	}
+	s.Parameters = &runtime.RawExtension{Raw: raw}
+}
+
+func marshalFuzzEnvelope(value any) *apiextensionsv1.JSON {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return &apiextensionsv1.JSON{Raw: raw}
 }
 
 func newRoundTripFiller(seed int64) *randfill.Filler {
@@ -460,7 +749,7 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 	case 5:
 		n := int(c.Uint32() % 3)
 		out := make(map[string]any, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
 		}
 		return out
@@ -472,7 +761,7 @@ func fuzzJSONValue(c randfill.Continue, depth int) any {
 func fuzzJSONObject(c randfill.Continue, depth int) map[string]any {
 	n := int(c.Uint32() % 3)
 	out := make(map[string]any, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[fmt.Sprintf("k%d", i)] = fuzzJSONValue(c, depth+1)
 	}
 	return out
@@ -601,6 +890,18 @@ func TestFuzzRoundTrip_DGDR_HubSpokeHub(t *testing.T) {
 
 func TestFuzzRoundTrip_DGDR_SpokeHubSpoke(t *testing.T) {
 	fuzzSpokeHubSpoke[*v1beta1.DynamoGraphDeploymentRequest, v1alpha1.DynamoGraphDeploymentRequest](t, "DGDR",
+		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
+	)
+}
+
+func TestFuzzRoundTrip_DGDRV1Beta2_HubSpokeHub(t *testing.T) {
+	fuzzHubSpokeHub[*v1beta1.DynamoGraphDeploymentRequest, v1beta2.DynamoGraphDeploymentRequest](t, "DGDR v1beta2",
+		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
+	)
+}
+
+func TestFuzzRoundTrip_DGDRV1Beta2_SpokeHubSpoke(t *testing.T) {
+	fuzzSpokeHubSpoke[*v1beta1.DynamoGraphDeploymentRequest, v1beta2.DynamoGraphDeploymentRequest](t, "DGDR v1beta2",
 		func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
 	)
 }
