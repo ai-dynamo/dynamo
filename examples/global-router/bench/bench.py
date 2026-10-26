@@ -424,6 +424,67 @@ def summary_script(namespace, label):
     )
 
 
+def http_probe_script(model, targets, sizes, requests, warmup, idle_s):
+    """Times the first streamed token of chat requests from a node to each pool
+    frontend in ``targets`` (name -> pod IP), for each prompt size in ``sizes``
+    (name -> repetitions of a 27-character phrase), on three kinds of connection:
+    ``hot`` (back to back on one connection), ``idle`` (the same connection after
+    ``idle_s`` quiet, which shrinks Linux's congestion window) and ``cold`` (a
+    new connection per request). The prompt repeats, so after ``warmup``
+    requests every worker serves it from its prefix cache, and the difference
+    between a remote and the local target is the cost of the path."""
+    return f"""python3 - <<'PY'
+import http.client, json, statistics, time
+targets = {json.dumps(targets)}
+sizes = {json.dumps(sizes)}
+def body(repeats):
+    text = "lorem ipsum dolor sit amet " * repeats
+    return json.dumps({{"model": {json.dumps(model)}, "stream": True, "max_tokens": 4,
+                       "ignore_eos": True, "stream_options": {{"include_usage": True}},
+                       "messages": [{{"role": "user", "content": text}}]}}).encode()
+def send(conn, payload):
+    start = time.perf_counter()
+    conn.request("POST", "/v1/chat/completions", body=payload,
+                 headers={{"Content-Type": "application/json"}})
+    response = conn.getresponse()
+    first, tokens = None, None
+    while True:
+        line = response.readline()
+        if not line:
+            break
+        if line.startswith(b"data:"):
+            if first is None:
+                first = time.perf_counter() - start
+            if b"prompt_tokens" in line:
+                tokens = json.loads(line[5:])["usage"]["prompt_tokens"]
+    return first * 1000, tokens
+out = {{}}
+for name, ip in targets.items():
+    for size, repeats in sizes.items():
+        payload = body(repeats)
+        conn = http.client.HTTPConnection(ip, 8000, timeout=300)
+        tokens = None
+        for _ in range({warmup}):
+            _, tokens = send(conn, payload)
+        result = {{"bytes": len(payload), "prompt_tokens": tokens}}
+        hot = [send(conn, payload)[0] for _ in range({requests})]
+        idle = []
+        for _ in range({requests}):
+            time.sleep({idle_s})
+            idle.append(send(conn, payload)[0])
+        conn.close()
+        cold = []
+        for _ in range({requests}):
+            fresh = http.client.HTTPConnection(ip, 8000, timeout=300)
+            cold.append(send(fresh, payload)[0])
+            fresh.close()
+        for mode, values in (("hot", hot), ("idle", idle), ("cold", cold)):
+            result[mode + "_ttft_ms_p50"] = round(statistics.median(values), 1)
+        out.setdefault(name, {{}})[size] = result
+print("BENCH_HTTP " + json.dumps(out, sort_keys=True))
+PY"""
+
+
 def ping_script(targets, count):
     """Round-trip times from a node to each pod IP in ``targets`` (name -> IP):
     ICMP ping, and the TCP handshake to the frontend's port 8000, which is the
@@ -495,6 +556,52 @@ def combine(results):
     return rows, totals["pools"]
 
 
+def frontend_ips(cfg, evidence):
+    """Each region's first-pool frontend pod IP, by region short name."""
+    pool = cfg["pools"][0]["stem"]
+    targets = {}
+    for member in cfg["regions"]:
+        pods = cluster.read(member, "pods", cfg["namespace"], "", ".items", evidence)
+        targets[member["short"]] = next(
+            pod["status"]["podIP"]
+            for pod in pods
+            if pod["metadata"]["name"].startswith(f"{pool}-frontend-")
+            and pod["status"].get("podIP")
+        )
+    return targets
+
+
+def from_every_region(cfg, script, marker, timeout_s):
+    """Runs ``script`` on one bench node per region at once and returns each
+    region's JSON from the output line that starts with ``marker``."""
+    sent = {
+        member["short"]: (member, node, ssm_send(member, [node], script, timeout_s))
+        for member in cfg["regions"]
+        for node in bench_nodes(member)[:1]
+    }
+    matrix = {}
+    for source, (member, node, command_id) in sent.items():
+        result = ssm_output(member, command_id, node)
+        line = next(
+            (
+                line
+                for line in result["StandardOutputContent"].splitlines()
+                if line.startswith(marker)
+            ),
+            None,
+        )
+        if line is None:
+            sys.exit(f"{source}: {result['StandardErrorContent'][-800:]}")
+        matrix[source] = json.loads(line.removeprefix(marker))
+    return matrix
+
+
+def write_matrix(path, targets, matrix):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"targets": targets, "from": matrix}, indent=2))
+    print(json.dumps(matrix, indent=2))
+
+
 # Commands ---------------------------------------------------------------------------
 
 
@@ -528,44 +635,33 @@ def main():
         "ping", help="round trip from each region to every region's pool frontend"
     )
     ping.add_argument("--count", type=int, default=20)
+    probe = commands.add_parser(
+        "probe", help="first-token time from each region to every region's pool frontend"
+    )
+    probe.add_argument("--requests", type=int, default=10)
+    probe.add_argument(
+        "--warmup", type=int, default=8, help="Per target and size; at least the pool's workers"
+    )
+    probe.add_argument("--idle-s", type=float, default=2.0)
     args = parser.parse_args()
 
     cfg = json.loads(args.config.read_text())
     if args.command == "ping":
-        pool = cfg["pools"][0]["stem"]
-        targets = {}
-        for member in cfg["regions"]:
-            pods = cluster.read(member, "pods", cfg["namespace"], "", ".items", args.evidence)
-            targets[member["short"]] = next(
-                pod["status"]["podIP"]
-                for pod in pods
-                if pod["metadata"]["name"].startswith(f"{pool}-frontend-")
-                and pod["status"].get("podIP")
-            )
-        script = ping_script(targets, args.count)
-        sent = {
-            member["short"]: (member, node, ssm_send(member, [node], script, 600))
-            for member in cfg["regions"]
-            for node in bench_nodes(member)[:1]
-        }
-        matrix = {}
-        for source, (member, node, command_id) in sent.items():
-            result = ssm_output(member, command_id, node)
-            line = next(
-                (
-                    line
-                    for line in result["StandardOutputContent"].splitlines()
-                    if line.startswith("BENCH_PING ")
-                ),
-                None,
-            )
-            if line is None:
-                sys.exit(f"{source}: {result['StandardErrorContent'][-800:]}")
-            matrix[source] = json.loads(line.removeprefix("BENCH_PING "))
-        out = args.evidence / "results" / "ping.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({"targets": targets, "from": matrix}, indent=2))
-        print(json.dumps(matrix, indent=2))
+        targets = frontend_ips(cfg, args.evidence)
+        matrix = from_every_region(
+            cfg, ping_script(targets, args.count), "BENCH_PING ", 600
+        )
+        write_matrix(args.evidence / "results" / "ping.json", targets, matrix)
+        return
+    if args.command == "probe":
+        targets = frontend_ips(cfg, args.evidence)
+        # The AgentX mean prompt in our runs was about 39k tokens; 128k is the tail.
+        sizes = {"tiny": 1, "agentx_mean": 6000, "agentx_128k": 20000}
+        script = http_probe_script(
+            cfg["model"], targets, sizes, args.requests, args.warmup, args.idle_s
+        )
+        matrix = from_every_region(cfg, script, "BENCH_HTTP ", 3600)
+        write_matrix(args.evidence / "results" / "probe.json", targets, matrix)
         return
     if args.command == "hub":
         members = [member["site"] for member in cfg["regions"]]
