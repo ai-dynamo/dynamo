@@ -193,16 +193,17 @@ impl Model {
     /// Whether this catalog model has at least one non-LoRA deployment.
     pub(crate) fn has_base_deployment(&self) -> bool {
         self.worker_sets
-            .iter()
-            .any(|entry| entry.value().card().lora.is_none())
+            .load()
+            .values()
+            .any(|worker_set| worker_set.card().lora.is_none())
     }
 
     /// Whether this catalog model can carry request-time LoRA metadata through
     /// frontend preprocessing to a non-LoRA base deployment.
     pub(crate) fn has_runtime_lora_base_deployment(&self) -> bool {
         let mut has_base_deployment = false;
-        for entry in &self.worker_sets {
-            let card = entry.value().card();
+        for worker_set in self.worker_sets.load().values() {
+            let card = worker_set.card();
             if card.lora.is_none() {
                 has_base_deployment = true;
                 if !card.requires_preprocessing() {
