@@ -200,52 +200,24 @@ def test_predict_cli_reports_retune_decisions(tmp_path: Path) -> None:
         assert desired["router_temperature"] == expected
 
 
-@pytest.mark.timeout(180)  # ~4 s measured per case: the replay rejects at startup
-@pytest.mark.parametrize(
-    ("traffic", "message"),
-    [
-        (
-            {"source": {"type": "trace", "format": "mooncake", "paths": ["m.jsonl"]}},
-            "traffic.source.format: dynamo",
-        ),
-        (
-            {"load": {"type": "concurrency", "concurrency": 4}},
-            "traffic.load.type: concurrency",
-        ),
-        (
-            {"stop": {"max_virtual_time_seconds": 60.0}},
-            "traffic.stop.max_virtual_time_seconds",
-        ),
-        (
-            {
-                "source": {"type": "synthetic", "input_tokens": 64},
-                "load": {"type": "constant_rate", "requests_per_second": 5.0},
-                "stop": {"requests": 20},
-            },
-            "traffic.source type: trace with format: dynamo",
-        ),
-    ],
-    ids=["mooncake", "closed-loop", "virtual-time-stop", "synthetic"],
-)
-def test_predict_cli_rejects_traffic_retune_cannot_replay(
-    tmp_path: Path, traffic: dict, message: str
-) -> None:
+@pytest.mark.timeout(180)  # ~4 s measured: the replay rejects at startup
+def test_predict_cli_rejects_traffic_retune_cannot_replay(tmp_path: Path) -> None:
+    # The other rejected inputs are unit-tested on _retune_inputs in
+    # test_retune_replay.py; this proves such an error reaches the CLI.
     _write_trace(
         tmp_path / "head.jsonl", count=20, gap_ms=40, start_ms=_BASE_MS, prefix="r"
-    )
-    (tmp_path / "m.jsonl").write_text(
-        json.dumps({"timestamp": 0, "input_length": 64, "output_length": 4}) + "\n"
     )
     config = _config()
     config["traffic"] = {
         **config["traffic"],
         "source": {**config["traffic"]["source"], "paths": ["head.jsonl"]},
-        **traffic,
+        "load": {"type": "concurrency", "concurrency": 4},
     }
 
     result = _predict(tmp_path, config)
 
     assert result.returncode != 0
     assert (
-        "planner.retune" in result.stderr and message in result.stderr
+        "planner.retune" in result.stderr
+        and "traffic.load.type: concurrency" in result.stderr
     ), result.stderr[-4000:]

@@ -919,4 +919,5 @@ Scenario 2 at about 4.5 GB with `max_parallel: 8`.
   sample path of one window; see [Measure the Gain](#measure-the-gain).
 - **Router cache weights are not retunable.** `host_cache_hit_weight` and `disk_cache_hit_weight`
   also set how the startup router counts cached tokens, which a runtime update does not change, and
-  replay reports no shared cache hits for `shared_cache_multiplier`. Retune rejects all three.
+  replay reports no shared cache hits for `shared_cache_multiplier`. Retune rejects all three and
+  its error says why.

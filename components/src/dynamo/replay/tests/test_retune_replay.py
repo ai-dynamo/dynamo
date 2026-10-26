@@ -493,23 +493,35 @@ def _inputs_kwargs(trace: Path, **overrides) -> dict:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "options, message",
+    "options, messages",
     [
-        ({"trace_format": "mooncake"}, "trace_format='dynamo'"),
-        ({"replay_concurrency": 2}, "replay_concurrency"),
-        ({"agentic_warmup": True}, "agentic_warmup"),
-        ({"max_sim_time_ms": 1_000.0}, "max_sim_time_ms"),
+        (
+            {"trace_format": "mooncake"},
+            ["trace_format='dynamo'", "traffic.source.format: dynamo"],
+        ),
+        (
+            {"replay_concurrency": 2},
+            ["replay_concurrency", "traffic.load.type: concurrency"],
+        ),
+        ({"agentic_warmup": True}, ["agentic_warmup", "traffic.load.agentic_*"]),
+        (
+            {"max_sim_time_ms": 1_000.0},
+            ["max_sim_time_ms", "traffic.stop.max_virtual_time_seconds"],
+        ),
     ],
     ids=["mooncake-format", "replay-concurrency", "agentic-warmup", "max-sim-time"],
 )
-def test_retune_rejects_non_open_loop_inputs(tmp_path, options, message):
+def test_retune_rejects_non_open_loop_inputs(tmp_path, options, messages):
+    # Each error names the replay kwarg and the aisimulate predict setting;
+    # test_retune_predict_cli.py checks that one of them reaches the CLI.
     trace = _write_trace(
         tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
     )
     config = PlannerConfig.model_validate(_guard_config())
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError) as error:
         api._retune_inputs(config, **_inputs_kwargs(trace, **options))
+    assert all(message in str(error.value) for message in messages), error.value
 
 
 @pytest.mark.unit
@@ -580,7 +592,9 @@ def test_retune_rejects_an_engine_shape_that_differs_from_the_planner_mode(
 
 @pytest.mark.unit
 def test_synthetic_replay_rejects_retune():
-    with pytest.raises(ValueError, match="only supported by run_trace_replay"):
+    with pytest.raises(
+        ValueError, match="traffic.source type: trace with format: dynamo"
+    ):
         run_synthetic_trace_replay(
             64, 4, 4, request_rate=10.0, planner_config=_guard_config()
         )

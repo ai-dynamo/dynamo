@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
+from pydantic import ValidationError
 
 pytest.importorskip(
     "aisimulate.sweeper",
@@ -41,5 +44,10 @@ def test_every_policy_parameter_is_public_an_extension_or_not_retunable() -> Non
     assert public | extensions | not_retunable == policy_parameters
     assert len(public) + len(extensions) + len(not_retunable) == 8
     assert list(ROUTER_KNOB_DEFAULTS) == list(ROUTER_PUBLIC_TO_LIVE)
-    # The retune schema has no field for them, so writing one is rejected.
+    # The retune schema has no field for them; writing one names the reason.
     assert not not_retunable & set(RouterRetuneConfig.model_fields)
+    for name, reason in ROUTER_NOT_RETUNABLE.items():
+        with pytest.raises(
+            ValidationError, match=re.escape(f"{name} is not retunable: {reason}")
+        ):
+            RouterRetuneConfig.model_validate({name: 1.0})

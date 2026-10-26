@@ -65,17 +65,19 @@ ROUTER_RETUNE_EXTENSIONS: tuple[str, ...] = (
     "overlap_score_credit_decay",
     "decode_active_request_weight",
 )
-# ``PolicyParameters`` retune rejects. The startup ``KvRouterConfig`` also
-# feeds host_cache_hit_weight and disk_cache_hit_weight to the router's
-# overlap accounting (effective cached tokens), which a runtime update does
-# not change, so a candidate replay would score a router no update can
-# produce. Replay reports no shared cache hits, so every
-# shared_cache_multiplier would score the same.
-ROUTER_NOT_RETUNABLE: tuple[str, ...] = (
-    "host_cache_hit_weight",
-    "disk_cache_hit_weight",
-    "shared_cache_multiplier",
+_STARTUP_OVERLAP_ACCOUNTING = (
+    "the startup KvRouterConfig also feeds it to the router's overlap "
+    "accounting (effective cached tokens), which a runtime update does not "
+    "change, so a candidate replay would score a router no update can produce"
 )
+# ``PolicyParameters`` retune rejects, mapped to the reason its error gives.
+ROUTER_NOT_RETUNABLE: dict[str, str] = {
+    "host_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
+    "disk_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
+    "shared_cache_multiplier": (
+        "replay reports no shared cache hits, so every value would score the same"
+    ),
+}
 
 
 class PrefillLoadModel(BaseModel):
@@ -267,6 +269,9 @@ class RouterRetuneConfig(RouterRecommendationConfig):
                     f"retune.router.{live} is not a public router name; "
                     f"write {public} instead"
                 )
+        for name, reason in ROUTER_NOT_RETUNABLE.items():
+            if name in value:
+                raise ValueError(f"retune.router.{name} is not retunable: {reason}")
         policy = value.get("policy", "kv_router")
         if policy != "kv_router" and policy != {"choices": ["kv_router"]}:
             raise ValueError(
