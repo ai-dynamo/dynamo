@@ -71,6 +71,16 @@ pub enum WireIdentityError {
     TopologyNamespaceMismatch { topology: String, member: String },
     #[error("serving topology repeats adapter {0:?}")]
     DuplicateAdapter(String),
+    #[error("serving load has unsupported data status {0}")]
+    DataStatus(i32),
+    #[error("{0} violates its DataStatus presence rule")]
+    LoadViewField(&'static str),
+    #[error("serving load repeats a pool producer")]
+    DuplicateLoadPool,
+    #[error("serving load repeats model {namespace:?}/{model:?}")]
+    DuplicateLoadModel { namespace: String, model: String },
+    #[error("model serving load repeats a serving pool")]
+    DuplicateServingPool,
 }
 
 impl WireIdentityError {
@@ -79,7 +89,9 @@ impl WireIdentityError {
     pub fn is_unsupported(&self) -> bool {
         match self {
             Self::PoolIdentityVersion(version) => *version != 0,
-            Self::QueryHashFormat(value) | Self::WorkerRole(value) => *value != 0,
+            Self::QueryHashFormat(value) | Self::WorkerRole(value) | Self::DataStatus(value) => {
+                *value != 0
+            }
             Self::IdentitySource { value, .. } => *value != 0,
             Self::UnsupportedModelTarget
             | Self::UnsupportedCkfFormat { .. }
@@ -420,7 +432,7 @@ fn validate_digest(
     Ok(())
 }
 
-fn validate_text(field: &'static str, value: &str) -> Result<(), WireIdentityError> {
+pub(super) fn validate_text(field: &'static str, value: &str) -> Result<(), WireIdentityError> {
     if value.is_empty() || value.trim() != value {
         return Err(WireIdentityError::InvalidText(field));
     }

@@ -410,6 +410,9 @@ async def test_selection_service_malformed_payload_raises_value_error(
         # Malformed input surfaces as a plain ValueError, not a SelectionServiceError.
         with pytest.raises(ValueError):
             await getattr(service, method)(payload)
+        # Prompt booleans are not coerced by truthiness.
+        with pytest.raises(ValueError, match="boolean"):
+            await service.select({"token_ids": [1, 2, 3, 4], "is_eagle": "false"})
     finally:
         service.shutdown()
 

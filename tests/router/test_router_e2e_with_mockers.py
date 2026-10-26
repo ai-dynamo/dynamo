@@ -51,7 +51,6 @@ from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
     managed_runtime,
-    parse_sse_json_chunks,
     poll_for_worker_instances,
     topology_env,
     wait_for_frontend_ready,
@@ -65,6 +64,7 @@ from tests.router.mocker_process import (
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.router_nvext import parse_sse_json_chunks
 
 logger = logging.getLogger(__name__)
 

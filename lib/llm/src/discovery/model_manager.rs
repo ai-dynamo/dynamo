@@ -150,6 +150,12 @@ pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) cards: Vec<ModelDeploymentCard>,
 }
 
+pub(crate) struct CommittedModelView {
+    pub(crate) name: String,
+    pub(crate) is_ready: bool,
+    pub(crate) aliases: Vec<String>,
+}
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -157,6 +163,7 @@ pub(crate) struct RemovedDiscoveryGroup {
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
+    pub(crate) router_policies: super::router_policy::RouterPolicyRegistry,
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
@@ -274,6 +281,7 @@ impl ModelManager {
 
     pub fn new() -> Self {
         Self {
+            router_policies: Default::default(),
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
@@ -501,6 +509,34 @@ impl ModelManager {
 
     pub(crate) fn get_committed_model(&self, model_name: &str) -> Option<Arc<Model>> {
         self.catalog.load().models.get(model_name).cloned()
+    }
+
+    /// Committed primary models with their aliases, sorted by name.
+    pub(crate) fn committed_model_views(&self) -> Vec<CommittedModelView> {
+        let catalog = self.catalog.load();
+        let mut aliases_by_primary = HashMap::<&str, Vec<String>>::new();
+        for (alias, primary) in catalog.aliases.iter() {
+            aliases_by_primary
+                .entry(primary)
+                .or_default()
+                .push(alias.clone());
+        }
+        let mut views = catalog
+            .models
+            .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
+            .map(|(name, model)| {
+                let mut aliases = aliases_by_primary.remove(name.as_str()).unwrap_or_default();
+                aliases.sort_unstable();
+                CommittedModelView {
+                    name: name.clone(),
+                    is_ready: model.is_ready_to_serve(),
+                    aliases,
+                }
+            })
+            .collect::<Vec<_>>();
+        views.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        views
     }
 
     fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
@@ -2378,6 +2414,7 @@ impl ModelManager {
             None
         };
 
+        let runtime_model_name = model_name.clone();
         let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
@@ -2456,6 +2493,14 @@ impl ModelManager {
             }
         }
 
+        if let Some(model) = runtime_model_name {
+            self.router_policies.register(
+                model,
+                endpoint.id(),
+                worker_type,
+                chooser.policy_control(),
+            );
+        }
         Ok(Arc::new(chooser))
     }
 
@@ -3016,6 +3061,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(discovery.list(query).await.unwrap(), before);
+        let registered = manager.router_policies.list(Some("test-model"));
+        assert_eq!(registered.len(), 1);
+        assert!(Arc::ptr_eq(&registered[0].1, router.policy_control()));
+        assert_eq!(registered[0].1.get().await.unwrap().revision(), 0);
         drop(router);
         distributed.shutdown();
     }
@@ -3374,6 +3423,65 @@ mod tests {
 
         assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama");
         assert_eq!(mm.resolve_canonical_name("llama"), "llama");
+    }
+
+    #[test]
+    fn committed_model_views_collapse_aliases_onto_the_primary() {
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("a-llama", "llama"));
+        assert!(mm.add_worker_set_arc("a-llama", "ns1", worker_set));
+        let other = Arc::new(make_worker_set("ns1", "def"));
+        assert!(mm.add_worker_set_arc("granite", "ns1", other));
+
+        let views = mm.committed_model_views();
+        let views = views
+            .iter()
+            .map(|view| (view.name.as_str(), view.aliases.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            views,
+            [
+                ("granite", &[][..]),
+                (
+                    "llama",
+                    &["a-llama".to_string(), "llama-alias".to_string()][..]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_requests_publish_frontend_load_under_the_primary_model() {
+        use crate::http::service::metrics::{Endpoint, Metrics};
+
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set));
+
+        // Handlers that do not rewrite the request model track it under the alias.
+        let metric_model = mm.metric_model_for("llama-alias");
+        assert_eq!(metric_model, "llama-alias");
+
+        let metrics = Arc::new(Metrics::new());
+        let _alias =
+            metrics
+                .clone()
+                .create_inflight_guard(metric_model, Endpoint::Embeddings, false, "");
+        let _primary =
+            metrics
+                .clone()
+                .create_inflight_guard("llama", Endpoint::Embeddings, false, "");
+        let frame = metrics.frontend_load(0, true, mm.committed_model_views());
+        assert_eq!(frame.models.len(), 1);
+        assert_eq!(frame.models[0].model, "llama");
+        assert_eq!(frame.models[0].totals.requests_started, 2);
+        assert_eq!(frame.models[0].gauges.requests_awaiting_first_token, 2);
     }
 
     #[test]
