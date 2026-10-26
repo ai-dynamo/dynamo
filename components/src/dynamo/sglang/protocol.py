@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Annotated, Any, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
@@ -161,6 +161,8 @@ class SglangMultimodalRequest(BaseModel):
         Union[Tuple[int, int], Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     transfer_payload: Optional[TransferRequest] = None
+    # Set only for SGLang-native /generate: forwarded sampling and logprob fields.
+    native_generate: Optional[Dict[str, Any]] = None
 
 
 class DisaggSglangMultimodalRequest(BaseModel):
