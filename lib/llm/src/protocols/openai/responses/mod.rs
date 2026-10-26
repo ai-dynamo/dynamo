@@ -14,9 +14,10 @@ use dynamo_protocols::types::responses::{
     InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
-    RefusalContent, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
-    ServiceTierResponses, Status, SummaryPart, TextResponseFormatConfiguration, Tool,
-    ToolChoiceAllowed, ToolChoiceAllowedMode, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    RefusalContent, RequestTool, RequestToolChoiceParam, Response, ResponseTextParam,
+    ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status, SummaryPart,
+    TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
+    ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -580,6 +581,7 @@ fn convert_input_items_to_messages(
                             name: names.encode(fc.namespace.as_deref(), &fc.name),
                             arguments: fc.arguments.clone(),
                         },
+                        custom: None,
                     });
                 }
                 Item::FunctionCallOutput(fco) => {
@@ -721,7 +723,10 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
                 description: description.clone(),
                 parameters: parameters.clone(),
                 strict,
+                defer_loading: None,
             },
+            custom: None,
+            defer_loading: None,
         });
     };
 
@@ -752,6 +757,26 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
 
 /// Identify an unsupported tool or choice by its serialized type and return
 /// `InvalidArgument` with the affected request field and supported alternatives.
+/// Returns the SDK tools wrapped by request tools, for the converter and the echoed response.
+/// The wrapper's only extra data is a namespace `defer_loading` flag, which Dynamo ignores.
+pub(crate) fn sdk_tools(tools: Option<&[RequestTool]>) -> Option<Vec<Tool>> {
+    tools.map(|tools| tools.iter().map(|tool| tool.inner.clone()).collect())
+}
+
+/// Converts a request tool choice to the SDK choice the converter accepts.
+/// `tool_search` has no SDK form; it is rejected like other unsupported choices
+/// rather than silently becoming `required`. Other choices round-trip unchanged.
+pub(crate) fn sdk_tool_choice(
+    choice: Option<&RequestToolChoiceParam>,
+) -> anyhow::Result<Option<ToolChoiceParam>> {
+    match choice {
+        Some(choice @ RequestToolChoiceParam::ToolSearch) => {
+            unsupported_tool(choice, "tool_choice")
+        }
+        choice => Ok(choice.map(RequestToolChoiceParam::sdk_response_choice)),
+    }
+}
+
 fn unsupported_tool<T>(tool: &impl serde::Serialize, field: &str) -> anyhow::Result<T> {
     let value = serde_json::to_value(tool)?;
     let tool_type = value["type"].as_str().unwrap_or("unknown");
@@ -923,8 +948,10 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
     /// Convert a Responses request using one alias map for tools, history, and choices.
     /// Return an error for tool types or choices that Chat Completions cannot represent.
     fn try_from(resp: NvCreateResponse) -> Result<Self, Self::Error> {
+        let request_tools = sdk_tools(resp.inner.tools.as_deref());
+        let request_tool_choice = sdk_tool_choice(resp.inner.tool_choice.as_ref())?;
         let names = ToolNameMap::new(
-            resp.inner.tools.as_deref().unwrap_or_default(),
+            request_tools.as_deref().unwrap_or_default(),
             Some(&resp.inner.input),
         );
         let mut messages = Vec::new();
@@ -1005,8 +1032,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
         let (tools, tool_choice) = convert_tools_and_choice(
-            resp.inner.tools.as_deref(),
-            resp.inner.tool_choice.as_ref(),
+            request_tools.as_deref(),
+            request_tool_choice.as_ref(),
             &names,
             *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
         )?;
@@ -3106,7 +3133,7 @@ mod tests {
             .unwrap(),
         );
 
-        let names = ToolNameMap::new(req.inner.tools.as_deref().unwrap(), None);
+        let names = ToolNameMap::new(&sdk_tools(req.inner.tools.as_deref()).unwrap(), None);
         let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
         let tools = chat.inner.tools.unwrap();
         assert_ne!(tools[0].function.name, tools[1].function.name);
@@ -3200,7 +3227,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        let names = ToolNameMap::new(req.inner.tools.as_deref().unwrap(), None);
+        let names = ToolNameMap::new(&sdk_tools(req.inner.tools.as_deref()).unwrap(), None);
         let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
         let tools = chat.inner.tools.unwrap();
         assert_ne!(tools[0].function.name, tools[1].function.name);
@@ -3242,7 +3269,10 @@ mod tests {
             ]}
         }))
         .unwrap();
-        let names = ToolNameMap::new(req.inner.tools.as_deref().unwrap(), Some(&req.inner.input));
+        let names = ToolNameMap::new(
+            &sdk_tools(req.inner.tools.as_deref()).unwrap(),
+            Some(&req.inner.input),
+        );
         let chat = NvCreateChatCompletionRequest::try_from(req.clone()).unwrap();
         let tools = chat.inner.tools.unwrap();
         assert_eq!(tools.len(), 1);
@@ -3261,8 +3291,8 @@ mod tests {
         };
         assert_eq!(&last.tool_calls.as_ref().unwrap()[0].function.name, alias);
         let params = ResponseParams {
-            tools: req.inner.tools.clone(),
-            tool_choice: req.inner.tool_choice.clone(),
+            tools: sdk_tools(req.inner.tools.as_deref()),
+            tool_choice: sdk_tool_choice(req.inner.tool_choice.as_ref()).unwrap(),
             tool_names: Some(names.clone()),
             ..Default::default()
         };
@@ -3457,6 +3487,7 @@ mod tests {
                                 name: "get_weather".into(),
                                 arguments: r#"{"location":"SF"}"#.into(),
                             },
+                            custom: None,
                         }]),
                         role: dynamo_protocols::types::Role::Assistant,
                         function_call: None,
@@ -3531,6 +3562,7 @@ mod tests {
                                 name: "spawn_agent".into(),
                                 arguments: r#"{"agent_type":"worker"}"#.into(),
                             },
+                            custom: None,
                         }]),
                         role: dynamo_protocols::types::Role::Assistant,
                         function_call: None,
@@ -3600,6 +3632,7 @@ mod tests {
                 name: "get_weather".into(),
                 arguments: r#"{"city":"Paris"}"#.into(),
             },
+            custom: None,
         }]);
         chat.inner.choices[0].finish_reason = Some(FinishReason::ToolCalls);
         let response = chat_completion_to_response(chat, &params, None).unwrap();
@@ -4059,6 +4092,7 @@ mod tests {
                         name: "get_weather".into(),
                         arguments: (*arguments).into(),
                     },
+                    custom: None,
                 })
                 .collect(),
         );
@@ -4115,6 +4149,7 @@ mod tests {
                 name: "get_weather".into(),
                 arguments: r#"{"location":"SF"}"#.into(),
             },
+            custom: None,
         }]);
         let params = ResponseParams {
             reasoning: Some(Reasoning {

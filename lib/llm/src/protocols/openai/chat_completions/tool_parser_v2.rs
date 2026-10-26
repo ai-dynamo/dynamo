@@ -322,6 +322,7 @@ fn emit_tool_chunks(
                     name: delta.name,
                     arguments: Some(delta.arguments),
                 }),
+                custom: None,
             }
         })
         .collect();

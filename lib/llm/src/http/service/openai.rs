@@ -4215,9 +4215,10 @@ async fn responses(
 
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
+    let tools = crate::protocols::openai::responses::sdk_tools(request.inner.tools.as_deref());
     let response_params = ResponseParams {
         tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
-            request.inner.tools.as_deref().unwrap_or_default(),
+            tools.as_deref().unwrap_or_default(),
             Some(&request.inner.input),
         )),
         model: request.inner.model.clone(),
@@ -4227,8 +4228,13 @@ async fn responses(
         metadata: request.inner.metadata.clone(),
         parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
-        tools: request.inner.tools.clone(),
-        tool_choice: request.inner.tool_choice.clone(),
+        tools,
+        // validate_responses_fields already rejected choices with no SDK form.
+        tool_choice: crate::protocols::openai::responses::sdk_tool_choice(
+            request.inner.tool_choice.as_ref(),
+        )
+        .ok()
+        .flatten(),
         instructions: request.inner.instructions.clone(),
         reasoning: request.inner.reasoning.clone(),
         text: request.inner.text.clone(),
@@ -4634,6 +4640,8 @@ pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), Error
     validate::validate_temperature(request.inner.temperature).map_err(&map_err)?;
     validate::validate_top_p(request.inner.top_p).map_err(&map_err)?;
     validate::validate_max_tokens(request.inner.max_output_tokens).map_err(&map_err)?;
+    crate::protocols::openai::responses::sdk_tool_choice(request.inner.tool_choice.as_ref())
+        .map_err(&map_err)?;
 
     if let Some(text) = &request.inner.text {
         use crate::protocols::openai::responses::convert_text_format;
@@ -8311,6 +8319,24 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_responses_fields_rejects_tool_search_choice() {
+        let mut request = make_base_request();
+        request.inner.tool_choice =
+            Some(serde_json::from_value(serde_json::json!({"type": "tool_search"})).unwrap());
+        let (code, body) = validate_responses_fields(&request)
+            .expect_err("tool_search has no Chat Completions equivalent");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            body.message
+                .contains("Unsupported Responses tool_choice type 'tool_search'")
+        );
+
+        request.inner.tool_choice =
+            Some(serde_json::from_value(serde_json::json!("required")).unwrap());
+        assert!(validate_responses_fields(&request).is_ok());
+    }
+
+    #[test]
     fn test_validate_responses_fields_accepts_object_json_schema() {
         use dynamo_protocols::types::ResponseFormatJsonSchema;
         use dynamo_protocols::types::responses::{
@@ -10191,6 +10217,7 @@ mod tests {
                 name: name.map(|s| s.to_string()),
                 arguments: arguments.map(|s| s.to_string()),
             }),
+            custom: None,
         };
         #[allow(deprecated)]
         ChatChoiceStream {
@@ -10283,6 +10310,7 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
             }),
+            custom: None,
         };
         let tc2 = ChatCompletionMessageToolCallChunk {
             index: 1,
@@ -10292,6 +10320,7 @@ mod tests {
                 name: Some("get_time".to_string()),
                 arguments: Some(r#"{"tz":"UTC"}"#.to_string()),
             }),
+            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10354,6 +10383,7 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
             }),
+            custom: None,
         };
         let incomplete = ChatCompletionMessageToolCallChunk {
             index: 1,
@@ -10363,6 +10393,7 @@ mod tests {
                 name: Some("search".to_string()),
                 arguments: None, // still streaming
             }),
+            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10399,6 +10430,7 @@ mod tests {
             id: Some("call_999".to_string()),
             r#type: Some(FunctionType::Function),
             function: None,
+            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10829,6 +10861,7 @@ mod tests {
                 name: Some("f".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }];
         assert!(
             !is_empty_stream_response(&make_delta(

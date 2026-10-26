@@ -1929,6 +1929,7 @@ impl ChoiceState {
                         name: first.then_some(call.name).flatten(),
                         arguments: Some(call.arguments),
                     }),
+                    custom: None,
                 }]);
             }
         }
@@ -2392,6 +2393,7 @@ fn parse_complete_in_mode(
                         name,
                         arguments: serde_json::to_string(&arguments)?,
                     },
+                    custom: None,
                 });
             }
         }
@@ -4255,6 +4257,7 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         let choices = state.choices_for(
@@ -4282,6 +4285,7 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some("more".to_string()),
             }),
+            custom: None,
         }]);
         let choices = state.choices_for(&upstream_continuation, Vec::new(), true, None);
         assert_eq!(
@@ -4495,6 +4499,7 @@ pub(crate) mod tests {
                     name: Some("first".to_string()),
                     arguments: Some(r#"{"city":"Paris"}"#.to_string()),
                 }),
+                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
                 index: 1,
@@ -4504,6 +4509,7 @@ pub(crate) mod tests {
                     name: Some("second".to_string()),
                     arguments: Some(r#"{"city":"Tokyo"}"#.to_string()),
                 }),
+                custom: None,
             },
         ]);
         let partials = state.choices_for(&parsed_fragments, Vec::new(), true, None);
@@ -6028,6 +6034,7 @@ pub(crate) mod tests {
                 name: Some("already_parsed".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6080,6 +6087,7 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{\"city\":\"Paris\"}".to_string()),
             }),
+            custom: None,
         }]);
 
         let mut continuation = chunk("", false);
@@ -6093,6 +6101,7 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some("more".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6637,6 +6646,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6675,6 +6685,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"#.to_string()),
             }),
+            custom: None,
         }]);
 
         let mut second = chunk("", false);
@@ -6688,6 +6699,7 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some(r#""Tokyo"}"#.to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6732,6 +6744,7 @@ pub(crate) mod tests {
                     name: id.map(|_| "get_weather".to_string()),
                     arguments: Some(arguments.to_string()),
                 }),
+                custom: None,
             }]);
             parsed
         };
@@ -6865,6 +6878,7 @@ pub(crate) mod tests {
                     name: name.map(str::to_string),
                     arguments: arguments.map(str::to_string),
                 }),
+                custom: None,
             }]);
             choice.finish_reason = finish;
             response
@@ -6948,6 +6962,7 @@ pub(crate) mod tests {
                 name: Some("get_".to_string()),
                 arguments: Some(r#"{"city":"Pa"#.to_string()),
             }),
+            custom: None,
         }]);
         let mut gap = chunk("", false);
         let gap_choice = &mut gap.data.as_mut().unwrap().inner.choices[0];
@@ -6965,6 +6980,7 @@ pub(crate) mod tests {
                 name: Some("weather".to_string()),
                 arguments: Some("ris\"}".to_string()),
             }),
+            custom: None,
         }]);
         resumed_choice.finish_reason = Some(FinishReason::ToolCalls);
 
@@ -7030,6 +7046,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Pa"#.to_string()),
             }),
+            custom: None,
         }]);
         let mut gap = chunk("", false);
         let gap_choice = &mut gap.data.as_mut().unwrap().inner.choices[0];
@@ -7121,6 +7138,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7163,6 +7181,7 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{\"city\":\"Paris\"}".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7490,6 +7509,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris""#.to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7561,6 +7581,7 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"NY"}"#.to_string()),
                 }),
+                custom: None,
             }]);
 
             let responses = apply_stream(
@@ -7794,6 +7815,7 @@ pub(crate) mod tests {
                         name: Some("get_weather".to_string()),
                         arguments: Some(r#"{"city":"Par"#.to_string()),
                     }),
+                    custom: None,
                 },
                 ChatCompletionMessageToolCallChunk {
                     index: 1,
@@ -7803,6 +7825,7 @@ pub(crate) mod tests {
                         name: Some("get_weather".to_string()),
                         arguments: Some(r#"{"city":"Tok"#.to_string()),
                     }),
+                    custom: None,
                 },
             ]);
 
@@ -7863,6 +7886,7 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"#.to_string()),
                 }),
+                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
                 index: 1,
@@ -7872,6 +7896,7 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"#.to_string()),
                 }),
+                custom: None,
             },
         ]);
         let mut second = first.clone();
@@ -7884,6 +7909,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(String::new()),
             }),
+            custom: None,
         }]);
         partials.data.as_mut().unwrap().inner.choices.push(second);
 
@@ -7900,6 +7926,7 @@ pub(crate) mod tests {
                     name: None,
                     arguments: Some("not-json".to_string()),
                 }),
+                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
                 index: 1,
@@ -7909,6 +7936,7 @@ pub(crate) mod tests {
                     name: None,
                     arguments: Some(r#""Tokyo"}"#.to_string()),
                 }),
+                custom: None,
             },
         ]);
         let mut second = first.clone();
@@ -7921,6 +7949,7 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some(String::new()),
             }),
+            custom: None,
         }]);
         terminal.data.as_mut().unwrap().inner.choices.push(second);
 
@@ -7976,6 +8005,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         // This choice index never has a raw chunk at all — no ChoiceState is ever
@@ -9345,6 +9375,7 @@ pub(crate) mod tests {
                                     name: Some("get_weather".into()),
                                     arguments: Some("{}".into()),
                                 }),
+                                custom: None,
                             }]);
                         data.tool_call_completion
                             .push(super::super::ToolCallCompletion {
@@ -9465,6 +9496,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".into()),
                 arguments: Some("{}".into()),
             }),
+            custom: None,
         }]);
         data.tool_call_completion
             .push(super::super::ToolCallCompletion {
@@ -9526,6 +9558,7 @@ pub(crate) mod tests {
                         name: Some("get_weather".into()),
                         arguments: Some("{}".into()),
                     }),
+                    custom: None,
                 })
                 .collect(),
         );
@@ -9620,6 +9653,7 @@ pub(crate) mod tests {
                     name: Some("get_weather".into()),
                     arguments: Some("{}".into()),
                 }),
+                custom: None,
             }]);
             let mut terminal = chunk("", false);
             terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
@@ -9700,6 +9734,7 @@ pub(crate) mod tests {
                                 name: Some("get_weather".into()),
                                 arguments: Some("{}".into()),
                             }),
+                            custom: None,
                         }]);
                         let mut input = vec![upstream];
                         if let Some(finish) = finish.filter(|_| !same_envelope) {
@@ -11250,6 +11285,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         // This choice index never has a raw chunk at all — no ChoiceState is ever
@@ -12024,6 +12060,7 @@ pub(crate) mod tests {
                             name: Some("get_weather".into()),
                             arguments: Some(arguments.into()),
                         }),
+                        custom: None,
                     }]);
                     let output = apply_stream(
                         stream::iter([input]),

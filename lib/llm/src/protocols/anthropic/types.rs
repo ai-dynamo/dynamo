@@ -460,6 +460,7 @@ fn convert_assistant_blocks(
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),
                     },
+                    custom: None,
                 });
             }
             _ => {}
@@ -539,7 +540,10 @@ fn convert_anthropic_tools(
                     description: tool.description.clone(),
                     parameters: Some(schema),
                     strict: tool.strict,
+                    defer_loading: None,
                 },
+                custom: None,
+                defer_loading: None,
             })
         })
         .collect()
@@ -2782,6 +2786,7 @@ mod anthropic_types_tests {
                         name: "record_literal".into(),
                         arguments: (*arguments).into(),
                     },
+                    custom: None,
                 },
             )
             .collect();
