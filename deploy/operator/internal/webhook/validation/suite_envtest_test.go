@@ -45,10 +45,6 @@ const (
 	frontendImage150           = "registry.example/dynamo-frontend:1.5.0"
 	legacyEPPImage140          = "registry.example/epp-image:1.4.0"
 	legacySeedUsername         = "operatorenv-legacy-seeder"
-	admissionAISimulateImage   = "registry.example.com/aisimulate:nightly"
-	// admissionAISimulateVersionOverride is the AISimulate version bundled in the configured
-	// default image, whose tag is not a Dynamo release.
-	admissionAISimulateVersionOverride = "0.13.0"
 )
 
 func groveProviderOverride(target, value string) *nvidiacomv1beta1.ProviderOverride {
@@ -101,9 +97,7 @@ func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptio
 		OperatorPrincipal: opts.OperatorPrincipal,
 		Gate:              admissionGate,
 		DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
-			AISimulateImage:           admissionAISimulateImage,
-			AISimulateVersionOverride: admissionAISimulateVersionOverride,
-			Hardware:                  admissionHardware,
+			Hardware: admissionHardware,
 		},
 	})
 }

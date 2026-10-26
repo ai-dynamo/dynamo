@@ -27,7 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdoverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -346,7 +346,7 @@ func dgdrRuntimeVersionOverrideRequired(spec *nvidiacomv1beta1.DynamoGraphDeploy
 	if spec.Image == "" || spec.RuntimeVersionOverride != "" {
 		return false
 	}
-	_, err := versionoverride.ParseImageVersion(spec.Image)
+	_, err := runtimeversion.ParseImageVersion(spec.Image)
 	return err != nil
 }
 

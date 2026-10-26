@@ -54,15 +54,6 @@ type HardwareDiscoverer interface {
 
 // DGDRV1beta2Options configures the defaults of v1beta2 Requests.
 type DGDRV1beta2Options struct {
-	// AISimulateImage overrides the version-matched Dynamo planner image persisted
-	// into spec.aisimulate.image when the caller omits it.
-	AISimulateImage string
-	// AISimulateVersionOverride is the AISimulate version bundled in AISimulateImage, for an image
-	// whose Dynamo release the release contract does not map (a nightly or custom planner image).
-	// Empty maps the image's release. WithV1beta2 completes it, so admission persists the image
-	// together with its AISimulate version, and only next to an image it supplies itself, never
-	// next to an image the caller chose.
-	AISimulateVersionOverride string
 	// Hardware discovers the cluster's GPUs. Nil disables hardware defaulting, and
 	// validation then requires the hardware to be spelled out.
 	Hardware HardwareDiscoverer
@@ -85,11 +76,7 @@ func (o DGDRV1beta2Options) resolveDefaults(
 	if err != nil {
 		return dynamoGraphDeploymentRequestV1beta2DefaultOptions{}, err
 	}
-	return dynamoGraphDeploymentRequestV1beta2DefaultOptions{
-		hardware:                  hardware,
-		aisimulateImage:           o.AISimulateImage,
-		aisimulateVersionOverride: o.AISimulateVersionOverride,
-	}, nil
+	return dynamoGraphDeploymentRequestV1beta2DefaultOptions{hardware: hardware}, nil
 }
 
 // resolveHardware returns the SKU and budget the typed spec omits. It asks the cluster only
@@ -101,7 +88,7 @@ func (o DGDRV1beta2Options) resolveDefaults(
 // never asks the cluster: a Request created while discovery had nothing to offer must not
 // pick hardware up once discovery recovers, which would change its spec and generation behind
 // the writer's back. oldSpec is the stored spec on UPDATE and nil otherwise. The decision reads
-// the typed hardware alone, never spec.aisimulate.parameters.
+// the typed hardware alone, never spec.aisimulate.inputOverrides.
 //
 // After a successful return the typed hardware is complete. An omitted SKU becomes the
 // cluster's AISimulate SKU, and an omitted budget becomes min(matching GPUs, cap). An explicit

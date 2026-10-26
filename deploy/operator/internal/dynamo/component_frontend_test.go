@@ -11,7 +11,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -21,13 +21,13 @@ func TestFrontendDefaultsStartupProbeVersionGate(t *testing.T) {
 	tests := []struct {
 		name           string
 		origin         string
-		runtimeVersion *versionoverride.Version
+		runtimeVersion *runtimeversion.Version
 		wantEnabled    bool
 	}{
 		{name: "unknown runtime on new graph", origin: "1.7.0"},
-		{name: "older runtime on new graph", origin: "1.7.0", runtimeVersion: &versionoverride.Version{Major: 1, Minor: 5, Patch: 9}},
-		{name: "released 1.6 graph preserves existing defaults", origin: "1.6.0", runtimeVersion: &versionoverride.Version{Major: 1, Minor: 6}},
-		{name: "new graph with minimum supported runtime", origin: "1.7.0", runtimeVersion: &versionoverride.Version{Major: 1, Minor: 6}, wantEnabled: true},
+		{name: "older runtime on new graph", origin: "1.7.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 5, Patch: 9}},
+		{name: "released 1.6 graph preserves existing defaults", origin: "1.6.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}},
+		{name: "new graph with minimum supported runtime", origin: "1.7.0", runtimeVersion: &runtimeversion.Version{Major: 1, Minor: 6}, wantEnabled: true},
 	}
 
 	for _, tt := range tests {

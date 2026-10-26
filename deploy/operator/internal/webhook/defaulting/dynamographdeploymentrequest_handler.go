@@ -59,15 +59,6 @@ func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 
 // WithV1beta2 sets the defaults of v1beta2 Requests and returns the defaulter.
 func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
-	// The operator refuses to start with a configuration that does not resolve, so a failure here
-	// only happens to a caller that skipped ValidateAISimulateDefault: keep the image and let
-	// validation report what the Request lacks.
-	if image, version, err := resolveAISimulateDefault(
-		d.OperatorVersion, options.AISimulateImage, options.AISimulateVersionOverride); err == nil {
-		options.AISimulateImage, options.AISimulateVersionOverride = image, version
-	} else {
-		options.AISimulateImage = defaultPlannerImageFor(d.OperatorVersion, options.AISimulateImage)
-	}
 	d.v1beta2 = options
 	return d
 }

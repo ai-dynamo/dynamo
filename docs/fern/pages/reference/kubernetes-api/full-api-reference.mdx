@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 208 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 211 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">71 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
-<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">32 types</Card>
+<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">35 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -4523,25 +4523,30 @@ Package v1beta2 contains API Schema definitions for the nvidia.com v1beta2 API g
 <Card title="DynamoGraphDeploymentRun" href="#dynamographdeploymentrun" />
 </CardGroup>
 
+<Accordion id="aisimulaterunstatus" title="AISimulateRunStatus">
+AISimulateRunStatus reports the exact public recommendation input used for this execution.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+<ParamField path="input" type="RawExtension">
+Input is the fully lowered AISimulate input after typed fields, derived defaults and spec.aisimulate.inputOverrides have been merged. Field names and nesting use the upstream AISimulate JSON contract.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="aisimulatespec" title="AISimulateSpec">
-AISimulateSpec selects the AISimulate execution artifact and supplies native input.
+AISimulateSpec supplies public recommendation input to the AISimulate version in the operator's configured
+planner image.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
-<ParamField path="image" type="string">
-Image selects a Dynamo-compatible AISimulate runner. When omitted, admission persists the operator's configured AISimulate image, or the Dynamo planner image of the operator's release, together with the AISimulate version it bundles.
-**Validation:** MinLength: 1  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="versionOverride" type="string">
-nightly or custom image), and it wins over the mapping.
-**Validation:** MinLength: 1  Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="parameters" type="RawExtension">
-Parameters contains native AISimulate input. Field names and nesting use the upstream AISimulate JSON contract, including snake_case names.
+<ParamField path="inputOverrides" type="RawExtension">
+InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISimulate JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The operator runs the AISimulate version from its configured planner image; Requests and Runs cannot select a different image or version.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
@@ -4806,7 +4811,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from admission. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials nor a KV-capacity-fraction search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4818,7 +4823,7 @@ See [ObjectiveSpec](#objectivespec).
 </ParamField>
 
 <ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate selects the execution artifact and supplies native AISimulate input.
+AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
 See [AISimulateSpec](#aisimulatespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4888,7 +4893,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from admission. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials nor a KV-capacity-fraction search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4900,7 +4905,7 @@ See [ObjectiveSpec](#objectivespec).
 </ParamField>
 
 <ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate selects the execution artifact and supplies native AISimulate input.
+AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
 See [AISimulateSpec](#aisimulatespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5010,7 +5015,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from admission. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials nor a KV-capacity-fraction search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5022,7 +5027,7 @@ See [ObjectiveSpec](#objectivespec).
 </ParamField>
 
 <ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate selects the execution artifact and supplies native AISimulate input.
+AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
 See [AISimulateSpec](#aisimulatespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5056,6 +5061,12 @@ See [ResourceReference](#resourcereference).
 <ParamField path="progress" type="DGDRRunProgress">
 Progress contains branch-aware optimizer and evaluation outcome counters.
 See [DGDRRunProgress](#dgdrrunprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="aisimulate" type="AISimulateRunStatus">
+AISimulate reports the effective input executed by AISimulate.
+See [AISimulateRunStatus](#aisimulaterunstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -5158,15 +5169,41 @@ See [GPUHardwareSpec](#gpuhardwarespec).
 </ParamField>
 </Accordion>
 
-<Accordion id="kvloadratio" title="KVLoadRatio">
-KVLoadRatio is either a pinned load ratio or a minimum/maximum range.
-AISimulate performs mode-specific validation.
+<Accordion id="kvcapacityfractionrange" title="KVCapacityFractionRange">
+KVCapacityFractionRange defines the searched fraction of a candidate's KV capacity.
 
 
 **Kind:** `type`
-**Underlying type:** `float array`
-**Validation:** MaxItems: 2; MinItems: 1; items:Maximum: 1; items:Minimum: 0
-**Appears in:** [StaticWorkloadSpec](#staticworkloadspec)
+**Appears in:** [KVCapacityFractionSpec](#kvcapacityfractionspec)
+
+<ParamField path="min" type="float">
+Min is the lower end of the searched fraction range.
+**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0
+</ParamField>
+
+<ParamField path="max" type="float">
+Max is the upper end of the searched fraction range.
+**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0
+</ParamField>
+</Accordion>
+
+<Accordion id="kvcapacityfractionspec" title="KVCapacityFractionSpec">
+KVCapacityFractionSpec selects either one fixed fraction or a searched range.
+
+
+**Kind:** `type`
+**Appears in:** [StaticLoadSpec](#staticloadspec)
+
+<ParamField path="value" type="float">
+Value uses a fixed fraction of the candidate's KV capacity. A value of 1 uses its full estimated capacity.
+**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="range" type="KVCapacityFractionRange">
+Range searches fractions between min and max.
+See [KVCapacityFractionRange](#kvcapacityfractionrange).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="modelspec" title="ModelSpec">
@@ -5209,7 +5246,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies a static shape of ISL 1024, OSL 128 and concurrency 10; an explicit empty workload receives the same shape from admission. An explicit workload.static: \&#123;\&#125; opts out of that shape, leaving the workload to spec.aisimulate.parameters.workload. spec.aisimulate.parameters.workload overrides the fields it names. The default evaluates a fixed concurrency, so it creates neither sweep.max_trials nor a KV-load ratio search.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials nor a KV-capacity-fraction search.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5221,7 +5258,7 @@ See [ObjectiveSpec](#objectivespec).
 </ParamField>
 
 <ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate selects the execution artifact and supplies native AISimulate input.
+AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
 See [AISimulateSpec](#aisimulatespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5302,13 +5339,13 @@ See [ObjectiveMetric](#objectivemetric).
 </ParamField>
 
 <ParamField path="metrics" type="ObjectiveMetric array">
-Metrics lists two or more distinct scalar targets when mode is Pareto.
+Metrics selects AISimulate's public Pareto objective pair when mode is Pareto. The configured AISimulate release supports exactly ThroughputPerGPU and ThroughputPerUser through its public recommendation input.
 See [ObjectiveMetric](#objectivemetric).
-**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MaxItems: 7  MinItems: 2  Optional: \&#123;\&#125;
+**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MaxItems: 2  MinItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="sla" type="ObjectiveSLASpec">
-SLA defines per-request latency bounds used to calculate goodput. When omitted, no bounds apply. spec.aisimulate.parameters.goal.sla overrides the bounds it names.
+SLA defines per-request latency bounds used to calculate goodput. When omitted, no bounds apply. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
 See [ObjectiveSLASpec](#objectiveslaspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5361,30 +5398,15 @@ Total is the number of planned rounds.
 </ParamField>
 </Accordion>
 
-<Accordion id="staticworkloadspec" title="StaticWorkloadSpec">
-StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
+<Accordion id="staticloadspec" title="StaticLoadSpec">
+StaticLoadSpec selects exactly one synthetic load model by field presence.
 
 
 **Kind:** `type`
-**Appears in:** [WorkloadSpec](#v1beta2-workloadspec)
+**Appears in:** [StaticWorkloadSpec](#staticworkloadspec)
 
-<ParamField path="isl" type="integer">
-ISL is the input sequence length in tokens.
-**Validation:** Minimum: 1  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="osl" type="integer">
-OSL is the output sequence length in tokens.
-**Validation:** Minimum: 1  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="numRequestRatio" type="float">
-NumRequestRatio sets request count relative to the selected load.
-**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="requestRate" type="float">
-RequestRate is a fixed open-loop arrival rate in requests per second.
+<ParamField path="requestsPerSecond" type="float">
+RequestsPerSecond is a fixed open-loop arrival rate.
 **Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -5393,10 +5415,35 @@ Concurrency is a fixed closed-loop in-flight request cap.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="kvLoadRatio" type="KVLoadRatio">
-KVLoadRatio derives concurrency from candidate KV capacity. A two-value range requires a bounded AISimulate sweep.
-See [KVLoadRatio](#kvloadratio).
-**Validation:** MaxItems: 2  MinItems: 1  items:Maximum: 1  items:Minimum: 0  Optional: \&#123;\&#125;
+<ParamField path="kvCapacityFraction" type="KVCapacityFractionSpec">
+KVCapacityFraction derives concurrency from each candidate's estimated KV capacity.
+See [KVCapacityFractionSpec](#kvcapacityfractionspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="staticworkloadspec" title="StaticWorkloadSpec">
+StaticWorkloadSpec defines AISimulate synthetic traffic. Admission completes a nonempty
+object with the omitted static defaults; an explicit empty object opts out of them.
+
+
+**Kind:** `type`
+**Appears in:** [WorkloadSpec](#v1beta2-workloadspec)
+
+<ParamField path="inputTokens" type="integer">
+InputTokens is the synthetic request input length in tokens.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="outputTokens" type="integer">
+OutputTokens is the synthetic request output length in tokens.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="load" type="StaticLoadSpec">
+Load selects the synthetic load model. When omitted from a nonempty static workload, admission defaults it to concurrency 10.
+See [StaticLoadSpec](#staticloadspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5408,7 +5455,7 @@ WorkloadSpec defines the synthetic traffic model used for every candidate evalua
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="static" type="StaticWorkloadSpec">
-Static defines one of AISimulate's synthetic workload shapes. Its fields are not defaulted individually: the default belongs to spec.workload as a whole, so an explicit workload object keeps exactly the fields it names.
+Static defines AISimulate synthetic traffic. When omitted, admission supplies the complete static default. An explicit empty object opts out; any nonempty object is completed with omitted inputTokens, outputTokens and load defaults.
 See [StaticWorkloadSpec](#staticworkloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

@@ -25,8 +25,7 @@ type Options struct {
 	OperatorVersion string
 	// DGDRV1beta1 configures the defaults of v1beta1 Requests.
 	DGDRV1beta1 webhookdefaulting.DGDRV1beta1Options
-	// DGDRV1beta2 configures the defaults of v1beta2 Requests: the AISimulate runner
-	// image and the cluster hardware discovery.
+	// DGDRV1beta2 configures cluster-derived defaults of v1beta2 Requests.
 	DGDRV1beta2       webhookdefaulting.DGDRV1beta2Options
 	OperatorPrincipal string
 	Gate              features.Gate

@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/aisimulate"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -39,44 +39,12 @@ func validateDynamoGraphDeploymentRequestEnvelopeV1beta2(
 	if err := json.Unmarshal(raw.Raw, &spec); err != nil {
 		return field.ErrorList{field.Invalid(fldPath, "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
 	}
-	return validateDynamoGraphDeploymentRequestV1beta2(&spec)
-}
-
-// validateDynamoGraphDeploymentRequestV1beta2 validates a defaulted v1beta2 Request spec: the
-// typed fields and the image and version selection. spec.aisimulate.parameters is opaque here: the
-// CRD types it as an object, and the validation of its content belongs to the schema of the
-// AISimulate release the Request selects.
-func validateDynamoGraphDeploymentRequestV1beta2(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) field.ErrorList {
-	return validateDynamoGraphDeploymentRequestSpecV1beta2(spec, field.NewPath("spec"))
-}
-
-// validateDynamoGraphDeploymentRequestSpecV1beta2 validates the typed rules that the source
-// schema and CEL cannot express. The generated OpenAPI schema and CEL of the v1beta2 API have
-// already run before conversion reaches this webhook, so they are not repeated here: native
-// model presence, the model name length, backend uniqueness and the kvLoadRatio range order.
-// spec and fldPath must not be nil.
-func validateDynamoGraphDeploymentRequestSpecV1beta2(
-	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
-	fldPath *field.Path,
-) field.ErrorList {
-	return validateAISimulateSpecV1beta2(spec.AISimulate, fldPath.Child("aisimulate"))
-}
-
-// validateAISimulateSpecV1beta2 validates the execution artifact. Admission persists the
-// operator's default image, so a Request that still has none was created while the operator
-// had no default image configured. spec may be nil.
-func validateAISimulateSpecV1beta2(spec *nvidiacomv1beta2.AISimulateSpec, fldPath *field.Path) field.ErrorList {
-	if spec == nil || spec.Image == "" {
-		return field.ErrorList{field.Required(fldPath.Child("image"),
-			"an AISimulate image is required; set it, or configure the operator's default AISimulate image")}
-	}
-	if _, err := aisimulate.ResolveVersion(spec.Image, spec.VersionOverride); err != nil {
-		if spec.VersionOverride != "" {
-			return field.ErrorList{field.Invalid(fldPath.Child("versionOverride"), spec.VersionOverride,
-				"must be a semantic version such as \"0.13.0\"")}
-		}
-		return field.ErrorList{field.Required(fldPath.Child("versionOverride"),
-			"is required when the tag of spec.aisimulate.image is not a Dynamo release with a bundled AISimulate version")}
+	if _, err := aisimulate.Lower(&spec.NativeSearchInput); err != nil {
+		return field.ErrorList{field.Invalid(
+			field.NewPath("spec"),
+			"<redacted>",
+			"cannot be lowered to the public AISimulate recommendation input: "+err.Error(),
+		)}
 	}
 	return nil
 }

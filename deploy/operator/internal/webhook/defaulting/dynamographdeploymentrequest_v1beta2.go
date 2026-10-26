@@ -37,10 +37,10 @@ const defaultMetricV1beta2 = nvidiacomv1beta2.ObjectiveMetric("Throughput")
 // defaults a mutated object in the webhook's version (v1beta1, whose v1beta2 carrier is
 // opaque), so the v1beta2 schema carries no default markers for them.
 const (
-	defaultStaticISLV1beta2         int32 = 1024
-	defaultStaticOSLV1beta2         int32 = 128
-	defaultStaticConcurrencyV1beta2 int32 = 10
-	defaultMaxCandidatesV1beta2     int32 = 1
+	defaultStaticInputTokensV1beta2  int32 = 1024
+	defaultStaticOutputTokensV1beta2 int32 = 128
+	defaultStaticConcurrencyV1beta2  int32 = 10
+	defaultMaxCandidatesV1beta2      int32 = 1
 )
 
 // This file defaults the v1beta2 shape of a DynamoGraphDeploymentRequest. It is separate
@@ -50,10 +50,11 @@ const (
 // API version because the canonical names belong to v1beta1.
 //
 // Admission owns every v1beta2 default, and each default has this one owner: backends,
-// objective.mode, the scalar metric, recommendation.maxCandidates, workload.static, the
-// cluster hardware and the AISimulate image. workload.static: {} opts out of the static
-// workload. objective.sla has no default: an omitted SLA stays absent.
-// spec.aisimulate.parameters never changes a default. It overrides the defaulted typed
+// objective.mode, the scalar metric, recommendation.maxCandidates, workload.static and the
+// cluster hardware. workload.static: {} opts out of the static workload; a nonempty static
+// object receives any missing inputTokens, outputTokens and load defaults. objective.sla has
+// no default: an omitted SLA stays absent.
+// spec.aisimulate.inputOverrides never changes a default. It overrides the defaulted typed
 // values later, when the input is lowered.
 
 // defaultDynamoGraphDeploymentRequestV1beta2 defaults the v1beta2 spec that dgdr carries in
@@ -123,10 +124,6 @@ func decodeOldSpecV1beta2(
 type dynamoGraphDeploymentRequestV1beta2DefaultOptions struct {
 	// hardware is the GPU identity and budget discovered from the cluster.
 	hardware hardwareDefaultsV1beta2
-	// aisimulateImage is the operator's resolved AISimulate image.
-	aisimulateImage string
-	// aisimulateVersionOverride belongs to aisimulateImage.
-	aisimulateVersionOverride string
 }
 
 // hardwareDefaultsV1beta2 is the hardware the cluster can offer for the values a Request omits.
@@ -180,15 +177,6 @@ func defaultNativeSearchInputV1beta2(
 	}
 	defaultObjectiveSpecV1beta2(input.Objective)
 
-	// The operator image is persisted with the Request, so spec.aisimulate is created to
-	// carry it.
-	if input.AISimulate == nil && opts.aisimulateImage != "" {
-		input.AISimulate = &nvidiacomv1beta2.AISimulateSpec{}
-	}
-	if input.AISimulate != nil {
-		defaultAISimulateSpecV1beta2(input.AISimulate, opts.aisimulateImage, opts.aisimulateVersionOverride)
-	}
-
 	if input.Recommendation == nil {
 		input.Recommendation = &nvidiacomv1beta2.RecommendationSpec{}
 	}
@@ -216,23 +204,33 @@ func defaultGPUHardwareSpecV1beta2(gpu *nvidiacomv1beta2.GPUHardwareSpec, defaul
 }
 
 func defaultWorkloadSpecV1beta2(workload *nvidiacomv1beta2.WorkloadSpec) {
-	// An explicit static: {} is the opt-out, so the static defaults apply only to the object
-	// created here.
 	if workload.Static == nil {
 		workload.Static = &nvidiacomv1beta2.StaticWorkloadSpec{}
-		defaultStaticWorkloadSpecV1beta2(workload.Static)
+	} else if workload.Static.InputTokens == nil && workload.Static.OutputTokens == nil && workload.Static.Load == nil {
+		// An explicit empty object is the one static-workload opt-out.
+		return
 	}
+	defaultStaticWorkloadSpecV1beta2(workload.Static)
 }
 
+// defaultStaticWorkloadSpecV1beta2 completes a static workload with every omitted default.
 func defaultStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpec) {
-	static.ISL = ptr.To(defaultStaticISLV1beta2)
-	static.OSL = ptr.To(defaultStaticOSLV1beta2)
-	static.Concurrency = ptr.To(defaultStaticConcurrencyV1beta2)
+	if static.InputTokens == nil {
+		static.InputTokens = ptr.To(defaultStaticInputTokensV1beta2)
+	}
+	if static.OutputTokens == nil {
+		static.OutputTokens = ptr.To(defaultStaticOutputTokensV1beta2)
+	}
+	if static.Load == nil {
+		static.Load = &nvidiacomv1beta2.StaticLoadSpec{
+			Concurrency: ptr.To(defaultStaticConcurrencyV1beta2),
+		}
+	}
 }
 
 // defaultObjectiveSpecV1beta2 defaults the mode and gives an Optimize objective without a
 // metric the default scalar target. It reads the typed objective alone: a goal.target in
-// spec.aisimulate.parameters overrides the completed typed value when the input is lowered,
+// spec.aisimulate.inputOverrides overrides the completed typed value when the input is lowered,
 // so it never suppresses this default.
 func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	if objective.Mode == "" {
@@ -240,19 +238,6 @@ func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 	}
 	if objective.Mode == nvidiacomv1beta2.ObjectiveModeOptimize && objective.Metric == nil {
 		objective.Metric = ptr.To(defaultMetricV1beta2)
-	}
-}
-
-// defaultAISimulateSpecV1beta2 persists the operator's AISimulate artifact as one pair. The
-// override follows the image: it is applied only when admission supplies the image. A caller's
-// image derives its own version or brings its own override, and a caller's override always wins.
-func defaultAISimulateSpecV1beta2(aisimulate *nvidiacomv1beta2.AISimulateSpec, image, versionOverride string) {
-	if aisimulate.Image != "" || image == "" {
-		return
-	}
-	aisimulate.Image = image
-	if aisimulate.VersionOverride == "" {
-		aisimulate.VersionOverride = versionOverride
 	}
 }
 
