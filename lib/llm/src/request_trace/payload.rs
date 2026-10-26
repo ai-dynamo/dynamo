@@ -236,7 +236,8 @@ mod tests {
             "model": "test", "messages": [{"role": "user", "content": "hello"}],
             "nvext": {"extra_fields": ["timing"], "metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "object_store", "destination": {"kind": "presigned_http_put", "url": "https://storage.example/object?sig=secret", "required_headers": {"x-token": "private-token"}, "expires_at": "2030-01-01T00:00:00Z", "max_bytes": 1024, "object_id": "object-1"}}}
         })).unwrap();
-        let handle = create_handle_with_config(&request, "test-id", true, true, None).unwrap();
+        let handle =
+            create_handle_with_config(&request, "test-id", true, true, None, None).unwrap();
         assert!(request.nvext.as_ref().unwrap().metadata_upload.is_some());
         let trace = serde_json::to_string(&handle.request).unwrap();
         assert!(!trace.contains("metadata_upload"));
