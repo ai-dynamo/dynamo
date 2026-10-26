@@ -44,10 +44,10 @@ flowchart LR
 ```
 
 By default, Nsight adds no privileged flag, capabilities, or host access to profiled pods, and `nsys` runs as the
-container's user. To keep it that way, do not turn on GPU metrics sampling (the `nsys` option `--gpu-metrics-devices`):
-Nsight's [GPU metrics setup](https://docs.nvidia.com/nsight-operator/Troubleshooting/index.html#gpu-metrics) gives
-profiled containers `privileged: true` or the `SYS_ADMIN` capability. Tracing CUDA API calls and GPU kernels, as the
-worker configs below do, needs no extra privileges.
+container's user. To keep it that way, do not turn on GPU metrics sampling (the `nsys` option `--gpu-metrics-devices`).
+[Nsight's GPU metrics setup](https://docs.nvidia.com/nsight-operator/Troubleshooting/index.html#gpu-metrics) needs
+extra privileges: it adds a collector DaemonSet whose pods run with `privileged: true` (or the `SYS_ADMIN` capability).
+Tracing CUDA API calls and GPU kernels, as the worker configs below do, needs no extra privileges.
 
 ## Try Nsight's Dynamo Helper First
 
@@ -63,7 +63,8 @@ fastest first look. Adjust it as follows:
   that no other DGD's name contains.
 - Set `--nsys-profile-args "-t cuda,nvtx,osrt --python-sampling=true"`. The helper's default adds
   `--pytorch=autograd-nvtx` (see [Pitfalls](#pitfalls)).
-- Leave out `--gpu-metrics`.
+- Leave out `--gpu-metrics`. It installs Nsight's GPU metrics collector: a DaemonSet whose pods run with
+  `privileged: true`, plus a profile config that runs `nsys --gpu-metrics-devices=all` in those pods.
 
 The helper puts every selected pod on the `default` tag and keeps reports in Nsight's in-cluster storage. For S3, or
 for a tag per test, write your own profile config as described below.
