@@ -29,8 +29,8 @@ Usage — same syntax as the bare nvtx module:
 When enabled, uses a named nvtx.Domain and pre-allocated EventAttributes
 objects (cached lazily by (message, color)) so that repeated calls to
 start_range incur only a single dict lookup — no object allocation
-or domain cache lookups on the hot path. Color names are resolved here,
-so markers never need matplotlib.
+or domain cache lookups on the hot path. Color names used by Dynamo are resolved
+here without requiring matplotlib.
 """
 import functools
 import inspect
@@ -42,6 +42,7 @@ ENABLED: bool = bool(int(os.getenv("DYN_NVTX", "0")))
 if ENABLED:
     try:
         import nvtx as _nvtx_lib
+        from nvtx.colors import color_to_hex as _color_to_hex
     except ModuleNotFoundError as exc:
         # Only a missing nvtx package degrades to the no-op path: profiling presets
         # set DYN_NVTX for every launch and an image without the package must still
@@ -59,38 +60,22 @@ if ENABLED:
     _domain = _nvtx_lib.get_domain("dynamo")
     _attr_cache: dict = {}
 
-    # The nvtx package resolves only a few color names itself and imports
-    # matplotlib for any other, which runtime images do not ship; an unresolved
-    # name then raises TypeError at the annotation site, which for a decorator
-    # means at import. Dynamo therefore passes nvtx an RGB integer. The names nvtx
-    # knows keep its values; any unknown name gets the nvtx default color.
-    _COLORS = {
-        "black": 0x000000,
-        "blue": 0x0000FF,
-        "brown": 0xA52A2A,
-        "cyan": 0x00FFFF,
-        "darkgreen": 0x006400,
-        "gray": 0x808080,
-        "green": 0x008000,
-        "grey": 0x808080,
+    # Reuse nvtx's color resolver, supplying only the extra names Dynamo uses
+    # that would otherwise require matplotlib.
+    _EXTRA_COLORS = {
         "lime": 0x00FF00,
         "magenta": 0xFF00FF,
-        "navy": 0x000080,
-        "olive": 0x808000,
-        "orange": 0xFFA500,
         "pink": 0xFFC0CB,
-        "purple": 0x800080,
-        "rapids": 0x7400FF,
-        "red": 0xFF0000,
-        "teal": 0x008080,
-        "white": 0xFFFFFF,
-        "yellow": 0xFFFF00,
     }
 
     def _resolve_color(color):
         if color is None or isinstance(color, int):
             return color
-        return _COLORS.get(color)
+        try:
+            return _color_to_hex(_EXTRA_COLORS.get(color, color))
+        except (TypeError, ValueError):
+            # Missing matplotlib or an invalid color: use nvtx's default.
+            return None
 
     def _get_attr(message: str, color: str):
         try:
@@ -109,7 +94,7 @@ if ENABLED:
         _domain.end_range(rng)
 
     def annotate(message=None, color=None, **kwargs):
-        """nvtx.annotate in the "dynamo" domain with a matplotlib-free color.
+        """nvtx.annotate in the "dynamo" domain with color fallback.
 
         Works as a decorator and as a context manager, like nvtx.annotate.
         Keeping every marker in one domain keeps them in one nsys row.

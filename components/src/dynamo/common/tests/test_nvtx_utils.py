@@ -46,15 +46,17 @@ NVTX_BUILTIN_NAMES = [
 @pytest.fixture
 def enabled_nvtx_utils(monkeypatch):
     """nvtx_utils reloaded with DYN_NVTX=1 and no matplotlib, as in runtime images."""
-    monkeypatch.setenv("DYN_NVTX", "1")
-    monkeypatch.setitem(sys.modules, "matplotlib", None)
     from dynamo.common.utils import nvtx_utils
 
-    module = importlib.reload(nvtx_utils)
-    assert module.ENABLED
-    yield module
-    monkeypatch.delenv("DYN_NVTX")
-    importlib.reload(nvtx_utils)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("DYN_NVTX", "1")
+            patch.setitem(sys.modules, "matplotlib", None)
+            module = importlib.reload(nvtx_utils)
+            assert module.ENABLED
+            yield module
+    finally:
+        importlib.reload(nvtx_utils)
 
 
 def test_every_color_used_in_dynamo_resolves_without_matplotlib(enabled_nvtx_utils):
@@ -74,7 +76,23 @@ def test_builtin_names_keep_nvtx_values(enabled_nvtx_utils, name):
     assert enabled_nvtx_utils._resolve_color(name) == nvtx_colors.color_to_hex(name)
 
 
+@pytest.mark.parametrize("color", [None, 0x80402010])
+def test_default_and_integer_colors_pass_through(enabled_nvtx_utils, color):
+    assert enabled_nvtx_utils._resolve_color(color) == color
+
+
 def test_unknown_name_falls_back_to_the_default_color(enabled_nvtx_utils):
+    assert enabled_nvtx_utils._resolve_color("not-a-color") is None
+
+
+def test_invalid_color_with_matplotlib_falls_back_to_the_default_color(
+    enabled_nvtx_utils, monkeypatch
+):
+    def invalid_color(color):
+        raise ValueError(f"Invalid RGBA argument: {color!r}")
+
+    monkeypatch.setattr(enabled_nvtx_utils, "_color_to_hex", invalid_color)
+
     assert enabled_nvtx_utils._resolve_color("not-a-color") is None
 
 
