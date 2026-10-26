@@ -88,11 +88,8 @@ fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
 /// Whether `DYN_EPP_ROUTING_HOST` enables the frontend routing-host path.
 fn routing_host_enabled() -> Result<bool> {
     match std::env::var(ROUTING_HOST_ENV) {
-        Ok(value) => match value.trim() {
-            "" | "0" | "false" => Ok(false),
-            "1" | "true" => Ok(true),
-            other => anyhow::bail!("{ROUTING_HOST_ENV} must be true or false, got {other:?}"),
-        },
+        Ok(value) => dynamo_runtime::config::parse_bool(&value)
+            .map_err(|error| anyhow::anyhow!("{ROUTING_HOST_ENV}: {error}")),
         Err(_) => Ok(false),
     }
 }
