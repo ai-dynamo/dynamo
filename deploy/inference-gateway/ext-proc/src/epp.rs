@@ -831,7 +831,7 @@ async fn fetch_preprocessor_from_discovery(
             let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    if is_prefill_card(&card) {
+                    if card.effective_worker_type() == WorkerType::Prefill {
                         continue;
                     }
                     model_card = Some((card, actual_namespace));
@@ -1249,19 +1249,6 @@ async fn spawn_pod_reflector(
     Ok((index, ready))
 }
 
-/// Whether a discovered card belongs to a prefill worker.
-///
-/// Reads the card's `worker_type`, resolving legacy cards through
-/// [`ModelDeploymentCard::effective_worker_type`]. The legacy
-/// `ModelType::Prefill` bit alone is not enough: it is a cross-version compat
-/// marker that current workers are not required to emit (the mocker does not),
-/// so keying on it leaves those prefill workers undiscovered and every
-/// disaggregated request fails at the decode worker for want of a prefill
-/// worker id.
-fn is_prefill_card(card: &ModelDeploymentCard) -> bool {
-    card.effective_worker_type() == WorkerType::Prefill
-}
-
 fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
@@ -1293,7 +1280,7 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !is_prefill_card(&card) {
+                        if card.effective_worker_type() != WorkerType::Prefill {
                             continue;
                         }
 
@@ -1685,38 +1672,7 @@ mod tests {
     use std::sync::{Arc, atomic::Ordering};
 
     use super::*;
-    use dynamo_llm::model_type::ModelType;
     use k8s_openapi::api::core::v1::Pod;
-
-    fn card(worker_type: Option<WorkerType>, model_type: ModelType) -> ModelDeploymentCard {
-        let mut card = ModelDeploymentCard::with_name_only("m");
-        card.worker_type = worker_type;
-        card.model_type = model_type;
-        card
-    }
-
-    #[test]
-    fn prefill_cards_are_recognized_by_worker_type() {
-        // A current prefill worker that does not emit the legacy marker bit
-        // (the mocker registers exactly this).
-        assert!(is_prefill_card(&card(
-            Some(WorkerType::Prefill),
-            ModelType::empty()
-        )));
-        // A current prefill worker that dual-emits the marker (vLLM).
-        assert!(is_prefill_card(&card(
-            Some(WorkerType::Prefill),
-            ModelType::Prefill
-        )));
-        // A legacy prefill card: no worker_type, marker bit only.
-        assert!(is_prefill_card(&card(None, ModelType::Prefill)));
-
-        let chat = ModelType::Chat | ModelType::Completions;
-        assert!(!is_prefill_card(&card(Some(WorkerType::Decode), chat)));
-        assert!(!is_prefill_card(&card(Some(WorkerType::Aggregated), chat)));
-        // A legacy card with no marker is an aggregated worker.
-        assert!(!is_prefill_card(&card(None, chat)));
-    }
 
     #[test]
     fn global_namespace_discovery_does_not_restrict_worker_pod_labels() {
