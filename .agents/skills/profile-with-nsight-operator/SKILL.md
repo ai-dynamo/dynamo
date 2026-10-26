@@ -1,11 +1,11 @@
 ---
 name: profile-with-nsight-operator
 description: >-
-  Profiles chosen components of a Dynamo DynamoGraphDeployment on Kubernetes with Nsight Systems (nsys) through
-  NVIDIA Nsight Operator, using kubectl, Nsight's Dynamo helper nsight_operator_dynamo.py, and Nsight's
-  nsight_operator.py CLI, and verifies that every expected pod produced a report. Use when someone asks to profile, trace, or run nsys on a Dynamo frontend, router,
-  aggregated worker, or prefill or decode worker on a cluster that runs Nsight Operator. Use deploy-dynamo-recipe for
-  bring-up and troubleshoot-dynamo for failed deployments.
+  Profiles chosen components of a Dynamo DynamoGraphDeployment on Kubernetes with Nsight Systems (nsys) through NVIDIA
+  Nsight Operator, using kubectl, Nsight's Dynamo helper nsight_operator_dynamo.py, and Nsight's nsight_operator.py CLI,
+  and verifies that every expected pod produced a report. Use when someone asks to profile, trace, or run nsys on a
+  Dynamo frontend, router, aggregated worker, or prefill or decode worker on a cluster that runs Nsight Operator. Use
+  deploy-dynamo-recipe for bring-up and troubleshoot-dynamo for failed deployments.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -57,11 +57,12 @@ not repeat them.
 
 ### 1. Preflight
 
-- Pin `--context` and `-n` on every `kubectl` call, and bound every wait with a timeout.
+- Pin `--context` and `-n` on every `kubectl` call, as the commands below do, and bound every wait with a timeout.
 - Check which profile-config fields the API server accepts:
-  `kubectl explain nsightoperatorprofileconfig.spec.injectionRules`. Nsight Operator 26.3 has `podObjectSelector`,
-  `nsightTags`, and `processIncludePatterns` on each rule; 26.2 has `objectSelector` or `matchConditions` on the rule
-  and `nsightTag` and `injectionIncludePatterns` on the tool config. Use the names the server accepts.
+  `kubectl --context <context> -n <namespace> explain nsightoperatorprofileconfig.spec.injectionRules`.
+  Nsight Operator 26.3 has `podObjectSelector`, `nsightTags`, and `processIncludePatterns` on each rule; 26.2 has
+  `objectSelector` or `matchConditions` on the rule and `nsightTag` and `injectionIncludePatterns` on the tool config.
+  Use the names the server accepts.
 - List existing profile configs in the namespace. Do not reuse or overwrite another test's config, tool-config, or rule
   names. `dynamo-profile-config` belongs to Nsight's helper; never write it by hand.
 - Run `python3 nsight_operator.py --tag <tag> status` to see whether the tag already holds a session. A tag holds one
@@ -99,16 +100,23 @@ python3 nsight_operator_dynamo.py -n <namespace> configure \
 Use your own config for S3 reports, a tag per DGD, process patterns per component, or when the helper's config would
 collide with someone else's. Start from the page's template. Then:
 
+- Check the real labels first, when pods exist:
+  `kubectl --context <context> -n <namespace> get pods -l nvidia.com/dynamo-graph-deployment-name=<dgd> --show-labels`.
+  Component types are lowercase; `Frontend` is a component name, not a type.
 - Add one rule per requested component. Select on `nvidia.com/dynamo-graph-deployment-name: <dgd>` plus the component
-  label from the page's table, for example `nvidia.com/dynamo-component-type: decode`. To record only decode workers,
-  write only the decode rule.
-- Check the real labels first with `kubectl get pods -l nvidia.com/dynamo-graph-deployment-name=<dgd> --show-labels`
-  when pods exist. Component types are lowercase; `Frontend` is a component name, not a type.
+  label from the page's table that the observed labels support:
+  - a component type, for example `nvidia.com/dynamo-component-type: decode`. It matches every component of that type.
+  - `nvidia.com/dynamo-sub-component-type: prefill` or `decode` for workers that kept type `worker` across an operator
+    upgrade.
+  - `nvidia.com/dynamo-component: <component name>`, with the name's case kept, to select one named component when
+    several share a type, or a component without a type, such as a standalone router.
+- To record only decode workers, write only the decode rule.
 - Put the same literal tag, the DGD name, on every rule. Use per-test names for the config, the tool configs, and the
   rules.
 - Write process patterns with `[.]`, never a backslash.
 - Leave out `--pytorch=autograd-nvtx`, `--gpu-metrics`, and `--trace-fork-before-exec`.
-- Validate with `kubectl apply --dry-run=server -f <file>`, then apply it. Use `<tag>` = the DGD name in later steps.
+- Validate with `kubectl --context <context> -n <namespace> apply --dry-run=server -f <file>`, then apply it with the
+  same flags. Use `<tag>` = the DGD name in later steps.
 
 ### 3. Get Fresh Pods
 
@@ -120,8 +128,8 @@ Only pods created after the config exists are profiled.
 
 ### 4. Confirm Injection
 
-- Derive the expected pods from the DGD and the selectors (`kubectl get pods -l ...`), never from the agents that
-  happened to register.
+- Derive the expected pods from the DGD and the selectors
+  (`kubectl --context <context> -n <namespace> get pods -l ...`), never from the agents that happened to register.
 - `python3 nsight_operator.py --tag <tag> status` must list one collection agent per expected pod. Ignore
   `otlp-converter-*` entries; they are Nsight's OpenTelemetry converter.
 - If a pod is missing, follow Nsight's sidecar injection checks, check the pod's init containers and its
@@ -145,12 +153,17 @@ Only pods created after the config exists are profiled.
 
 ### 6. Collect And Verify
 
-- Poll `python3 nsight_operator.py --tag <tag> ls` in a bounded loop until every expected pod has a report. Reports
-  appear only after the delay, the window, report generation, and the upload, so allow several minutes.
-- Run `session-end`, then `download -o <dir>`, or read the reports from the bucket with the user's credentials.
+- Reports appear only after the delay, the window, report generation, and the upload. Set a polling deadline of the
+  delay plus the window plus 10 minutes, unless the user gives another one, and tell the user the deadline.
+- Poll `python3 nsight_operator.py --tag <tag> ls` until every expected pod has a report or the deadline passes.
+- Run `download -o <dir>` before `session-end`, because `ls` and `download` use the tag's active session unless
+  `--session <UUID>` is passed. Or read the reports from the bucket with the user's credentials. Then run
+  `session-end`, also when the deadline passed.
 - Check completeness: every expected pod has a report, and every GPU worker report contains kernel rows
   (`nsys stats --report cuda_gpu_kern_sum <file>`). Report a missing pod or a GPU report without kernels as an
   incomplete capture; do not present partial results as complete.
+- If the deadline passed, check `status` and injection for each missing pod, and report the capture as incomplete
+  with the reports you have.
 - Only then remove the profile config (`python3 nsight_operator_dynamo.py -n <namespace> unconfigure` on the helper
   path, `kubectl delete` of your own config otherwise), and the DGD if the user created it only for this test.
 
