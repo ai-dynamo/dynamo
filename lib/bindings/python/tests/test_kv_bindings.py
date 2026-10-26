@@ -287,6 +287,13 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
         assert selected["worker_id"] == 1
         assert selected["dp_rank"] == 0
         assert selected["endpoint"] == "http://worker-1:8000"
+
+        # Token sequences other than a list of ints take the generic conversion.
+        for token_ids in [(1, 2, 3, 4), [1, 2, 3, True]]:
+            selected = await service.select(
+                {"model_name": "model", "token_ids": token_ids}
+            )
+            assert selected["worker_id"] == 1
     finally:
         await service.shutdown_async()
 
@@ -308,6 +315,10 @@ async def test_selection_service_malformed_payload_raises_value_error(monkeypatc
         # Prompt booleans are not coerced by truthiness.
         with pytest.raises(ValueError, match="boolean"):
             await service.select({"token_ids": [1, 2, 3, 4], "is_eagle": "false"})
+        # Out-of-range or non-int token ids keep the conversion's ValueError.
+        for token_ids in [[1, -1], [1, 2**32], [1, "2"]]:
+            with pytest.raises(ValueError, match="token_ids"):
+                await service.select({"token_ids": token_ids})
     finally:
         service.shutdown()
 
