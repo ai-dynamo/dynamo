@@ -455,8 +455,8 @@ impl
                     };
 
                     // Per-token text is read only with this chunk's logprobs (`create_logprobs`).
-                    let token_text = data.log_probs.is_some();
-                    let result = decoder.process_token_ids_with_token_text(&data.token_ids, token_text).and_then(|mut result| {
+                    let needs_token_text = data.log_probs.is_some();
+                    let result = decoder.process_token_ids_with_token_text(&data.token_ids, needs_token_text).and_then(|mut result| {
                         if result.stop_trigger.is_none() && data.finish_reason.is_some() {
                             let final_step = decoder.finish()?;
                             if let Some(text) = final_step.released_text {
@@ -783,19 +783,7 @@ pub struct StepResult {
 }
 
 impl StepResult {
-    /// No stop-sequence withholding in effect: the token's own text is released as-is.
-    fn ok(token: Option<String>) -> Self {
-        Self {
-            token: token.clone(),
-            released_text: token,
-            stop_trigger: None,
-        }
-    }
-
-    /// `token` and `released_text` differ, e.g. because `released_text` also carries a
-    /// previously withheld backlog, or because a matched stop sequence is excluded from
-    /// `released_text` but not from `token`.
-    fn ok_split(token: Option<String>, released_text: Option<String>) -> Self {
+    fn ok(token: Option<String>, released_text: Option<String>) -> Self {
         Self {
             token,
             released_text,
@@ -988,13 +976,12 @@ impl Decoder {
         self.step_with_token_text(token_id, true)
     }
 
-    /// Like [`Self::step`], but leaves `StepResult::token` as `None` when `token_text` is
-    /// false. Per-token text is only read alongside logprobs, so the backend skips the
-    /// per-token decode for chunks that carry none.
+    /// Like [`Self::step`], but leaves `StepResult::token` as `None` when `needs_token_text`
+    /// is false.
     fn step_with_token_text(
         &mut self,
         token_id: TokenIdType,
-        token_text: bool,
+        needs_token_text: bool,
     ) -> Result<StepResult> {
         let below_min_tokens = self.generated_tokens < self.min_tokens;
         // increment the generated tokens
@@ -1007,7 +994,6 @@ impl Decoder {
             && !self.no_stop_trim
         {
             let mut result = self.finish()?;
-            result.token = None;
             result.stop_trigger.get_or_insert_with(|| {
                 if self.user_stop_ids.contains(&token_id) {
                     StopTrigger::UserStopTokenDetected(token_id)
@@ -1017,15 +1003,6 @@ impl Decoder {
             });
             return Ok(result);
         }
-
-        // Decode the selected token independently for per-token metadata. Incremental
-        // decoding may release a backlog of earlier byte-fallback IDs on this step; using
-        // that backlog as this ID's token string would attach it to the wrong logprob.
-        let selected_token = self
-            .tokenizer
-            .as_ref()
-            .filter(|_| token_text)
-            .and_then(|tokenizer| decode_token_text(tokenizer, token_id, self.skip_special_tokens));
 
         // Decode caller-visible content. Track IDs retained by the incremental decoder so
         // a migration checkpoint can replay them instead of losing buffered byte fallback.
@@ -1041,12 +1018,24 @@ impl Decoder {
         if let (Some(start), Some(tracker)) = (detokenize_start, &self.tracker) {
             tracker.record_detokenize_latency(start.elapsed());
         }
-        let selected_token =
-            selected_token.or_else(|| token_text.then(|| decoded_text.clone()).flatten());
+
+        // Decode the selected token independently for per-token metadata. Incremental
+        // decoding may release a backlog of earlier byte-fallback IDs on this step; using
+        // that backlog as this ID's token string would attach it to the wrong logprob.
+        let selected_token = needs_token_text
+            .then(|| {
+                self.tokenizer
+                    .as_ref()
+                    .and_then(|tokenizer| {
+                        decode_token_text(tokenizer, token_id, self.skip_special_tokens)
+                    })
+                    .or_else(|| decoded_text.clone())
+            })
+            .flatten();
 
         // stop conditions to not apply until the minimum number of tokens have been generated
         if below_min_tokens {
-            return Ok(StepResult::ok_split(selected_token, decoded_text));
+            return Ok(StepResult::ok(selected_token, decoded_text));
         }
 
         if self.visible_stop_ids.contains(&token_id) || self.hidden_stop_ids.contains(&token_id) {
@@ -1060,57 +1049,33 @@ impl Decoder {
         // Stop strings are evaluated before stop-token IDs so a configured string ending
         // at a visible stop token cannot leak through the token-stop fast path.
         let mut decoded = self.process_decoded_text(decoded_text)?;
-        decoded.token = selected_token.clone();
+        decoded.token = selected_token;
         if decoded.stop_trigger.is_some() {
             return Ok(decoded);
         }
 
-        // Check token stops. Visible token IDs are included in output.
-        if self.visible_stop_ids.contains(&token_id) {
-            // Any text still withheld as a partial hidden-stop-sequence match can never
-            // complete now, so it goes out ahead of this (included) token's own text --
-            // otherwise it would be silently dropped and, if it were released later, would
-            // come out of order.
-            if let Some(flushed) = self.flush_jailed() {
-                decoded
-                    .released_text
-                    .get_or_insert_default()
-                    .push_str(&flushed);
-            }
-            return Ok(StepResult::with_stop_trigger(
-                selected_token,
-                decoded.released_text,
-                StopTrigger::VisibleStopTokenDetected(token_id),
-            ));
+        // Check token stops. Visible token IDs are included in output. User-provided token
+        // IDs take precedence over system/EOS IDs so stop_reason only reports stops the
+        // caller requested. A hidden ID only reaches here under no_stop_trim.
+        let trigger = if self.visible_stop_ids.contains(&token_id) {
+            StopTrigger::VisibleStopTokenDetected(token_id)
+        } else if self.user_stop_ids.contains(&token_id) {
+            StopTrigger::UserStopTokenDetected(token_id)
+        } else if self.hidden_stop_ids.contains(&token_id) {
+            StopTrigger::HiddenStopTokenDetected(token_id)
+        } else {
+            return Ok(decoded);
+        };
+        // Any text still withheld as a partial hidden-stop-sequence match can never
+        // complete now, so it goes out ahead of this token's own text -- otherwise it would
+        // be silently dropped and, if it were released later, would come out of order.
+        if let Some(flushed) = self.flush_jailed() {
+            decoded
+                .released_text
+                .get_or_insert_default()
+                .push_str(&flushed);
         }
-
-        // Check token stops. User-provided token IDs take precedence over
-        // system/EOS IDs so stop_reason only reports stops the caller requested.
-        if self.hidden_stop_ids.contains(&token_id) {
-            let trigger = if self.user_stop_ids.contains(&token_id) {
-                StopTrigger::UserStopTokenDetected(token_id)
-            } else {
-                StopTrigger::HiddenStopTokenDetected(token_id)
-            };
-            // Release any earlier withheld prefix before this stop token's own text.
-            let token = if self.no_stop_trim {
-                selected_token
-            } else {
-                None
-            };
-            if let Some(flushed) = self.flush_jailed() {
-                decoded
-                    .released_text
-                    .get_or_insert_default()
-                    .push_str(&flushed);
-            }
-            return Ok(StepResult::with_stop_trigger(
-                token,
-                decoded.released_text,
-                trigger,
-            ));
-        }
-
+        decoded.stop_trigger = Some(trigger);
         Ok(decoded)
     }
 
@@ -1139,11 +1104,8 @@ impl Decoder {
                         .then(|| self.jail[release_start..offset].to_string())
                         .filter(|s| !s.is_empty());
                     self.jailed_bytes = 0;
-                    // `decoded_text` remains provisional metadata here; `step` replaces it
-                    // with the independently decoded selected token before returning. Only
-                    // caller-visible `released_text` excludes the matched sequence.
                     return Ok(StepResult::with_stop_trigger(
-                        decoded_text,
+                        None,
                         partial_token,
                         StopTrigger::HiddenStopSequenceDetected(seq.to_string()),
                     ));
@@ -1162,7 +1124,7 @@ impl Decoder {
                         .filter(|s| !s.is_empty());
                     self.jailed_bytes = 0;
                     return Ok(StepResult::with_stop_trigger(
-                        decoded_text,
+                        None,
                         token_with_stop,
                         StopTrigger::VisibleStopSequenceDetected(seq.to_string()),
                     ));
@@ -1179,12 +1141,10 @@ impl Decoder {
                 .then(|| self.jail[release_start..release_end].to_string());
 
             Self::maybe_drain_to_max_bytes(&mut self.jail, self.jail_max_bytes);
-            // `decoded_text` is provisional per-token metadata that `step` replaces with
-            // the selected token; `released` is what newly clears the jail for content.
-            return Ok(StepResult::ok_split(decoded_text, released));
+            return Ok(StepResult::ok(None, released));
         }
 
-        Ok(StepResult::ok(decoded_text))
+        Ok(StepResult::ok(None, decoded_text))
     }
 
     /// Finalize tokenizer bytes through the same stop-string filter as ordinary tokens.
@@ -1192,7 +1152,7 @@ impl Decoder {
         let tail = self.decode_stream.finish()?;
         self.pending_token_ids.clear();
         let mut result = if self.generated_tokens <= self.min_tokens {
-            StepResult::ok(tail)
+            StepResult::ok(None, tail)
         } else {
             self.process_decoded_text(tail)?
         };
@@ -1297,12 +1257,12 @@ impl Decoder {
         self.process_token_ids_with_token_text(token_ids, true)
     }
 
-    /// Like [`Self::process_token_ids`], but every `tokens[i]` is `None` when `token_text`
-    /// is false. `tokens` still has one entry per consumed ID.
+    /// Like [`Self::process_token_ids`], but every `tokens[i]` is `None` when
+    /// `needs_token_text` is false. `tokens` still has one entry per consumed ID.
     fn process_token_ids_with_token_text(
         &mut self,
         token_ids: &[TokenIdType],
-        token_text: bool,
+        needs_token_text: bool,
     ) -> Result<SeqResult> {
         let mut text: Option<String> = None;
         let mut tokens = Vec::with_capacity(token_ids.len());
@@ -1312,7 +1272,7 @@ impl Decoder {
                 token,
                 released_text,
                 stop_trigger,
-            } = self.step_with_token_text(*token_id, token_text)?;
+            } = self.step_with_token_text(*token_id, needs_token_text)?;
 
             // `text` accumulates the caller-visible content, which can lag behind and later
             // release more than one step's worth at once. `tokens[i]` always reports
@@ -1871,8 +1831,6 @@ mod tests {
         }
     }
 
-    /// Per-token text is only read with logprobs, so a chunk without them skips the
-    /// per-token decode; its content text is unaffected.
     #[tokio::test]
     async fn test_token_text_only_decoded_for_chunks_with_logprobs() {
         let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
