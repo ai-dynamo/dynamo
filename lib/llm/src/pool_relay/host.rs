@@ -618,7 +618,7 @@ fn is_stronger_source_fault(candidate: CkfFailureAction, current: CkfFailureActi
     )
 }
 
-/// Pool Relay host. It is intentionally not scoped to a model, namespace, or endpoint.
+/// Intentionally not scoped to a model, namespace, or endpoint.
 pub struct PoolRelay {
     #[cfg(feature = "ckf-diagnostics")]
     cluster_id: Arc<str>,
