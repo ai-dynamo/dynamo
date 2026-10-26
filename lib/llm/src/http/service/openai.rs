@@ -1149,6 +1149,40 @@ pub(super) fn preprocessed_context_from_headers(
     context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| None)
 }
 
+/// The HTTP status and client message the frontend returns for a request
+/// that failed before streaming (rejection, overload, no routable worker).
+/// Lets a host outside the HTTP service (the Gateway EPP) answer with the
+/// frontend's statuses instead of mapping errors itself.
+pub fn client_error_response(err: anyhow::Error) -> (u16, String) {
+    let (status, Json(message)) = ErrorMessage::from_anyhow(err, "Request routing failed");
+    (status.as_u16(), message.message)
+}
+
+/// The request context the OpenAI routes build, for hosts outside the HTTP
+/// service (the Gateway EPP) that preprocess a request they did not receive
+/// through axum. `input_trigger` is the classification of the typed request
+/// (`classify_chat_request` / `classify_completion_request`), recorded on the
+/// agent context as the routes record it.
+///
+/// Fails with the frontend's status and message: 431 for oversized metadata
+/// headers.
+pub fn preprocessed_request_context(
+    mut request: crate::preprocessor::PreprocessedRequest,
+    request_id: String,
+    headers: &HeaderMap,
+    input_trigger: Option<InputTrigger>,
+) -> Result<Context<crate::preprocessor::PreprocessedRequest>, (u16, String)> {
+    let agent_context = agent_context_from_headers(headers).map(|mut agent_context| {
+        agent_context.input_trigger = input_trigger;
+        agent_context
+    });
+    request.agent_context = agent_context.clone();
+    context_from_headers_with_agent_context(request, request_id, headers, agent_context, |_| {
+        input_trigger
+    })
+    .map_err(|(status, Json(message))| (status.as_u16(), message.message))
+}
+
 fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     source: &Context<T>,
     target: &mut Context<U>,

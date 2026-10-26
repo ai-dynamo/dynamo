@@ -13,6 +13,8 @@ use dynamo_llm::http::service::metadata::MetadataHeaderError;
 
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, last_non_empty_trimmed_value};
 
+pub use crate::response_event::ResponseEvent;
+
 /// A model server pod endpoint available for serving requests.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
@@ -149,6 +151,19 @@ pub trait EndpointPicker: Send + Sync + 'static {
     /// the picker booked nothing.
     async fn on_prefill_complete(&self, _booking_id: &str) {}
 
+    /// Called with the upstream response status of a routed request.
+    fn on_response_headers(&self, _booking_id: &str, _status: u16) {}
+
+    /// Called for each response event of a routed request that reports
+    /// something: every SSE event with output, a finish reason, usage or an
+    /// error, or the whole body of a buffered response. Must not block: it runs
+    /// on the response path ahead of forwarding the chunk.
+    fn on_response_event(&self, _booking_id: &str, _event: &ResponseEvent) {}
+
+    /// Called once when the upstream response finishes (end of body or
+    /// trailers). A stream that closes without it ended early.
+    fn on_response_end(&self, _booking_id: &str) {}
+
     /// Called when a request's response is fully complete (end-of-stream on the
     /// response body or trailers). Lets the picker free bookkeeping state.
     /// `booking_id` is as in [`Self::on_prefill_complete`]. Prefer
@@ -207,6 +222,11 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
+    /// The routing pipeline rejected the request with the status the frontend
+    /// returns for the same failure (for example 529 when every worker is over
+    /// its load threshold).
+    #[error("{message}")]
+    Rejected { status: u16, message: String },
 }
 
 #[cfg(test)]

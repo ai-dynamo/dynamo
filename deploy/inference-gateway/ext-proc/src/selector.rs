@@ -23,7 +23,7 @@ use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, WorkerType};
 use kube::Client;
 use tokio_util::sync::CancellationToken;
 
-use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::epp_standalone_config::{EppStandaloneConfig, session_affinity_ttl};
 
 /// A worker-selection request.
 #[derive(Debug, Clone)]
@@ -120,10 +120,7 @@ impl Selector {
             builder = builder.replica_sync(peer_replication.sync_port, Vec::new());
         }
         if let Some(ttl) = cfg.session_affinity_ttl_secs {
-            builder = builder.session_affinity(
-                std::time::Duration::try_from_secs_f64(ttl)
-                    .context("invalid session affinity TTL")?,
-            );
+            builder = builder.session_affinity(session_affinity_ttl(ttl)?);
         }
         let service = Arc::new(
             builder

@@ -20,7 +20,8 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
 use crate::picker::{
-    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseEvent,
+    ResponseUsage,
 };
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc, ProcessingRequest, ProcessingResponse,
@@ -83,7 +84,12 @@ struct RequestContext {
     parsed_usage: Option<ResponseUsage>,
 
     /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
-    sse_usage_buf: Vec<u8>,
+    sse_buf: Vec<u8>,
+    /// Response events read from the last body message, for the picker.
+    response_events: Vec<ResponseEvent>,
+    /// Upstream response status (`:status`).
+    response_status: Option<u16>,
+    response_end_signaled: bool,
 }
 
 impl RequestContext {
@@ -112,8 +118,16 @@ impl RequestContext {
             resp_body_resp: Vec::new(),
             resp_trailer_resp: None,
             parsed_usage: None,
-            sse_usage_buf: Vec::new(),
+            sse_buf: Vec::new(),
+            response_events: Vec::new(),
+            response_status: None,
+            response_end_signaled: false,
         }
+    }
+
+    /// The booking id handed back to the picker: its own, else the request id.
+    fn picker_booking_id(&self) -> &str {
+        self.booking_id.as_deref().unwrap_or(&self.request_id)
     }
 
     /// Advance the state machine and collect responses that are ready to send.
@@ -383,6 +397,9 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 if key == "content-type" && value.contains("text/event-stream") {
                     ctx.model_server_streaming = true;
                 }
+                if key == ":status" {
+                    ctx.response_status = value.parse().ok();
+                }
                 ctx.response_headers.insert(key, value);
             }
         }
@@ -398,8 +415,8 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.response_size += chunk.len();
 
         if ctx.model_server_streaming {
-            // Reassemble SSE across Envoy chunk boundaries before parsing usage.
-            ingest_streaming_usage(ctx, chunk, end_of_stream);
+            // Reassemble SSE across Envoy chunk boundaries before reading events.
+            ingest_sse(ctx, chunk, end_of_stream);
             if end_of_stream {
                 ctx.response_complete = true;
             }
@@ -413,9 +430,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         } else if end_of_stream {
             ctx.response_complete = true;
             // Non-streaming: `chunk` is the fully buffered JSON body.
-            if let Some(usage) = parse_unary_usage(chunk) {
-                ctx.parsed_usage = Some(usage);
-            }
+            record_response_event(ctx, ResponseEvent::from_body(chunk));
             let rewritten = envoy_helpers::rewrite_model_name(
                 chunk,
                 &ctx.target_model_name,
@@ -427,114 +442,84 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 }
 
-/// Extract [`ResponseUsage`] from a JSON `usage` object.
-fn usage_from_json(value: &serde_json::Value) -> Option<ResponseUsage> {
-    let usage = value.get("usage")?;
-    if usage.is_null() {
-        return None;
+/// Keep a response event's usage for completion, and queue the event for the
+/// picker when the request was routed.
+fn record_response_event(ctx: &mut RequestContext, event: ResponseEvent) {
+    if let Some(usage) = &event.usage {
+        ctx.parsed_usage = Some(usage.clone());
     }
-    let cached_tokens = usage
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(serde_json::Value::as_u64);
-    Some(ResponseUsage {
-        prompt_tokens: usage
-            .get("prompt_tokens")
-            .and_then(serde_json::Value::as_u64),
-        completion_tokens: usage
-            .get("completion_tokens")
-            .and_then(serde_json::Value::as_u64),
-        total_tokens: usage
-            .get("total_tokens")
-            .and_then(serde_json::Value::as_u64),
-        cached_tokens,
-    })
+    if ctx.body_routed {
+        ctx.response_events.push(event);
+    }
 }
 
-/// Parse `usage` from a buffered non-streaming JSON body.
-fn parse_unary_usage(body: &[u8]) -> Option<ResponseUsage> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    usage_from_json(&value)
-}
-
-/// Buffer SSE bytes across chunks; parse complete lines, keep the incomplete suffix.
-fn ingest_streaming_usage(ctx: &mut RequestContext, chunk: &[u8], end_of_stream: bool) {
-    if end_of_stream {
-        if ctx.sse_usage_buf.is_empty() {
-            update_streaming_usage(ctx, chunk);
-        } else {
-            ctx.sse_usage_buf.extend_from_slice(chunk);
-            if let Some(usage) = parse_streaming_usage(&ctx.sse_usage_buf) {
-                ctx.parsed_usage = Some(usage);
+/// Buffer SSE bytes across chunks; read complete events, keep the incomplete suffix.
+fn ingest_sse(ctx: &mut RequestContext, chunk: &[u8], end_of_stream: bool) {
+    let complete_len = if end_of_stream {
+        chunk.len()
+    } else {
+        match chunk.iter().rposition(|&b| b == b'\n') {
+            Some(index) => index + 1,
+            None => {
+                buffer_incomplete_sse(&mut ctx.sse_buf, chunk);
+                return;
             }
-            ctx.sse_usage_buf.clear();
         }
-        return;
-    }
-
-    let Some(complete_len) = chunk.iter().rposition(|&b| b == b'\n').map(|i| i + 1) else {
-        buffer_incomplete_sse(&mut ctx.sse_usage_buf, chunk);
-        return;
     };
 
-    if ctx.sse_usage_buf.is_empty() {
-        update_streaming_usage(ctx, &chunk[..complete_len]);
+    if ctx.sse_buf.is_empty() {
+        read_sse_events(ctx, &chunk[..complete_len]);
     } else {
-        ctx.sse_usage_buf.extend_from_slice(&chunk[..complete_len]);
-        if let Some(usage) = parse_streaming_usage(&ctx.sse_usage_buf) {
-            ctx.parsed_usage = Some(usage);
+        let mut lines = std::mem::take(&mut ctx.sse_buf);
+        lines.extend_from_slice(&chunk[..complete_len]);
+        read_sse_events(ctx, &lines);
+        lines.clear();
+        ctx.sse_buf = lines;
+    }
+    if !end_of_stream {
+        buffer_incomplete_sse(&mut ctx.sse_buf, &chunk[complete_len..]);
+    }
+}
+
+/// Read every complete SSE `data:` line in `lines`.
+fn read_sse_events(ctx: &mut RequestContext, lines: &[u8]) {
+    for line in lines.split(|&b| b == b'\n') {
+        if let Some(payload) = line.trim_ascii().strip_prefix(b"data:")
+            && let Some(event) = ResponseEvent::from_sse_data(payload.trim_ascii())
+        {
+            record_response_event(ctx, event);
         }
-        ctx.sse_usage_buf.clear();
-    }
-    buffer_incomplete_sse(&mut ctx.sse_usage_buf, &chunk[complete_len..]);
-}
-
-fn update_streaming_usage(ctx: &mut RequestContext, complete: &[u8]) {
-    if let Some(usage) = parse_streaming_usage(complete) {
-        ctx.parsed_usage = Some(usage);
     }
 }
 
-/// Append an incomplete SSE line, bounding memory. A `usage` event is small, so
-/// a partial line larger than the cap can't be one; drop it (self-corrects once
-/// the next newline lands).
+/// Hand the picker the response events read from the last body message, and
+/// signal the end of the response once.
+fn relay_response_progress<P: EndpointPicker>(picker: &P, ctx: &mut RequestContext) {
+    if !ctx.body_routed {
+        return;
+    }
+    let mut events = std::mem::take(&mut ctx.response_events);
+    for event in &events {
+        picker.on_response_event(ctx.picker_booking_id(), event);
+    }
+    events.clear();
+    ctx.response_events = events;
+    if ctx.response_complete && !ctx.response_end_signaled {
+        ctx.response_end_signaled = true;
+        picker.on_response_end(ctx.picker_booking_id());
+    }
+}
+
+/// Append an incomplete SSE line, bounding memory. Token and usage events are
+/// small, so a partial line larger than the cap is dropped (self-corrects once
+/// the next newline lands); at most one event's output count is lost.
 fn buffer_incomplete_sse(buf: &mut Vec<u8>, bytes: &[u8]) {
-    const MAX_SSE_USAGE_BUF: usize = 64 * 1024;
-    if buf.len() + bytes.len() > MAX_SSE_USAGE_BUF {
+    const MAX_SSE_BUF: usize = 64 * 1024;
+    if buf.len() + bytes.len() > MAX_SSE_BUF {
         buf.clear();
         return;
     }
     buf.extend_from_slice(bytes);
-}
-
-/// Parse `usage` from complete SSE `data:` lines (last wins).
-fn parse_streaming_usage(chunk: &[u8]) -> Option<ResponseUsage> {
-    // Skip JSON work unless the terminal `"usage"` field is present.
-    const USAGE_FIELD: &str = "\"usage\"";
-    if !chunk
-        .windows(USAGE_FIELD.len())
-        .any(|window| window == USAGE_FIELD.as_bytes())
-    {
-        return None;
-    }
-    let text = std::str::from_utf8(chunk).ok()?;
-    let mut latest = None;
-    for line in text.lines() {
-        let line = line.trim_start();
-        let Some(payload) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let payload = payload.trim();
-        if payload.is_empty() || payload == "[DONE]" || !payload.contains(USAGE_FIELD) {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
-            && let Some(usage) = usage_from_json(&value)
-        {
-            latest = Some(usage);
-        }
-    }
-    latest
 }
 
 #[tonic::async_trait]
@@ -660,6 +645,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         Some(processing_request::Request::RequestTrailers(_)) => {}
                         Some(processing_request::Request::ResponseHeaders(ref hdr)) => {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
+                            if ctx.body_routed
+                                && let Some(status) = ctx.response_status
+                            {
+                                picker.on_response_headers(ctx.picker_booking_id(), status);
+                            }
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
                             // Signal prefill completion on the first non-empty
@@ -675,12 +665,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 && !body.body.is_empty()
                             {
                                 ctx.prefill_complete_signaled = true;
-                                // Hand back the picker's own booking id (falls
-                                // back to request_id if it booked nothing).
-                                let booking_id = ctx
-                                    .booking_id
-                                    .clone()
-                                    .unwrap_or_else(|| ctx.request_id.clone());
+                                let booking_id = ctx.picker_booking_id().to_owned();
                                 // Detach: prefill-completion is idempotent,
                                 // best-effort load bookkeeping. Awaiting it inline
                                 // would gate first-token forwarding on the router's
@@ -694,8 +679,6 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 });
                             }
 
-                            // TODO(epp-output-tracking): Parse generated-token progress and
-                            // update router output blocks instead of tracking only phase changes.
                             if ctx.model_server_streaming {
                                 ExtProcServer::<P>::handle_response_body(&mut ctx, body);
                             } else {
@@ -709,10 +692,16 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     ExtProcServer::<P>::handle_response_body(&mut ctx, &synthetic);
                                 }
                             }
+                            relay_response_progress(&*picker, &mut ctx);
                         }
                         Some(processing_request::Request::ResponseTrailers(_)) => {
                             if !ctx.response_complete {
                                 ctx.response_complete = true;
+                                if ctx.model_server_streaming {
+                                    // The body ended without end_of_stream: read
+                                    // what the reassembler still holds.
+                                    ingest_sse(&mut ctx, &[], true);
+                                }
                                 if !resp_body_buf.is_empty() {
                                     let full_body = std::mem::take(&mut resp_body_buf);
                                     let synthetic = ext_proc::HttpBody {
@@ -722,6 +711,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     ExtProcServer::<P>::handle_response_body(&mut ctx, &synthetic);
                                 }
                             }
+                            relay_response_progress(&*picker, &mut ctx);
                             ctx.resp_trailer_resp =
                                 Some(envoy_helpers::build_response_trailer_response());
                         }
@@ -755,10 +745,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             // Notify the picker that this request is complete so it can free
             // router bookkeeping state.
             if ctx.body_routed && !ctx.request_id.is_empty() {
-                let booking_id = ctx
-                    .booking_id
-                    .clone()
-                    .unwrap_or_else(|| ctx.request_id.clone());
+                let booking_id = ctx.picker_booking_id().to_owned();
                 let usage = ctx.parsed_usage.take();
                 if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
                     crate::metrics::observe_cached_tokens(cached_tokens);
@@ -987,7 +974,9 @@ fn extract_candidate_subset(
 // ---------------------------------------------------------------------------
 
 struct ExtProcError {
-    status_code: StatusCode,
+    /// HTTP status. An `i32` rather than [`StatusCode`] so statuses outside
+    /// Envoy's enum (the frontend's default overload status 529) pass through.
+    status_code: i32,
     message: String,
 }
 
@@ -995,47 +984,51 @@ impl ExtProcError {
     fn from_pick_error(e: PickError) -> Self {
         match e {
             PickError::NoEndpoints => Self {
-                status_code: StatusCode::ServiceUnavailable,
+                status_code: StatusCode::ServiceUnavailable as i32,
                 message: e.to_string(),
             },
             PickError::RoutingFailed(msg) => Self {
-                status_code: StatusCode::ServiceUnavailable,
+                status_code: StatusCode::ServiceUnavailable as i32,
                 message: msg,
             },
             PickError::InvalidRequest(msg) => Self {
-                status_code: StatusCode::BadRequest,
+                status_code: StatusCode::BadRequest as i32,
                 message: msg,
             },
             PickError::MetadataHeadersTooLarge(err) => Self {
-                status_code: StatusCode::RequestHeaderFieldsTooLarge,
+                status_code: StatusCode::RequestHeaderFieldsTooLarge as i32,
                 message: err.to_string(),
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
             // client-safe variant message; the detailed cause is logged upstream.
             PickError::TokenizerUnavailable => Self {
-                status_code: StatusCode::ServiceUnavailable,
+                status_code: StatusCode::ServiceUnavailable as i32,
                 message: e.to_string(),
             },
             PickError::TokenizerTimeout => Self {
-                status_code: StatusCode::GatewayTimeout,
+                status_code: StatusCode::GatewayTimeout as i32,
                 message: e.to_string(),
             },
             PickError::TokenizerUpstreamError => Self {
-                status_code: StatusCode::BadGateway,
+                status_code: StatusCode::BadGateway as i32,
                 message: e.to_string(),
             },
             // In-flight limit saturated: shed as retryable backpressure. The
             // variant message ("endpoint picker overloaded") is client-safe.
             PickError::Overloaded => Self {
-                status_code: StatusCode::ServiceUnavailable,
+                status_code: StatusCode::ServiceUnavailable as i32,
                 message: e.to_string(),
+            },
+            PickError::Rejected { status, message } => Self {
+                status_code: i32::from(status),
+                message,
             },
         }
     }
 
     fn into_processing_response(self) -> ProcessingResponse {
-        envoy_helpers::build_error_response(self.status_code, Some(&self.message))
+        envoy_helpers::build_error_response_code(self.status_code, Some(&self.message))
     }
 }
 
@@ -1125,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_unary_usage_extracts_cached_tokens() {
+    fn buffered_body_usage_extracts_cached_tokens() {
         let body = br#"{
             "id": "cmpl-1",
             "choices": [],
@@ -1136,7 +1129,7 @@ mod tests {
                 "prompt_tokens_details": {"cached_tokens": 64}
             }
         }"#;
-        let usage = parse_unary_usage(body).expect("usage present");
+        let usage = ResponseEvent::from_body(body).usage.expect("usage present");
         assert_eq!(usage.prompt_tokens, Some(100));
         assert_eq!(usage.completion_tokens, Some(20));
         assert_eq!(usage.total_tokens, Some(120));
@@ -1144,105 +1137,113 @@ mod tests {
     }
 
     #[test]
-    fn parse_unary_usage_without_details_has_no_cached_tokens() {
+    fn buffered_body_usage_without_details_has_no_cached_tokens() {
         let body = br#"{"usage": {"prompt_tokens": 10, "total_tokens": 10}}"#;
-        let usage = parse_unary_usage(body).expect("usage present");
+        let usage = ResponseEvent::from_body(body).usage.expect("usage present");
         assert_eq!(usage.prompt_tokens, Some(10));
         assert_eq!(usage.cached_tokens, None);
     }
 
     #[test]
-    fn parse_unary_usage_none_when_absent_or_invalid() {
-        assert!(parse_unary_usage(br#"{"choices": []}"#).is_none());
-        assert!(parse_unary_usage(br#"{"usage": null}"#).is_none());
-        assert!(parse_unary_usage(b"not json").is_none());
+    fn buffered_body_usage_none_when_absent_or_invalid() {
+        let usage = |body: &[u8]| ResponseEvent::from_body(body).usage;
+        assert!(usage(br#"{"choices": []}"#).is_none());
+        assert!(usage(br#"{"usage": null}"#).is_none());
+        assert!(usage(b"not json").is_none());
+    }
+
+    /// The usage a whole SSE response reports.
+    fn streaming_usage(stream: &[u8]) -> Option<ResponseUsage> {
+        let mut ctx = RequestContext::new();
+        ingest_sse(&mut ctx, stream, true);
+        ctx.parsed_usage
     }
 
     #[test]
-    fn parse_streaming_usage_returns_last_event_with_usage() {
+    fn streaming_usage_returns_last_event_with_usage() {
         let chunk = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
             "data: [DONE]\n\n"
         );
-        let usage = parse_streaming_usage(chunk.as_bytes()).expect("usage present");
+        let usage = streaming_usage(chunk.as_bytes()).expect("usage present");
         assert_eq!(usage.total_tokens, Some(10));
         assert_eq!(usage.cached_tokens, Some(4));
     }
 
     #[test]
-    fn parse_streaming_usage_none_without_usage_event() {
+    fn streaming_usage_none_without_usage_event() {
         let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
-        assert!(parse_streaming_usage(chunk.as_bytes()).is_none());
+        assert!(streaming_usage(chunk.as_bytes()).is_none());
     }
 
     #[test]
-    fn ingest_streaming_usage_does_not_buffer_complete_chunks() {
+    fn ingest_sse_does_not_buffer_complete_chunks() {
         let mut ctx = RequestContext::new();
         let chunk = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
 
-        ingest_streaming_usage(&mut ctx, chunk, false);
+        ingest_sse(&mut ctx, chunk, false);
 
-        assert!(ctx.sse_usage_buf.is_empty());
+        assert!(ctx.sse_buf.is_empty());
         assert!(ctx.parsed_usage.is_none());
     }
 
     #[test]
-    fn ingest_streaming_usage_survives_split_data_event() {
+    fn ingest_sse_survives_split_data_event() {
         let mut ctx = RequestContext::new();
         let part1 = br#"data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":"#;
         let part2 = br#"4}}}"#;
         let part3 = b"\n\ndata: [DONE]\n\n";
 
-        ingest_streaming_usage(&mut ctx, part1, false);
+        ingest_sse(&mut ctx, part1, false);
         assert!(ctx.parsed_usage.is_none());
-        assert!(!ctx.sse_usage_buf.is_empty());
+        assert!(!ctx.sse_buf.is_empty());
 
-        ingest_streaming_usage(&mut ctx, part2, false);
+        ingest_sse(&mut ctx, part2, false);
         assert!(ctx.parsed_usage.is_none());
-        assert!(!ctx.sse_usage_buf.is_empty());
+        assert!(!ctx.sse_buf.is_empty());
 
-        ingest_streaming_usage(&mut ctx, part3, true);
+        ingest_sse(&mut ctx, part3, true);
         let usage = ctx.parsed_usage.expect("usage across split chunks");
         assert_eq!(usage.total_tokens, Some(10));
         assert_eq!(usage.cached_tokens, Some(4));
-        assert!(ctx.sse_usage_buf.is_empty());
+        assert!(ctx.sse_buf.is_empty());
     }
 
     #[test]
-    fn ingest_streaming_usage_keeps_incomplete_suffix_only() {
+    fn ingest_sse_keeps_incomplete_suffix_only() {
         let mut ctx = RequestContext::new();
         let chunk = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":1"
         );
-        ingest_streaming_usage(&mut ctx, chunk.as_bytes(), false);
+        ingest_sse(&mut ctx, chunk.as_bytes(), false);
         assert!(ctx.parsed_usage.is_none());
         assert_eq!(
-            std::str::from_utf8(&ctx.sse_usage_buf).unwrap(),
+            std::str::from_utf8(&ctx.sse_buf).unwrap(),
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":1"
         );
 
-        ingest_streaming_usage(&mut ctx, b"}}}\n\n", true);
+        ingest_sse(&mut ctx, b"}}}\n\n", true);
         let usage = ctx.parsed_usage.expect("usage after completing suffix");
         assert_eq!(usage.cached_tokens, Some(1));
-        assert!(ctx.sse_usage_buf.is_empty());
+        assert!(ctx.sse_buf.is_empty());
     }
 
     #[test]
-    fn ingest_streaming_usage_bounds_incomplete_buffer() {
+    fn ingest_sse_bounds_incomplete_buffer() {
         let mut ctx = RequestContext::new();
         // A very long newline-less run must not grow the buffer unboundedly.
         let huge = vec![b'x'; 128 * 1024];
-        ingest_streaming_usage(&mut ctx, &huge, false);
-        assert!(ctx.sse_usage_buf.len() <= 64 * 1024);
+        ingest_sse(&mut ctx, &huge, false);
+        assert!(ctx.sse_buf.len() <= 64 * 1024);
 
         // Once a real usage event completes afterward, it is still parsed.
         let tail = concat!(
             "\n\n",
             "data: {\"choices\":[],\"usage\":{\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n"
         );
-        ingest_streaming_usage(&mut ctx, tail.as_bytes(), true);
+        ingest_sse(&mut ctx, tail.as_bytes(), true);
         let usage = ctx.parsed_usage.expect("usage after oversized run");
         assert_eq!(usage.cached_tokens, Some(4));
     }
@@ -1651,7 +1652,25 @@ mod tests {
     #[test]
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
-        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+        assert_eq!(err.status_code, StatusCode::ServiceUnavailable as i32);
+    }
+
+    /// #14638: a routing-pipeline rejection reaches Envoy with the frontend's
+    /// status, including 529, which Envoy's `StatusCode` enum does not name.
+    #[test]
+    fn rejected_pick_error_keeps_the_frontend_status() {
+        let err = ExtProcError::from_pick_error(PickError::Rejected {
+            status: 529,
+            message: "Service temporarily overloaded".to_string(),
+        });
+        let response = err.into_processing_response();
+        let Some(crate::proto::envoy::service::ext_proc::v3::processing_response::Response::ImmediateResponse(immediate)) =
+            response.response
+        else {
+            panic!("a rejection is an immediate response");
+        };
+        assert_eq!(immediate.status.unwrap().code, 529);
+        assert_eq!(immediate.body, b"Service temporarily overloaded");
     }
 
     #[test]
@@ -1659,7 +1678,10 @@ mod tests {
         let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(
             dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
         ));
-        assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
+        assert_eq!(
+            err.status_code,
+            StatusCode::RequestHeaderFieldsTooLarge as i32
+        );
     }
 
     /// Cache salt is injected as a top-level field and tagged with the Dynamo

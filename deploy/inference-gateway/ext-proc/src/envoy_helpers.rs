@@ -299,13 +299,17 @@ pub fn build_response_trailer_response() -> ProcessingResponse {
 
 /// Build an ImmediateResponse for error cases.
 pub fn build_error_response(status_code: StatusCode, body: Option<&str>) -> ProcessingResponse {
+    build_error_response_code(status_code.into(), body)
+}
+
+/// [`build_error_response`] for a raw HTTP status, including statuses outside
+/// Envoy's `StatusCode` enum such as 529.
+pub fn build_error_response_code(status_code: i32, body: Option<&str>) -> ProcessingResponse {
     ProcessingResponse {
         response: Some(
             crate::proto::envoy::service::ext_proc::v3::processing_response::Response::ImmediateResponse(
                 ImmediateResponse {
-                    status: Some(HttpStatus {
-                        code: status_code.into(),
-                    }),
+                    status: Some(HttpStatus { code: status_code }),
                     body: body.map(|b| b.as_bytes().to_vec()).unwrap_or_default(),
                     ..Default::default()
                 },

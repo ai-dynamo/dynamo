@@ -45,6 +45,7 @@ pub use frontend_extension::{
     validate_extension_route_path,
 };
 pub use metrics::Metrics;
+pub use openai::{client_error_response, preprocessed_request_context};
 
 use crate::{
     preprocessor::OpenAIPreprocessor,
