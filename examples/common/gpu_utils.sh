@@ -249,51 +249,17 @@ _gpu_utils_self_test() {
     _assert "trtllm passthrough" '{"return_perf_metrics": true}' "$result"
 
     # Regression: nested event settings must not discard profiling memory limits.
-    local budget_key budget_env
-    for budget_key in max_tokens max_gpu_total_bytes; do
-        if [[ "$budget_key" == max_tokens ]]; then
-            budget_env=_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS
-        else
-            budget_env=_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES
-        fi
-        echo ""
-        echo "=== trtllm: merge $budget_key with KV events ==="
-        result=$(
-            export "$budget_env=2048"
-            build_trtllm_override_args_with_mem --merge-with-json \
-                "{\"kv_cache_config\": {\"$budget_key\": 4096, \"enable_block_reuse\": true, \"kv_events_config\": {\"enable_kv_cache_events\": true, \"endpoint\": \"tcp://*:5557\"}}, \"guided_decoding_backend\": \"xgrammar\"}"
-        )
-        result=$(python3 - "$result" "$budget_key" <<'PYTHON'
-import json
-import sys
+    echo ""
+    echo "=== trtllm: merge token cap with KV events ==="
+    result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=2048 \
+        build_trtllm_override_args_with_mem --merge-with-json '{"kv_cache_config": {"max_tokens": 4096, "enable_block_reuse": true, "kv_events_config": {"enable_kv_cache_events": true, "endpoint": "tcp://127.0.0.1:5557"}}, "guided_decoding_backend": "xgrammar"}')
+    _assert "trtllm nested token merge" '{"kv_cache_config": {"max_tokens": 2048, "enable_block_reuse": true, "kv_events_config": {"enable_kv_cache_events": true, "endpoint": "tcp://127.0.0.1:5557"}}, "guided_decoding_backend": "xgrammar"}' "$result"
 
-
-def unique_keys(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"Duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
-config = json.loads(sys.argv[1], object_pairs_hook=unique_keys)
-expected = {
-    "kv_cache_config": {
-        sys.argv[2]: 2048,
-        "enable_block_reuse": True,
-        "kv_events_config": {
-            "enable_kv_cache_events": True,
-            "endpoint": "tcp://*:5557",
-        },
-    },
-    "guided_decoding_backend": "xgrammar",
-}
-print(config == expected)
-PYTHON
-        )
-        _assert "trtllm nested $budget_key merge" "True" "$result"
-    done
+    echo ""
+    echo "=== trtllm: merge byte cap with KV events ==="
+    result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES=2048 \
+        build_trtllm_override_args_with_mem --merge-with-json '{"kv_cache_config": {"max_gpu_total_bytes": 4096, "enable_block_reuse": true, "kv_events_config": {"enable_kv_cache_events": true, "endpoint": "tcp://127.0.0.1:5557"}}, "guided_decoding_backend": "xgrammar"}')
+    _assert "trtllm nested byte merge" '{"kv_cache_config": {"max_gpu_total_bytes": 2048, "enable_block_reuse": true, "kv_events_config": {"enable_kv_cache_events": true, "endpoint": "tcp://127.0.0.1:5557"}}, "guided_decoding_backend": "xgrammar"}' "$result"
 
     echo ""
     echo "=========================================="

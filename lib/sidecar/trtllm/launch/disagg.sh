@@ -118,15 +118,7 @@ trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"
 # also need a guided-decoding backend to enforce a required or named tool_choice.
 TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
 build_trtllm_override_args_with_mem \
-    --merge-with-json "$(cat <<EOF
-{
-  "cache_transceiver_config": {
-    "backend": "${TRTLLM_CACHE_TRANSCEIVER_BACKEND}"
-  },
-  "guided_decoding_backend": "xgrammar"
-}
-EOF
-)" \
+    --merge-with-json "{\"cache_transceiver_config\": {\"backend\": \"${TRTLLM_CACHE_TRANSCEIVER_BACKEND}\"}, \"guided_decoding_backend\": \"xgrammar\"}" \
     > "$TRTLLM_EXTRA_CONFIG"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"

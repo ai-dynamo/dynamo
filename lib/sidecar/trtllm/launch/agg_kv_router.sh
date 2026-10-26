@@ -37,8 +37,8 @@ while [[ $# -gt 0 ]]; do
             echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                   Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  TRTLLM_PYTHON           Python with TensorRT-LLM installed (default: python3)"
-            echo "  TRTLLM_WORKER1_GPU      First GPU (default: 0)"
-            echo "  TRTLLM_WORKER2_GPU      Second GPU (default: 1)"
+            echo "  TRTLLM_WORKER1_GPU      First GPU (default: inherited device 1, otherwise 0)"
+            echo "  TRTLLM_WORKER2_GPU      Second GPU (default: inherited device 2, otherwise 1)"
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1        First sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2        Second sidecar system port (default: 8082)"
@@ -56,16 +56,26 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+IFS=, read -r -a visible_gpus <<< "${CUDA_VISIBLE_DEVICES-0,1}"
+for worker in 1 2; do
+    gpu_var="TRTLLM_WORKER${worker}_GPU"
+    if [[ -z "${!gpu_var:-}" ]]; then
+        gpu="${visible_gpus[worker - 1]:-}"
+        if [[ -z "$gpu" ]]; then
+            echo "Missing GPU for worker ${worker}: extend CUDA_VISIBLE_DEVICES or set ${gpu_var}." >&2
+            exit 1
+        fi
+        printf -v "$gpu_var" '%s' "$gpu"
+    fi
+done
+
 resolve_sidecar trtllm SIDECAR_CMD
 
-TRTLLM_EXTRA_CONFIG_1=""
-TRTLLM_EXTRA_CONFIG_2=""
+TRTLLM_CONFIG_FILES=()
 trtllm_exit_trap() {
     local rc=$?
-    for config in "$TRTLLM_EXTRA_CONFIG_1" "$TRTLLM_EXTRA_CONFIG_2"; do
-        if [[ -n "$config" ]]; then
-            rm -f -- "$config"
-        fi
+    for config in "${TRTLLM_CONFIG_FILES[@]}"; do
+        rm -f -- "$config"
     done
     echo "Cleaning up..."
     dynamo_reap_and_exit "$rc"
@@ -75,18 +85,14 @@ trap trtllm_exit_trap EXIT
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_WORKER1_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${TRTLLM_WORKER1_GRPC_PORT:-30001}")
 TRTLLM_WORKER2_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${TRTLLM_WORKER2_GRPC_PORT:-30011}")
-TRTLLM_WORKER1_KV_EVENT_PORT="${TRTLLM_WORKER1_KV_EVENT_PORT:-5557}"
-TRTLLM_WORKER2_KV_EVENT_PORT="${TRTLLM_WORKER2_KV_EVENT_PORT:-5558}"
-TRTLLM_WORKER1_GPU="${TRTLLM_WORKER1_GPU:-0}"
-TRTLLM_WORKER2_GPU="${TRTLLM_WORKER2_GPU:-1}"
+TRTLLM_WORKER1_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${TRTLLM_WORKER1_KV_EVENT_PORT:-5557}")
+TRTLLM_WORKER2_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${TRTLLM_WORKER2_KV_EVENT_PORT:-5558}")
 
 # Reject config overrides that would replace required engine settings.
 for arg in "${EXTRA_ARGS[@]}"; do
     case "$arg" in
         --extra_llm_api_options|--extra_llm_api_options=*|--config|--config=*)
-            echo "Cannot forward ${arg%%=*}: this launcher needs it for" >&2
-            echo "guided_decoding_backend. Add 'guided_decoding_backend: xgrammar'" >&2
-            echo "to your file and run the engine yourself." >&2
+            echo "Cannot forward ${arg%%=*}: this launcher supplies per-worker engine configs." >&2
             exit 1
             ;;
     esac
@@ -97,9 +103,9 @@ trtllm_resolve_context_length "${EXTRA_ARGS[@]}"
 trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"
 
 for worker in 1 2; do
-    config_var="TRTLLM_EXTRA_CONFIG_${worker}"
     port_var="TRTLLM_WORKER${worker}_KV_EVENT_PORT"
-    printf -v "$config_var" '%s' "$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-agg-kv.XXXXXX.yaml")"
+    config=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-agg-kv.XXXXXX.yaml")
+    TRTLLM_CONFIG_FILES+=("$config")
     build_trtllm_override_args_with_mem \
         --merge-with-json "$(cat <<EOF
 {
@@ -116,7 +122,7 @@ for worker in 1 2; do
 }
 EOF
 )" \
-        > "${!config_var}"
+        > "$config"
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -128,7 +134,6 @@ python3 -m dynamo.frontend --router-mode kv &
 for worker in 1 2; do
     gpu_var="TRTLLM_WORKER${worker}_GPU"
     grpc_var="TRTLLM_WORKER${worker}_GRPC_PORT"
-    config_var="TRTLLM_EXTRA_CONFIG_${worker}"
     system_var="DYN_SYSTEM_PORT${worker}"
     system_port="${!system_var:-$((8080 + worker))}"
     CUDA_VISIBLE_DEVICES="${!gpu_var}" \
@@ -136,7 +141,7 @@ for worker in 1 2; do
         --grpc --grpc-protocol openengine --openengine-enable-load-metrics \
         --host 127.0.0.1 --port "${!grpc_var}" \
         "${TRTLLM_MAX_SEQ_LEN_ARGS[@]}" \
-        --extra_llm_api_options "${!config_var}" "${EXTRA_ARGS[@]}" &
+        --extra_llm_api_options "${TRTLLM_CONFIG_FILES[worker - 1]}" "${EXTRA_ARGS[@]}" &
     DYN_SYSTEM_PORT="$system_port" "${SIDECAR_CMD[@]}" \
         --grpc-endpoint "127.0.0.1:${!grpc_var}" --model-path "$MODEL" \
         "${TRTLLM_CONTEXT_LENGTH_ARGS[@]}" &
