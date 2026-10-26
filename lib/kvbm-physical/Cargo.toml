@@ -3,7 +3,8 @@
 
 [package]
 name = "kvbm-physical"
-version = "1.6.0"
+version = "1.7.0"
+description = "Physical layout and transfer management for KV cache block storage"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

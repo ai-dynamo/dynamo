@@ -153,7 +153,9 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 
 > [!WARNING]
 > **Experimental. Development clusters only.** The unfinished DGDR v1beta2 schemas are disabled by
-> default. To install them for API development, add
+> default. The `1.2.1` chart shown above does not support this feature gate. To test the API before
+> a supporting release is available, use a development chart built from the current `main` branch
+> and add
 > `--set "dynamo-operator.dgdrV1Beta2.enabled=true"` to the Helm command.
 > The flag adds the v1beta2 `DynamoGraphDeploymentRequest` schema and installs the
 > `DynamoGraphDeploymentRun` and `DynamoGraphDeploymentCandidate` Custom Resource Definitions
@@ -163,10 +165,6 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > Kubernetes persists Run and Candidate objects in etcd. Because the schemas are not finalized,
 > later schema changes can make stored objects unreadable or prevent a CRD upgrade. Do not enable
 > this API on production or shared clusters.
->
-> Disabling the flag on a later Helm upgrade stops updating the experimental schemas but does not
-> delete CRDs that were previously installed. Remove those CRDs manually only after confirming
-> that they contain no resources.
 
 > [!TIP]
 > **Shared/Multi-Tenant Clusters**: If a cluster-wide Dynamo operator is already running, do **not** install another one. Check with:

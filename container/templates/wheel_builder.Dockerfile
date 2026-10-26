@@ -39,6 +39,7 @@ WORKDIR /workspace
 # targets that build no wheels. runtime_wheel_builder populates it post-build.
 RUN mkdir -p /opt/dynamo/rust-licenses
 {% if device == "xpu" or device == "cpu" %}
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl ca-certificates zip unzip git lsb-release numactl wget vim \
@@ -47,7 +48,11 @@ RUN apt clean && apt-get update -y && \
     libxext6 \
     libgl1 \
     libaio-dev \
-    linux-libc-dev
+    linux-libc-dev && \
+    . /etc/os-release && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge "20260816ubuntu0.${VERSION_ID}.1"
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
 {% endif %}
 
 {% if device == "cuda" %}
@@ -112,6 +117,11 @@ RUN apt-get update -y \
 {% endif %}
 
 {% if device == "cuda" %}
+# Keep the CA floor in this RUN so its version participates in the layer cache key.
+# dnf fails when no package at or above the floor is available.
+RUN dnf -y --setopt=tsflags=nocontexts install 'ca-certificates >= 2026.2.92_v9.0.319-81.3.el8_10' && \
+    dnf clean all
+
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
 # --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux

@@ -47,7 +47,9 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
+ARG NATS_COMMIT={{ context.dynamo.nats_commit }}
 ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
+ARG ETCD_COMMIT={{ context.dynamo.etcd_commit }}
 
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
@@ -94,8 +96,10 @@ ARG PLANNER_PYTHON_VERSION={{ context.dynamo.planner_python_version }}
 
 {% if framework == "vllm" -%}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
-ARG TRANSFORMERS_VERSION={{ context.vllm.transformers_version }}
-ARG TOKENIZERS_VERSION={{ context.vllm.tokenizers_version }}
+{% if context.vllm[device_key].transformers_version is defined -%}
+ARG TRANSFORMERS_VERSION={{ context.vllm[device_key].transformers_version }}
+ARG TOKENIZERS_VERSION={{ context.vllm[device_key].tokenizers_version }}
+{% endif -%}
 ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
 {% if device == "cuda" -%}

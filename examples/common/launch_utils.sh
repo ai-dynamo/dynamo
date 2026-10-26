@@ -118,6 +118,7 @@ dyn_worker_ports() {
             HTTP) prefix=DYN_ENGINE_HTTP_PORT ;;
             GRPC) prefix=DYN_ENGINE_GRPC_PORT ;;
             KV_EVENT) prefix=DYN_VLLM_KV_EVENT_PORT ;;
+            KV_REPLAY) prefix=DYN_VLLM_KV_REPLAY_PORT ;;
             NIXL_SIDE_CHANNEL) prefix=DYN_VLLM_NIXL_SIDE_CHANNEL_PORT ;;
             *)
                 echo "Unknown port kind for ${name}: ${spec}" >&2

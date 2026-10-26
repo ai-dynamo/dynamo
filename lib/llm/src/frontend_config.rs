@@ -8,6 +8,8 @@
 //! them by domain so each service consumes an explicit typed contract. Defaults
 //! read the legacy environment variables only for direct Rust/non-Python callers.
 
+use std::sync::LazyLock;
+
 use dynamo_runtime::config::{
     env_is_truthy,
     environment_names::llm::{self as env_llm, metrics as env_metrics},
@@ -15,6 +17,10 @@ use dynamo_runtime::config::{
 };
 
 use crate::reasoning_field::ReasoningField;
+
+/// Process-wide strict-schema policy, initialized before the HTTP service accepts requests.
+pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION));
 
 /// Metrics naming controls for frontend-owned services.
 ///
