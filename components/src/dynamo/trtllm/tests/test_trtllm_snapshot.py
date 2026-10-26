@@ -37,6 +37,7 @@ def _snapshot_config(**overrides):
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "encode_endpoint": "",
         "frontend_decoding": False,
+        "has_connector": lambda name: False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -100,6 +101,7 @@ def test_snapshot_prefetch_skips_external_model_loader():
         ),
         ({"encode_endpoint": "dyn://ns.encode.generate"}, "--encode-endpoint"),
         ({"frontend_decoding": True}, "--frontend-decoding"),
+        ({"has_connector": lambda name: name == "kvbm"}, "--connector kvbm"),
     ],
 )
 def test_snapshot_config_rejects_paths_that_can_create_pre_restore_state(

@@ -250,6 +250,8 @@ def test_config_rejects_removed_kvbm_connector(monkeypatch):
     monkeypatch.delenv("DYN_CONNECTOR", raising=False)
     config_none = parse_args(["--connector", "none"])
     assert config_none.connector == ["none"]
+    assert config_none.has_connector("none") is True
+    assert config_none.has_connector("kvbm") is False
 
     with pytest.raises(ValueError, match="KVBM integration has been removed"):
         parse_args(["--connector", "kvbm"])
@@ -603,6 +605,7 @@ async def test_init_llm_worker_engine_args_without_overrides(
         assert engine_args["max_batch_size"] == config.max_batch_size
         assert engine_args["return_perf_metrics"] is False
         assert engine_args["enable_iter_perf_stats"] is expected_iter_perf_stats
+        assert engine_args["kv_connector_config"] is None
 
 
 @pytest.mark.asyncio
