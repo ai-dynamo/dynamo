@@ -62,6 +62,23 @@ EOF
     esac
 done
 
+# Validate every managed rendezvous port before starting any worker. Falling back
+# to SGLang's free-port probe here would reintroduce the bind race.
+NCCL_PORTS=()
+if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+    for i in $(seq 1 "${NUM_WORKERS}"); do
+        NCCL_PORT_VAR="DYN_SYSTEM_PORT$((NUM_WORKERS + i))"
+        NCCL_PORT="${!NCCL_PORT_VAR:-}"
+        # Bound the digit count before arithmetic to avoid integer overflow.
+        if [[ ! "${NCCL_PORT}" =~ ^[0-9]{1,5}$ ]] \
+            || (( 10#${NCCL_PORT} < 1 || 10#${NCCL_PORT} > 65535 )); then
+            echo "Invalid managed NCCL port ${NCCL_PORT_VAR}: ${NCCL_PORT:-<unset>}; expected 1-5 decimal digits in 1..65535" >&2
+            exit 1
+        fi
+        NCCL_PORTS+=("$((10#${NCCL_PORT}))")
+    done
+fi
+
 print_launch_banner --multimodal --no-curl \
     "MM Exact Routing (SGLang)" "${MODEL}" "${HTTP_PORT}" \
     "NUM_WORKERS:  ${NUM_WORKERS}" \
@@ -96,6 +113,8 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 # Per-worker DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i} come from the test
 # harness for parallel runs; standalone runs fall back to the script's port bases.
+# Under DYN_MANAGED_PORTS, worker i uses spare DYN_SYSTEM_PORT{NUM_WORKERS+i} as --nccl-port;
+# SGLang's own free-port probe races torch.distributed's bind (sporadic EADDRINUSE).
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
@@ -109,7 +128,14 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 
     KV_EVENTS_CONFIG="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
 
-    echo "--- launching SGLang worker $i (GPU=${GPU_ID}, system_port=${WORKER_PORT}, kv_events=tcp://*:${KV_EVENTS_PORT}) ---"
+    NCCL_PORT="sglang-default"
+    NCCL_PORT_ARGS=()
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        NCCL_PORT="${NCCL_PORTS[i-1]}"
+        NCCL_PORT_ARGS=(--nccl-port "${NCCL_PORT}")
+    fi
+
+    echo "--- launching SGLang worker $i (GPU=${GPU_ID}, system_port=${WORKER_PORT}, kv_events=tcp://*:${KV_EVENTS_PORT}, nccl_port=${NCCL_PORT}) ---"
     env "${COMMON_ENV[@]}" \
         "DYN_SYSTEM_PORT=${WORKER_PORT}" \
         "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
@@ -124,6 +150,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         --enable-metrics \
         --disable-piecewise-cuda-graph \
+        ${NCCL_PORT_ARGS[@]+"${NCCL_PORT_ARGS[@]}"} \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
 done
 

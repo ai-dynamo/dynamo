@@ -4,6 +4,7 @@
 //! HTTP regressions for validation performed by protocol adapters.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
@@ -12,8 +13,9 @@ use dynamo_llm::{
 };
 use dynamo_runtime::{
     config::environment_names::llm::{
-        DYN_DISABLE_FRONTEND_NVEXT, DYN_ENABLE_ANTHROPIC_API,
-        DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+        DYN_DISABLE_FRONTEND_NVEXT, DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
+        DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+        DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
     },
     error::{DynamoError, ErrorType as DynamoErrorType},
 };
@@ -32,10 +34,11 @@ mod scripted_chat_engine;
 use http_harness::{HarnessService, MODEL, load_agent_fixture};
 use scripted_chat_engine::{Script, ScriptedChatEngine};
 
-const BASE_ENV: [(&str, Option<&str>); 3] = [
+const BASE_ENV: [(&str, Option<&str>); 4] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
     (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
+    (DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, None),
 ];
 
 fn nvext_disabled_env() -> Vec<(&'static str, Option<&'static str>)> {
@@ -44,13 +47,20 @@ fn nvext_disabled_env() -> Vec<(&'static str, Option<&'static str>)> {
     env
 }
 
-async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Response {
-    svc.client
-        .post(format!("{}{path}", svc.base_url))
-        .json(&body)
-        .send()
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn bounded<F: std::future::Future>(future: F) -> F::Output {
+    tokio::time::timeout(HTTP_TIMEOUT, future)
         .await
-        .unwrap()
+        .expect("HTTP operation exceeded HTTP_TIMEOUT")
+}
+
+async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Response {
+    let request = svc
+        .client
+        .post(format!("{}{path}", svc.base_url))
+        .json(&body);
+    bounded(request.send()).await.unwrap()
 }
 
 #[derive(Clone, Copy)]
@@ -298,6 +308,378 @@ fn tool_name_requests(name: &str) -> [(&'static str, Value, bool); 3] {
             false,
         ),
     ]
+}
+
+fn strict_tool_requests(function: Value) -> [(&'static str, Value); 3] {
+    let mut flat = function.clone();
+    flat["type"] = json!("function");
+    [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": MODEL, "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{"type": "function", "function": function}]
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": MODEL, "input": "ping", "tools": [flat]
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": MODEL, "input": "ping", "tools": [{
+                    "type": "namespace", "name": "utilities", "description": "Utility functions",
+                    "tools": [flat]
+                }]
+            }),
+        ),
+    ]
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_rejected_before_dispatch() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        for (path, body) in strict_tool_requests(json!({
+            "name": "search", "strict": true, "parameters": {
+                "type": "object", "properties": {"query": {"type": "string", "minLength": 1}}
+            }
+        })) {
+            for stream in [false, true] {
+                for choice in [
+                    json!("auto"),
+                    json!("none"),
+                    json!({
+                        "type": "allowed_tools", "mode": "auto",
+                        "tools": [{"type": "function", "name": "retained"}]
+                    }),
+                ] {
+                    if choice.is_object() && path != "/v1/responses" {
+                        continue;
+                    }
+                    let mut body = body.clone();
+                    body["stream"] = json!(stream);
+                    if choice.is_object() {
+                        body["tools"].as_array_mut().unwrap().push(json!({
+                            "type": "function", "name": "retained"
+                        }));
+                    }
+                    body["tool_choice"] = choice;
+                    let response = post_json(&svc, path, body).await;
+                    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                    let error: Value = bounded(response.json()).await.unwrap();
+                    assert_eq!(error["code"], 400);
+                    assert_eq!(error["type"], "Bad Request");
+                    let message = error["message"].as_str().unwrap();
+                    let prefix = if path == "/v1/responses" {
+                        "Failed to convert responses request: "
+                    } else {
+                        "Validation: "
+                    };
+                    assert!(message.starts_with(prefix), "{message}");
+                    assert!(
+                        message.contains("Invalid schema for function 'search': In context="),
+                        "{message}"
+                    );
+                    assert!(message.contains("additionalProperties"), "{message}");
+                    assert!(svc.engine.take_requests().await.is_empty());
+                }
+            }
+        }
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            assert_error_metrics(
+                &svc,
+                &Endpoint::Responses,
+                &request_type,
+                &[(ErrorType::Validation, 6), (ErrorType::Internal, 0)],
+            );
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+// The process-wide startup policy needs a fresh process for opt-in cases.
+async fn run_compatibility_subprocess(test_name: &str) -> bool {
+    const CHILD: &str = "DYNAMO_STRICT_SCHEMA_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        return false;
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(45),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD, test_name)
+            .env(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("compatibility subprocess must finish")
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "compatibility subprocess failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+        "subprocess must execute the selected test: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    true
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_compatibility_preserves_submitted_functions_across_adapters() {
+    let parameters = json!({
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "value": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+            "options": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "default": 5}}
+            }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    });
+    if run_compatibility_subprocess(
+        "strict_tool_schema_compatibility_preserves_submitted_functions_across_adapters",
+    )
+    .await
+    {
+        temp_env::async_with_vars(BASE_ENV, async {
+            let svc = HarnessService::start(Vec::new()).await;
+            temp_env::async_with_vars(
+                [(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, Some("1"))],
+                async {
+                    let response = post_json(
+                        &svc,
+                        "/v1/messages",
+                        json!({
+                            "model": MODEL, "max_tokens": 64,
+                            "messages": [{"role": "user", "content": "ping"}],
+                            "tools": [{"name": "search", "strict": true, "input_schema": parameters}]
+                        }),
+                    )
+                    .await;
+                    assert_anthropic_error(response, ExpectedError::Validation, "must include property").await;
+                    assert!(svc.engine.take_requests().await.is_empty());
+                },
+            )
+            .await;
+            svc.shutdown().await;
+        })
+        .await;
+        return;
+    }
+
+    let function = json!({"name": "search", "strict": true, "parameters": parameters});
+    let mut requests = strict_tool_requests(function).to_vec();
+    requests.push((
+        "/v1/messages",
+        json!({
+            "model": MODEL, "max_tokens": 64,
+            "messages": [{"role": "user", "content": "ping"}],
+            "tools": [{"name": "search", "strict": true, "input_schema": parameters}]
+        }),
+    ));
+
+    let script = load_agent_fixture("text.sse").await.unwrap();
+    let mut env = BASE_ENV;
+    env.iter_mut()
+        .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
+        .unwrap()
+        .1 = Some("1");
+    temp_env::async_with_vars(env, async {
+        let svc = HarnessService::start(vec![script; requests.len()]).await;
+        temp_env::async_with_vars(
+            [(DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, None::<&str>)],
+            async {
+                for (path, body) in requests {
+                    let response = post_json(&svc, path, body).await;
+                    assert_eq!(response.status(), reqwest::StatusCode::OK);
+                    bounded(response.bytes()).await.unwrap();
+                    let requests = svc.engine.take_requests().await;
+                    assert_eq!(requests.len(), 1);
+                    let tools = requests[0].inner.tools.as_ref().unwrap();
+                    assert_eq!(tools.len(), 1);
+                    assert_eq!(tools[0].function.name, "search");
+                    assert_eq!(tools[0].function.strict, Some(true));
+                    assert_eq!(tools[0].function.parameters.as_ref(), Some(&parameters));
+                }
+            },
+        )
+        .await;
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_compatibility_retains_basic_validation() {
+    if run_compatibility_subprocess("strict_tool_schema_compatibility_retains_basic_validation")
+        .await
+    {
+        return;
+    }
+    let mut env = BASE_ENV;
+    env.iter_mut()
+        .find(|(name, _)| *name == DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION)
+        .unwrap()
+        .1 = Some("1");
+    temp_env::async_with_vars(env, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        for (function, message) in [
+            (
+                json!({"name": "invalid name", "strict": true, "parameters": {}}),
+                "invalid name",
+            ),
+            (
+                json!({"name": "search", "strict": true, "parameters": []}),
+                "must be a JSON Schema object",
+            ),
+        ] {
+            for (path, body) in strict_tool_requests(function) {
+                let response = post_json(&svc, path, body).await;
+                assert_openai_error(response, ExpectedError::Validation, message).await;
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_diagnostics_are_bounded() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        let name = "x".repeat(1 << 20);
+        for (path, body) in strict_tool_requests(json!({
+            "name": "search", "strict": true, "parameters": {
+                "type": "object", "additionalProperties": false, "properties": {name: true}
+            }
+        })) {
+            for stream in [false, true] {
+                let mut body = body.clone();
+                body["stream"] = json!(stream);
+                let response = post_json(&svc, path, body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                let bytes = bounded(response.bytes()).await.unwrap();
+                assert!(bytes.len() <= 4096, "error body is {} bytes", bytes.len());
+                let error: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(error["code"], 400);
+                let message = error["message"].as_str().unwrap();
+                assert!(message.contains("In context=#/required"));
+                assert!(message.contains("must include property"));
+                assert!(message.contains("..."));
+                assert!(svc.engine.take_requests().await.is_empty());
+            }
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_reference_chain_completes() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let count = 16_000;
+        let mut definitions = serde_json::Map::new();
+        for i in 0..count {
+            definitions.insert(
+                format!("n{i:05}"),
+                json!({"type": "object", "$ref": format!("#/$defs/n{:05}", i + 1)}),
+            );
+        }
+        definitions.insert(
+            format!("n{count:05}"),
+            json!({"type": "object", "additionalProperties": false}),
+        );
+        let parameters = json!({"$ref": "#/$defs/n00000", "$defs": definitions});
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script]).await;
+        let started = Instant::now();
+        let response = post_json(
+            &svc,
+            "/v1/responses",
+            json!({
+                "model": MODEL, "input": "ping", "tools": [{
+                    "type": "function", "name": "search", "strict": true, "parameters": parameters
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        bounded(response.bytes()).await.unwrap();
+        assert!(
+            started.elapsed() < HTTP_TIMEOUT,
+            "reference-chain request exceeded HTTP_TIMEOUT"
+        );
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].inner.tools.as_ref().unwrap()[0]
+                .function
+                .parameters
+                .as_ref()
+                == Some(&parameters)
+        );
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_acceptance_preserves_submitted_functions() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let valid = json!({"type": "object", "properties": {"query": {"type": "string", "minLength": 1}}, "required": ["query"], "additionalProperties": false});
+        let loose = json!({"type": "object", "properties": {"query": {"type": "string"}}});
+        let mut functions = vec![json!({"name": "search", "strict": true, "parameters": valid})];
+        for strict in [None, Some(json!(false))] {
+            let mut function = json!({"name": "search", "parameters": loose});
+            if let Some(strict) = strict { function["strict"] = strict; }
+            functions.push(function);
+        }
+        functions.push(json!({"name": "search", "strict": true}));
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; functions.len() * 6]).await;
+        for function in functions {
+            for (path, body) in strict_tool_requests(function.clone()) {
+                for stream in [false, true] {
+                    let mut body = body.clone();
+                    body["stream"] = json!(stream);
+                    let response = post_json(&svc, path, body).await;
+                    assert_eq!(response.status(), reqwest::StatusCode::OK);
+                    bounded(response.bytes()).await.unwrap();
+                    let requests = svc.engine.take_requests().await;
+                    assert_eq!(requests.len(), 1);
+                    let tools = requests[0].inner.tools.as_ref().unwrap();
+                    assert_eq!(tools.len(), 1);
+                    let actual = &tools[0].function;
+                    assert_eq!(actual.name, "search");
+                    assert_eq!(actual.strict, function["strict"].as_bool());
+                    assert_eq!(actual.parameters.as_ref(), function.get("parameters"));
+                }
+            }
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    }).await;
 }
 
 fn dynamo_error(error_type: DynamoErrorType, message: &str) -> anyhow::Error {
@@ -663,6 +1045,51 @@ async fn anthropic_handler_errors_record_classification_with_response() {
     .await;
 }
 
+/// Invalid keys must produce HTTP 400 before generation, including before HTTP
+/// 200 streaming headers can be committed for a streaming request.
+#[tokio::test]
+#[serial]
+async fn completion_endpoints_reject_invalid_logit_bias_keys() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for stream in [false, true] {
+            for (path, body) in [
+                (
+                    "/v1/chat/completions",
+                    json!({
+                        "model": MODEL,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": stream,
+                        "logit_bias": {"not-a-token": 1.0}
+                    }),
+                ),
+                (
+                    "/v1/completions",
+                    json!({
+                        "model": MODEL,
+                        "prompt": "ping",
+                        "stream": stream,
+                        "logit_bias": {"not-a-token": 1.0}
+                    }),
+                ),
+            ] {
+                let response = post_json(&svc, path, body).await;
+                assert_openai_error(
+                    response,
+                    ExpectedError::Validation,
+                    "Logit bias key must be a non-negative 32-bit integer token id",
+                )
+                .await;
+            }
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 // `reqwest::send` completes when response headers arrive. A 400 for `stream: true`
 // proves converted-request validation ran before the HTTP 200 SSE response was committed.
 #[tokio::test]
@@ -719,6 +1146,41 @@ async fn converted_validation_errors_are_returned_before_streaming_headers() {
 
 #[tokio::test]
 #[serial]
+async fn responses_auto_tool_choice_without_tools_reaches_backend() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 4]).await;
+
+        for tools in [Value::Null, json!([])] {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "tool_choice": "auto",
+                    "stream": stream
+                });
+                if !tools.is_null() {
+                    body["tools"] = tools.clone();
+                }
+                let response = post_json(&svc, "/v1/responses", body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                bounded(response.bytes()).await.unwrap();
+
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].inner.tools.is_none());
+                assert!(requests[0].inner.tool_choice.is_none());
+            }
+        }
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
     temp_env::async_with_vars(BASE_ENV, async {
         let svc = HarnessService::start(Vec::new()).await;
@@ -741,6 +1203,32 @@ async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
             let response = post_json(&svc, "/v1/responses", body).await;
             assert_openai_error(response, ExpectedError::Validation, message).await;
         }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn chat_completions_reject_empty_tools() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        let body = json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 10,
+            "tools": []
+        });
+        let response = post_json(&svc, "/v1/chat/completions", body).await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "tools array cannot be empty; omit the field entirely to disable tool use",
+        )
+        .await;
 
         assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;

@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -57,7 +58,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}
 	)
 
-	tests := []struct {
+	type dcdAdmissionTestCase struct {
 		name               string
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
@@ -69,10 +70,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantWarnings       []string
 		wantPodAnnotations map[string]string
 		wantRoleReplicas   map[string]int32
-	}{
+	}
+	tests := []dcdAdmissionTestCase{
 		{name: "DGD-owned vLLM multi-GPU automatic candidate is admitted without checkpointRef", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
-			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: k8sptr.To(true)}}
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
 			dcd.Spec.PodTemplate.Annotations = map[string]string{
 				consts.RestoreCandidateSourceKindAnnotation: consts.RestoreCandidateSourceSnapshotJob,
 				consts.CheckpointNameAnnotation:             "capture-job",
@@ -82,8 +84,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{name: "DGD-owned SGLang multi-GPU checkpointRef restore is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionSGLangBackend)
-			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: k8sptr.To(true)}}
-			dcd.Spec.Experimental.Checkpoint.CheckpointRef = k8sptr.To("existing-snapshot")
+			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
+			dcd.Spec.Experimental.Checkpoint.CheckpointRef = new("existing-snapshot")
 		})},
 		{name: "TRT-LLM snapshot failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
@@ -278,7 +280,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
 		},
 		{name: "native sidecar with regular frontend", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.FrontendSidecar = k8sptr.To("http-frontend")
+			c.FrontendSidecar = new("http-frontend")
 			c.PodTemplate.Spec.Containers = append(c.PodTemplate.Spec.Containers, corev1.Container{Name: "http-frontend", Image: "frontend:1.5.0"})
 		})},
 		// Baseline schema and webhook behavior.
@@ -322,8 +324,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
 				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
-					{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: k8sptr.To(int32(2))},
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: new(int32(1))},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: new(int32(2))},
 				}
 			}),
 			wantWebhookErrs: []string{
@@ -590,7 +592,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
 						Enabled:       true,
-						CheckpointRef: k8sptr.To("frontend-snapshot"),
+						CheckpointRef: new("frontend-snapshot"),
 					},
 				}
 			}),
@@ -602,7 +604,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
 						Enabled:       true,
-						CheckpointRef: k8sptr.To("worker-snapshot"),
+						CheckpointRef: new("worker-snapshot"),
 					},
 				}
 			}),
@@ -613,7 +615,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
 					Enabled:       true,
-					CheckpointRef: k8sptr.To("worker-snapshot"),
+					CheckpointRef: new("worker-snapshot"),
 				}
 			}),
 			wantWebhookErrs: []string{"spec.checkpoint.checkpointRef: Forbidden: worker-class checkpointRef is supported only on DynamoGraphDeployment-managed components"},
@@ -626,12 +628,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
 					Name:       "graph",
 					UID:        "graph-uid",
-					Controller: k8sptr.To(true),
+					Controller: new(true),
 				}}
 				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
 						Enabled:       true,
-						CheckpointRef: k8sptr.To("worker-snapshot"),
+						CheckpointRef: new("worker-snapshot"),
 					},
 				}
 			}),
@@ -664,7 +666,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
 				dcd.Spec.SharedMemorySize = &negativeSHMSize
-				dcd.Spec.FrontendSidecar = k8sptr.To("frontend")
+				dcd.Spec.FrontendSidecar = new("frontend")
 				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{},
 				}
@@ -809,7 +811,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
 						Enabled:       true,
-						CheckpointRef: k8sptr.To("existing-checkpoint"),
+						CheckpointRef: new("existing-checkpoint"),
 						Job:           &nvidiacomv1beta1.ComponentCheckpointJobConfig{},
 					},
 				}
@@ -852,7 +854,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "empty dynamo namespace is accepted",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				DynamoNamespace: k8sptr.To(""),
+				DynamoNamespace: new(""),
 			}),
 		},
 		{
@@ -989,7 +991,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeWorker,
 				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
 					Enabled:       true,
-					CheckpointRef: k8sptr.To("existing-checkpoint"),
+					CheckpointRef: new("existing-checkpoint"),
 					Job:           &nvidiacomv1alpha1.ServiceCheckpointJobConfig{},
 				},
 			}),
@@ -1003,12 +1005,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Kind:       "DynamoGraphDeployment",
 					Name:       "graph",
 					UID:        "graph-uid",
-					Controller: k8sptr.To(true),
+					Controller: new(true),
 				}}
 				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
 					Enabled:       true,
 					Mode:          nvidiacomv1alpha1.CheckpointModeManual,
-					CheckpointRef: k8sptr.To("existing-checkpoint"),
+					CheckpointRef: new("existing-checkpoint"),
 				}
 			}),
 		},
@@ -1332,7 +1334,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Name:       "trtllm-disagg",
 					UID:        "test-owner",
 				}}
-				dcd.Spec.DynamoNamespace = k8sptr.To("my-custom-namespace")
+				dcd.Spec.DynamoNamespace = new("my-custom-namespace")
 			}),
 			wantWarnings: []string{`spec.dynamoNamespace is deprecated and ignored. Value "my-custom-namespace" will be replaced with "hannahz-trtllm-disagg". Remove this field from your configuration`},
 		},
@@ -1368,7 +1370,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Replicas:      &validMinAvail,
 				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
@@ -1405,7 +1407,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Replicas:      &oneReplica,
 				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
@@ -1422,7 +1424,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1434,7 +1436,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Replicas:      &oneReplica,
 				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
@@ -1452,7 +1454,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1517,7 +1519,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "epp-config"},
 					Config: &apixv1alpha1.EndpointPickerConfig{
 						Plugins:            []apixv1alpha1.PluginSpec{},
 						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
@@ -1531,7 +1533,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "epp-config"},
 					Config: &apixv1alpha1.EndpointPickerConfig{
 						Plugins:            []apixv1alpha1.PluginSpec{},
 						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
@@ -1558,7 +1560,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1611,9 +1613,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 invalid pod template backend annotation is rejected by CEL",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					Annotations: map[string]string{
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
-					}},
+					},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
 				}
 			}),
@@ -1624,10 +1626,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 discovery annotation survives the generated DCD API server round trip",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					Annotations: map[string]string{
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
 						consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
-					}},
+					},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "main:1.1.0"}}},
 				}
 			}),
@@ -1716,7 +1718,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1727,7 +1729,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1741,7 +1743,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
@@ -1751,7 +1753,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 		},
@@ -1781,7 +1783,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
@@ -1790,7 +1792,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "changed-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "changed-epp-config"},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
@@ -1808,7 +1810,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1839,7 +1841,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1857,7 +1859,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1885,7 +1887,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				}
 			}),
@@ -1898,7 +1900,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Replicas:      &oneReplica,
 				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
@@ -1922,7 +1924,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Replicas:      &oneReplica,
 				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+						Name: "legacy-epp-config",
 					},
 				},
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
@@ -2062,6 +2064,50 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 	}
 
+	t.Log("Add complete-probe cases to the admission table for both API versions")
+	for _, placement := range []string{"main", "frontend sidecar", "role"} {
+		beta := betaDCDForAdmission(nil)
+		alpha := alphaDCDForAdmission(nil)
+		betaSpec := &beta.Spec.DynamoComponentDeploymentSharedSpec
+		alphaSpec := &alpha.Spec.DynamoComponentDeploymentSharedSpec
+		betaPath := field.NewPath("spec")
+		alphaPath := field.NewPath("spec")
+		betaContainer := &betaSpec.PodTemplate.Spec.Containers[0]
+		alphaContainer := alphaSpec.ExtraPodSpec.MainContainer
+
+		// Select a representative container in each source-version template.
+		switch placement {
+		case "main":
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(0)
+			alphaPath = alphaPath.Child("extraPodSpec", "mainContainer")
+		case "frontend sidecar":
+			betaSpec.FrontendSidecar = new("frontend")
+			betaSpec.PodTemplate.Spec.Containers = append(betaSpec.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: frontendImage150})
+			betaContainer = &betaSpec.PodTemplate.Spec.Containers[1]
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(1)
+			alphaSpec.ExtraPodSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "frontend", Image: frontendImage150}}}
+			alphaContainer = &alphaSpec.ExtraPodSpec.Containers[0]
+			alphaPath = alphaPath.Child("extraPodSpec", "containers").Index(0)
+		case "role":
+			setBetaExplicitMultinodeRoleTemplates(betaSpec, 2)
+			betaContainer = &betaSpec.Roles[1].PodTemplate.Spec.Containers[0]
+			betaPath = betaPath.Child("roles").Index(1).Child("podTemplate", "spec", "containers").Index(0)
+			setAlphaExplicitMultinodeRoleTemplates(alphaSpec, 2)
+			alphaContainer = &alphaSpec.Roles[0].PodTemplate.Spec.Containers[0]
+			alphaPath = alphaPath.Child("roles").Index(0).Child("podTemplate", "spec", "containers").Index(0)
+		}
+
+		// Keep the shared probe cases on the resource's production admission path.
+		probeCases := containerProbeAdmissionCases(beta, betaContainer, betaPath)
+		probeCases = append(probeCases, containerProbeAdmissionCases(alpha, alphaContainer, alphaPath)...)
+		for _, probeCase := range probeCases {
+			tests = append(tests, dcdAdmissionTestCase{
+				name: probeCase.name, deployment: probeCase.deployment,
+				oldDeployment: probeCase.oldDeployment, wantCELErr: probeCase.wantCELErr,
+			})
+		}
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gates := features.Gates{Checkpoint: !tt.checkpointOff}
@@ -2134,11 +2180,9 @@ func alphaDCDForAdmission(
 	mutate func(*nvidiacomv1alpha1.DynamoComponentDeployment),
 ) *nvidiacomv1alpha1.DynamoComponentDeployment {
 	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
-			Kind:       "DynamoComponentDeployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
+		APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+		Kind:       "DynamoComponentDeployment",
+		Name:       "worker", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework: dcdAdmissionVLLMBackend,
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -2174,11 +2218,9 @@ func betaDCDForAdmission(
 	mutate func(*nvidiacomv1beta1.DynamoComponentDeployment),
 ) *nvidiacomv1beta1.DynamoComponentDeployment {
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta1.GroupVersion.String(),
-			Kind:       "DynamoComponentDeployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
+		APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+		Kind:       "DynamoComponentDeployment",
+		Name:       "worker", Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: dcdAdmissionVLLMBackend,
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{

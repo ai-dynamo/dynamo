@@ -603,6 +603,10 @@ class PlannerEnginePerfModel:
     # classes directly in regression-specific tests.
     # ------------------------------------------------------------------
 
+    def has_valid_engine_limits(self) -> bool:
+        """Whether worker metadata permits an engine model, independent of warmup."""
+        return self._limit_values() is not None
+
     def has_sufficient_data(self) -> bool:
         if self._engine_model is not None and self._engine_ready():
             return True

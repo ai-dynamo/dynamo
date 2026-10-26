@@ -75,6 +75,12 @@ Added by an individual metric family. Each label appears only on the metrics not
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>aggregated</Badge> <Badge intent="note" minimal>"" (empty)</Badge></span>
 </ParamField>
 
+<ParamField path="state" type="string">
+  `[Shared]` On `dynamo_frontend_inflight_input_tokens` — where an in-flight request is in its lifecycle. Summing over `state` gives all in-flight prompt tokens.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>awaiting_first_token</Badge> <Badge intent="note" minimal>generating</Badge></span>
+</ParamField>
+
 <ParamField path="worker_type" type="string">
   `[Shared]` On `dynamo_frontend_worker_*` and `dynamo_frontend_router_queue_*` — the worker role. In disaggregated mode both values appear; in aggregated mode all workers report as `decode`.
 

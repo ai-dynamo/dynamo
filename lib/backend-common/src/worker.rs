@@ -13,10 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_llm::admission_gate::{AdmissionEngine, WorkerAdmissionGate};
 use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::local_model::runtime_config::{
-    DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
-    StructuralTagScope, TOPOLOGY_TAINT_PREFIX,
+    DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagConfig, TOPOLOGY_TAINT_PREFIX,
 };
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, update_model_taints};
 use dynamo_llm::model_type::{ModelInput, ModelType};
@@ -209,12 +209,8 @@ pub struct WorkerConfig {
     /// Python sets this via `--health-check-payload` / env; Rust-only
     /// engines leave it `None` and let `Worker` read the env directly.
     pub health_check_payload: Option<serde_json::Value>,
-    /// Structural tag guided decoding mode.
-    pub structural_tag_mode: StructuralTagMode,
-    /// Structural tag activation scope.
-    pub structural_tag_scope: StructuralTagScope,
-    /// Structural tag schema strictness.
-    pub structural_tag_schema: StructuralTagSchemaMode,
+    /// Structural-tag guided-decoding policy. Presence enables structural tags.
+    pub structural_tag: Option<StructuralTagConfig>,
     /// Runtime / transport overrides used when constructing the
     /// `DistributedRuntime`.
     pub runtime: RuntimeConfig,
@@ -264,12 +260,7 @@ impl Default for WorkerConfig {
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
-            // Keep the shared/wire default conservative for mixed-version and
-            // Rust-sidecar compatibility. Deployment-facing runtime arguments
-            // explicitly publish the current On/Always defaults.
-            structural_tag_mode: StructuralTagMode::Off,
-            structural_tag_scope: StructuralTagScope::Auto,
-            structural_tag_schema: StructuralTagSchemaMode::Auto,
+            structural_tag: None,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
             enable_rl: false,
@@ -462,6 +453,10 @@ pub struct Worker {
     /// step. Always present once `start()` returns Ok, independent of
     /// whether the engine returned a component publisher.
     lifecycle: Option<crate::metrics::LifecycleGauges>,
+    /// This worker's backend admission gate, which its token pipeline admits
+    /// network requests through. Created as the worker serves, for its
+    /// component; anything else serving for this worker holds a clone.
+    admission_gate: WorkerAdmissionGate,
 }
 
 impl Worker {
@@ -488,7 +483,16 @@ impl Worker {
             engine_route_shutdown: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
+            admission_gate: WorkerAdmissionGate::default(),
         }
+    }
+
+    /// Admit this worker's requests through `admission_gate`, a handle its
+    /// caller also gave the worker's engine, so the engine's own registrations
+    /// size the gate the worker admits through rather than another.
+    pub fn with_admission_gate(mut self, admission_gate: WorkerAdmissionGate) -> Self {
+        self.admission_gate = admission_gate;
+        self
     }
 
     /// Lifecycle driver. Takes owned `self` — `Worker` is single-shot and
@@ -1099,14 +1103,22 @@ impl Worker {
                     DisaggregationMode::Encode => LifecycleOperationRole::Encode,
                     DisaggregationMode::Aggregated => LifecycleOperationRole::Worker,
                 };
-                let ingress =
-                    Ingress::for_engine_with_lifecycle_role(engine_adapter.clone(), lifecycle_role)
-                        .map_err(|e| {
-                            err(
-                                ErrorType::Backend(BackendError::Unknown),
-                                format!("ingress: {e}"),
-                            )
-                        })?;
+                // Network requests are admitted through this worker's gate
+                // before they reach the engine, sized by the model card it
+                // registered above; the local health-check probe below calls
+                // the adapter directly, outside admission.
+                let admission_gate = self.admission_gate.get_or_create(endpoint.component());
+                admission_gate.record_model_card(local_model.card());
+                let ingress = Ingress::for_engine_with_lifecycle_role(
+                    AdmissionEngine::new(admission_gate, engine_adapter.clone()),
+                    lifecycle_role,
+                )
+                .map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("ingress: {e}"),
+                    )
+                })?;
                 let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
                 (ingress, probe)
             }
@@ -2211,9 +2223,7 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
-        structural_tag_mode: config.structural_tag_mode,
-        structural_tag_scope: config.structural_tag_scope,
-        structural_tag_schema: config.structural_tag_schema,
+        structural_tag: config.structural_tag.clone(),
         enable_local_indexer,
         kv_state_endpoint: config.kv_state_endpoint.clone(),
         disaggregated_endpoint,

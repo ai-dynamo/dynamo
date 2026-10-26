@@ -29,6 +29,7 @@ pub mod pooling;
 pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
+mod strict_schema;
 pub mod tools;
 pub mod validate;
 pub mod videos;
@@ -90,6 +91,10 @@ pub(crate) trait OpenAISamplingOptionsProvider {
     fn get_n(&self) -> Option<u8>;
 
     fn get_best_of(&self) -> Option<u8>;
+
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        None
+    }
 
     fn nvext(&self) -> Option<&NvExt>;
 }
@@ -178,6 +183,8 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let min_p = validate_range(CommonExtProvider::get_min_p(self), &MIN_P_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
 
+        let logit_bias = self.get_logit_bias();
+
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
             if greedy {
@@ -214,6 +221,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             seed,
             use_beam_search: None,
             length_penalty: None,
+            logit_bias,
             guided_decoding,
             include_stop_str_in_output,
         })
@@ -452,16 +460,11 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub move_reasoning_to_content_when_empty: bool,
 
-    /// The worker's operator-configured structural-tag policy. Carried through so
-    /// the HTTP-layer tool-call-gate reconstruction
-    /// (`http::service::apply_request_tool_call_parsing_options`) can consult the
-    /// same structural-tag contract the real preprocessing path uses, instead of
-    /// only recognizing intrinsically-forced model families.
-    #[serde(default)]
-    pub structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode,
-
-    #[serde(default)]
-    pub structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope,
+    /// The worker's structural-tag policy. Carried through so the HTTP-layer
+    /// tool-call-gate reconstruction consults the same configuration as the
+    /// request preprocessor. Presence enables operator-controlled tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<crate::local_model::runtime_config::StructuralTagConfig>,
 
     #[serde(
         default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
@@ -499,8 +502,7 @@ impl ParsingOptions {
             guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
             move_reasoning_to_content_when_empty: false,
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::default(),
-            structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope::default(),
+            structural_tag: None,
             exclude_tools_when_tool_choice_none:
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
@@ -531,16 +533,22 @@ impl ParsingOptions {
             let whole_response_decoder = matches!(
                 self.tool_call_parser.as_deref(),
                 Some("harmony" | "kimi_k3" | "kimi-k3")
-            ) || chat_completions::unified_parser::configured_family(
-                self.tool_call_parser.as_deref(),
-                self.reasoning_parser.as_deref(),
-            ) == Some("muse_glimmer")
+            )
                 || chat_completions::unified_parser::selected_content_decoder_family(
                     self.tool_call_parser.as_deref(),
                     self.reasoning_parser.as_deref(),
                 )
                 .is_some();
-            if !whole_response_decoder {
+            // Removing an incompatible tool parser must not manufacture a reasoning-only V2 route.
+            // TODO: Separate pair identity from legacy decoder activation: with suppressed calls,
+            // hermes + qwen3 must retain literal tool-call text in batch as streaming does.
+            let reasoning_would_select_v2 =
+                chat_completions::unified_parser::selected_content_decoder_family(
+                    None,
+                    self.reasoning_parser.as_deref(),
+                )
+                .is_some();
+            if !whole_response_decoder && !reasoning_would_select_v2 {
                 self.tool_call_parser = None;
             }
             self.guided_tool_constraint = GuidedToolConstraint::None;
@@ -574,7 +582,19 @@ mod parsing_options_tests {
         let options = ParsingOptions::new(Some("hermes".to_string()), Some("qwen3".to_string()))
             .with_tool_call_parsing_enabled(false);
 
-        assert_eq!(options.tool_call_parser, None);
+        let would_select_v2 =
+            super::chat_completions::unified_parser::selected_family(None, Some("qwen3")).is_some();
+        assert_eq!(
+            options.tool_call_parser.as_deref(),
+            would_select_v2.then_some("hermes")
+        );
+        assert_eq!(
+            super::chat_completions::unified_parser::selected_batch_family(
+                options.tool_call_parser.as_deref(),
+                options.reasoning_parser.as_deref()
+            ),
+            None
+        );
         assert_eq!(options.reasoning_parser.as_deref(), Some("qwen3"));
         assert!(options.suppress_tool_calls);
     }
@@ -622,8 +642,11 @@ mod parsing_options_tests {
 
         assert_eq!(
             options.tool_call_parser.as_deref(),
-            crate::protocols::openai::chat_completions::tool_parser_v2::enabled()
-                .then_some("qwen3_coder")
+            crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                Some("qwen3_coder"),
+                Some("qwen3")
+            )
+            .map(|_| "qwen3_coder")
         );
         assert_eq!(options.reasoning_parser.as_deref(), Some("qwen3"));
         assert!(options.suppress_tool_calls);

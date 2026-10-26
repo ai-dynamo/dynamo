@@ -53,6 +53,18 @@ Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a
   Requests in the HTTP processing queue. Kept for backward compatibility; the "waiting for first token" window is now the sum of `dynamo_frontend_stage_requests` across the `preprocess`, `route`, and `dispatch` stages.
 </ParamField>
 
+<ParamField path="dynamo_frontend_awaiting_first_token_requests" type="gauge">
+  **Experimental.** Admitted requests that have not produced an output token yet: being tokenized, queued, routed, or prefilled. Requests to endpoints that never stream tokens (embeddings, images, videos, tensors) stay here until they finish. Unit: requests. Labeled by `model`. Requests producing output tokens are `clamp_min(dynamo_frontend_active_requests - dynamo_frontend_awaiting_first_token_requests, 0)`; the clamp covers the two gauges being sampled a moment apart.
+</ParamField>
+
+<ParamField path="dynamo_frontend_inflight_input_tokens" type="gauge">
+  **Experimental.** Known prompt tokens of in-flight requests. Unit: tokens. Labeled by `model` and `state`: `awaiting_first_token` (the requests in `dynamo_frontend_awaiting_first_token_requests`) or `generating`. Summing over `state` gives all in-flight prompt tokens. A request still being tokenized contributes zero.
+</ParamField>
+
+<ParamField path="dynamo_frontend_input_tokens_total" type="counter">
+  **Experimental.** Prompt tokens of admitted requests, counted at tokenization, including requests that fail or are cancelled before producing output. Unit: tokens. Labeled by `model`. Unlike the sum of `dynamo_frontend_input_sequence_tokens`, which is observed at the first output token, this counts every admitted request when it is tokenized.
+</ParamField>
+
 <ParamField path="dynamo_frontend_disconnected_clients" type="gauge">
   Number of disconnected clients.
 </ParamField>
@@ -151,6 +163,8 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 `dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id`, `dp_rank`, and `worker_type`.
 
+At each HTTP scrape, these six gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. The `worker_type` label describes serving attribution: an Encode worker serving Chat/Completions reports its load and timing samples as `decode`, while the inventory metrics below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
+
 <ParamField path="dynamo_frontend_worker_active_decode_blocks" type="gauge">
   Active KV cache decode blocks per worker.
 </ParamField>
@@ -174,6 +188,69 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 <ParamField path="dynamo_frontend_worker_last_inter_token_latency_seconds" type="gauge">
   Last observed inter-token latency per worker, in seconds.
 </ParamField>
+
+### Router Worker Inventory
+
+These frontend-only metrics describe each Frontend's independent view of normalized base model-card discovery and router admission. They do not report Kubernetes Pod existence, and LoRA overlays do not count as additional workers. Both metrics carry `model`, `target_namespace`, `target_component`, `target_endpoint`, and `worker_type` labels. The target labels identify the discovered serving endpoint.
+
+Admission uses first-wins semantics within each Frontend's model and target group. The first observed checksum cohort remains the incumbent; later incompatible worker IDs are excluded individually and do not remove or replace it. If the incumbent cohort disappears, the next remaining cohort can become its successor after initialization.
+
+<ParamField path="dynamo_frontend_router_workers" type="gauge">
+  Number of unique physical worker IDs in a model and target group, labeled by `state`. DP ranks do not increase the count. The `available`, `pending`, and `excluded` states are disjoint; `discovered` is their sum. `available` requires successfully committed worker-set membership and current hard availability; `pending` means discovery has observed the worker but initialization has not completed; `excluded` means discovered but currently unavailable for routing.
+</ParamField>
+
+Hard availability uses the committed group's client and, when a prefill or encode hop targets that group, the hop's local availability. A matching hop that is still activating reports no available workers. If no hop targets the group, its own client availability applies. These counts describe individual worker groups; use `dynamo_frontend_model_ready` to check whether the frontend has a complete routable serving topology.
+
+Each currently observed group emits all four counts, including zero values for states with no workers. When discovery withdraws a group after its last worker disappears, its count and per-worker state series disappear on the next scrape. Retired rolling-update namespaces are not retained as permanent zero-count groups. Groups never observed by that frontend also have no series. Do not aggregate these counts across Frontends as worker-global readiness; separate Frontends can choose different incumbents from the same discovered workers.
+
+<ParamField path="dynamo_frontend_router_worker_state" type="gauge">
+  One sample with value `1` for each discovered worker, additionally labeled by `router_worker_id`, `state`, and `reason`. The state is `available`, `pending`, or `excluded`. The sample changes with the worker's current state and disappears when discovery removes the ID.
+</ParamField>
+
+The bounded `reason` values describe the current admission or availability condition:
+
+| Reason | Meaning |
+|--------|---------|
+| `none` | Available for routing |
+| `initializing` | Waiting for initialization |
+| `checksum_mismatch` | The individual worker's Model Deployment Card checksum differs from the incumbent; emitted only for rejected worker IDs |
+| `materialization_failed` | Creating the serving configuration failed |
+| `commit_blocked` | The serving configuration could not be committed |
+| `invalid_config` | The discovered configuration is invalid |
+| `unavailable` | Absent from the current availability view; includes local inhibition and other availability changes without identifying their exact cause |
+
+When an incumbent is still initializing and an incompatible newcomer is discovered, counts are `discovered=2`, `available=0`, `pending=1`, and `excluded=1`. The incumbent carries `state="pending",reason="initializing"`; only the newcomer carries `state="excluded",reason="checksum_mismatch"`. Once the incumbent is healthy, the same group reports `discovered=2`, `available=1`, `pending=0`, and `excluded=1`. Rejection of the newcomer never makes the incumbent pending or excluded.
+
+To detect an unexpected absence of workers, select one frontend, model, worker role, and the namespaces belonging to one deployment. The following expression alerts when the frontend is being scraped successfully but no selected group has a positive discovered-worker count. It handles both explicit zero counts and series disappearing after group withdrawal:
+
+```promql
+(up{job="<frontend-job>", instance="<frontend-instance>"} == 1)
+unless on (job, instance)
+(
+  sum by (job, instance) (
+    dynamo_frontend_router_workers{
+      job="<frontend-job>",
+      instance="<frontend-instance>",
+      model="<model>",
+      target_namespace=~"<deployment-namespace-pattern>",
+      worker_type="<worker-role>",
+      state="discovered"
+    }
+  ) > 0
+)
+```
+
+Replace the selectors with your scrape labels and a namespace pattern that includes only the rolling versions of one deployment. Enable the rule only for deployments expected to have workers, and use an alert duration such as `for: 3m` to tolerate startup and brief rollout transitions. To alert when no selected worker is available for routing, use `state="available"` instead of `state="discovered"`. Monitor `up == 0` separately for frontend scrape failures. A raw `sum(...) == 0` expression does not match when all selected group series have disappeared.
+
+Preserve `target_namespace` when diagnosing an individual namespace. Do not aggregate independent deployments or different frontend instances.
+
+Inspect workers still discovered but excluded from routing:
+
+```promql
+dynamo_frontend_router_worker_state{state="excluded"} == 1
+```
+
+Scope these queries to the target frontend and deployment. Evaluate each Frontend separately because discovery order and first-wins admission can produce different incumbents. A missing series does not mean zero workers; check Prometheus `up` separately for scrape health. These metrics reflect updates after the frontend processes discovery and routing state changes, not at the instant a worker process terminates.
 
 ### Model metrics
 
@@ -245,18 +322,68 @@ Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, 
   Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md).
 </ParamField>
 
-The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
+The shared TCP request plane exposes the following `dynamo_work_handler_*` metrics. They are
+independent of backend admission; see [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend).
 
-<ParamField path="dynamo_rejection_request_total" type="counter">
-  Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full).
+<ParamField path="dynamo_work_handler_pool_active_tasks" type="gauge">
+  Current TCP request handlers holding worker-pool permits, from dispatch until downstream handling finishes.
 </ParamField>
 
-<ParamField path="dynamo_engine_request" type="gauge">
-  Current requests being handled by the engine.
+<ParamField path="dynamo_work_handler_pool_capacity" type="gauge">
+  Configured capacity of the TCP worker pool.
 </ParamField>
 
-<ParamField path="dynamo_request_queue" type="gauge">
-  Current requests queued in Dynamo, not yet in the engine.
+<ParamField path="dynamo_work_handler_queue_depth" type="gauge">
+  Current requests in the bounded TCP work queue awaiting dispatcher pickup.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_queue_capacity" type="gauge">
+  Configured capacity of the bounded TCP work queue.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_enqueue_rejected_total" type="counter">
+  Cumulative requests rejected before TCP worker dispatch because the bounded work queue was full or the dispatcher channel was closed.
+</ParamField>
+
+<ParamField path="dynamo_work_handler_permit_wait_seconds" type="histogram">
+  Time a queued request spends waiting for a TCP worker-pool permit after dispatcher pickup.
+</ParamField>
+
+The `dynamo_backend_admission_*` metrics track engine occupancy, queueing, and request outcomes.
+See [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend)
+for gate behavior.
+
+The `dp_rank` label contains the rank ID, such as `"4"`, or `"unspecified"` for unranked requests.
+Sum across all `dp_rank` values for worker totals.
+
+<ParamField path="dynamo_backend_admission_engine_request_count" type="gauge">
+  Requests admitted to the engine that have not finished. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_engine_request_waiting_count" type="gauge">
+  Admitted requests still awaiting their first generated token or completion. Label: `dp_rank`.
+  Replaces `dynamo_backend_admission_engine_wait_count`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_queue_count" type="gauge">
+  Requests waiting outside the engine in gate queues. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_receive_total" type="counter">
+  All requests received by the gate, counted once regardless of outcome. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_request_admit_total" type="counter">
+  Requests passed into the engine. Labels: `dp_rank` and `source`.
+  `source="direct"` means admitted without queueing; `source="queue"` means admitted after queueing.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_rejection_total" type="counter">
+  Requests the gate could neither admit nor queue. Label: `dp_rank`.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_cancellation_total" type="counter">
+  Requests cancelled before engine admission. Label: `dp_rank`.
 </ParamField>
 
 Specialized components expose additional families under their own prefix, e.g. `dynamo_preprocessor_*` for preprocessor components.
@@ -264,6 +391,10 @@ Specialized components expose additional families under their own prefix, e.g. `
 ## Router metrics
 
 The router exposes metrics for routing decisions and overhead. Not every metric appears in every deployment — see [Availability by configuration](#availability-by-configuration).
+
+<ParamField path="dynamo_component_router_worker_registered" type="gauge">
+  A sample with value `1` for each worker and DP rank in the scheduler's current registration and hard-availability view. Carries `router_worker_id`, `dp_rank`, and `worker_type` labels in addition to the component labels. The sample can appear during scheduler preparation before worker-set materialization commits, so it does not indicate committed model readiness. Removed or unavailable workers disappear from the output, rather than emitting `0`; late request bookkeeping cannot restore their exposed series. Prefer the [Router Worker Inventory](#router-worker-inventory) metrics for committed available-worker counts and exclusion reasons on the frontend.
+</ParamField>
 
 ### Router request metrics
 

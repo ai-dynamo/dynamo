@@ -17,6 +17,29 @@ fn assert_invalid(error: DynamoError) {
 }
 
 #[test]
+fn media_strings_move_into_generate_request() {
+    for media in [
+        MultimodalData::RawUrl("data:image/jpeg;base64,AA==".to_string()),
+        MultimodalData::Url("https://example.com/image.jpg".parse().unwrap()),
+    ] {
+        let pointer = match &media {
+            MultimodalData::RawUrl(value) => value.as_ptr(),
+            MultimodalData::Url(value) => value.as_str().as_ptr(),
+            _ => unreachable!(),
+        };
+        let request = epd_request(vec![("image_url", vec![media])]);
+        let wire =
+            build_generate_request(request, "move-media".into(), DisaggregationMode::Aggregated)
+                .unwrap();
+        let source = match wire.media[0].source.as_ref().unwrap() {
+            pb::media_item::Source::DataUri(value) | pb::media_item::Source::Url(value) => value,
+            other => panic!("unexpected media source: {other:?}"),
+        };
+        assert_eq!(source.as_ptr(), pointer);
+    }
+}
+
+#[test]
 fn compatibility_envelope_preserves_typed_controls() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
         let request = PreprocessedRequest::builder()
@@ -204,7 +227,7 @@ fn absent_and_explicit_zero_controls_preserve_native_sentinels() {
         let mut request = crate::test_fixtures::minimal_request();
         if explicit {
             request.sampling_options.temperature = Some(0.0);
-            request.sampling_options.top_p = Some(0.0);
+            request.sampling_options.top_p = Some(1.0);
             request.sampling_options.seed = Some(0);
             request.sampling_options.presence_penalty = Some(0.0);
             request.sampling_options.frequency_penalty = Some(0.0);
@@ -235,9 +258,9 @@ fn absent_and_explicit_zero_controls_preserve_native_sentinels() {
             wire.sampling,
             Some(pb::RandomSampling {
                 num_sequences: 1,
-                top_k: 0,
-                top_p: 0.0,
-                min_p: 0.0,
+                top_k: None,
+                top_p: explicit.then_some(1.0),
+                min_p: None,
                 seed: explicit.then_some(0)
             })
         );
@@ -475,11 +498,34 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
             r.sampling_options.length_penalty = Some(0.5)
         }),
         ("top_k", |r| r.sampling_options.top_k = Some(-2)),
-        ("visible stop", |r| {
-            r.stop_conditions.stop_token_ids_visible = Some(vec![42])
+        ("top_p", |r| r.sampling_options.top_p = Some(0.0)),
+        ("top_p", |r| r.sampling_options.top_p = Some(1.5)),
+        ("top_p", |r| r.sampling_options.top_p = Some(f32::NAN)),
+        ("reasoning_parser_kwargs", |r| {
+            r.extra_args = Some(json!({"reasoning_parser_kwargs": {"chat_template_kwargs": false}}))
         }),
-        ("max_thinking_tokens", |r| {
-            r.stop_conditions.max_thinking_tokens = Some(5)
+        ("bad_words_token_ids", |r| {
+            r.extra_args = Some(json!({"sampling_options": {"bad_words_token_ids": [[]]}}))
+        }),
+        ("sampling_options", |r| {
+            r.extra_args = Some(json!({"sampling_options": {"bad_words_token_ids": [[-1]]}}))
+        }),
+        ("at most 128 sequences", |r| {
+            r.extra_args =
+                Some(json!({"sampling_options": {"bad_words_token_ids": vec![[1]; 129]}}))
+        }),
+        ("1024 tokens in total", |r| {
+            r.extra_args =
+                Some(json!({"sampling_options": {"bad_words_token_ids": [vec![1; 1025]]}}))
+        }),
+        ("allowed_token_ids must not be empty", |r| {
+            r.extra_args = Some(json!({"sampling_options": {"allowed_token_ids": []}}))
+        }),
+        ("detokenize=false is not supported", |r| {
+            r.extra_args = Some(json!({"sampling_options": {"detokenize": false}}))
+        }),
+        ("logprob_token_ids is not supported", |r| {
+            r.extra_args = Some(json!({"sampling_options": {"logprob_token_ids": [1]}}))
         }),
         ("mm_processor_kwargs", |r| {
             r.mm_processor_kwargs = Some(json!({}))
@@ -506,6 +552,39 @@ fn invalid_canonical_controls_are_rejected_before_submission() {
         assert!(error.to_string().contains(expected), "{expected}: {error}");
         assert_invalid(error);
     }
+}
+
+#[test]
+fn reasoning_parser_kwargs_ignore_keys_the_gate_cannot_carry() {
+    let mut request = minimal_request();
+    request.extra_args = Some(json!({"reasoning_parser_kwargs": {
+        "chat_template_kwargs": {"enable_thinking": false},
+        "future_control": true,
+    }}));
+    let gate = build_generate_request(request, "id".into(), DisaggregationMode::Aggregated)
+        .unwrap()
+        .engine_reasoning_gate
+        .unwrap();
+    assert_eq!(
+        gate.chat_template_kwargs.unwrap().fields["enable_thinking"].kind,
+        Some(prost_types_v14::value::Kind::BoolValue(false))
+    );
+}
+
+#[test]
+fn sampling_passthrough_reaches_decoding_parameters() {
+    let mut request = minimal_request();
+    request.extra_args = Some(json!({"sampling_options": {
+        "allowed_token_ids": [10, 11],
+        "bad_words_token_ids": vec![[1]; 128],
+        "detokenize": true,
+    }}));
+    let decoding = build_generate_request(request, "id".into(), DisaggregationMode::Aggregated)
+        .unwrap()
+        .decoding
+        .unwrap();
+    assert_eq!(decoding.allowed_token_ids, vec![10, 11]);
+    assert_eq!(decoding.bad_words_token_ids.len(), 128);
 }
 
 #[test]
@@ -625,7 +704,13 @@ fn stopping_tokens_are_merged_and_deduplicated() {
 
 #[test]
 fn top_k_preserves_default_and_explicit_limits() {
-    for (top_k, expected) in [(None, 0), (Some(7), 7), (Some(i32::MAX), i32::MAX as u32)] {
+    for (top_k, expected) in [
+        (None, None),
+        (Some(-1), Some(0)),
+        (Some(0), Some(0)),
+        (Some(7), Some(7)),
+        (Some(i32::MAX), Some(i32::MAX as u32)),
+    ] {
         let mut request = minimal_request();
         request.sampling_options.top_k = top_k;
         let wire = build_generate_request(request, "top-k".into(), DisaggregationMode::Aggregated)
@@ -702,7 +787,7 @@ fn canonical_sampling_and_stopping_fields_are_preserved() {
     let sampling = wire.sampling.unwrap();
     assert_eq!(
         (sampling.top_k, sampling.top_p, sampling.min_p),
-        (4, 0.9, 0.1)
+        (Some(4), Some(0.9), Some(0.1))
     );
     let decoding = wire.decoding.unwrap();
     assert_eq!(
@@ -822,9 +907,9 @@ fn compatibility_envelope_accepts_sampling_projected_to_proto() {
             .expect("vllm-proto 0.3 preserves projected sampling controls");
         assert_eq!(wire.temperature, Some(0.2));
         let sampling = wire.sampling.expect("sampling");
-        assert_eq!(sampling.top_p, 0.9);
-        assert_eq!(sampling.top_k, 4);
-        assert_eq!(sampling.min_p, 0.1);
+        assert_eq!(sampling.top_p, Some(0.9));
+        assert_eq!(sampling.top_k, Some(4));
+        assert_eq!(sampling.min_p, Some(0.1));
         assert_eq!(sampling.seed, Some(123));
         let decoding = wire.decoding.expect("decoding");
         assert_eq!(decoding.presence_penalty, 0.3);
@@ -899,7 +984,7 @@ fn released_envelope_hydrates_legacy_sampling_with_canonical_precedence() {
 }
 
 #[test]
-fn native_generate_rejects_unrepresentable_sampling_controls() {
+fn native_generate_preserves_explicitly_disabled_sampling_controls() {
     let mut defaults = request();
     defaults.sampling_options.temperature = None;
     let wire = build_generate_request(
@@ -913,24 +998,24 @@ fn native_generate_rejects_unrepresentable_sampling_controls() {
     for top_k in [-1, 0] {
         let mut disabled = request();
         disabled.sampling_options.top_k = Some(top_k);
-        let error = build_generate_request(
+        let wire = build_generate_request(
             disabled,
             "disabled".to_string(),
             DisaggregationMode::Aggregated,
         )
-        .expect_err("disabled top_k cannot be represented by proto 0.3");
-        assert!(error.to_string().contains("top_k"));
+        .expect("proto 0.5 preserves explicit zero");
+        assert_eq!(wire.sampling.unwrap().top_k, Some(0));
     }
 
     let mut disabled = request();
     disabled.sampling_options.min_p = Some(0.0);
-    let error = build_generate_request(
+    let wire = build_generate_request(
         disabled,
         "disabled".to_string(),
         DisaggregationMode::Aggregated,
     )
-    .expect_err("disabled min_p cannot be represented by proto 0.3");
-    assert!(error.to_string().contains("min_p"));
+    .expect("proto 0.5 preserves explicit zero");
+    assert_eq!(wire.sampling.unwrap().min_p, Some(0.0));
 }
 
 #[test]
@@ -1040,6 +1125,25 @@ fn unprojected_native_sampling_is_rejected_instead_of_silently_discarded() {
                 .contains("sampling_params.logit_bias is not supported")
         );
     }
+}
+
+#[test]
+fn logit_bias_is_forwarded_to_decoding_parameters() {
+    let mut request = request();
+    request.sampling_options = SamplingOptions {
+        logit_bias: Some(std::collections::HashMap::from([(18, -100.0), (42, 5.5)])),
+        ..Default::default()
+    };
+    let wire = build_generate_request(
+        request,
+        "logit-bias".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("logit_bias request should convert");
+    let decoding = wire.decoding.expect("decoding parameters");
+    assert_eq!(decoding.logit_bias.len(), 2);
+    assert_eq!(decoding.logit_bias.get(&18), Some(&-100.0));
+    assert_eq!(decoding.logit_bias.get(&42), Some(&5.5));
 }
 
 #[test]
@@ -1288,29 +1392,6 @@ fn preprocessed_features_cannot_mix_with_raw_media() {
 }
 
 #[test]
-fn reasoning_parser_extra_args_do_not_reach_the_engine() {
-    // `request()` carries a JSON schema: the only case where vLLM reads these.
-    let baseline = build_generate_request(
-        request(),
-        "request-1".to_string(),
-        DisaggregationMode::Aggregated,
-    )
-    .unwrap();
-    let mut request = request();
-    let extra = request.extra_args.as_mut().unwrap();
-    extra["reasoning_parser_kwargs"] = json!({"chat_template_kwargs": {"enable_thinking": false}});
-    extra["reasoning_ended"] = json!(false);
-    consume_reasoning_parser_args(&mut request.extra_args);
-    let converted = build_generate_request(
-        request,
-        "request-1".to_string(),
-        DisaggregationMode::Aggregated,
-    )
-    .unwrap();
-    assert_eq!(converted, baseline);
-}
-
-#[test]
 fn frontend_router_metadata_does_not_require_engine_support() {
     let baseline = build_generate_request(
         request(),
@@ -1319,7 +1400,18 @@ fn frontend_router_metadata_does_not_require_engine_support() {
     )
     .unwrap();
     for (fields, is_supported) in [
-        (json!(["worker_id", "timing"]), true),
+        (
+            json!([
+                "worker_id",
+                "timing",
+                "completion_token_ids",
+                "prompt_token_ids",
+                "prompt_logprobs",
+                "detailed_finish_reason",
+                "stop_reason"
+            ]),
+            true,
+        ),
         (json!(["worker_id", "engine_data"]), false),
     ] {
         let mut request = request();

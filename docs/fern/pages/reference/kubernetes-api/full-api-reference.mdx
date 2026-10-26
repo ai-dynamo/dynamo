@@ -10,11 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 172 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 208 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">74 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">71 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
+<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">32 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -190,7 +191,7 @@ Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
 **Kind:** `enum`
 **Underlying type:** `string`
 **Validation:** Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed]
-**Appears in:** [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
+**Appears in:** [DynamoGraphDeploymentRequestNativeStatus](#dynamographdeploymentrequestnativestatus), [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
 
 **Allowed values**
 
@@ -224,7 +225,7 @@ When autoApply is enabled, these overrides are applied to the generated DGD reso
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
 
 <ParamField path="name" type="string">
 Name is the desired name for the created DynamoGraphDeployment. If not specified, defaults to the DGDR name.
@@ -258,7 +259,7 @@ This status is populated when autoApply is enabled and a DGD is created.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
+**Appears in:** [DynamoGraphDeploymentRequestNativeStatus](#dynamographdeploymentrequestnativestatus), [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
 
 <ParamField path="name" type="string">
 Name is the name of the created DynamoGraphDeployment.
@@ -359,7 +360,7 @@ See [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec).
 **Appears in:** [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
 
 <ParamField path="providerOverride" type="ProviderOverride">
-ProviderOverride configures the primary Grove unit representing this DGD component. With apiVersion `grove.io/v1alpha1`, target is `PodCliqueTemplateSpec` for a single-node component or `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+ProviderOverride configures the primary Grove unit representing this DGD component. With apiVersion `grove.io/v1alpha1`, target is `PodCliqueTemplateSpec` for a single-node component or `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD OpenAPI omits this field.
 See [ProviderOverride](#provideroverride).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -784,33 +785,31 @@ See [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus).
 </ParamField>
 </Accordion>
 
-<Accordion id="dynamographdeploymentrequestspec" title="DynamoGraphDeploymentRequestSpec">
-DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-This CRD serves as the primary interface for users to request model deployments with
-specific performance constraints and resource requirements, enabling SLA-driven deployments.
+<Accordion id="dynamographdeploymentrequestnativespec" title="DynamoGraphDeploymentRequestNativeSpec">
+DynamoGraphDeploymentRequestNativeSpec contains the native v1alpha1 request fields.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
 
-<ParamField path="model" type="string" required={true}>
+<ParamField path="model" type="string">
 Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). This is a high-level identifier for easy reference in kubectl output and logs. The controller automatically sets this value in profilingConfig.config.deployment.model.
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="backend" type="string" required={true}>
+<ParamField path="backend" type="string">
 Backend specifies the inference backend for profiling. The controller automatically sets this value in profilingConfig.config.engine.backend. Profiling runs on real GPUs or via AIC simulation to collect performance data.
-**Validation:** Enum: [auto vllm sglang trtllm]  Required: \&#123;\&#125;
+**Validation:** Enum: [auto vllm sglang trtllm]  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="useMocker" type="boolean" default="false">
+<ParamField path="useMocker" type="boolean">
 UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of a real backend deployment. When true, the deployment uses simulated engines that don't require GPUs, using the profiling data to simulate realistic timing behavior. Mocker is available in all backend images and useful for large-scale experiments. Profiling still runs against the real backend (specified above) to collect performance data.
 </ParamField>
 
-<ParamField path="profilingConfig" type="ProfilingConfigSpec" required={true}>
+<ParamField path="profilingConfig" type="ProfilingConfigSpec">
 ProfilingConfig provides the complete configuration for the profiling job. Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted), discovered GPU configuration is used as defaults when hardware configuration is not manually specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values always take precedence over auto-discovered values. If GPU discovery fails (e.g., namespace-restricted operator without node permissions), manual hardware config is required. This configuration is passed directly to the profiler. The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema). Note: deployment.model and engine.backend are automatically set from the high-level modelName and backend fields and should not be specified in this config.
 See [ProfilingConfigSpec](#profilingconfigspec).
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
@@ -818,12 +817,12 @@ RuntimeVersionOverride explicitly sets the Dynamo runtime version for every comp
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="enableGpuDiscovery" type="boolean" default="true">
+<ParamField path="enableGpuDiscovery" type="boolean">
 EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes. DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always attempted automatically. Setting this field has no effect - the operator will always try to discover GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped operator without permissions), manual hardware configuration is required regardless of this setting.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="autoApply" type="boolean" default="false">
+<ParamField path="autoApply" type="boolean">
 AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, only the spec is generated and stored in status. Users can then manually create a DGD using the generated spec.
 </ParamField>
 
@@ -834,18 +833,17 @@ See [DeploymentOverridesSpec](#deploymentoverridesspec).
 </ParamField>
 </Accordion>
 
-<Accordion id="dynamographdeploymentrequeststatus" title="DynamoGraphDeploymentRequestStatus">
-DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
-The controller updates this status as the DGDR progresses through its lifecycle.
+<Accordion id="dynamographdeploymentrequestnativestatus" title="DynamoGraphDeploymentRequestNativeStatus">
+DynamoGraphDeploymentRequestNativeStatus contains the native v1alpha1 status fields.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+**Appears in:** [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus)
 
-<ParamField path="state" type="DGDRState" default="Initializing">
+<ParamField path="state" type="DGDRState">
 State is a high-level textual status of the deployment request lifecycle.
 See [DGDRState](#dgdrstate).
-**Validation:** Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed]
+**Validation:** Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="backend" type="string">
@@ -877,6 +875,115 @@ See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api
 Deployment tracks the auto-created DGD when AutoApply is true. Contains name, namespace, state, and creation status of the managed DGD.
 See [DeploymentStatus](#deploymentstatus).
 **Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentrequestspec" title="DynamoGraphDeploymentRequestSpec">
+DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+This CRD serves as the primary interface for users to request model deployments with
+specific performance constraints and resource requirements, enabling SLA-driven deployments.
+Native v1alpha1 fields and the V1Beta2 conversion envelope are mutually exclusive.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+
+<ParamField path="model" type="string">
+Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). This is a high-level identifier for easy reference in kubectl output and logs. The controller automatically sets this value in profilingConfig.config.deployment.model.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="backend" type="string">
+Backend specifies the inference backend for profiling. The controller automatically sets this value in profilingConfig.config.engine.backend. Profiling runs on real GPUs or via AIC simulation to collect performance data.
+**Validation:** Enum: [auto vllm sglang trtllm]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="useMocker" type="boolean">
+UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of a real backend deployment. When true, the deployment uses simulated engines that don't require GPUs, using the profiling data to simulate realistic timing behavior. Mocker is available in all backend images and useful for large-scale experiments. Profiling still runs against the real backend (specified above) to collect performance data.
+</ParamField>
+
+<ParamField path="profilingConfig" type="ProfilingConfigSpec">
+ProfilingConfig provides the complete configuration for the profiling job. Note: GPU discovery is automatically attempted to detect GPU resources from Kubernetes cluster nodes. If the operator has node read permissions (cluster-wide or explicitly granted), discovered GPU configuration is used as defaults when hardware configuration is not manually specified (minNumGpusPerEngine, maxNumGpusPerEngine, numGpusPerNode). User-specified values always take precedence over auto-discovered values. If GPU discovery fails (e.g., namespace-restricted operator without node permissions), manual hardware config is required. This configuration is passed directly to the profiler. The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema). Note: deployment.model and engine.backend are automatically set from the high-level modelName and backend fields and should not be specified in this config.
+See [ProfilingConfigSpec](#profilingconfigspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="runtimeVersionOverride" type="string">
+RuntimeVersionOverride explicitly sets the Dynamo runtime version for every component in the generated DynamoGraphDeployment. Set this when profilingConfig.profilerImage uses a non-semantic-version tag or digest, or when its tag does not identify the Dynamo runtime version.
+**Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="enableGpuDiscovery" type="boolean">
+EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes. DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always attempted automatically. Setting this field has no effect - the operator will always try to discover GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped operator without permissions), manual hardware configuration is required regardless of this setting.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="autoApply" type="boolean">
+AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, only the spec is generated and stored in status. Users can then manually create a DGD using the generated spec.
+</ParamField>
+
+<ParamField path="deploymentOverrides" type="DeploymentOverridesSpec">
+DeploymentOverrides allows customizing metadata for the auto-created DGD. Only applicable when AutoApply is true.
+See [DeploymentOverridesSpec](#deploymentoverridesspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="v1beta2" type="JSON">
+V1Beta2 losslessly preserves a native v1beta2 spec while this object is represented through v1alpha1. It is mutually exclusive with native fields. This field is a read-only conversion view; modify the request through the native v1beta2 API.
+See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentrequeststatus" title="DynamoGraphDeploymentRequestStatus">
+DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+The controller updates this status as the DGDR progresses through its lifecycle.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+
+<ParamField path="state" type="DGDRState">
+State is a high-level textual status of the deployment request lifecycle.
+See [DGDRState](#dgdrstate).
+**Validation:** Enum: [Initializing Pending Profiling Deploying Ready DeploymentDeleted Failed]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="backend" type="string">
+Backend is extracted from profilingConfig.config.engine.backend for display purposes. This field is populated by the controller and shown in kubectl output.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="observedGeneration" type="integer">
+ObservedGeneration reflects the generation of the most recently observed spec. Used to detect spec changes and enforce immutability after profiling starts.
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions contains the latest observed conditions of the deployment request. Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady. Conditions are merged by type on patch updates.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+</ParamField>
+
+<ParamField path="profilingResults" type="string">
+ProfilingResults contains a reference to the ConfigMap holding profiling data. Format: "configmap/\&lt;name\&gt;"
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="generatedDeployment" type="RawExtension">
+GeneratedDeployment contains the full generated DynamoGraphDeployment specification including metadata, based on profiling results. Users can extract this to create a DGD manually, or it's used automatically when autoApply is true. Stored as RawExtension to preserve all fields including metadata. For mocker backends, this contains the mocker DGD spec.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** EmbeddedResource: \&#123;\&#125;  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="deployment" type="DeploymentStatus">
+Deployment tracks the auto-created DGD when AutoApply is true. Contains name, namespace, state, and creation status of the managed DGD.
+See [DeploymentStatus](#deploymentstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="v1beta2" type="JSON">
+V1Beta2 losslessly preserves a native v1beta2 status while this object is represented through v1alpha1.
+See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
+**Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1612,7 +1719,7 @@ See dynamo/profiler/utils/profiler_argparse.py for the complete schema.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
 
 <ParamField path="config" type="JSON">
 Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler. The profiler will validate the configuration and report any errors.
@@ -1662,7 +1769,8 @@ Grove support is restricted as follows:
     `PodCliqueScalingGroupConfig`, according to the field location and
     component shape.
   - value may set topologyConstraint, and component contexts may set the
-    native minAvailable field. Availability is not supported at root or role scope.
+    native minAvailable field and rollingUpdate.maxUnavailable. Availability
+    and rollout budgets are not supported at root or role scope.
 
 All other providers, versions, targets, and fields are rejected.
 
@@ -1681,7 +1789,7 @@ target identifies the provider resource kind or embedded provider schema. It may
 </ParamField>
 
 <ParamField path="value" type="JSON" required={true}>
-value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. Component contexts also accept `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the deprecated component field preserves its value and leaves the update strategy unchanged.
+value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. Component contexts also accept `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the deprecated component field preserves its value and leaves the update strategy unchanged. Component contexts also accept rollingUpdate.maxUnavailable.
 See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
 **Validation:** Required: \&#123;\&#125;  Type: object
 </ParamField>
@@ -2014,12 +2122,12 @@ RuntimeNamespace is the effective Dynamo runtime namespace for this component. W
 </ParamField>
 
 <ParamField path="servedModelName" type="string">
-ServedModelName is the effective primary model identity exposed by this component's serving role. During rolling updates, worker status keeps the old active revision value until cutover completes.
+ServedModelName is the effective primary model identity exposed by this component's serving role in combined mode. Native sidecars omit this field; Kubernetes Planner reads their registered model identity. During rolling updates, worker status keeps the old active revision until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeComponentName" type="string">
-RuntimeComponentName is an explicit Dynamo runtime component identity resolved from the serving role's endpoint override. Omission means the backend default applies. During rolling updates, worker status keeps the old active revision value until cutover completes.
+RuntimeComponentName is an explicit Dynamo runtime component identity resolved from the serving role's endpoint override in combined mode. Native sidecars omit this field; Kubernetes Planner reads their registered component identity. During rolling updates, worker status keeps the old active revision value until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2174,7 +2282,7 @@ BackendType specifies the inference backend.
 **Kind:** `enum`
 **Underlying type:** `string`
 **Validation:** Enum: [auto sglang trtllm vllm]
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta1-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 **Allowed values**
 
@@ -2393,12 +2501,12 @@ runtimeNamespace is the effective Dynamo runtime namespace for this component. W
 </ParamField>
 
 <ParamField path="servedModelName" type="string">
-servedModelName is the effective primary model identity exposed by this component's serving role. During rolling updates, worker status keeps the old active revision value until cutover completes.
+servedModelName is the effective primary model identity exposed by this component's serving role in combined mode. Native sidecars omit this field; Kubernetes Planner reads their registered model identity. During rolling updates, worker status keeps the old active revision until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeComponentName" type="string">
-runtimeComponentName is an explicit Dynamo runtime component identity resolved from the serving role's endpoint override. Omission means the backend default applies. During rolling updates, worker status keeps the old active revision value until cutover completes.
+runtimeComponentName is an explicit Dynamo runtime component identity resolved from the serving role's endpoint override in combined mode. Native sidecars omit this field; Kubernetes Planner reads their registered component identity. During rolling updates, worker status keeps the old active revision value until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2505,7 +2613,7 @@ DGDRPhase represents the lifecycle phase of a DynamoGraphDeploymentRequest.
 **Kind:** `enum`
 **Underlying type:** `string`
 **Validation:** Enum: [Pending Profiling Ready Deploying Deployed Failed]
-**Appears in:** [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+**Appears in:** [DynamoGraphDeploymentRequestNativeStatus](#v1beta1-dynamographdeploymentrequestnativestatus), [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
 
 **Allowed values**
 
@@ -2539,7 +2647,7 @@ DeploymentInfoStatus tracks the state of the deployed DynamoGraphDeployment.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+**Appears in:** [DynamoGraphDeploymentRequestNativeStatus](#v1beta1-dynamographdeploymentrequestnativestatus), [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
 
 <ParamField path="replicas" type="integer">
 Replicas is the desired number of replicas.
@@ -2648,10 +2756,10 @@ any `extraPodSpec`-style escape hatch. Container paths are relative to the compo
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="providerOverride" type="ProviderOverride">
-providerOverride configures the primary Grove unit representing this DGD component. With apiVersion `grove.io/v1alpha1`, target is `PodCliqueTemplateSpec` for a single-node component or `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+providerOverride configures the primary Grove unit representing this DGD component. With apiVersion `grove.io/v1alpha1`, target is `PodCliqueTemplateSpec` for a single-node component or `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD OpenAPI omits this field.
 See [ProviderOverride](#v1beta1-provideroverride).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2930,7 +3038,7 @@ v1beta1 releases. Component-level experimental features live under
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="kvTransferPolicy" type="KvTransferPolicy">
 kvTransferPolicy configures topology-aware routing for KV-cache transfers between prefill and decode workers.
@@ -2980,20 +3088,19 @@ See [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequestst
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-dynamographdeploymentrequestspec" title="v1beta1 DynamoGraphDeploymentRequestSpec">
-DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-Only the Model field is required; all other fields are optional and have sensible defaults.
+<Accordion id="v1beta1-dynamographdeploymentrequestnativespec" title="v1beta1 DynamoGraphDeploymentRequestNativeSpec">
+DynamoGraphDeploymentRequestNativeSpec contains the native v1beta1 request fields.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
-<ParamField path="model" type="string" required={true}>
+<ParamField path="model" type="string">
 Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.
-**Validation:** MinLength: 1  Required: \&#123;\&#125;
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="backend" type="BackendType" default="auto">
+<ParamField path="backend" type="BackendType">
 Backend specifies the inference backend to use for profiling and deployment.
 See [BackendType](#backendtype).
 **Validation:** Enum: [auto sglang trtllm vllm]  Optional: \&#123;\&#125;
@@ -3045,15 +3152,151 @@ See [FeaturesSpec](#featuresspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="searchStrategy" type="SearchStrategy" default="rapid">
+<ParamField path="searchStrategy" type="SearchStrategy">
 SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.
 See [SearchStrategy](#searchstrategy).
 **Validation:** Enum: [rapid thorough]  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="autoApply" type="boolean" default="true">
+<ParamField path="autoApply" type="boolean">
 AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.
 **Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta1-dynamographdeploymentrequestnativestatus" title="v1beta1 DynamoGraphDeploymentRequestNativeStatus">
+DynamoGraphDeploymentRequestNativeStatus contains the native v1beta1 status fields.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+
+<ParamField path="phase" type="DGDRPhase">
+Phase is the high-level lifecycle phase of the deployment request.
+See [DGDRPhase](#dgdrphase).
+**Validation:** Enum: [Pending Profiling Ready Deploying Deployed Failed]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="profilingPhase" type="ProfilingPhase">
+ProfilingPhase indicates the current sub-phase of the profiling pipeline. Only meaningful when Phase is "Profiling". Cleared when profiling completes or fails.
+See [ProfilingPhase](#profilingphase).
+**Validation:** Enum: [Initializing SweepingPrefill SweepingDecode SelectingConfig BuildingCurves GeneratingDGD Done]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="dgdName" type="string">
+DGDName is the name of the generated or created DynamoGraphDeployment.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="profilingJobName" type="string">
+ProfilingJobName is the name of the Kubernetes Job running the profiler.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions contains the latest observed conditions of the deployment request. Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="profilingResults" type="ProfilingResultsStatus">
+ProfilingResults contains the selected deployment configuration produced by profiling. Deprecated compatibility fields may remain on objects created by older releases.
+See [ProfilingResultsStatus](#profilingresultsstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="deploymentInfo" type="DeploymentInfoStatus">
+DeploymentInfo tracks the state of the deployed DynamoGraphDeployment. Populated when a DGD has been created (either via autoApply or manually).
+See [DeploymentInfoStatus](#deploymentinfostatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="observedGeneration" type="integer">
+ObservedGeneration is the most recent generation observed by the controller.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta1-dynamographdeploymentrequestspec" title="v1beta1 DynamoGraphDeploymentRequestSpec">
+DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+Native v1beta1 fields and the V1Beta2 conversion envelope are mutually exclusive.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequest](#v1beta1-dynamographdeploymentrequest)
+
+<ParamField path="model" type="string">
+Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b"). Can be a HuggingFace ID or a private model name.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="backend" type="BackendType">
+Backend specifies the inference backend to use for profiling and deployment.
+See [BackendType](#backendtype).
+**Validation:** Enum: [auto sglang trtllm vllm]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="image" type="string">
+Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0". For Dynamo &lt; 1.1.0, use dynamo-frontend.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="runtimeVersionOverride" type="string">
+RuntimeVersionOverride supplies the default Dynamo runtime version for generated DynamoGraphDeployment components that do not set their own override. Set this when Image uses a non-semantic-version tag or digest, or when its tag does not identify the Dynamo runtime version. An explicit component value in overrides.dgd takes precedence.
+**Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="modelCache" type="ModelCacheSpec">
+ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.
+See [ModelCacheSpec](#modelcachespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="hardware" type="HardwareSpec">
+Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.
+See [HardwareSpec](#hardwarespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="workload" type="WorkloadSpec">
+Workload defines the expected workload characteristics for SLA-based profiling.
+See [WorkloadSpec](#workloadspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="sla" type="SLASpec">
+SLA defines service-level agreement targets that drive profiling optimization.
+See [SLASpec](#slaspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="overrides" type="OverridesSpec">
+Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.
+See [OverridesSpec](#overridesspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="features" type="FeaturesSpec">
+Features controls optional Dynamo platform features in the generated deployment.
+See [FeaturesSpec](#featuresspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="searchStrategy" type="SearchStrategy">
+SearchStrategy controls the profiling search depth. "rapid" performs a fast sweep; "thorough" explores more configurations.
+See [SearchStrategy](#searchstrategy).
+**Validation:** Enum: [rapid thorough]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="autoApply" type="boolean">
+AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="v1beta2" type="JSON">
+V1Beta2 losslessly preserves a native v1beta2 spec while this object is represented through v1beta1. It is mutually exclusive with native fields. This field is a read-only conversion view; modify the request through the native v1beta2 API.
+See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
+**Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3107,6 +3350,12 @@ See [DeploymentInfoStatus](#deploymentinfostatus).
 <ParamField path="observedGeneration" type="integer">
 ObservedGeneration is the most recent generation observed by the controller.
 **Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="v1beta2" type="JSON">
+V1Beta2 losslessly preserves a native v1beta2 status while this object is represented through v1beta1.
+See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
+**Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3197,7 +3446,7 @@ DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeployment](#v1beta1-dynamographdeployment)
+**Appears in:** [DynamoGraphDeployment](#v1beta1-dynamographdeployment), [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)
 
 <ParamField path="providerOverride" type="ProviderOverride">
 providerOverride configures the root resource generated by the selected graph-level workload provider. For Grove it uses apiVersion `grove.io/v1alpha1`, target `PodCliqueSet`, and may set only `spec.template.topologyConstraint`. It cannot select or change the provider.
@@ -3404,7 +3653,7 @@ FeaturesSpec controls optional Dynamo platform features in the generated deploym
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta1-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="planner" type="RawExtension">
 Planner contains the raw Planner configuration passed to the Planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference. DGDR passes this object through without field-level validation; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.
@@ -3547,7 +3796,7 @@ If all four fields are set, discovery is skipped.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta1-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="gpuSku" type="GPUSKUType">
 GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU. The legacy value gb200_sxm is deprecated; use gb200 instead.
@@ -3740,7 +3989,7 @@ ModelCacheSpec references a PVC containing pre-downloaded model weights.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta1-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="pvcName" type="string">
 PVCName is the name of the PersistentVolumeClaim containing model weights. The PVC must exist in the same namespace as the DGDR.
@@ -3810,7 +4059,7 @@ OverridesSpec allows customizing the profiling job and the generated DynamoGraph
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta1-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="profilingJob" type="JobSpec">
 ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec. Security: creating a DGDR is workload-creation authority in its namespace — these overrides carry the same blast radius as creating a Job or Pod directly there, by design. Pod security is enforced centrally by Kubernetes Pod Security Admission on the resulting Pods once the namespace is labeled (see pod-security.kubernetes.io/enforce): it applies the full Pod Security Standards — covering privileged, host namespaces, and hostPath, not only securityContext — not this API. ServiceAccount identity is a separate layer: these overrides can set serviceAccountName and automountServiceAccountToken, which are bounded by RBAC and namespace membership rather than PSA — the same authority any Pod author in the namespace already holds. Grant create/update on DGDRs only to principals trusted to create Pods in the namespace. The profiling Job always runs in the DGDR's own namespace and overrides cannot change that — but namespace containment is not node or cross-tenant isolation. Dynamo's workloads, including this Job, satisfy the baseline standard, so enforce baseline (non-exempt) on every resulting Pod to close the privileged, host-namespace, host-device, and hostPath paths.
@@ -3907,7 +4156,7 @@ of the profiling pipeline is currently executing.
 **Kind:** `enum`
 **Underlying type:** `string`
 **Validation:** Enum: [Initializing SweepingPrefill SweepingDecode SelectingConfig BuildingCurves GeneratingDGD Done]
-**Appears in:** [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+**Appears in:** [DynamoGraphDeploymentRequestNativeStatus](#v1beta1-dynamographdeploymentrequestnativestatus), [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
 
 **Allowed values**
 
@@ -3925,7 +4174,7 @@ ProfilingResultsStatus contains the output of the profiling process.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
+**Appears in:** [DynamoGraphDeploymentRequestNativeStatus](#v1beta1-dynamographdeploymentrequestnativestatus), [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus)
 
 <ParamField path="pareto" type="ParetoConfig array">
 Pareto is retained for compatibility with existing status objects. Deprecated: The controller no longer populates this field.
@@ -3948,13 +4197,14 @@ Grove support is restricted as follows:
     `PodCliqueScalingGroupConfig`, according to the field location and
     component shape.
   - value may set topologyConstraint, and component contexts may set the
-    native minAvailable field. Availability is not supported at root or role scope.
+    native minAvailable field and rollingUpdate.maxUnavailable. Availability
+    and rollout budgets are not supported at root or role scope.
 
 All other providers, versions, targets, and fields are rejected.
 
 
 **Kind:** `type`
-**Appears in:** [ComponentRoleSpec](#v1beta1-componentrolespec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [ComponentRoleSpec](#v1beta1-componentrolespec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="apiVersion" type="string" required={true}>
 apiVersion is the Kubernetes API group and version of the provider schema. Grove requires `grove.io/v1alpha1`.
@@ -3967,7 +4217,7 @@ target identifies the provider resource kind or embedded provider schema. It may
 </ParamField>
 
 <ParamField path="value" type="JSON" required={true}>
-value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. Component contexts also accept `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the deprecated component field preserves its value and leaves the update strategy unchanged.
+value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. Component contexts also accept `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the deprecated component field preserves its value and leaves the update strategy unchanged. Component contexts also accept rollingUpdate.maxUnavailable.
 See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
 **Validation:** Required: \&#123;\&#125;  Type: object
 </ParamField>
@@ -3978,7 +4228,7 @@ Restart specifies the restart policy for a graph deployment.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="id" type="string" required={true}>
 id is an arbitrary string that triggers a restart when changed. Any modification to this value initiates a restart of the graph deployment according to the configured strategy.
@@ -4118,7 +4368,7 @@ SLASpec defines the service-level agreement targets for profiling optimization.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta1-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="ttft" type="float">
 TTFT is the Time To First Token target in milliseconds.
@@ -4174,7 +4424,7 @@ SearchStrategy controls the profiling search depth.
 **Kind:** `enum`
 **Underlying type:** `string`
 **Validation:** Enum: [rapid thorough]
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta1-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 **Allowed values**
 
@@ -4187,7 +4437,7 @@ SpecTopologyConstraint defines deployment-level topology placement requirements.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="clusterTopologyName" type="string">
 clusterTopologyName is the name of the ClusterTopology resource that defines the topology hierarchy for this deployment.
@@ -4236,7 +4486,7 @@ WorkloadSpec defines the workload characteristics for SLA-based profiling.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta1-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="isl" type="integer" default="4000">
 ISL is the Input Sequence Length (number of tokens).
@@ -4255,6 +4505,911 @@ Concurrency is the target concurrency level. Mutually exclusive with the request
 
 <ParamField path="requestRate" type="float">
 RequestRate is the target request rate (req/s). Mutually exclusive with the concurrency field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<div id="nvidia-com-v1beta2" />
+
+## nvidia.com/v1beta2
+
+Package v1beta2 contains API Schema definitions for the nvidia.com v1beta2 API group.
+
+**Resource Types**
+
+<CardGroup cols={3}>
+<Card title="DynamoGraphDeploymentCandidate" href="#dynamographdeploymentcandidate" />
+<Card title="DynamoGraphDeploymentRequest" href="#v1beta2-dynamographdeploymentrequest" />
+<Card title="DynamoGraphDeploymentRun" href="#dynamographdeploymentrun" />
+</CardGroup>
+
+<Accordion id="aisimulatespec" title="AISimulateSpec">
+AISimulateSpec selects the AISimulate execution artifact and supplies native input.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+<ParamField path="image" type="string">
+Image selects a Dynamo-compatible AISimulate runner. When omitted, admission and execution defaults are resolved outside this API.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="versionOverride" type="string">
+VersionOverride declares the AISimulate compatibility version when it cannot be inferred from the effective image.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="parameters" type="RawExtension">
+Parameters contains native AISimulate input. Field names and nesting use the upstream AISimulate JSON contract, including snake_case names.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="backend" title="Backend">
+Backend identifies an inference backend searched by AISimulate and used by generated candidates.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [vllm sglang trtllm]
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>vllm</Badge>
+- <Badge intent="note" minimal>sglang</Badge>
+- <Badge intent="note" minimal>trtllm</Badge>
+</Accordion>
+
+<Accordion id="branchprogress" title="BranchProgress">
+BranchProgress reports progress for one independently optimized AISimulate branch.
+
+
+**Kind:** `type`
+**Appears in:** [DGDRRunProgress](#dgdrrunprogress)
+
+<ParamField path="name" type="string">
+Name is the executor-defined stable branch identifier.
+</ParamField>
+
+<ParamField path="rounds" type="RoundProgress">
+Rounds reports optimizer progress for this branch.
+See [RoundProgress](#roundprogress).
+</ParamField>
+</Accordion>
+
+<Accordion id="candidateprogress" title="CandidateProgress">
+CandidateProgress reports bounded Kubernetes publication, not all internal trials.
+
+
+**Kind:** `type`
+**Appears in:** [DGDRRunProgress](#dgdrrunprogress)
+
+<ParamField path="paretoFront" type="integer">
+ParetoFront is the number of feasible points on the current Pareto front.
+</ParamField>
+
+<ParamField path="published" type="integer">
+Published is the number of Candidate resources currently referenced by this run.
+</ParamField>
+</Accordion>
+
+<Accordion id="dgdrrunphase" title="DGDRRunPhase">
+DGDRRunPhase is a concise presentation state. Conditions remain authoritative.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Pending Running Succeeded Failed]
+**Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Pending</Badge>
+- <Badge intent="note" minimal>Running</Badge>
+- <Badge intent="note" minimal>Succeeded</Badge>
+- <Badge intent="note" minimal>Failed</Badge>
+</Accordion>
+
+<Accordion id="dgdrrunprogress" title="DGDRRunProgress">
+DGDRRunProgress contains branch-aware optimizer and evaluation outcome counters.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+<ParamField path="branches" type="BranchProgress array">
+Branches reports independently optimized AISimulate branches.
+See [BranchProgress](#branchprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="evaluations" type="EvaluationProgress">
+Evaluations reports unique candidate outcomes.
+See [EvaluationProgress](#evaluationprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="candidates" type="CandidateProgress">
+Candidates reports bounded Kubernetes publication.
+See [CandidateProgress](#candidateprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentcandidate" title="DynamoGraphDeploymentCandidate">
+DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1beta2`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoGraphDeploymentCandidate`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoGraphDeploymentCandidateSpec">
+See [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec).
+</ParamField>
+
+<ParamField path="status" type="DynamoGraphDeploymentCandidateStatus">
+See [DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentcandidatespec" title="DynamoGraphDeploymentCandidateSpec">
+DynamoGraphDeploymentCandidateSpec is an immutable evaluated point: the
+inline DGD spec plus its resolved evaluation parameters.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentCandidate](#dynamographdeploymentcandidate)
+
+<ParamField path="providerOverride" type="ProviderOverride">
+providerOverride configures the root resource generated by the selected graph-level workload provider. For Grove it uses apiVersion `grove.io/v1alpha1`, target `PodCliqueSet`, and may set only `spec.template.topologyConstraint`. It cannot select or change the provider.
+See [ProviderOverride](#provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="annotations" type="object (keys:string, values:string)">
+annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates). Component-level (`podTemplate`) values take precedence on conflict.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="labels" type="object (keys:string, values:string)">
+labels to propagate to all child resources. Same precedence rules as `annotations`.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="priorityClassName" type="string">
+priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets. Requires the Grove pathway.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="components" type="DynamoComponentDeploymentSharedSpec array">
+components are the components deployed as part of this graph. Each entry carries its own stable logical `name`, and names must be unique within the list. Component types are generally repeatable, except `type: epp` which may appear at most once.
+See [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec).
+**Validation:** MaxItems: 25  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="env" type="EnvVar array">
+env is prepended to every component's environment. Component-specific env entries with the same name take precedence and may reference values from this list.
+See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="backendFramework" type="string">
+backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
+**Validation:** Enum: [sglang vllm trtllm]
+</ParamField>
+
+<ParamField path="restart" type="Restart">
+restart specifies the restart policy for the graph deployment.
+See [Restart](#restart).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="topologyConstraint" type="SpecTopologyConstraint">
+topologyConstraint is the deployment-level topology constraint. When set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology CR to use. `spec.topologyConstraint.packDomain` is optional at this level and can be omitted when only components carry constraints. Components without their own `topologyConstraint` inherit from this value.
+See [SpecTopologyConstraint](#spectopologyconstraint).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="experimental" type="DynamoGraphDeploymentExperimentalSpec">
+experimental groups graph-level preview features whose API shape and behavior may change in breaking ways between v1beta1 releases.
+See [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="parameters" type="RawExtension">
+Parameters are the resolved evaluation parameters for this point.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** Type: object
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentcandidatestatus" title="DynamoGraphDeploymentCandidateStatus">
+DynamoGraphDeploymentCandidateStatus describes evaluation, never deployment health.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentCandidate](#dynamographdeploymentcandidate)
+
+<ParamField path="metrics" type="RawExtension">
+Metrics are the resolved evaluation metrics for this point.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-dynamographdeploymentrequest" title="v1beta2 DynamoGraphDeploymentRequest">
+DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1beta2`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoGraphDeploymentRequest`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoGraphDeploymentRequestSpec">
+See [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec).
+</ParamField>
+
+<ParamField path="status" type="DynamoGraphDeploymentRequestStatus">
+See [DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-dynamographdeploymentrequestnativespec" title="v1beta2 DynamoGraphDeploymentRequestNativeSpec">
+DynamoGraphDeploymentRequestNativeSpec contains the native v1beta2 request fields.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)
+
+<ParamField path="model" type="ModelSpec">
+Model identifies the model whose deployment configurations are evaluated.
+See [ModelSpec](#modelspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="backends" type="Backend array">
+Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+See [Backend](#backend).
+**Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="hardware" type="HardwareSpec">
+Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+See [HardwareSpec](#v1beta2-hardwarespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="workload" type="WorkloadSpec">
+Workload defines the synthetic traffic model used for every candidate evaluation.
+See [WorkloadSpec](#v1beta2-workloadspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="objective" type="ObjectiveSpec">
+Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
+See [ObjectiveSpec](#objectivespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="aisimulate" type="AISimulateSpec">
+AISimulate selects the execution artifact and supplies native AISimulate input.
+See [AISimulateSpec](#aisimulatespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="recommendation" type="RecommendationSpec">
+Recommendation controls bounded projection into DGDC resources.
+See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-dynamographdeploymentrequestnativestatus" title="v1beta2 DynamoGraphDeploymentRequestNativeStatus">
+DynamoGraphDeploymentRequestNativeStatus contains the native v1beta2 status fields.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus)
+
+<ParamField path="observedGeneration" type="integer">
+ObservedGeneration is the most recent DGDR generation accepted by the controller.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="activeRunRef" type="LocalObjectReference">
+ActiveRunRef identifies the one non-terminal run.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="recentRunRefs" type="LocalObjectReference array">
+RecentRunRefs identifies retained terminal runs in newest-first order.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions reports reconciliation of the persistent request, not run execution outcomes.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-dynamographdeploymentrequestspec" title="v1beta2 DynamoGraphDeploymentRequestSpec">
+DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequest](#v1beta2-dynamographdeploymentrequest)
+
+<ParamField path="model" type="ModelSpec">
+Model identifies the model whose deployment configurations are evaluated.
+See [ModelSpec](#modelspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="backends" type="Backend array">
+Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+See [Backend](#backend).
+**Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="hardware" type="HardwareSpec">
+Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+See [HardwareSpec](#v1beta2-hardwarespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="workload" type="WorkloadSpec">
+Workload defines the synthetic traffic model used for every candidate evaluation.
+See [WorkloadSpec](#v1beta2-workloadspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="objective" type="ObjectiveSpec">
+Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
+See [ObjectiveSpec](#objectivespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="aisimulate" type="AISimulateSpec">
+AISimulate selects the execution artifact and supplies native AISimulate input.
+See [AISimulateSpec](#aisimulatespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="recommendation" type="RecommendationSpec">
+Recommendation controls bounded projection into DGDC resources.
+See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="v1beta1" type="JSON">
+V1Beta1 losslessly preserves a native v1beta1 spec while this object is represented through v1beta2. It is mutually exclusive with native fields. This field is a read-only conversion view; modify the request through the native v1beta1 API.
+See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-dynamographdeploymentrequeststatus" title="v1beta2 DynamoGraphDeploymentRequestStatus">
+DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequest](#v1beta2-dynamographdeploymentrequest)
+
+<ParamField path="observedGeneration" type="integer">
+ObservedGeneration is the most recent DGDR generation accepted by the controller.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="activeRunRef" type="LocalObjectReference">
+ActiveRunRef identifies the one non-terminal run.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="recentRunRefs" type="LocalObjectReference array">
+RecentRunRefs identifies retained terminal runs in newest-first order.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions reports reconciliation of the persistent request, not run execution outcomes.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="v1beta1" type="JSON">
+V1Beta1 losslessly preserves a native v1beta1 status while this object is represented through v1beta2.
+See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentrun" title="DynamoGraphDeploymentRun">
+DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1beta2`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoGraphDeploymentRun`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoGraphDeploymentRunSpec">
+See [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec).
+</ParamField>
+
+<ParamField path="status" type="DynamoGraphDeploymentRunStatus">
+See [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentrunspec" title="DynamoGraphDeploymentRunSpec">
+DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
+Run creators resolve optional Request inputs before persisting the Run.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRun](#dynamographdeploymentrun)
+
+<ParamField path="model" type="ModelSpec">
+Model identifies the model whose deployment configurations are evaluated.
+See [ModelSpec](#modelspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="backends" type="Backend array">
+Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+See [Backend](#backend).
+**Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="hardware" type="HardwareSpec">
+Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+See [HardwareSpec](#v1beta2-hardwarespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="workload" type="WorkloadSpec">
+Workload defines the synthetic traffic model used for every candidate evaluation.
+See [WorkloadSpec](#v1beta2-workloadspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="objective" type="ObjectiveSpec">
+Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
+See [ObjectiveSpec](#objectivespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="aisimulate" type="AISimulateSpec">
+AISimulate selects the execution artifact and supplies native AISimulate input.
+See [AISimulateSpec](#aisimulatespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="recommendation" type="RecommendationSpec">
+Recommendation controls bounded projection into DGDC resources.
+See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentrunstatus" title="DynamoGraphDeploymentRunStatus">
+DynamoGraphDeploymentRunStatus represents one search execution's observed state.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRun](#dynamographdeploymentrun)
+
+<ParamField path="phase" type="DGDRRunPhase">
+Phase is a concise presentation state. Conditions remain authoritative.
+See [DGDRRunPhase](#dgdrrunphase).
+**Validation:** Enum: [Pending Running Succeeded Failed]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="jobRef" type="ResourceReference">
+JobRef identifies the controller-owned Job for this run.
+See [ResourceReference](#resourcereference).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="progress" type="DGDRRunProgress">
+Progress contains branch-aware optimizer and evaluation outcome counters.
+See [DGDRRunProgress](#dgdrrunprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="candidateRefs" type="LocalObjectReference array">
+CandidateRefs identifies the current bounded DGDC projection. List order represents rank, best first, for scalar searches.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="startTime" type="Time">
+StartTime is when execution started.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="completionTime" type="Time">
+CompletionTime is present only after a terminal outcome.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lastProgressTime" type="Time">
+LastProgressTime is the latest coarse-grained progress update or heartbeat. Writers should update it periodically, not for every evaluation.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions contains standard Kubernetes conditions merged by type.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="evaluationprogress" title="EvaluationProgress">
+EvaluationProgress reports unique candidate outcomes without creating one resource per trial.
+
+
+**Kind:** `type`
+**Appears in:** [DGDRRunProgress](#dgdrrunprogress)
+
+<ParamField path="scheduled" type="integer">
+Scheduled is the number of unique evaluations accepted for execution.
+</ParamField>
+
+<ParamField path="running" type="integer">
+Running is the number of evaluations currently executing.
+</ParamField>
+
+<ParamField path="feasible" type="integer">
+Feasible is the number of completed evaluations that satisfy all constraints.
+</ParamField>
+
+<ParamField path="infeasible" type="integer">
+Infeasible is the number of completed evaluations that violate at least one constraint.
+</ParamField>
+
+<ParamField path="failed" type="integer">
+Failed is the number of evaluations that ended in an execution error.
+</ParamField>
+
+<ParamField path="unsupported" type="integer">
+Unsupported is the number of configurations rejected as unsupported before evaluation.
+</ParamField>
+
+<ParamField path="cacheHits" type="integer">
+CacheHits is the number of evaluations satisfied from a prior result.
+</ParamField>
+</Accordion>
+
+<Accordion id="gpuhardwarespec" title="GPUHardwareSpec">
+GPUHardwareSpec describes accelerator identity and the maximum allocation per candidate.
+
+
+**Kind:** `type`
+**Appears in:** [HardwareSpec](#v1beta2-hardwarespec)
+
+<ParamField path="sku" type="string">
+SKU identifies the accelerator using the AISimulate hardware catalog name. When omitted, admission discovers the accelerator from the cluster.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="budget" type="integer">
+Budget is the maximum total number of GPUs one candidate may use. When omitted, admission derives the available GPU budget from the cluster.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-hardwarespec" title="v1beta2 HardwareSpec">
+HardwareSpec bounds the accelerator configurations evaluated by the search.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+<ParamField path="gpu" type="GPUHardwareSpec">
+GPU describes accelerator identity and the maximum allocation per candidate. Omitted fields are resolved independently by admission.
+See [GPUHardwareSpec](#gpuhardwarespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="kvloadratio" title="KVLoadRatio">
+KVLoadRatio is either a pinned load ratio or a minimum/maximum range.
+AISimulate performs mode-specific validation.
+
+
+**Kind:** `type`
+**Underlying type:** `float array`
+**Validation:** MaxItems: 2; MinItems: 1; items:Maximum: 1; items:Minimum: 0
+**Appears in:** [StaticWorkloadSpec](#staticworkloadspec)
+</Accordion>
+
+<Accordion id="modelspec" title="ModelSpec">
+ModelSpec identifies the model whose deployment configurations are evaluated.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+<ParamField path="name" type="string">
+Name identifies the model in the syntax accepted by the selected backend.
+**Validation:** MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="nativesearchinput" title="NativeSearchInput">
+NativeSearchInput defines the v1beta2 search input shared by Requests and
+immutable Runs.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)
+
+<ParamField path="model" type="ModelSpec">
+Model identifies the model whose deployment configurations are evaluated.
+See [ModelSpec](#modelspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="backends" type="Backend array">
+Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+See [Backend](#backend).
+**Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="hardware" type="HardwareSpec">
+Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+See [HardwareSpec](#v1beta2-hardwarespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="workload" type="WorkloadSpec">
+Workload defines the synthetic traffic model used for every candidate evaluation.
+See [WorkloadSpec](#v1beta2-workloadspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="objective" type="ObjectiveSpec">
+Objective defines scalar optimization or a multi-objective Pareto search. When omitted, the schema supplies the default Optimize mode and SLA; admission supplies the conditional scalar metric.
+See [ObjectiveSpec](#objectivespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="aisimulate" type="AISimulateSpec">
+AISimulate selects the execution artifact and supplies native AISimulate input.
+See [AISimulateSpec](#aisimulatespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="recommendation" type="RecommendationSpec">
+Recommendation controls bounded projection into DGDC resources.
+See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="objectivemetric" title="ObjectiveMetric">
+ObjectiveMetric is a metric optimized by AISimulate.
+
+
+**Kind:** `type`
+**Underlying type:** `string`
+**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]
+**Appears in:** [ObjectiveSpec](#objectivespec)
+</Accordion>
+
+<Accordion id="objectivemode" title="ObjectiveMode">
+ObjectiveMode selects scalar optimization or a multi-objective Pareto search.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Optimize Pareto]
+**Appears in:** [ObjectiveSpec](#objectivespec)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Optimize</Badge>
+- <Badge intent="note" minimal>Pareto</Badge>
+</Accordion>
+
+<Accordion id="objectiveslaspec" title="ObjectiveSLASpec">
+ObjectiveSLASpec defines per-request latency bounds used to calculate goodput.
+An empty object disables SLA filtering.
+
+
+**Kind:** `type`
+**Appears in:** [ObjectiveSpec](#objectivespec)
+
+<ParamField path="ttftMs" type="float">
+TTFTMs is the Time To First Token bound in milliseconds.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="itlMs" type="float">
+ITLMs is the Inter-Token Latency bound in milliseconds.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="e2eMs" type="float">
+E2EMs is an alternative end-to-end bound in milliseconds.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="objectivespec" title="ObjectiveSpec">
+ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+<ParamField path="mode" type="ObjectiveMode" default="Optimize">
+Mode selects scalar optimization or a Pareto search.
+See [ObjectiveMode](#objectivemode).
+**Validation:** Enum: [Optimize Pareto]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="metric" type="ObjectiveMetric">
+Metric is the scalar target when mode is Optimize. When omitted in Optimize mode, admission defaults it to ThroughputPerGPU.
+See [ObjectiveMetric](#objectivemetric).
+**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="metrics" type="ObjectiveMetric array">
+Metrics lists two or more distinct scalar targets when mode is Pareto.
+See [ObjectiveMetric](#objectivemetric).
+**Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MaxItems: 7  MinItems: 2  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="sla" type="ObjectiveSLASpec" default="\{ itlMs:30 ttftMs:2000 \}">
+SLA defines per-request latency bounds used to calculate goodput.
+See [ObjectiveSLASpec](#objectiveslaspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="recommendationspec" title="RecommendationSpec">
+RecommendationSpec controls bounded projection into DGDC resources.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+<ParamField path="maxCandidates" type="integer" default="1">
+MaxCandidates is the maximum number of DGDCs owned by one run. Scalar candidates are ordered best first; Pareto candidates have no scalar rank. This field does not limit internal trials.
+**Validation:** Maximum: 100  Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="resourcereference" title="ResourceReference">
+ResourceReference identifies a namespaced resource by name and UID.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+<ParamField path="name" type="string">
+Name is the resource name.
+</ParamField>
+
+<ParamField path="uid" type="UID">
+UID is the resource UID.
+See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="roundprogress" title="RoundProgress">
+RoundProgress reports completed and planned optimizer rounds.
+
+
+**Kind:** `type`
+**Appears in:** [BranchProgress](#branchprogress)
+
+<ParamField path="completed" type="integer">
+Completed is the number of finished rounds.
+</ParamField>
+
+<ParamField path="total" type="integer">
+Total is the number of planned rounds.
+</ParamField>
+</Accordion>
+
+<Accordion id="staticworkloadspec" title="StaticWorkloadSpec">
+StaticWorkloadSpec defines one of AISimulate's synthetic workload shapes.
+
+
+**Kind:** `type`
+**Appears in:** [WorkloadSpec](#v1beta2-workloadspec)
+
+<ParamField path="isl" type="integer">
+ISL is the input sequence length in tokens.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="osl" type="integer">
+OSL is the output sequence length in tokens.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="numRequestRatio" type="float">
+NumRequestRatio sets request count relative to the selected load.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="requestRate" type="float">
+RequestRate is a fixed open-loop arrival rate in requests per second.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="concurrency" type="integer">
+Concurrency is a fixed closed-loop in-flight request cap.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="kvLoadRatio" type="KVLoadRatio">
+KVLoadRatio derives concurrency from candidate KV capacity. A two-value range requires a bounded AISimulate sweep.
+See [KVLoadRatio](#kvloadratio).
+**Validation:** MaxItems: 2  MinItems: 1  items:Maximum: 1  items:Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-workloadspec" title="v1beta2 WorkloadSpec">
+WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+<ParamField path="static" type="StaticWorkloadSpec" default="\{ isl:4000 kvLoadRatio:[0 1] osl:1000 \}">
+Static defines one of AISimulate's synthetic workload shapes. When omitted, it searches the full KV-load ratio range at ISL 4000 and OSL 1000. An explicit empty object opts out of this underlay.
+See [StaticWorkloadSpec](#staticworkloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -5015,24 +6170,15 @@ The operator applies different default health probes based on the component type
 
 #### Frontend Components
 
-Frontend components receive the following probe configurations:
+Frontend components receive the following HTTP GET probes on port `http` (8000):
 
-**Liveness Probe:**
-- **Type**: HTTP GET
-- **Path**: `/health`
-- **Port**: `http` (8000)
-- **Initial Delay**: 60 seconds
-- **Period**: 60 seconds
-- **Timeout**: 30 seconds
-- **Failure Threshold**: 10
+| Probe | Path | Initial delay | Period | Timeout | Failure threshold |
+| --- | --- | --- | --- | --- | --- |
+| Liveness | `/live` | 15 seconds | 10 seconds | 1 second | 3 |
+| Readiness | `/health` | 10 seconds | 10 seconds | 3 seconds | 3 |
+| Startup (runtime 1.6.0 and later) | `/live` | 0 seconds | 10 seconds | 1 second | 30 |
 
-**Readiness Probe:**
-- **Type**: Exec command
-- **Command**: `curl -s http://localhost:${DYNAMO_PORT}/health | jq -e ".status == \"healthy\""`
-- **Initial Delay**: 60 seconds
-- **Period**: 60 seconds
-- **Timeout**: 30 seconds
-- **Failure Threshold**: 10
+The startup probe allows five minutes for the sequential NATS and etcd connection waits and initialization. It also applies to colocated frontends. Older runtimes and images whose runtime version cannot be resolved do not receive a default startup probe. User-specified probes replace these defaults. If you raise `NATS_STARTUP_CONNECT_TIMEOUT_SECONDS` or `ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS`, raise the startup probe allowance to cover the combined connection windows and initialization.
 
 #### Worker Components
 

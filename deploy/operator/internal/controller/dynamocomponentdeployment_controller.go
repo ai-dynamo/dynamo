@@ -51,7 +51,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -216,28 +215,29 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 	modified := componentReconcileResult.modified
 
-	// create or update api-server service
-	serviceModified, err := r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
-		dynamoComponentDeployment: dynamoComponentDeployment,
-	})
+	serviceModified := false
+	disaggregatedSetBacked, err := r.isDisaggregatedSetBacked(ctx, dynamoComponentDeployment)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to determine workload provider: %w", err)
 	}
+	if !disaggregatedSetBacked {
+		// Graph-level Services are rendered and owned by the DGD when the DS
+		// provider is selected. Standalone/component DCDs retain this path.
+		serviceModified, err = r.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
+			dynamoComponentDeployment: dynamoComponentDeployment,
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
+		}
 
-	// create or update headless service for model endpoint discovery
-	componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
-	componentMap := map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-		componentName: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
-	}
-	if err := dynamo.ReconcileModelServicesForComponents(
-		ctx,
-		r,
-		dynamoComponentDeployment,
-		componentMap,
-		dynamoComponentDeployment.Namespace,
-	); err != nil {
-		logs.Error(err, "Failed to reconcile model service")
-		return ctrl.Result{}, err
+		componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
+		componentMap := map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			componentName: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+		}
+		if err := dynamo.ReconcileModelServicesForComponents(ctx, r, dynamoComponentDeployment, componentMap, dynamoComponentDeployment.Namespace); err != nil {
+			logs.Error(err, "Failed to reconcile model service")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// create or update api-server ingresses
@@ -269,6 +269,24 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 
 	return
+}
+
+func (r *DynamoComponentDeploymentReconciler) isDisaggregatedSetBacked(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (bool, error) {
+	owner := metav1.GetControllerOf(dcd)
+	if owner == nil || owner.Kind != dynamoGraphDeploymentKind || owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() {
+		return false, nil
+	}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: dcd.Namespace, Name: owner.Name}, dgd); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return dgd.Annotations[commonconsts.KubeAnnotationWorkloadProvider] == commonconsts.WorkloadProviderDisaggregatedSet, nil
 }
 
 type ComponentReconcileResult struct {
@@ -516,8 +534,8 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 		componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = nil
 		componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = nil
 		if componentReconcileResult.gpuShape != nil {
-			componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = ptr.To(componentReconcileResult.gpuShape.GPUsPerEngine)
-			componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = ptr.To(componentReconcileResult.gpuShape.GPUsPerReplica)
+			componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = new(componentReconcileResult.gpuShape.GPUsPerEngine)
+			componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = new(componentReconcileResult.gpuShape.GPUsPerReplica)
 		}
 	}
 
@@ -671,11 +689,9 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      kubeName,
-			Namespace: kubeNs,
-			Labels:    labels,
-		},
+		Name:      kubeName,
+		Namespace: kubeNs,
+		Labels:    labels,
 	}
 
 	desiredReplicas := int32(1)
@@ -843,10 +859,8 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 		return nil, false, err
 	}
 	ingress := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.NormalizeKubeResourceName(opt.dynamoComponentDeployment.Name),
-			Namespace: opt.dynamoComponentDeployment.Namespace,
-		},
+		Name:      dynamo.NormalizeKubeResourceName(opt.dynamoComponentDeployment.Name),
+		Namespace: opt.dynamoComponentDeployment.Namespace,
 	}
 
 	if !hasIngressSpec || !ingressSpec.Enabled || ingressSpec.IngressControllerClassName == nil {
@@ -865,10 +879,8 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 		return nil, false, err
 	}
 	vs := &networkingv1beta1.VirtualService{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.NormalizeKubeResourceName(opt.dynamoComponentDeployment.Name),
-			Namespace: opt.dynamoComponentDeployment.Namespace,
-		},
+		Name:      dynamo.NormalizeKubeResourceName(opt.dynamoComponentDeployment.Name),
+		Namespace: opt.dynamoComponentDeployment.Namespace,
 	}
 
 	if !hasIngressSpec || !ingressSpec.IsVirtualServiceEnabled() {
@@ -901,10 +913,8 @@ func (r *DynamoComponentDeploymentReconciler) dcdIngressSpec(dcd *nvidiacomv1bet
 		return dynamo.IngressSpec{}, false, nil
 	}
 	parentDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      parentDGDName,
-			Namespace: dcd.Namespace,
-		},
+		Name:      parentDGDName,
+		Namespace: dcd.Namespace,
 	}
 	return dynamo.GenerateDefaultIngressSpec(parentDGD, r.Config.Ingress), true, nil
 }
@@ -920,17 +930,15 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	kubeName := opt.dynamoComponentDeployment.Name
 
 	kubeDeployment = &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        kubeName,
-			Namespace:   kubeNs,
-			Labels:      labels,
-			Annotations: annotations,
-		},
+		Name:        kubeName,
+		Namespace:   kubeNs,
+		Labels:      labels,
+		Annotations: annotations,
 	}
 
 	renderer := r.workloadRenderer()
 	containerGPUs := renderer.containerGPUCount(ctx, opt.dynamoComponentDeployment)
-	// nolint: gosimple
+	// nolint: staticcheck
 	podTemplateSpec, err := renderer.generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, dynamo.RoleMain, containerGPUs)
 	if err != nil {
 		return
@@ -1012,6 +1020,15 @@ func hasLegacyWorkerSelector(labels map[string]string, componentType string) boo
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	controller, err := r.controllerBuilder(mgr)
+	if err != nil {
+		return err
+	}
+	return controller.Complete(r)
+}
+
+// controllerBuilder shares the production watches and indexes with instrumented reconcilers.
+func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager) (*builder.Builder, error) {
 	// Index native PodSnapshot references so dependency events can find affected DCDs.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		if err := mgr.GetFieldIndexer().IndexField(
@@ -1020,7 +1037,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			dcdPodSnapshotRefIndex,
 			dcdPodSnapshotRefIndexValues,
 		); err != nil {
-			return fmt.Errorf("register DCD PodSnapshot reference index: %w", err)
+			return nil, fmt.Errorf("register DCD PodSnapshot reference index: %w", err)
 		}
 	}
 
@@ -1084,7 +1101,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})
-	return m.Complete(r)
+	return m, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) GetRecorder() events.EventRecorder {

@@ -58,6 +58,7 @@ pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Erro
 pub mod extensions;
 pub mod input_trigger;
 pub mod llm_backend;
+pub mod metadata_upload;
 pub mod metrics;
 pub mod postprocessor;
 pub mod preprocessor;
@@ -457,6 +458,8 @@ pub struct SamplingOptions {
 
     /// Whether to include the stop string in the output.
     pub include_stop_str_in_output: Option<bool>,
+
+    pub logit_bias: Option<std::collections::HashMap<u32, f32>>,
 
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,

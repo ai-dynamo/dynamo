@@ -24,7 +24,8 @@ _NO_DEFAULT_MARKERS_ENV = "DYNAMO_PYTEST_NO_DEFAULT_MARKERS"
 _SUITE_MARKERS = REQUIRED_CATEGORIES["Lifecycle"]
 _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 
-# Trees that ship runnable demos and agent scripts rather than CI suites.
+# Trees with dedicated CI jobs or runnable demos outside the runtime suites.
+# Helm chart tests run in helm-chart-tests, which installs the Helm CLI.
 # Their files are still collected, so a developer can run one explicitly, but
 # they must not be defaulted into a lifecycle: an unmarked demo helper such as
 # examples/backends/sglang/test_sglang_profile.py assumes a server the harness
@@ -32,7 +33,7 @@ _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 # Anything under these roots that carries its own markers is unaffected.
 # ``skills`` is a symlink to ``.agents/skills``, so resolve() lands on
 # ``.agents``; both names are listed because either can reach collection.
-_UNMANAGED_ROOTS = frozenset({"examples", "skills", ".agents"})
+_UNMANAGED_PATHS = (("examples",), ("skills",), (".agents",), ("deploy", "helm"))
 _REPO_ROOT = Path(__file__).resolve().parent
 
 # Seed sys.modules with the venv copies before pytest collection runs.
@@ -138,7 +139,7 @@ def pytest_runtest_protocol(item, nextitem):
 
 
 def _is_unmanaged(item) -> bool:
-    """True when the item lives in a demo or script tree, not a CI suite."""
+    """True when runtime CI must not supply lifecycle or hardware defaults."""
     try:
         path = Path(str(item.path)).resolve()
     except (AttributeError, OSError, ValueError):
@@ -147,7 +148,58 @@ def _is_unmanaged(item) -> bool:
         parts = path.relative_to(_REPO_ROOT).parts
     except ValueError:
         return False
-    return bool(parts) and parts[0] in _UNMANAGED_ROOTS
+    return any(parts[: len(prefix)] == prefix for prefix in _UNMANAGED_PATHS)
+
+
+def _tag_xfail_for_datadog(item) -> None:
+    """Expose ``@pytest.mark.xfail`` to Datadog Test Optimization.
+
+    Datadog's test status is three-valued — pass / fail / skip. pytest reports
+    an xfailed test as ``skipped`` and an xpassed one as ``passed``, and
+    ddtrace forwards that raw outcome without looking at ``wasxfail``, so both
+    are indistinguishable from an ordinary skip or pass once uploaded. Allure
+    reads ``wasxfail`` and keeps first-class ``xfailed`` / ``xpassed``, which is
+    why the OpenSearch-backed reports can show an xfail rate and Datadog cannot.
+
+    The outcome is not knowable at collection time, but the *marker* is, and
+    that is enough: combined with the status Datadog already records,
+
+        @test.is_xfail:true AND @test.status:skip  -> xfailed
+        @test.is_xfail:true AND @test.status:pass  -> xpassed
+
+    ``dd_tags`` is ddtrace's supported per-test tag marker. It is read during
+    test discovery (``_get_test_custom_tags`` in ddtrace's pytest plugin), so
+    it has to be applied at collection — tagging from a report hook is too
+    late.
+
+    No-ops when ddtrace is absent: ``dd_tags`` is only registered by its
+    plugin, so applying it without would fail collection as an unknown marker.
+    """
+    marker = item.get_closest_marker("xfail")
+    if marker is None or not item.config.pluginmanager.hasplugin("ddtrace"):
+        return
+    # Conditions are positional args or ``condition=``; no condition means
+    # unconditional. When every condition is falsy pytest runs the test as a
+    # normal one, so tagging it would make a plain pass look like an xpass.
+    conditions = marker.args or (
+        (marker.kwargs["condition"],) if "condition" in marker.kwargs else ()
+    )
+    if conditions and not any(conditions):
+        return
+    item.add_marker(
+        pytest.mark.dd_tags(
+            **{
+                "test.is_xfail": "true",
+                # A strict xfail that passes is reported as a failure, so the
+                # two cannot be collapsed downstream.
+                "test.xfail_strict": str(
+                    bool(
+                        marker.kwargs.get("strict", item.config.getini("xfail_strict"))
+                    )
+                ).lower(),
+            }
+        )
+    )
 
 
 def pytest_itemcollected(item):
@@ -163,12 +215,13 @@ def pytest_itemcollected(item):
     fault-tolerance suite in a single process -- the imports alone cost ~90 MB
     resident for the rest of the run, and the job was OOM-killed (exit 137).
 
-    Trees in ``_UNMANAGED_ROOTS`` are skipped entirely; they keep the
+    Trees in ``_UNMANAGED_PATHS`` are skipped entirely; they keep the
     pre-default behaviour of being deselected unless they mark themselves.
 
     ``DYNAMO_PYTEST_NO_DEFAULT_MARKERS=1`` disables the defaults so the marker
     report can inspect authored markers only.
     """
+    _tag_xfail_for_datadog(item)
     if os.environ.get(_NO_DEFAULT_MARKERS_ENV) == "1":
         return
     if _is_unmanaged(item):
