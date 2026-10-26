@@ -27,6 +27,7 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | `multiturn_bench` | `multiturn` |
 | `offline_replay_bench` | `offline-replay` |
 | `mooncake_bench` | `mooncake` |
+| `lower_tier_bench` | `lower-tier` |
 | `active_sequences_bench` | `active-sequences` |
 | `approximate_lru_bench` | `approximate-lru` |
 | `dc_ckf_consumer_bench` | `dc-ckf-consumer` |

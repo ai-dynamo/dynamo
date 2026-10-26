@@ -371,6 +371,46 @@ exceed capacity, any acquire falls back, eviction does not occur, or final
 invariants fail. macOS runs are functional smoke evidence only; authoritative
 CPU and throughput comparisons require pinned, exclusive Linux CPUs.
 
+## Lower-tier replay
+
+`lower_tier_bench` measures `LowerTierIndexers`, the router's index of KV blocks
+held in lower storage tiers by KVCR cache owners. It synthesizes HostPinned
+events from a Mooncake-format trace: sessions stick to workers in order of first
+appearance (a row without `session_id` is its own session), and each worker runs
+an LRU host cache of `--num-host-blocks` engine blocks. A request touches its
+resident blocks, evicts to make room in one `Removed` event, and stores each
+contiguous run of missing blocks as one `Stored` event. Every worker is its own
+cache owner, projected to that worker and registered as a router-hint source.
+
+Each process runs one phase:
+
+- `--phase write` applies every event to a fresh indexer and reports process CPU
+  per stored or removed block, and the indexer's heap per live (block, owner)
+  membership. The heap figure is the drop in allocated bytes when the indexer is
+  dropped, from glibc's `mallinfo2` or, when jemalloc is preloaded, its
+  `stats.allocated`; `allocator` in the result says which. `indexed_memberships`
+  counts the indexer's dump and must equal `expected_memberships`.
+- `--phase query` replays again and, before each request's events, times the
+  router's lower-tier query for it (hints on, no device tier). It reports latency
+  percentiles, nanoseconds per matched block, and a `checksum` of the routing
+  answers, which must match across builds that compute the same results.
+
+```bash
+cargo bench --package dynamo-bench --bench lower_tier_bench \
+  --no-default-features --features lower-tier --no-run
+BIN=$(find target/release/deps -maxdepth 1 -type f -perm -111 \
+  -name 'lower_tier_bench-*' | head -n1)
+
+"$BIN" "$TRACE" --phase write --trace-block-size 512 \
+  --result-json-output /tmp/lower-tier-write.json
+"$BIN" "$TRACE" --phase query --trace-block-size 512 \
+  --result-json-output /tmp/lower-tier-query.json
+```
+
+The public Mooncake trace has no session ids, so every request lands on the next
+worker in turn and conversation turns spread across owners. A trace with session
+ids keeps each session on one owner, as KV-aware routing would.
+
 ## Validation evidence
 
 The measurements below used one fixed host and one build:
