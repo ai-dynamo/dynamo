@@ -51,7 +51,7 @@ The populated graph replay controls cover Deployment, LWS and DS graphs without
 claiming that these freshly captured test graphs came from an older release.
 Formal released history still advances only through the pinned-release workflow.
 
-These cases complete 22 of the 27 canonical matrix entries. The five remaining
+These cases complete 23 of the 27 canonical matrix entries. The four remaining
 single-node Component cases and the missing-origin historical case remain in
 [#16650](https://github.com/ai-dynamo/dynamo/issues/16650); the incomplete
 release-matrix gate stays enforced.

@@ -83,18 +83,22 @@ func TestUpgradeComponentSafety(t *testing.T) {
 			changed := old.DeepCopy()
 			changed.SetGeneration(2)
 			require.ErrorContains(t, upgradeSafetyError(false, before, []unstructured.Unstructured{*changed}), "generation")
-			changed = old.DeepCopy()
-			path := []string{"spec", "template", "spec", "hostname"}
+			paths := [][]string{{"spec", "template", "spec", "hostname"}}
 			if kind == "LeaderWorkerSet" {
-				path = []string{"spec", "leaderWorkerTemplate", "workerTemplate", "spec", "hostname"}
+				paths = [][]string{
+					{"spec", "leaderWorkerTemplate", "leaderTemplate", "spec", "hostname"},
+					{"spec", "leaderWorkerTemplate", "workerTemplate", "spec", "hostname"},
+				}
 			}
-			if kind == "DisaggregatedSet" {
-				path = []string{"spec", "roles"}
-				require.NoError(t, unstructured.SetNestedSlice(changed.Object, []any{map[string]any{"name": "changed-role"}}, path...))
-			} else {
-				require.NoError(t, unstructured.SetNestedField(changed.Object, "changed-worker", path...))
+			for _, path := range paths {
+				changed = old.DeepCopy()
+				if kind == "DisaggregatedSet" {
+					require.NoError(t, unstructured.SetNestedSlice(changed.Object, []any{map[string]any{"name": "changed-role"}}, "spec", "roles"))
+				} else {
+					require.NoError(t, unstructured.SetNestedField(changed.Object, "changed-worker", path...))
+				}
+				require.ErrorContains(t, upgradeSafetyError(false, before, []unstructured.Unstructured{*changed}), "rollout intent")
 			}
-			require.ErrorContains(t, upgradeSafetyError(false, before, []unstructured.Unstructured{*changed}), "rollout intent")
 			require.ErrorContains(t, upgradeSafetyError(false, before, nil), "inventory")
 		})
 	}
