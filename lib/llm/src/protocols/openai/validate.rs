@@ -113,7 +113,7 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
-/// Extra-body fields accepted for backend-specific handling.
+/// Extra-body fields accepted for compatibility or backend-specific handling.
 pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "cache_salt",
     "stop_token_ids",
@@ -122,6 +122,9 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "bad_words_token_ids",
     "logprob_token_ids",
     "vllm_xargs",
+    // Accept OpenAI cache/moderation hints without acting on them, as in Responses.
+    "prompt_cache_retention",
+    "safety_identifier",
 ];
 
 /// `vllm_xargs` keys vLLM itself fills from dedicated request fields. Dynamo only
@@ -149,7 +152,7 @@ static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
 
 /// Validates that no unsupported fields are present in the request.
 ///
-/// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
+/// Backend-specific fields in `PASSTHROUGH_EXTRA_FIELDS` are validated below or downstream.
 /// Other fields may be ignored and dropped when
 /// `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy.
 pub fn validate_no_unsupported_fields(
@@ -1354,6 +1357,8 @@ mod tests {
             "bad_words_token_ids": [[2]],
             "logprob_token_ids": [3],
             "vllm_xargs": {"flag": true},
+            "prompt_cache_retention": "24h",
+            "safety_identifier": "user-hash",
         }))
         .unwrap();
         validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap();

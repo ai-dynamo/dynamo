@@ -793,6 +793,21 @@ mod tests {
         serde_json::from_value(body).expect("Failed to deserialize request")
     }
 
+    #[test]
+    fn test_openai_cache_metadata_is_accepted() {
+        for stream in [false, true] {
+            for retention in ["in-memory", "in_memory", "24h"] {
+                let request = chat_request_with(&json!({
+                    "stream": stream,
+                    "prompt_cache_key": "session-1",
+                    "prompt_cache_retention": retention,
+                    "safety_identifier": "user-hash",
+                }));
+                ValidateRequest::validate(&request).unwrap();
+            }
+        }
+    }
+
     /// Extracts sampling options for `extra` and returns the guided-decoding options it
     /// produced, failing if extraction rejected the request or engaged nothing.
     fn guided_for(extra: &serde_json::Value) -> GuidedDecodingOptions {
