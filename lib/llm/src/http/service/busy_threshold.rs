@@ -187,8 +187,8 @@ async fn busy_threshold_handler(
             StatusCode::CONFLICT,
             Json(serde_json::json!(ErrorResponse {
                 error: format!(
-                    "Model '{}' is served in direct routing mode, where this frontend ignores \
-                     busy thresholds. Set them where workers are picked, such as the EPP.",
+                    "Model '{}' is served in direct routing mode, where the caller picks \
+                     workers and this frontend ignores busy thresholds.",
                     request.model
                 ),
             })),

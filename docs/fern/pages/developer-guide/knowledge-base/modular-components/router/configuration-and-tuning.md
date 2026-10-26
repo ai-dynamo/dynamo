@@ -685,7 +685,8 @@ curl -X POST http://localhost:8000/router_policy/busy_threshold \
 The response returns the model name and current values of all three fields. Omitted or null
 fields retain their current values; a body containing only `model` queries that model. A write
 to an undiscovered model returns 404. Invalid threshold ranges return 400, and invalid field
-types return 422, without changing the thresholds.
+types return 422, without changing the thresholds. A frontend in direct routing mode
+(`--router-mode direct`) does not pick workers and ignores busy thresholds, so a write returns 409.
 
 The legacy `GET` and `POST /busy_threshold` routes remain compatibility aliases with the same
 handlers and state. Writes through either path are visible through the other. These updates

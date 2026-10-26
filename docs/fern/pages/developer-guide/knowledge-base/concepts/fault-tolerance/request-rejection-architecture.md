@@ -88,6 +88,10 @@ A `POST /busy_threshold` update changes the stored threshold configuration. It d
 recompute every worker. The next worker-load or runtime-configuration update triggers reevaluation, so
 a new threshold can take a short time to change routing decisions.
 
+A frontend in direct routing mode (`--router-mode direct`) does not pick workers: the caller does. It
+ignores busy thresholds, does not subscribe to worker load events, and returns a worker's overload
+refusal to the caller without excluding the worker.
+
 ## Rejection Path
 
 When a request arrives:

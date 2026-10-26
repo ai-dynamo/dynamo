@@ -1383,7 +1383,7 @@ fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
 }
 
 /// A frontend in direct routing mode does not pick workers, so its handle
-/// ignores busy-worker thresholds: the component that picks workers applies them.
+/// ignores busy-worker thresholds: they belong to the caller that picks workers.
 fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
     if !router_config.router_mode.is_direct_routing() {
         return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
@@ -1391,8 +1391,8 @@ fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
     if router_config.load_threshold_config.is_configured() {
         tracing::warn!(
             thresholds = ?router_config.load_threshold_config,
-            "ignoring busy-worker thresholds in direct routing mode: the component that picks \
-             workers, such as the EPP, applies them"
+            "ignoring busy-worker thresholds in direct routing mode: the caller picks workers, \
+             not this frontend"
         );
     }
     LoadThresholdHandle::disabled()
