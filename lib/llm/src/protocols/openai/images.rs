@@ -244,6 +244,7 @@ pub struct ImageTokenDetails {
 
 /// One generated image. The worker sets one of `url` and `b64_json`.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+#[serde(try_from = "ImageDataWire")]
 pub struct ImageData {
     /// URL of the generated image (if response_format is "url")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -255,6 +256,30 @@ pub struct ImageData {
 
     /// The prompt the model used, when it rewrote the original prompt
     pub revised_prompt: Option<String>,
+}
+
+/// The wire shape of [`ImageData`]. The OpenAI `Image` type rejects an entry
+/// with neither `url` nor `b64_json`, and so does this one.
+#[derive(Deserialize)]
+struct ImageDataWire {
+    url: Option<String>,
+    b64_json: Option<String>,
+    revised_prompt: Option<String>,
+}
+
+impl TryFrom<ImageDataWire> for ImageData {
+    type Error = &'static str;
+
+    fn try_from(wire: ImageDataWire) -> Result<Self, Self::Error> {
+        if wire.url.is_none() && wire.b64_json.is_none() {
+            return Err("an image needs `url` or `b64_json`");
+        }
+        Ok(Self {
+            url: wire.url,
+            b64_json: wire.b64_json,
+            revised_prompt: wire.revised_prompt,
+        })
+    }
 }
 
 /// Actual background of the generated images
@@ -431,11 +456,14 @@ mod tests {
             r#"{"created":1,"data":[]}"#,
             r#"{"created":1,"data":[{"b64_json":"aGVsbG8=","url":null}],"size":"768x512"}"#,
             // Rejected: an unknown background, a negative created, no data,
-            // and a usage without its input token details.
+            // a usage without its input token details, and an image with
+            // neither url nor b64_json.
             r#"{"created":1,"data":[],"background":"auto"}"#,
             r#"{"created":1,"data":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}"#,
             r#"{"created":-1,"data":[]}"#,
             r#"{"created":1}"#,
+            r#"{"created":1,"data":[{}]}"#,
+            r#"{"created":1,"data":[{"revised_prompt":"a cat, photo"}]}"#,
         ] {
             assert_same_wire_format::<ImagesResponse, NvImagesResponse>(json);
         }
