@@ -5,14 +5,12 @@ name: conductor
 replicas: 1
 podTemplate:
   spec:
-    resourceClaims:
-    - {name: gpu, resourceClaimTemplateName: gpu}
     containers:
     - name: main
       image: cyborg-runtime
       resources:
-        claims:
-        - {name: gpu}
+        limits:
+          nvidia.com/gpu: 1
       volumeMounts:
       - {name: config, mountPath: /configs}
       - {name: model-storage, mountPath: /models}

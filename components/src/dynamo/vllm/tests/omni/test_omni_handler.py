@@ -1493,6 +1493,43 @@ class TestImageReferenceInputs:
         handler._image_loader.load_image.assert_not_awaited()
         handler.engine_client.generate.assert_not_called()
 
+    @staticmethod
+    def _reference_data_url() -> str:
+        with io.BytesIO() as buffer:
+            Image.new("RGB", (8, 8), color="red").save(buffer, format="PNG")
+            return (
+                "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_reference", [False, True], ids=["t2i", "edit"])
+    async def test_engine_inputs_carry_image_accounting_to_the_formatter(
+        self, image_request_handler, with_reference
+    ):
+        """The handler, not the engine output, knows the accounting inputs:
+        the reference image it loaded and the step count the request asked
+        for. Both reach the formatter through `EngineInputs`."""
+        handler = image_request_handler
+        handler.output_formatter = AsyncMock()
+        handler.output_formatter.format.return_value = {"data": []}
+        stage_output = SimpleNamespace(final_output_type="image", images=[])
+        handler.engine_client.generate.return_value.__aiter__.return_value = [
+            stage_output
+        ]
+        request = {"prompt": "a teapot", "nvext": {"num_inference_steps": 4}}
+        if with_reference:
+            request["input_reference"] = self._reference_data_url()
+
+        chunks = [
+            chunk
+            async for chunk in handler._generate_openai_mode(request, None, "req-1")
+        ]
+
+        assert chunks == [{"data": []}]
+        kwargs = handler.output_formatter.format.call_args.kwargs
+        assert kwargs["input_images"] == (1 if with_reference else 0)
+        assert kwargs["num_inference_steps"] == 4
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "model_class_name, image_modality, edit_prompt",

@@ -16,7 +16,6 @@ import importlib
 import inspect
 
 import pytest
-from packaging.version import Version
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 _vllm = importlib.import_module("vllm")
@@ -382,6 +381,7 @@ class TestVllmRendererApi:
             "reasoning_parser_kwargs",
             "abort_immediately",
             "session_id",
+            "kv_hints",
         )
         expected_output_fields = (
             "request_id",
@@ -401,37 +401,23 @@ class TestVllmRendererApi:
             "mm_cache_miss_hashes",
             "new_sampling_mask",
             "spec_decode_metrics",
+            "prompt_token_id_logprobs",
         )
 
-        if Version(_vllm.__version__) >= Version("0.31.0"):
-            expected_request_fields += ("kv_hints",)
-            expected_output_fields += ("prompt_token_id_logprobs",)
-
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
-            omni = importlib.import_module("vllm_omni")
-            omni_version = Version(omni.__version__).release[:2]
-            expected_request_fields += {
-                (0, 29): ("additional_information", "model_intermediate_buffer"),
-                (0, 31): (
-                    "additional_information",
-                    "model_intermediate_buffer",
-                    "payload_sender_info",
-                ),
-            }[omni_version]
-            expected_output_fields += {
-                (0, 29): (
-                    "multimodal_output",
-                    "is_segment_finished",
-                    "new_prompt_len_snapshot",
-                ),
-                (0, 31): (
-                    "multimodal_output",
-                    "pooling_output_payload",
-                    "is_segment_finished",
-                    "new_prompt_len_snapshot",
-                    "num_generation_tokens",
-                ),
-            }[omni_version]
+            expected_request_fields += (
+                "additional_information",
+                "model_intermediate_buffer",
+                "payload_sender_info",
+            )
+            expected_output_fields += (
+                "multimodal_output",
+                "pooling_output_payload",
+                "is_segment_finished",
+                "new_prompt_len_snapshot",
+                "num_generation_tokens",
+                "is_coalesced",
+            )
 
         actual_request_fields = EngineCoreRequest.__struct_fields__
         assert actual_request_fields == expected_request_fields, (

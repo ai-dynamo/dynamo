@@ -47,7 +47,7 @@ const (
 )
 
 // DGDRDefaulter is a mutating webhook handler that fills in default values for
-// DynamoGraphDeploymentRequest resources on CREATE.
+// native v1beta1 DynamoGraphDeploymentRequest resources.
 //
 // If spec.image is not set, it is derived as:
 //
@@ -71,9 +71,8 @@ func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
-// If spec.image is not set, derives a default image from the backend and operator version.
-// UPDATE requests are admitted unchanged so an omitted image is not rewritten after
-// creation.
+// Native API defaults apply on CREATE and UPDATE. If spec.image is not set on
+// CREATE, derives a default image from the operator version.
 func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdrDefaultingWebhookName)
 
@@ -92,6 +91,24 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		return nil
 	}
 
+	if dgdr.Spec.V1Beta2 != nil {
+		return nil
+	}
+
+	// Preserve the API defaults that moved out of the structural schema so
+	// envelope-backed storage objects remain free of native siblings.
+	if dgdr.Spec.Backend == "" {
+		dgdr.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
+	}
+	if dgdr.Spec.SearchStrategy == "" {
+		dgdr.Spec.SearchStrategy = nvidiacomv1beta1.SearchStrategyRapid
+	}
+	if dgdr.Spec.AutoApply == nil {
+		dgdr.Spec.AutoApply = new(true)
+	}
+
+	// Image derivation remains create-only so updates do not rewrite an
+	// intentionally cleared image.
 	if req.Operation == admissionv1.Create && dgdr.Spec.Image == "" {
 		if img := d.defaultImageFor(); img != "" {
 			dgdr.Spec.Image = img
