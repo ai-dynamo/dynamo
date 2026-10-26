@@ -2254,6 +2254,19 @@ pub(crate) fn parse_complete(
 /// This function handles batch parsing of model output with full policy control,
 /// including tool output mode, reasoning policy, and guided tool constraints.
 /// It processes all message boundary markers (MessageStart/MessageEnd) from v0.8.0.
+///
+/// # Arguments
+///
+/// * `family` - The parser family name (e.g., "qwen3", "kimi_k2")
+/// * `content` - The complete model output text to parse
+/// * `guided_tool_constraint` - Constraint for guided tool call parsing
+/// * `tool_definitions` - List of available tool definitions
+/// * `policy` - Unified request policy controlling parsing behavior
+///
+/// # Returns
+///
+/// Returns `Ok(CompleteOutput)` with parsed tool calls, reasoning, and text content,
+/// or an error if parsing fails.
 pub(crate) fn parse_complete_with_policy(
     family: &str,
     content: &str,
@@ -2309,6 +2322,20 @@ pub(crate) fn parse_complete_with_policy(
 /// This function handles batch parsing of model output, processing tool calls,
 /// reasoning content, and text according to the specified mode and policy.
 /// It handles message boundary markers (MessageStart/MessageEnd) from v0.8.0.
+///
+/// # Arguments
+///
+/// * `family` - The parser family name (e.g., "qwen3", "kimi_k2")
+/// * `content` - The complete model output text to parse
+/// * `guided_tool_constraint` - Constraint for guided tool call parsing
+/// * `tool_definitions` - List of available tool definitions
+/// * `effective_mode` - The tool output mode to use for parsing
+/// * `policy` - Unified request policy controlling parsing behavior
+///
+/// # Returns
+///
+/// Returns `Ok(CompleteOutput)` with parsed tool calls, reasoning, and text content,
+/// or an error if parsing fails.
 fn parse_complete_in_mode(
     family: &str,
     content: &str,
