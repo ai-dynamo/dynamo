@@ -9,7 +9,7 @@ use std::{
 };
 
 use base64::{Engine, prelude::BASE64_STANDARD};
-use futures::{Stream, StreamExt, stream::BoxStream};
+use futures::{SinkExt, Stream, StreamExt, stream::BoxStream};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
@@ -47,6 +47,16 @@ impl Session {
             )),
             limit: client.inner.limits.max_buffered_output_bytes.get(),
         };
+        if protocol == Protocol::OmniDuplex {
+            client.inner.tasks.spawn(
+                run_duplex(client.clone(), input, emitter, cancel.clone(), cancellation)
+                    .in_current_span(),
+            );
+            return Self {
+                output: receiver,
+                cancel,
+            };
+        }
         let driver = Coordinator {
             permits: Arc::new(Semaphore::new(client.inner.limits.concurrent_turns.get())),
             client: client.clone(),
@@ -84,6 +94,102 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
+}
+
+/// One upstream socket owns the native session. The backend handles media,
+/// history, interruption and resume; no turn splitting or resampling occurs.
+async fn run_duplex(
+    client: Client,
+    mut input: BoxStream<'static, Value>,
+    output: Emitter,
+    cancel: CancellationToken,
+    cancellation: impl Future<Output = ()> + Send + 'static,
+) {
+    use tokio_tungstenite::tungstenite::Message;
+
+    let connect = client.connect_duplex();
+    tokio::pin!(cancellation);
+    let socket = tokio::select! {
+        _ = cancel.cancelled() => return,
+        _ = &mut cancellation => return,
+        result = connect => result,
+    };
+    let socket = match socket {
+        Ok(socket) => socket,
+        Err(error) => {
+            tracing::warn!(%error, "native duplex connection failed");
+            let _ = output.send(duplex_error()).await;
+            return;
+        }
+    };
+    let (mut writer, mut reader) = socket.split();
+    let result = {
+        let incoming = async {
+            while let Some(event) = input.next().await {
+                let text = serde_json::to_string(&event)?;
+                if text.len() > output.limit {
+                    return Err(Error::Invalid(
+                        "native duplex event exceeds the byte limit".into(),
+                    ));
+                }
+                writer.send(Message::Text(text.into())).await?;
+            }
+            Ok::<_, Error>(())
+        };
+        let outgoing = async {
+            while let Some(frame) = reader.next().await {
+                match frame? {
+                    Message::Text(text) => {
+                        let event: Value = serde_json::from_str(&text)?;
+                        let closed = event["type"] == "session.closed";
+                        output.send(event).await?;
+                        if closed {
+                            return Ok(());
+                        }
+                    }
+                    Message::Close(_) => return Ok(()),
+                    Message::Ping(_) | Message::Pong(_) => {}
+                    _ => return Err(Error::Protocol("expected a JSON text frame".into())),
+                }
+            }
+            Ok::<_, Error>(())
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => Ok(()),
+            _ = &mut cancellation => Ok(()),
+            result = incoming => result,
+            result = outgoing => result,
+        }
+    };
+    // A client disconnect detaches the upstream session so its lease can resume.
+    // Worker shutdown explicitly closes it instead of leaving a parked session.
+    if let Ok(mut socket) = writer.reunite(reader) {
+        if client.inner.shutdown.is_cancelled() {
+            let _ = tokio::time::timeout(
+                client.inner.limits.close_timeout,
+                send(&mut socket, json!({"type": "session.close"})),
+            )
+            .await;
+        }
+        client.close(&mut socket).await;
+    }
+    if let Err(error) = result {
+        tracing::warn!(%error, "native duplex relay failed");
+        let _ = tokio::select! {
+            _ = cancel.cancelled() => Ok(()),
+            result = output.send(duplex_error()) => result,
+        };
+    }
+}
+
+fn duplex_error() -> Value {
+    events::event(
+        "error",
+        json!({"error": {
+            "type": "server_error", "code": "upstream_error",
+            "message": "Upstream duplex session failed"
+        }}),
+    )
 }
 
 struct BufferedEvent {
@@ -514,6 +620,7 @@ impl TurnDriver {
                 Protocol::Omni => {
                     events::omni_failed(&self.response, &self.session["output_modalities"])
                 }
+                Protocol::OmniDuplex => duplex_error(),
             };
             tokio::select! {
                 _ = self.cancel.cancelled() => {},
@@ -547,6 +654,11 @@ impl TurnDriver {
                 let mut session = self.session.clone();
                 session["model"] = self.client.inner.model.clone().into();
                 self.client.update_omni_session(socket, session).await?;
+            }
+            Protocol::OmniDuplex => {
+                return Err(Error::Protocol(
+                    "native duplex cannot use a turn-local connection".into(),
+                ));
             }
         }
         let mut converter = (self.protocol == Protocol::VllmTranscription)
@@ -616,6 +728,7 @@ impl TurnDriver {
                                 return Ok(());
                             }
                         }
+                        Protocol::OmniDuplex => return Err(Error::Protocol("native duplex cannot use a turn-local connection".into())),
                     }
                 }
                 _ = &mut deadline, if committed => return Err(Error::Timeout),

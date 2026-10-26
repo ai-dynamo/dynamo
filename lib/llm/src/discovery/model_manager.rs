@@ -1520,6 +1520,18 @@ impl ModelManager {
             .get_realtime_engine()
     }
 
+    pub fn get_native_realtime_engine(
+        &self,
+        model: &str,
+    ) -> Result<crate::types::NativeRealtimeBidirectionalEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_native_realtime_engine()
+    }
+
     pub fn get_generate_engine(
         &self,
         model: &str,

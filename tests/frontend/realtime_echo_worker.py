@@ -12,12 +12,20 @@ backend, ``DYN_FILE_KV``) and installs a typed realtime PushRouter to it.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 import uuid
 
 import uvloop
 
-from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_realtime_python_bridge import ENDPOINT_PATH, MODEL_NAME
 
@@ -123,7 +131,17 @@ async def _python_realtime_echo(request_stream, context):
             }
 
 
-async def main() -> None:
+async def _native_echo(request_stream, context):
+    async for event in request_stream:
+        if context.is_stopped():
+            return
+        if event.get("type") == "session.update":
+            yield {"type": "session.created", "session": event["session"]}
+        else:
+            yield {"type": "native.echo", "event": event}
+
+
+async def main(native_duplex: bool = False) -> None:
     """Register the realtime echo model and serve the bidirectional engine.
 
     Uses file-based discovery (``DYN_FILE_KV``) + the tcp request plane, so the
@@ -137,6 +155,9 @@ async def main() -> None:
         asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
     )
     endpoint = runtime.endpoint(ENDPOINT_PATH)
+    config = ModelRuntimeConfig()
+    if native_duplex:
+        config.set_engine_specific("realtime_protocol", json.dumps("omni-duplex"))
     await register_model(
         ModelInput.Text,
         ModelType.Realtime,
@@ -144,9 +165,14 @@ async def main() -> None:
         MODEL_NAME,
         model_name=MODEL_NAME,
         worker_type=WorkerType.Aggregated,
+        runtime_config=config,
     )
-    await endpoint.serve_bidirectional_endpoint(_python_realtime_echo)
+    await endpoint.serve_bidirectional_endpoint(
+        _native_echo if native_duplex else _python_realtime_echo
+    )
 
 
 if __name__ == "__main__":
-    uvloop.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--native-duplex", action="store_true")
+    uvloop.run(main(parser.parse_args().native_duplex))

@@ -38,7 +38,7 @@ use parking_lot::Mutex;
 use axum::{
     Router,
     extract::{
-        State,
+        Query, State,
         ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade, close_code},
     },
     http::Method,
@@ -46,8 +46,9 @@ use axum::{
     routing::get,
 };
 use dynamo_runtime::engine::AsyncEngineContextProvider;
-use dynamo_runtime::pipeline::{Context, RequestStream};
+use dynamo_runtime::pipeline::{BidirectionalStreamingEngine, Context, RequestStream};
 use futures::{SinkExt, StreamExt, stream::SplitSink};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -63,7 +64,7 @@ const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 use super::{RouteDoc, error::SanitizedError, service_v2};
 use crate::discovery::ModelManagerError;
-use crate::types::RealtimeBidirectionalEngine;
+use crate::types::{Annotated, RealtimeBidirectionalEngine};
 use dynamo_protocols::types::realtime::{
     DynamoRealtimeClientEvent, EventType, RealtimeAPIError, RealtimeClientEvent,
     RealtimeClientEventSessionUpdate, RealtimeServerEvent, RealtimeServerEventError,
@@ -83,8 +84,18 @@ pub fn realtime_router(
     (docs, router)
 }
 
+/// Native duplex is explicitly selected: its event schema and session lifecycle
+/// belong to the upstream engine, including the initial session.created event.
+#[derive(Default, Deserialize)]
+struct RealtimeQuery {
+    #[serde(default)]
+    duplex: u8,
+    model: Option<String>,
+}
+
 async fn realtime_ws_handler(
     State(state): State<Arc<service_v2::State>>,
+    Query(query): Query<RealtimeQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let permit = state.acquire_inflight();
@@ -95,8 +106,15 @@ async fn realtime_ws_handler(
         return super::openai::ErrorMessage::_service_unavailable().into_response();
     }
 
+    // Native media events can be large; bound them before they enter the
+    // frontend queue. The sidecar applies its configurable byte bound as well.
+    let upgrade = if query.duplex == 1 {
+        upgrade.max_message_size(8 * 1024 * 1024)
+    } else {
+        upgrade
+    };
     upgrade
-        .on_upgrade(move |socket| handle_socket(socket, state, permit))
+        .on_upgrade(move |socket| handle_socket(socket, state, permit, query))
         .into_response()
 }
 
@@ -106,6 +124,7 @@ async fn handle_socket(
     // Held for the full WebSocket task lifetime so realtime sessions are
     // visible to graceful shutdown after the 101 upgrade response completes.
     _permit: service_v2::InflightPermit,
+    query: RealtimeQuery,
 ) {
     // Inbound writes a non-NORMAL close message to `close_reason` on protocol errors
     // before cancelling the engine; the ScopedWsWriter takes it on Drop.
@@ -113,6 +132,45 @@ async fn handle_socket(
     let close_reason: Arc<Mutex<Option<Message>>> = Arc::new(Mutex::new(None));
     let (ws_tx, mut ws_rx) = socket.split();
     let mut writer = ScopedWsWriter::new(ws_tx, close_reason.clone());
+
+    if query.duplex != 0 {
+        if query.duplex != 1 {
+            send_error_event(
+                &mut *writer,
+                "invalid_request",
+                "duplex must be 0 or 1",
+                Some("duplex"),
+            )
+            .await;
+            return;
+        }
+        let Some(model) = query.model.as_deref().filter(|model| !model.is_empty()) else {
+            send_error_event(
+                &mut *writer,
+                "invalid_request",
+                "native duplex requires a model query parameter",
+                Some("model"),
+            )
+            .await;
+            return;
+        };
+        let engine = match state.manager().get_native_realtime_engine(model) {
+            Ok(engine) => engine,
+            Err(err) => {
+                tracing::debug!(%err, "/v1/realtime native engine lookup failed");
+                send_error_event(
+                    &mut *writer,
+                    "model_unavailable",
+                    "native duplex model unavailable",
+                    Some("model"),
+                )
+                .await;
+                return;
+            }
+        };
+        forward_events(writer, ws_rx, close_reason, engine, None).await;
+        return;
+    }
 
     // OpenAI Realtime spec requires `session.created` to be the first server
     // frame on the wire, before any client event arrives. The handler synthesizes
@@ -148,16 +206,36 @@ async fn handle_socket(
         return;
     };
 
-    let (req_tx, req_rx) = mpsc::channel::<DynamoRealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
+    forward_events(
+        writer,
+        ws_rx,
+        close_reason,
+        engine,
+        Some(RealtimeClientEvent::SessionUpdate(session_update).into()),
+    )
+    .await;
+}
+
+/// The typed and native profiles share transport bounds and cancellation. Only
+/// the profile selected during admission controls JSON decoding.
+async fn forward_events<I, O>(
+    writer: ScopedWsWriter,
+    mut ws_rx: futures::stream::SplitStream<WebSocket>,
+    close_reason: Arc<Mutex<Option<Message>>>,
+    engine: BidirectionalStreamingEngine<I, Annotated<O>>,
+    first: Option<I>,
+) where
+    I: DeserializeOwned + Serialize + Send + Sync + 'static,
+    O: DeserializeOwned + Serialize + Send + Sync + 'static,
+{
+    let (req_tx, req_rx) = mpsc::channel::<I>(REQUEST_CHANNEL_CAPACITY);
 
     // Forward the session.update verbatim — it carries the engine's
     // generation config (instructions, voice, audio formats, turn-detection,
     // max_output_tokens, tools, output_modalities). The handler only used
     // it to pick the engine; the rest is the engine's to apply.
-    if req_tx
-        .send(RealtimeClientEvent::SessionUpdate(session_update).into())
-        .await
-        .is_err()
+    if let Some(first) = first
+        && req_tx.send(first).await.is_err()
     {
         tracing::debug!("/v1/realtime engine receiver dropped before session.update delivered");
         return;
@@ -187,12 +265,12 @@ async fn handle_socket(
     let outbound = tokio::spawn(async move {
         let mut writer = writer;
         while let Some(annotated) = response_stream.next().await {
-            let event = if let Some(event) = annotated.data {
-                event
+            let serialized = if let Some(event) = annotated.data {
+                serde_json::to_string(&event)
             } else if let Some(err) = annotated.error {
                 tracing::error!("/v1/realtime engine error: {err}");
                 let sanitized = SanitizedError::Internal;
-                RealtimeServerEvent::Error(RealtimeServerEventError {
+                serde_json::to_string(&RealtimeServerEvent::Error(RealtimeServerEventError {
                     event_id: format!("event_{}", Uuid::new_v4()),
                     error: RealtimeAPIError {
                         r#type: "server_error".to_string(),
@@ -201,11 +279,11 @@ async fn handle_socket(
                         param: None,
                         event_id: None,
                     },
-                })
+                }))
             } else {
                 continue;
             };
-            let frame_payload = match serde_json::to_string(&event) {
+            let frame_payload = match serialized {
                 Ok(s) => s,
                 Err(err) => {
                     tracing::warn!(%err, "/v1/realtime serializing response chunk failed");
@@ -233,22 +311,20 @@ async fn handle_socket(
             }
         };
         match msg {
-            Message::Text(text) => {
-                match serde_json::from_str::<DynamoRealtimeClientEvent>(text.as_str()) {
-                    Ok(event) => {
-                        if req_tx.send(event).await.is_err() {
-                            tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
-                        *close_reason.lock() =
-                            Some(close_message(close_code::INVALID, "malformed JSON frame"));
+            Message::Text(text) => match serde_json::from_str::<I>(text.as_str()) {
+                Ok(event) => {
+                    if req_tx.send(event).await.is_err() {
+                        tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
                         break;
                     }
                 }
-            }
+                Err(err) => {
+                    tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
+                    *close_reason.lock() =
+                        Some(close_message(close_code::INVALID, "malformed JSON frame"));
+                    break;
+                }
+            },
             Message::Binary(_) => {
                 tracing::warn!("/v1/realtime received binary frame; not supported in this slice");
                 *close_reason.lock() = Some(close_message(

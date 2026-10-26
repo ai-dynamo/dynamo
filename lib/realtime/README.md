@@ -24,6 +24,7 @@ The Python realtime and Omni handlers remain available.
 | --- | --- | --- |
 | `realtime --protocol asr` | vLLM `/v1/realtime`, 16 kHz PCM16, `transcription.*` events | 24 kHz PCM16 transcription sessions, deltas before commit, repeated/queued turns, clear, token usage |
 | `realtime --protocol omni` | vLLM-Omni OpenAI `/v1/realtime` | Independent audio turns, output modality selection, concurrent generation with responses forwarded in turn order |
+| `realtime --protocol omni-duplex` | vLLM-Omni native `/v1/realtime?duplex=1` | Opt-in native JSON sessions with continuous input/output and upstream-owned playback, interruption, history, and resume |
 | `speech` | vLLM-Omni `/v1/audio/speech` | Existing HTTP TTS API, incremental PCM/WAV, legacy frontend aggregation, codecs/speed handled upstream |
 
 The wire contracts were checked against vLLM **v0.31.0** and vLLM-Omni
@@ -42,9 +43,54 @@ do not change that independent-turn behavior.
 
 Omni's legacy `transcription.*` audio endpoint and its native duplex endpoint
 (`duplex=1`) use different contracts. They are not selected by `--protocol omni`.
-Native playback acknowledgement, overlap/barge-in, session resume, and capability
-negotiation need public protocol support and a separate adapter. A model's name
+Use the explicit `omni-duplex` profile below for native sessions. A model's name
 does not select or imply these capabilities.
+
+## Native Duplex PoC
+
+This profile targets vLLM-Omni **v0.32.0rc1** with MiniCPM-o-4_5. Start the
+upstream with its native duplex deployment configuration, then run:
+
+```bash
+dynamo-vllm-sidecar realtime \
+  --protocol omni-duplex \
+  --http-endpoint "${ENGINE_HTTP_URL:?}" \
+  --model "${MODEL_ID:?}"
+```
+
+Connect to the matching Dynamo frontend at
+`/v1/realtime?duplex=1&model=<URL-encoded-model-id>`. Send native `session.update`
+or `session.resume` as the first JSON text frame. The frontend does not synthesize
+a greeting: the upstream owns `session.created`, capability negotiation, errors,
+and all subsequent events. This is the native Omni protocol, not an OpenAI Realtime
+schema extension. The ordinary `/v1/realtime` typed path is unchanged. Both
+frontend and sidecar must support this opt-in profile; discovery advertises
+`runtime_data.realtime_protocol=omni-duplex` to keep the profiles separate.
+
+The relay preserves JSON fields, omitted values, explicit nulls, event IDs, audio
+sample rates, video timestamps, and playback positions. It opens one upstream
+WebSocket per client attachment with `duplex=1&autostart=0`. It does not split
+turns, resample audio, or insert commit/response events. Upstream owns validation,
+reference-media access, voice, session settings, history, and execution of
+`playback.ack`, `barge_in`, `response.cancel`, and `conversation.item.truncate`.
+Deploy upstream with media-access policies appropriate for the clients; this
+profile does not apply the separate speech adapter's reference-media policy.
+
+Client disconnect closes the upstream socket without sending `session.close`,
+allowing the engine's own bounded resume lease to apply. Explicit `session.close`
+is forwarded, and worker shutdown closes attached sessions. **Use one upstream
+worker for this PoC.** Cross-worker resume routing, migration, and recovery after
+owner failure are not implemented. Resuming must reach the original engine.
+
+The existing event-count and buffered-output byte bounds apply per attachment;
+the output byte limit also bounds each input JSON frame. The frontend additionally
+caps native input messages at 8 MiB. Turn-count and decoded
+audio limits are rejected in this mode because upstream owns native media and
+session limits. The post-commit response timeout does not apply; configure
+session lifetime/idle policy upstream. Startup checks model identity and a
+native session handshake, including independent input/output capability, then
+explicitly closes the probe session. Active health probes check HTTP health and
+model identity without consuming session slots. These checks do not validate inference.
 
 LLM text sessions and streaming prefill are outside this iteration. Streaming
 prefill will need the corresponding upstream vLLM/vllm-rs APIs.

@@ -206,7 +206,11 @@ pub mod generic {
         /// the input side is [`dynamo_runtime::pipeline::RequestStream`].
         pub type RealtimeBidirectionalEngine =
             BidirectionalStreamingEngine<DynamoRealtimeClientEvent, Annotated<RealtimeServerEvent>>;
+
+        /// Opt-in model-native duplex JSON, with validation and event semantics upstream.
+        pub type NativeRealtimeBidirectionalEngine =
+            BidirectionalStreamingEngine<serde_json::Value, Annotated<serde_json::Value>>;
     }
 }
 
-pub use generic::realtime::RealtimeBidirectionalEngine;
+pub use generic::realtime::{NativeRealtimeBidirectionalEngine, RealtimeBidirectionalEngine};

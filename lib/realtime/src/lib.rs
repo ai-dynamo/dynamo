@@ -29,6 +29,8 @@ pub enum Protocol {
     VllmTranscription,
     /// vLLM-Omni's OpenAI session API, with independent, ordered audio turns.
     Omni,
+    /// vLLM-Omni's model-native duplex sessions; events remain backend-owned.
+    OmniDuplex,
 }
 
 /// Bounds apply per session/turn, including when clients or upstreams stall.
@@ -52,7 +54,7 @@ impl Limits {
     pub fn for_protocol(protocol: Protocol) -> Self {
         Self {
             concurrent_turns: NonZeroUsize::new(match protocol {
-                Protocol::VllmTranscription => 1,
+                Protocol::VllmTranscription | Protocol::OmniDuplex => 1,
                 Protocol::Omni => 8,
             })
             .unwrap(),

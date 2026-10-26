@@ -224,6 +224,7 @@ pub struct WorkerSet {
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
+    pub(crate) native_realtime_engine: Option<crate::types::NativeRealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
     /// Owns load monitoring for routed surfaces that do not use `RoutingHost`.
@@ -271,6 +272,7 @@ impl WorkerSet {
             audios_engine: None,
             tensor_engine: None,
             realtime_engine: None,
+            native_realtime_engine: None,
             generate_engine: None,
             load_context: None,
             load_thresholds: None,
@@ -358,7 +360,7 @@ impl WorkerSet {
     }
 
     pub fn has_realtime_engine(&self) -> bool {
-        self.realtime_engine.is_some()
+        self.realtime_engine.is_some() || self.native_realtime_engine.is_some()
     }
 
     pub fn has_generate_engine(&self) -> bool {
@@ -508,6 +510,7 @@ impl WorkerSet {
         retain_for_requests!(audios_engine);
         retain_for_requests!(tensor_engine);
         retain_for_requests!(realtime_engine);
+        retain_for_requests!(native_realtime_engine);
         retain_for_requests!(generate_engine);
         self.allocator_trim_wrapped = true;
     }
@@ -544,6 +547,7 @@ impl WorkerSet {
             // Realtime is bidirectional, so the server-streaming LoRA context wrapper cannot
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
+            native_realtime_engine: None,
             generate_engine,
             load_context: self.load_context.clone(),
             load_thresholds: self.load_thresholds.clone(),

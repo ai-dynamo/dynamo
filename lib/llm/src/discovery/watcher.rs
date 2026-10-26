@@ -924,14 +924,27 @@ impl ModelWatcher {
 
             if card.model_type.supports_realtime() {
                 // `Text` is overloaded for Realtime; its I/O passes through.
-                let realtime_router = PushRouter::<
-                    DynamoRealtimeClientEvent,
-                    Annotated<RealtimeServerEvent>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
-                .await?;
-                worker_set.realtime_engine = Some(Arc::new(realtime_router));
+                match card.runtime_config.runtime_data.get("realtime_protocol") {
+                    Some(serde_json::Value::String(protocol)) if protocol == "omni-duplex" => {
+                        let router = PushRouter::<serde_json::Value, Annotated<serde_json::Value>>::from_client_with_monitor(
+                            client.clone(), router_config.router_mode, None,
+                        ).await?;
+                        worker_set.native_realtime_engine = Some(Arc::new(router));
+                    }
+                    Some(_) => anyhow::bail!("unsupported realtime protocol"),
+                    None => {
+                        let realtime_router = PushRouter::<
+                            DynamoRealtimeClientEvent,
+                            Annotated<RealtimeServerEvent>,
+                        >::from_client_with_monitor(
+                            client.clone(),
+                            router_config.router_mode,
+                            None,
+                        )
+                        .await?;
+                        worker_set.realtime_engine = Some(Arc::new(realtime_router));
+                    }
+                }
             }
 
             if card.model_type.is_empty() {

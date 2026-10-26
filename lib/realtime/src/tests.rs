@@ -20,6 +20,174 @@ type Socket = WebSocketStream<tokio::net::TcpStream>;
 const DEADLINE: Duration = Duration::from_secs(5);
 const MODEL: &str = "test-audio-model";
 
+#[tokio::test]
+#[allow(clippy::result_large_err)] // tungstenite's handshake callback fixes the error type.
+async fn native_duplex_preserves_events_and_receives_input_during_output() {
+    let (listener, client, input, mut session) = setup(Protocol::OmniDuplex).await;
+    let update = json!({"type": "session.update", "session": {
+        "model": MODEL, "modalities": ["audio", "text"], "input_audio_sample_rate": 16000,
+        "extra_body": {"future_field": null}, "ref_audio": "data:audio/wav;base64,AQID"
+    }});
+    let expected_update = update.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_hdr_async(
+            stream,
+            |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                let query = request.uri().query().unwrap();
+                assert!(query.contains("duplex=1"));
+                assert!(query.contains("autostart=0"));
+                Ok(response)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(receive(&mut socket).await, expected_update);
+        send(
+            &mut socket,
+            json!({"type": "session.created", "session": {
+                "id": "native-owner", "capabilities": {"supports_independent_io_streams": true}
+            }}),
+        )
+        .await;
+        // No commit/response.create: output starts while microphone input remains open.
+        send(
+            &mut socket,
+            json!({"type": "response.audio.delta", "delta": "AQID", "chunk_id": 7}),
+        )
+        .await;
+        assert_eq!(
+            receive(&mut socket).await,
+            json!({"type": "input_audio_buffer.append", "audio": "BAUG", "timestamp_ms": 1000})
+        );
+        assert_eq!(
+            receive(&mut socket).await,
+            json!({"type": "playback.ack", "chunk_id": 7, "audio_end_ms": 100})
+        );
+        send(
+            &mut socket,
+            json!({"type": "playback.acknowledged", "chunk_id": 7}),
+        )
+        .await;
+        assert_eq!(receive(&mut socket).await["type"], "barge_in");
+        send(
+            &mut socket,
+            json!({"type": "response.audio.cancelled", "reason": "barge_in"}),
+        )
+        .await;
+        assert_eq!(receive(&mut socket).await["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "session_id": "native-owner"}),
+        )
+        .await;
+    });
+    input.send(update).await.unwrap();
+    let created = tokio::time::timeout(DEADLINE, session.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(created["session"]["id"], "native-owner");
+    assert_eq!(
+        created["session"]["capabilities"]["supports_independent_io_streams"],
+        true
+    );
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, session.next())
+            .await
+            .unwrap()
+            .unwrap()["chunk_id"],
+        7
+    );
+    input
+        .send(json!({"type": "input_audio_buffer.append", "audio": "BAUG", "timestamp_ms": 1000}))
+        .await
+        .unwrap();
+    input
+        .send(json!({"type": "playback.ack", "chunk_id": 7, "audio_end_ms": 100}))
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, session.next())
+            .await
+            .unwrap()
+            .unwrap()["type"],
+        "playback.acknowledged"
+    );
+    input.send(json!({"type": "barge_in"})).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, session.next())
+            .await
+            .unwrap()
+            .unwrap()["type"],
+        "response.audio.cancelled"
+    );
+    input.send(json!({"type": "session.close"})).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, session.next())
+            .await
+            .unwrap()
+            .unwrap()["type"],
+        "session.closed"
+    );
+    assert!(
+        tokio::time::timeout(DEADLINE, session.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.await.unwrap();
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_duplex_disconnect_preserves_resume_but_shutdown_closes_session() {
+    for shutdown in [false, true] {
+        let (listener, client, input, session) = setup(Protocol::OmniDuplex).await;
+        let (connected, ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // Reattach is the first frame, without a synthetic session.update.
+            assert_eq!(
+                receive(&mut socket).await,
+                json!({"type": "session.resume", "session_id": "existing", "resume_token": "opaque"})
+            );
+            connected.send(()).unwrap();
+            if shutdown {
+                assert_eq!(receive(&mut socket).await["type"], "session.close");
+            }
+            assert!(matches!(
+                tokio::time::timeout(DEADLINE, socket.next()).await.unwrap(),
+                Some(Ok(Message::Close(_))) | None
+            ));
+        });
+        input.send(json!({"type": "session.resume", "session_id": "existing", "resume_token": "opaque"})).await.unwrap();
+        tokio::time::timeout(DEADLINE, ready)
+            .await
+            .unwrap()
+            .unwrap();
+        if shutdown {
+            tokio::time::timeout(DEADLINE, client.shutdown())
+                .await
+                .unwrap();
+            drop(session);
+        } else {
+            drop(session);
+            tokio::time::timeout(DEADLINE, server)
+                .await
+                .unwrap()
+                .unwrap();
+            client.shutdown().await;
+            continue;
+        }
+        tokio::time::timeout(DEADLINE, server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
 fn asr_session() -> Value {
     json!({"type": "session.update", "session": {
         "type": "transcription", "audio": {"input": {

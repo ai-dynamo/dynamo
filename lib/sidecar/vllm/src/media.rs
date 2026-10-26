@@ -147,6 +147,7 @@ impl MediaArgs {
 pub(crate) enum RealtimeProtocol {
     Asr,
     Omni,
+    OmniDuplex,
 }
 
 impl From<RealtimeProtocol> for Protocol {
@@ -154,6 +155,7 @@ impl From<RealtimeProtocol> for Protocol {
         match value {
             RealtimeProtocol::Asr => Self::VllmTranscription,
             RealtimeProtocol::Omni => Self::Omni,
+            RealtimeProtocol::OmniDuplex => Self::OmniDuplex,
         }
     }
 }
@@ -203,6 +205,16 @@ impl RealtimeEngine {
     > {
         args.media.validate("realtime")?;
         let protocol = args.protocol.into();
+        if protocol == Protocol::OmniDuplex
+            && (args.concurrent_turns.is_some()
+                || args.queued_turns.is_some()
+                || args.max_audio_chunk_bytes.is_some()
+                || args.max_turn_audio_bytes.is_some())
+        {
+            return Err(invalid_argument(
+                "native duplex owns its audio and turn limits; use upstream configuration",
+            ));
+        }
         let mut limits = Limits::for_protocol(protocol);
         if let Some(value) = args.concurrent_turns {
             limits.concurrent_turns = value;
@@ -241,7 +253,13 @@ impl RealtimeEngine {
 #[async_trait::async_trait]
 impl BidirectionalEngine for RealtimeEngine {
     async fn start(&self, _: u64) -> Result<EngineConfig, DynamoError> {
-        Ok(registration(&self.model))
+        let mut config = registration(&self.model);
+        if self.protocol == Protocol::OmniDuplex {
+            config
+                .runtime_data
+                .insert("realtime_protocol".into(), json!("omni-duplex"));
+        }
+        Ok(config)
     }
 
     async fn generate(
@@ -262,7 +280,15 @@ impl BidirectionalEngine for RealtimeEngine {
                     let health = tokio::select! {
                         _ = ctx.stopped() => None,
                         _ = ctx.killed() => None,
-                        result = client.realtime_health(protocol) => Some(result),
+                        result = async {
+                            if protocol == Protocol::OmniDuplex {
+                                // Startup already checked capabilities. Active probes must
+                                // not consume one of the engine's live session slots.
+                                client.health().await
+                            } else {
+                                client.realtime_health(protocol).await
+                            }
+                        } => Some(result),
                     };
                     if let Some(health) = health {
                         health.map_err(to_dynamo)?;

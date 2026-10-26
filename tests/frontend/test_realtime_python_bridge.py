@@ -47,9 +47,12 @@ pytestmark = [
 class RealtimeEchoWorkerProcess(ManagedProcess):
     """Launch the realtime echo worker; ready once the frontend lists its model."""
 
-    def __init__(self, request, *, frontend_port: int) -> None:
+    def __init__(
+        self, request, *, frontend_port: int, native_duplex: bool = False
+    ) -> None:
         super().__init__(
-            command=["python3", "-m", "tests.frontend.realtime_echo_worker"],
+            command=["python3", "-m", "tests.frontend.realtime_echo_worker"]
+            + (["--native-duplex"] if native_duplex else []),
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", self._model_listed)
             ],
@@ -112,7 +115,11 @@ def realtime_frontend(request, monkeypatch, dynamo_dynamic_ports: ServicePorts):
             terminate_all_matching_process_names=False,
         ):
             logger.info("Frontend started on port %s", frontend_port)
-            with RealtimeEchoWorkerProcess(request, frontend_port=frontend_port):
+            with RealtimeEchoWorkerProcess(
+                request,
+                frontend_port=frontend_port,
+                native_duplex=getattr(request, "param", False),
+            ):
                 logger.info("Realtime echo worker registered model %s", MODEL_NAME)
                 yield frontend_port
 
@@ -123,6 +130,78 @@ async def _recv_json(ws: aiohttp.ClientWebSocketResponse, timeout_s: float) -> d
     if msg.type is not aiohttp.WSMsgType.TEXT:
         raise AssertionError(f"unexpected websocket frame: {msg.type!r} {msg.data!r}")
     return json.loads(msg.data)
+
+
+@pytest.mark.parametrize("realtime_frontend", [True], indirect=True)
+def test_native_duplex_preserves_backend_handshake_and_extensions(realtime_frontend):
+    async def run():
+        url = f"ws://127.0.0.1:{realtime_frontend}/v1/realtime?duplex=1&model={MODEL_NAME}"
+        native_session = {
+            "model": MODEL_NAME,
+            "modalities": ["text", "audio"],
+            "input_audio_sample_rate": 16000,
+            "extra_body": {"new_option": None},
+            "capabilities": {"supports_independent_io_streams": True},
+        }
+        async with aiohttp.ClientSession() as client:
+            async with client.ws_connect(url) as ws:
+                await ws.send_json(
+                    {"type": "session.update", "session": native_session}
+                )
+                # The first event must come from the backend, without a typed
+                # frontend greeting or projection that removes native fields.
+                assert await _recv_json(ws, 5) == {
+                    "type": "session.created",
+                    "session": native_session,
+                }
+                for event in [
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": "AQID",
+                        "timestamp_ms": 1000,
+                    },
+                    {
+                        "type": "input_video_buffer.append",
+                        "image": "BAUG",
+                        "timestamp_ms": 1000,
+                    },
+                    {"type": "playback.ack", "chunk_id": 7, "audio_end_ms": 100},
+                    {"type": "barge_in", "reason": "user_speech"},
+                    {
+                        "type": "conversation.item.truncate",
+                        "item_id": "item1",
+                        "audio_end_ms": 100,
+                    },
+                ]:
+                    await ws.send_json(event)
+                    assert await _recv_json(ws, 5) == {
+                        "type": "native.echo",
+                        "event": event,
+                    }
+            async with client.ws_connect(url) as ws:
+                event = {
+                    "type": "session.resume",
+                    "session_id": "s1",
+                    "resume_token": "opaque",
+                }
+                await ws.send_json(event)
+                assert await _recv_json(ws, 5) == {
+                    "type": "native.echo",
+                    "event": event,
+                }
+
+    asyncio.run(run())
+
+
+def test_native_duplex_does_not_select_a_typed_worker(realtime_frontend):
+    async def run():
+        url = f"ws://127.0.0.1:{realtime_frontend}/v1/realtime?duplex=1&model={MODEL_NAME}"
+        async with aiohttp.ClientSession() as client, client.ws_connect(url) as ws:
+            event = await _recv_json(ws, 5)
+            assert event["type"] == "error"
+            assert event["error"]["code"] == "model_unavailable"
+
+    asyncio.run(run())
 
 
 async def _drain_until(

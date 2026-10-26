@@ -1316,6 +1316,13 @@ impl ModelDeploymentCard {
                     &self.runtime_config,
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 );
+                // Native and typed realtime events require different routers.
+                // Missing metadata preserves the existing typed-worker checksum.
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    "realtime_protocol",
+                );
 
                 // TODO: Do we want any other user_data or runtime_config?
 
@@ -3490,6 +3497,24 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn native_realtime_protocol_isolates_worker_sets() {
+        let typed = ModelDeploymentCard::with_name_only("model");
+        let mut native = ModelDeploymentCard::with_name_only("model");
+        native
+            .runtime_config
+            .runtime_data
+            .insert("realtime_protocol".into(), serde_json::json!("omni-duplex"));
+        assert_ne!(typed.mdcsum(), native.mdcsum());
+        // Unrelated runtime counters do not change the legacy identity.
+        let mut legacy = ModelDeploymentCard::with_name_only("model");
+        legacy
+            .runtime_config
+            .runtime_data
+            .insert("session_count".into(), 1.into());
+        assert_eq!(typed.mdcsum(), legacy.mdcsum());
     }
 
     #[test]

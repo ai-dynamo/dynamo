@@ -129,6 +129,9 @@ impl Client {
     /// inference result; it checks upstream health, model identity, and WS routing.
     pub async fn realtime_health(&self, protocol: Protocol) -> Result<(), Error> {
         self.health().await?;
+        if protocol == Protocol::OmniDuplex {
+            return self.duplex_health().await;
+        }
         let mut socket = self.connect().await?;
         let event = tokio::time::timeout(self.inner.limits.connect_timeout, receive(&mut socket))
             .await
@@ -206,12 +209,25 @@ impl Client {
     }
 
     pub(crate) async fn connect(&self) -> Result<Socket, Error> {
+        self.connect_realtime(false).await
+    }
+
+    pub(crate) async fn connect_duplex(&self) -> Result<Socket, Error> {
+        self.connect_realtime(true).await
+    }
+
+    async fn connect_realtime(&self, duplex: bool) -> Result<Socket, Error> {
         let mut url = self.url("v1/realtime");
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
         url.set_scheme(scheme)
             .map_err(|_| Error::Invalid("invalid WebSocket scheme".into()))?;
         url.query_pairs_mut()
             .append_pair("model", &self.inner.model);
+        if duplex {
+            url.query_pairs_mut()
+                .append_pair("duplex", "1")
+                .append_pair("autostart", "0");
+        }
         let mut request = url.as_str().into_client_request()?;
         if let Some(value) = &self.inner.authorization {
             request
@@ -228,6 +244,54 @@ impl Client {
         .await
         .map_err(|_| Error::Timeout)??;
         Ok(socket)
+    }
+
+    async fn duplex_health(&self) -> Result<(), Error> {
+        let mut socket = self.connect_duplex().await?;
+        let result = tokio::time::timeout(self.inner.limits.connect_timeout, async {
+            send(
+                &mut socket,
+                serde_json::json!({
+                    "type": "session.update",
+                    "session": {"model": self.inner.model, "modalities": ["text"]}
+                }),
+            )
+            .await?;
+            let event = receive(&mut socket).await?;
+            if event["type"] != "session.created"
+                || event["session"]["capabilities"]["supports_independent_io_streams"] != true
+            {
+                return Err(Error::Protocol(
+                    "upstream does not advertise native duplex sessions".into(),
+                ));
+            }
+            send(&mut socket, serde_json::json!({"type": "session.close"})).await?;
+            loop {
+                let event = receive(&mut socket).await?;
+                match event["type"].as_str() {
+                    Some("session.closed") => return Ok(()),
+                    Some("error") => {
+                        return Err(Error::Protocol(
+                            "upstream rejected duplex health probe".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
+        if result.is_err() {
+            // A failed probe must not leave a resumable session consuming a slot.
+            let _ = tokio::time::timeout(
+                self.inner.limits.close_timeout,
+                send(&mut socket, serde_json::json!({"type": "session.close"})),
+            )
+            .await;
+        }
+        self.close(&mut socket).await;
+        result
     }
 
     pub(crate) async fn close(&self, socket: &mut Socket) {

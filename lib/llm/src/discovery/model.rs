@@ -647,6 +647,13 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
+    pub fn get_native_realtime_engine(
+        &self,
+    ) -> Result<crate::types::NativeRealtimeBidirectionalEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.native_realtime_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
+    }
+
     pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.generate_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_generate_engine()))
