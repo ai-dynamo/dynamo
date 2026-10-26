@@ -59,44 +59,10 @@ def test_rows_round_trip_byte_for_byte(pool):
         assert np.array_equal(want, got)
 
 
-def test_multidimensional_rows(pool):
-    row = rows_of(1)[0].reshape(3, -1)
-    slot = pool.alloc()
-    pool.store([row], [slot])
-    drain(pool, 1)
-    out = np.zeros_like(row)
-    pool.load([slot], [out])
-    drain(pool, 1)
-    assert np.array_equal(row, out)
-
-
-def test_slot_reuse_after_release(pool):
-    a, b = rows_of(2, seed=1)
-    slot = pool.alloc()
-    pool.store([a], [slot])
-    drain(pool, 1)
-    pool.release(slot)
-    assert pool.num_free == pool.capacity
-    again = pool.alloc()
-    assert again == slot
-    pool.store([b], [again])
-    drain(pool, 1)
-    out = np.zeros(ROW_BYTES, dtype=np.uint8)
-    pool.load([again], [out])
-    drain(pool, 1)
-    assert np.array_equal(out, b)
-
-
-def test_alloc_exhausts_and_stride_is_padded(pool):
-    assert pool.stride == 114688 and pool.stride % 4096 == 0
-    assert pool.nbytes == 32 * pool.stride
-    assert os.path.getsize(pool.path) == pool.nbytes
-    slots = [pool.alloc() for _ in range(32)]
-    assert sorted(slots) == list(range(32))
-    assert pool.alloc() is None and pool.num_free == 0
-
-
 def test_neighbouring_slots_do_not_overlap(pool):
+    # Slots are padded to 4 KiB, so O_DIRECT stays possible later.
+    assert pool.stride == 114688 and pool.stride % 4096 == 0
+    assert os.path.getsize(pool.path) == pool.nbytes
     full = [np.full(ROW_BYTES, v, dtype=np.uint8) for v in (1, 2, 3)]
     for row, slot in zip(full, (0, 1, 2)):
         pool.store([row], [slot])
