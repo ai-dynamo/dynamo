@@ -92,8 +92,7 @@ Select pods with the labels the Dynamo operator already sets on every pod; see
 | Planner, or Endpoint Picker Plugin (EPP) | `nvidia.com/dynamo-component-type: planner` or `epp` |
 | Component without a `type`, such as a standalone router | `nvidia.com/dynamo-component: <component name>` |
 
-Pods that match no rule are not changed, so to record only the decode workers, keep only the decode rule. Check the
-labels of your pods with:
+Check the labels of your pods with:
 
 ```bash
 kubectl get pods -n <namespace> -l nvidia.com/dynamo-graph-deployment-name=<dgd> --show-labels
