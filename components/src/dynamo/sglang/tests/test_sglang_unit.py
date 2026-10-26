@@ -2568,7 +2568,7 @@ async def test_configured_warmups_gate_registration(monkeypatch, failure):
         dynamo_args=Mock(
             freeze_gc_after_init=False,
             custom_jinja_template=None,
-            endpoint_types=["chat"],
+            endpoint_types="chat",
         ),
     )
     config.use_resolved_server_args.return_value = args
