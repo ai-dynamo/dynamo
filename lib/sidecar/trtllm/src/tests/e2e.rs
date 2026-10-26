@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use dynamo_backend_common::{MultimodalData, MultimodalItemRef};
+
 use super::*;
 
 /// Drives a real disaggregated prefill -> decode handoff against two live
