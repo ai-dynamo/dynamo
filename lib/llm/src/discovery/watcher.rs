@@ -1524,11 +1524,9 @@ mod tests {
                 .with_load_threshold_config(thresholds.clone())
         };
         let direct = load_threshold_handle(&config(RouterMode::Direct));
-        let configured = direct.watch_configured();
         direct.update(&thresholds);
         assert!(!direct.accepts_thresholds());
         assert!(!direct.is_configured());
-        assert!(!configured.has_changed().unwrap());
         assert!(load_threshold_handle(&config(RouterMode::KV)).is_configured());
     }
 
