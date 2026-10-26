@@ -229,7 +229,7 @@ class HardwareSpec(BaseModel):
 
     gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the node with the most GPUs, then highest VRAM per GPU. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU. The legacy value gb200_sxm is deprecated; use gb200 instead.",
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected as the GPU type of the node with the most GPUs (ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU. The legacy value gb200_sxm is deprecated; use gb200 instead.",
     )
     vramMb: Optional[float] = Field(
         default=None,
@@ -237,11 +237,11 @@ class HardwareSpec(BaseModel):
     )
     totalGpus: Optional[int] = Field(
         default=None,
-        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs on discovered nodes with the selected GPU type (filtered by gpuSku when set), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.",
+        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs across discovered nodes of the selected GPU type (gpuSku, or the auto-detected type), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.",
     )
     numGpusPerNode: Optional[int] = Field(
         default=None,
-        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected from cluster GPU nodes.",
+        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected as the highest GPU count on any discovered node of the selected GPU type. In clusters whose nodes have different GPU counts, set this explicitly to the node size you intend to schedule on.",
     )
     interconnect: Optional[str] = Field(
         default=None,

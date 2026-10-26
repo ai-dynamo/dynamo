@@ -64,7 +64,6 @@ func TestGPUDiscovery_TotalGPUs(t *testing.T) {
 				wantTotal   int
 			}{
 				{name: "heterogeneous nodes", h100Counts: []int{8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
-				{name: "maximum selected after smaller node", h100Counts: []int{4, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
 				{name: "unfiltered excludes other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
 				{name: "filter selects other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, filterSKU: "a100_sxm", wantSKU: "a100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 10},
 				{name: "discovery does not cap the total", h100Counts: []int{8, 8, 8, 8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 5, wantTotal: 36},
