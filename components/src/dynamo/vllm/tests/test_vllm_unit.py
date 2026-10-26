@@ -1712,6 +1712,18 @@ def test_build_sampling_params_preserves_explicit_max_tokens(max_tokens):
     assert sp.max_tokens == min(max_tokens, 97)
 
 
+def test_build_sampling_params_rejects_output_limit_above_model_length():
+    from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm.handlers import build_sampling_params
+
+    with pytest.raises(InvalidArgument):
+        build_sampling_params(
+            _sampling_request({"max_tokens": 101}),
+            {"max_tokens": 32},
+            model_max_len=100,
+        )
+
+
 @pytest.mark.parametrize(
     "stop_conditions", [{}, {"max_tokens": None}], ids=["omitted", "null"]
 )
