@@ -8,6 +8,11 @@ hide-toc: true
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
+<Warning>
+**Deprecated.** These examples require Dynamo 1.6.x or earlier; later releases no longer ship KVBM.
+See [Deprecations](../../reference/general/releases/deprecations.mdx) for the migration path.
+</Warning>
+
 <ExampleSelector
   variants={[
     {"id": "kubernetes-vllm-agg-kvbm-yaml", "target": "kubernetes:vllm", "label": "agg_kvbm.yaml", "description": "Aggregated with KV Block Manager offloading"},

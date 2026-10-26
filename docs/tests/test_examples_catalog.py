@@ -696,6 +696,8 @@ def test_diffusion_section_matches_catalog_without_changing_existing_slugs() -> 
                 "sglang/deploy/agg_image_diffusion.yaml",
                 "trtllm/deploy/agg_image_diffusion.yaml",
                 "vllm/deploy/agg_omni_image.yaml",
+                "vllm/launch/agg_omni_cosmos3_image.sh",
+                "vllm/launch/agg_omni_cosmos3.sh",
             ],
         ),
         ("text-diffusion", ["sglang/deploy/agg_llm_diffusion.yaml"]),
@@ -712,6 +714,9 @@ def test_diffusion_section_matches_catalog_without_changing_existing_slugs() -> 
             [
                 "vllm/deploy/experimental/agg_omni_video.yaml",
                 "vllm/deploy/experimental/agg_omni_i2v.yaml",
+                "vllm/launch/agg_omni_cosmos3_video.sh",
+                "vllm/launch/agg_omni_cosmos3_i2v.sh",
+                "vllm/launch/agg_omni_cosmos3.sh",
             ],
         ),
     ],
@@ -978,6 +983,9 @@ def test_diffusion_overview_keeps_local_only_cases_discoverable() -> None:
         "disagg_omni_glm_image.sh",
         "disagg_omni_glm_image_nixl.sh",
         "agg_omni_minimax_h3.sh",
+        "agg_omni_cosmos3_image.sh",
+        "agg_omni_cosmos3_video.sh",
+        "agg_omni_cosmos3_i2v.sh",
     ]:
         assert name in text
         assert any(name == source.name for source in all_embeds())

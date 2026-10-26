@@ -178,9 +178,11 @@ Additional local launch scripts and FastVideo deployments are available on the s
 | Text-to-video | SGLang | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` or `Wan-AI/Wan2.1-T2V-14B-Diffusers` | [Video Generation](video-generation.mdx): `text-to-video-diffusion.sh`; local only |
 | Text-to-video | TensorRT-LLM | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | [Video Generation](video-generation.mdx): `agg_video_diffusion.sh`; local only |
 | Text-to-video with audio | vLLM-Omni | `MiniMaxAI/MiniMax-H3` | [Video Generation](video-generation.mdx): `agg_omni_minimax_h3.sh`; local only, four B200 GPUs |
+| Text-to-video and image-to-video | vLLM-Omni | `nvidia/Cosmos3-Nano` | [Video Generation](video-generation.mdx): `agg_omni_cosmos3_video.sh` and `agg_omni_cosmos3_i2v.sh`; local only, experimental |
 | Text-to-audio | vLLM-Omni | `nvidia/Nemotron-Labs-Audex-2B` or `nvidia/Nemotron-Labs-Audex-30B-A3B` | [Audio Generation](audio-generation.mdx): `agg_omni_audio.sh --model`; local only |
 | Two-stage image generation | vLLM-Omni | `zai-org/GLM-Image` | [Image Generation](image-generation.mdx): `disagg_omni_glm_image.sh`; local only |
 | Cross-node image generation with NIXL | vLLM-Omni | `zai-org/GLM-Image` | [Image Generation](image-generation.mdx): `disagg_omni_glm_image_nixl.sh`; local only |
+| Text-to-image | vLLM-Omni | `nvidia/Cosmos3-Nano` | [Image Generation](image-generation.mdx): `agg_omni_cosmos3_image.sh`; local only, experimental |
 
 The SGLang `image_diffusion.sh` defaults to `black-forest-labs/FLUX.1-dev`; the image DGD
 above instead uses `black-forest-labs/FLUX.1-schnell`. A shared workload does not imply identical
