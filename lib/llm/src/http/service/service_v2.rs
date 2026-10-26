@@ -2501,6 +2501,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_health_lists_instances_only_on_request() {
+        let (port, state, handle) = spawn_service(|builder| builder).await;
+        state
+            .discovery()
+            .register(dynamo_runtime::discovery::DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "backend".to_string(),
+                endpoint: "generate".to_string(),
+                transport: dynamo_runtime::component::TransportType::Nats(
+                    "nats://localhost:4222".to_string(),
+                ),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+
+        let health: serde_json::Value = client
+            .get(format!("http://localhost:{port}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            health,
+            serde_json::json!({"status": "healthy", "stage": "ready"})
+        );
+
+        let health: serde_json::Value = client
+            .get(format!("http://localhost:{port}/health?instances=true"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(
+            health["endpoints"],
+            serde_json::json!(["dyn://ns.backend.generate"])
+        );
+        assert_eq!(health["instances"].as_array().unwrap().len(), 1);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn test_service_observer_waits_for_inflight_requests() {
         let observer = Arc::new(ServiceObserver::default());
         let permit = observer.acquire_inflight();

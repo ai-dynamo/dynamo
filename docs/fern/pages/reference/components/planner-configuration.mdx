@@ -180,7 +180,8 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 
 ### Local execution-profile datasets
 
-Download the snapshot in the image build or mount it before starting Planner. Use the
+Download the AISimulate dataset snapshot into the container image during the image
+build, or mount a local copy before starting Planner. Use the
 generic AISimulate wheel; measurements do not belong inside the wheel. The supported
 dependency pair is Python `0.13.0.dev202610230000000081` and Rust
 `0.13.0-dev.202610230000000081`.
@@ -201,16 +202,9 @@ Set the paths to the installed snapshot and its selected manifest. For disaggreg
 serving, supply separate `prefill` and `decode` sources. Canonical prepared configs
 containing `estimator_config.op_level.execution_profile` also work through `roles`.
 
-These profiles support exact homogeneous shapes: an unchunked, uncached prefill batch
-or one decode iteration with equal context lengths. Planner uses the direct phase APIs
-and converts milliseconds to seconds. Capacity queries retain the requested batch
-geometry. The profile's correction-disabled and fallback-deny settings remain intact.
-
-Missing measured cells, heterogeneous or mixed batches, chunked queue drain, speculative
-acceptance, prefix-hit discounts, and synthetic next-request or redistribution queries
-return unavailable estimates. Planner skips decisions requiring those estimates; it
-does not interpolate or substitute another model. This adapter does not establish
-end-to-end serving accuracy or support every workload used by Planner's policies.
+Execution profiles require matching measurements for the requested shape. Missing
+measurements or unsupported batch shapes return unavailable estimates, so Planner
+skips scaling decisions that depend on them.
 
 <ParamField path="aic_interpolation" type="AICInterpolationSpec" default="null">
   AIConfigurator interpolation spec. Populated by the profiler in rapid mode and written onto the Planner ConfigMap; you do not normally set this by hand. When present, the Planner runs the AIC sweep in-process at bootstrap to seed the performance model. See [AICInterpolationSpec](#aicinterpolationspec).
