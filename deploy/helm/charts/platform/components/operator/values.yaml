@@ -113,9 +113,9 @@ controllerManager:
       repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
       # tag is optional - if not set, will use Chart.AppVersion
       tag: ""
-    # Default DGDR profiler image, put into DGDR spec.image when unset. Empty
-    # derives dynamo-planner:<chart appVersion>, which only exists for GA
-    # releases.
+    # Planner image used to execute v1beta2 DGDR Runs and default v1beta1
+    # spec.image. Empty derives dynamo-planner:<chart appVersion>, which only
+    # exists for GA releases.
     dgdrDefaultImage: ""
     resources:
       limits:

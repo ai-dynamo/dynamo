@@ -100,15 +100,9 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	defaultDynamoGraphDeploymentRequest(dgdr, dynamoGraphDeploymentRequestDefaultOptions{
 		operation: req.Operation,
-		image:     d.defaultImageFor(),
+		image:     PlannerImageFor(d.OperatorVersion, d.DefaultImage),
 	})
 	return nil
-}
-
-// defaultPlannerImageFor returns explicitImage when set, else the planner image with a
-// canonical operator-version tag, or an empty string when the version cannot be parsed.
-func defaultPlannerImageFor(operatorVersion, explicitImage string) string {
-	return NewDGDRDefaulter(operatorVersion, explicitImage).defaultImageFor()
 }
 
 // RegisterWithManager registers the DGDR defaulting webhook with the manager.

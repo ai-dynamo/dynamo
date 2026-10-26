@@ -182,6 +182,65 @@ def test_snapshot_preserves_the_evaluated_point_not_just_its_manifest(
     assert "marker: a" in candidate["manifest"]
 
 
+def test_each_candidate_uses_the_runtime_image_for_its_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    images: dict[str, str] = {}
+
+    def capture_image(
+        candidate: Any, workload: Any, options: Any, **kwargs: Any
+    ) -> str:
+        del workload, kwargs
+        images[candidate.config["backend"]] = options.runtime_image
+        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
+
+    monkeypatch.setattr(adapter_module, "render_dgd", capture_image)
+    adapter = DGDRRunOutputAdapter(
+        make_config(
+            tmp_path,
+            runtime_image="nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
+            derive_runtime_images=True,
+        ),
+        workload=None,
+    )
+    for index, backend in enumerate(("vllm", "sglang", "trtllm")):
+        candidate = record(backend, float(index))
+        candidate.config["backend"] = backend
+        adapter.on_candidate(candidate)
+    adapter.close()
+
+    assert images == {
+        "vllm": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
+        "sglang": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.3",
+        "trtllm": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3",
+    }
+
+
+def test_explicit_runtime_image_stays_fixed_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    images: list[str] = []
+
+    def capture_image(
+        candidate: Any, workload: Any, options: Any, **kwargs: Any
+    ) -> str:
+        del candidate, workload, kwargs
+        images.append(options.runtime_image)
+        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
+
+    monkeypatch.setattr(adapter_module, "render_dgd", capture_image)
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, runtime_image="example.com/my-runtime:1.2.3"),
+        workload=None,
+    )
+    candidate = record("sglang", 1.0)
+    candidate.config["backend"] = "sglang"
+    adapter.on_candidate(candidate)
+    adapter.close()
+
+    assert images == ["example.com/my-runtime:1.2.3"]
+
+
 def test_round_progress_is_monotonic(tmp_path: Path, renders: list[str]) -> None:
     adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
     adapter.on_round(3, [])

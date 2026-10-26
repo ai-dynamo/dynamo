@@ -77,9 +77,9 @@ func TestDefaultPlannerImageFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := defaultPlannerImageFor(tt.operatorVersion, tt.defaultImage)
+			got := PlannerImageFor(tt.operatorVersion, tt.defaultImage)
 			if got != tt.expectedImage {
-				t.Errorf("defaultPlannerImageFor() = %q, want %q", got, tt.expectedImage)
+				t.Errorf("PlannerImageFor() = %q, want %q", got, tt.expectedImage)
 			}
 		})
 	}

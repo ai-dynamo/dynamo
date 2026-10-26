@@ -28,6 +28,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -38,8 +39,8 @@ import (
 // This test runs the controller under a real manager, so only the watch events (a Request edit, a Run
 // annotation/status update, a deleted Run) can make it reconcile. It fails if SetupWithManager loses the Owns
 // watch, an event predicate drops Run status updates, or the owner mapping breaks. It also covers the
-// API server and admission side: the Request is created model-only and admission supplies the image
-// and the hardware.
+// API server and admission side: the Request is created model-only and admission persists the
+// structural defaults and discovered hardware before the controller snapshots it.
 func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	g := NewWithT(t)
 	env := sharedEnv.ForTest(t)
@@ -94,13 +95,11 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
 	first := getRun(g, firstName)
-	g.Expect(metav1.IsControlledBy(first, getRequest(g))).To(BeTrue())
+	live := getRequest(g)
+	g.Expect(metav1.IsControlledBy(first, live)).To(BeTrue())
 	g.Expect(first.Spec.Hardware).NotTo(BeNil())
-	g.Expect(first.Spec.AISimulate.Image).To(Equal(controllerAISimulateImage))
-	g.Expect(first.Spec.AISimulate.VersionOverride).To(Equal("1.2.0"))
-	input, err := frozenInputForTest(first)
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(input).To(HaveKey("search_space"))
+	g.Expect(apiequality.Semantic.DeepEqual(first.Spec.NativeSearchInput, live.Spec.NativeSearchInput)).To(BeTrue())
+	g.Expect(first.Status.AISimulate).To(BeNil())
 
 	t.Log("Editing the Request causally requests cancellation without deleting the active Run")
 	g.Eventually(func(g Gomega) {
