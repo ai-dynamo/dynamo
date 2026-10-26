@@ -60,6 +60,14 @@ pub enum WorkerSelectionPolicyError {
     #[error("worker selection policy failed: {0}")]
     Failed(String),
 
+    /// The policy declines to place the request for capacity reasons: eligible workers
+    /// exist but none satisfies the policy's placement rules right now. Hosts may
+    /// classify this as overload so the request receives the overload status code
+    /// (529, or 429 via `DYN_HTTP_OVERLOAD_STATUS_CODE`). Unlike [`Self::Failed`],
+    /// this is a transient condition the caller may retry.
+    #[error("no eligible worker satisfies the policy: {0}")]
+    NoCapacity(String),
+
     #[error("scorer {scorer_index} produced a non-finite cost for candidate row {row}")]
     NonFiniteCost { scorer_index: usize, row: usize },
 
@@ -72,6 +80,10 @@ pub enum WorkerSelectionPolicyError {
 impl WorkerSelectionPolicyError {
     pub fn failed(message: impl Into<String>) -> Self {
         Self::Failed(message.into())
+    }
+
+    pub fn no_capacity(message: impl Into<String>) -> Self {
+        Self::NoCapacity(message.into())
     }
 }
 

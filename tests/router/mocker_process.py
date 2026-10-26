@@ -87,12 +87,16 @@ class MockerProcess:
         standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
+        extra_env: Mapping[str, str] | None = None,
+        namespace: str | None = None,
     ):
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
 
-        namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
+        if namespace is not None:
+            self.namespace = namespace
+        else:
+            self.namespace = f"test-namespace-{generate_random_suffix()}"
         self.component_name = "mocker"
         self.model_name = model_name
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
@@ -114,6 +118,7 @@ class MockerProcess:
         self._store_backend = store_backend
         self._request_plane = request_plane
         self._mocker_config = MockerConfig.from_value(mocker_args)
+        self._extra_env = dict(extra_env) if extra_env else None
         self.worker_id_to_zmq_ports: dict[int, dict[int, str]] = {}
         request.addfinalizer(self._release_ports)
 
@@ -177,6 +182,8 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = request_plane
+            if self._extra_env:
+                env.update(self._extra_env)
             self._process = ManagedProcess(
                 command=command,
                 env=env,
@@ -309,6 +316,8 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = self._request_plane
+            if self._extra_env:
+                env.update(self._extra_env)
             proc = ManagedProcess(
                 command=command,
                 env=env,
