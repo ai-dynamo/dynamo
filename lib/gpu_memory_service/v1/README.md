@@ -197,29 +197,31 @@ sequenceDiagram
 Suspend order is weights then KV so the exclusive KV lease remains held until
 local weight memory is asleep. Resume order is KV then weights.
 
-Every connection verifies the physical GPU identity. The container-local device
-ordinal selects both the rank-local socket and the `device-<ordinal>` artifact
+Every connection verifies the physical GPU identity. GMS device N, the pod's
+N-th GPU, selects both the device-local socket and the `device-<N>` artifact
 directory; a predecessor server identity is not persisted. V1 does not
 reconstruct models, retain KV contents, scan raw mappings, validate
 model-specific layouts, or implement SGLang integration.
 
 ## Running V1
 
-Start one V1 child per visible device:
+Start one V1 process per GPU:
 
 ```text
 DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server
 ```
 
-The supervisor discovers the visible devices and monitors the children. To
-start one rank-local child directly:
+The supervisor reads the GPUs from `/proc/driver/nvidia/gpus` without starting
+CUDA and serves GMS device N from the N-th GPU in PCI bus order, the order
+engines see with `CUDA_DEVICE_ORDER=PCI_BUS_ID`. Each device's process is pinned
+to its GPU with `CUDA_VISIBLE_DEVICES`. To start one device's server directly:
 
 ```text
 DYN_GMS_USE_V1=true gpu-memory-service --device 0
 ```
 
 Save or load every visible device (pass `--device N` for one GPU). Artifacts
-land under `<checkpoint-dir>/device-<ordinal>`:
+land under `<checkpoint-dir>/device-<N>`:
 
 ```text
 DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.saver \
@@ -231,6 +233,9 @@ DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
   --checkpoint-dir /checkpoints/run/versions/1 \
   --transfer-backend nixl-gds
 ```
+
+With `--enable-loader`, each device's server process loads its weights in a
+thread and keeps serving.
 
 The loader also accepts `nixl` and `sharded-ssd`, the existing sharded SSD root
 and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.

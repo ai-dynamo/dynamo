@@ -264,6 +264,11 @@ def load_weights(
         if session.lock_type is GrantedLockType.RO:
             logger.info("GMS V1 weights already committed on device=%d", device)
             return
+        logger.info(
+            "GMS V1 loader RW granted device=%d elapsed=%.3fs",
+            device,
+            monotonic() - started_at,
+        )
 
         mappings: list[tuple[LocalMapping, int]] = []
         targets: dict[str, GMSTransferTarget] = {}
@@ -290,6 +295,12 @@ def load_weights(
                     device,
                     record.aligned_size,
                 )
+            logger.info(
+                "GMS V1 loader allocated device=%d allocations=%d elapsed=%.3fs",
+                device,
+                len(targets),
+                monotonic() - started_at,
+            )
 
             if set(targets) != {source.allocation_id for source in sources}:
                 raise RuntimeError(
@@ -300,6 +311,11 @@ def load_weights(
                 transfer_resources.callback(transfer.close)
                 transfer.restore(targets)
                 vmm.synchronize()
+            logger.info(
+                "GMS V1 loader transferred device=%d elapsed=%.3fs",
+                device,
+                monotonic() - started_at,
+            )
 
         _close_backend(backend_holder)
         session.commit()
