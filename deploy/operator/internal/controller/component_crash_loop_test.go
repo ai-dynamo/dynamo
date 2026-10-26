@@ -9,11 +9,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
@@ -47,7 +52,7 @@ func crashLoopTestPod(namespace, name, dcdName string, ready bool, restarts int3
 	return pod
 }
 
-func TestDCDPodCrashLoopPredicate(t *testing.T) {
+func TestPodCrashLoopPredicate(t *testing.T) {
 	restarted := crashLoopTestPod("inference", "worker-a", "graph-worker", false, 2)
 	restarted.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
 	terminal := crashLoopTestPod("inference", "worker-a", "graph-worker", false, 2)
@@ -111,32 +116,82 @@ func TestDCDPodCrashLoopPredicate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := dcdPodCrashLoopPredicate().Update(event.UpdateEvent{ObjectOld: tt.oldPod, ObjectNew: tt.newPod})
+			got := podCrashLoopPredicate(deploymentPodDCDName).Update(event.UpdateEvent{ObjectOld: tt.oldPod, ObjectNew: tt.newPod})
 			assert.Equal(t, tt.want, got)
 		})
 	}
 }
 
-func TestMapDeploymentPodToDCDRequests(t *testing.T) {
+func TestMapPodToRequests(t *testing.T) {
+	dgdComponentPod := crashLoopTestPod("inference", "graph-frontend-a", "graph-frontend", false, 2)
+	dgdComponentPod.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = "graph"
+	dgdComponentPod.Labels[commonconsts.KubeLabelDynamoComponent] = "frontend"
+	graphOnlyPod := crashLoopTestPod("inference", "graph-frontend-a", "", false, 2)
+	graphOnlyPod.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = "graph"
+
 	tests := []struct {
-		name string
-		pod  *corev1.Pod
-		want []ctrl.Request
+		name        string
+		requestName func(client.Object) (string, bool)
+		pod         *corev1.Pod
+		want        []ctrl.Request
 	}{
 		{
-			name: "Pod labeled for a DCD",
-			pod:  crashLoopTestPod("inference", "worker-a", "graph-worker", false, 2),
-			want: []ctrl.Request{{Namespace: "inference", Name: "graph-worker"}},
+			name:        "Pod labeled for a DCD",
+			requestName: deploymentPodDCDName,
+			pod:         crashLoopTestPod("inference", "worker-a", "graph-worker", false, 2),
+			want:        []ctrl.Request{{Namespace: "inference", Name: "graph-worker"}},
 		},
 		{
-			name: "Pod without the selector label",
-			pod:  crashLoopTestPod("inference", "worker-a", "", false, 2),
+			name:        "Pod without the selector label",
+			requestName: deploymentPodDCDName,
+			pod:         crashLoopTestPod("inference", "worker-a", "", false, 2),
+		},
+		{
+			name:        "Pod labeled for a DGD component",
+			requestName: componentPodDGDName,
+			pod:         dgdComponentPod,
+			want:        []ctrl.Request{{Namespace: "inference", Name: "graph"}},
+		},
+		{
+			name:        "Pod labeled for a DGD without a component",
+			requestName: componentPodDGDName,
+			pod:         graphOnlyPod,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, mapDeploymentPodToDCDRequests(t.Context(), tt.pod))
+			assert.Equal(t, tt.want, mapPodToRequests(tt.requestName)(t.Context(), tt.pod))
 		})
 	}
+}
+
+func TestFindComponentPodCrashLoops(t *testing.T) {
+	t.Log("Label Pods for two components of graph and one component of another graph")
+	componentPod := func(name, dgdName, component string, restarts int32) *corev1.Pod {
+		pod := crashLoopTestPod("inference", name, "", false, restarts)
+		pod.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgdName
+		pod.Labels[commonconsts.KubeLabelDynamoComponent] = component
+		return pod
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).
+		WithObjects(
+			componentPod("graph-frontend-a", "graph", "frontend", 3),
+			componentPod("graph-worker-a", "graph", "worker", 1),
+			componentPod("other-worker-a", "other", "worker", 4),
+		).
+		Build()
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "inference"}
+	components := []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend"}, {ComponentName: "worker"}}
+
+	t.Log("Diagnose each component from the Pods labeled for it")
+	crashLoops, err := findComponentPodCrashLoops(t.Context(), kubeClient, dgd, components)
+
+	t.Log("Verify only the crash-looping component of graph is reported")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"frontend": "pod graph-frontend-a container main restarted 3 times, last exit code 1 (Error)",
+	}, crashLoops)
 }

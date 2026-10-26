@@ -460,7 +460,7 @@ func TestWorkerRecreateIgnoresCheckpointCapturePods(t *testing.T) {
 			}
 			r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD, newDCD, worker, capture))
 			ctx := context.Background()
-			pods, err := r.listDGDComponentPods(ctx, dgd, "worker")
+			pods, err := listDGDComponentPods(ctx, r, dgd, "worker")
 			require.NoError(t, err)
 			require.Len(t, pods, 2, "capture pods share the DGD/component index")
 

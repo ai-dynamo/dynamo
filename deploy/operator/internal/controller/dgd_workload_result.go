@@ -154,12 +154,12 @@ func checkResourcesReadiness(resources []Resource) ReconcileResult {
 }
 
 // applyComponentCrashLoops fails the graph while any DCD reports, for its
-// current generation, that a container of its current Pods is crash-looping.
+// current generation, a crash-looping container among its Pods.
 func applyComponentCrashLoops(
 	result ReconcileResult,
 	dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 ) ReconcileResult {
-	crashLoops := make([]string, 0, len(dcds))
+	crashLoops := make(map[string]string, len(dcds))
 	for _, dcd := range dcds {
 		if dcd.Status.ObservedGeneration < dcd.Generation {
 			continue
@@ -173,19 +173,25 @@ func applyComponentCrashLoops(
 			available.Reason != dcdReasonContainerCrashLooping {
 			continue
 		}
-		crashLoops = append(crashLoops, fmt.Sprintf(
-			"Component %s is crash-looping: %s",
-			dynamo.GetDCDComponentName(dcd),
-			available.Message,
-		))
+		crashLoops[dynamo.GetDCDComponentName(dcd)] = available.Message
 	}
+	return failCrashLoopingComponents(result, crashLoops)
+}
+
+// failCrashLoopingComponents fails the graph while crashLoops, a diagnosis by
+// component name, is non-empty.
+func failCrashLoopingComponents(result ReconcileResult, crashLoops map[string]string) ReconcileResult {
 	if len(crashLoops) == 0 {
 		return result
 	}
-	sort.Strings(crashLoops)
+	messages := make([]string, 0, len(crashLoops))
+	for component, diagnosis := range crashLoops {
+		messages = append(messages, fmt.Sprintf("Component %s is crash-looping: %s", component, diagnosis))
+	}
+	sort.Strings(messages)
 	result.State = nvidiacomv1beta1.DGDStateFailed
 	result.Reason = reasonComponentCrashLooping
-	result.Message = Message(strings.Join(crashLoops, "; "))
+	result.Message = Message(strings.Join(messages, "; "))
 	return result
 }
 

@@ -51,7 +51,7 @@ func newLPXHandoffSource(t *testing.T, fixture string) *v1beta1.DynamoGraphDeplo
 func newLPXHandoffFixture(t *testing.T, fixture string) (*v1alpha1.LPXGraphDeployment, *v1beta1.DynamoGraphDeployment, client.Client) {
 	t.Helper()
 	source := newLPXHandoffSource(t, fixture)
-	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).
 		WithRESTMapper(groveScaleRESTMapper()).
 		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}, &v1alpha1.LPXGraphDeployment{}).
 		WithObjects(source).Build()
@@ -707,7 +707,7 @@ func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
 		}}},
 	}
 	childReads := 0
-	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(source).
+	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).WithObjects(source).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if _, child := obj.(*v1alpha1.LPXGraphDeployment); child {

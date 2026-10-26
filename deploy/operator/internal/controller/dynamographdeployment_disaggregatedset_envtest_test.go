@@ -221,6 +221,46 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
 	})
 
+	It("fails the graph while a non-DisaggregatedSet DCD reports a crash-looping container", func() {
+		ctx := context.Background()
+		dgd := newEnvtestDSHappyPathDGD("demo-ds-frontend-crash-loop")
+		dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName:          "frontend",
+			ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
+			RuntimeVersionOverride: "1.0.0",
+			PodTemplate:            envtestDSTestPodTemplate(),
+		})
+		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
+		reconciler := newEnvtestDSReconcilers()
+
+		By("converging the DisaggregatedSet roles and lowering the frontend to a DCD")
+		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		markDisaggregatedSetReady(ctx, current)
+		dcds := ownedEnvtestCutoverDCDs(ctx, current)
+		Expect(dcds).To(HaveLen(1))
+
+		By("reporting a crash loop from the frontend DCD's current generation")
+		frontend := &dcds[0]
+		frontend.Status.ObservedGeneration = frontend.Generation
+		frontend.Status.Conditions = []metav1.Condition{{
+			Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+			Status:             metav1.ConditionFalse,
+			Reason:             dcdReasonContainerCrashLooping,
+			Message:            "pod frontend-a container main restarted 2 times, last exit code 1",
+			LastTransitionTime: metav1.Now(),
+		}}
+		Expect(k8sClient.Status().Update(ctx, frontend)).To(Succeed())
+
+		By("failing the graph with the frontend's diagnosis")
+		result, _ := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateFailed))
+		ready := apiMeta.FindStatusCondition(result.Status.Conditions, "Ready")
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Reason).To(Equal(string(reasonComponentCrashLooping)))
+		Expect(ready.Message).To(Equal("Component frontend is crash-looping: pod frontend-a container main restarted 2 times, last exit code 1"))
+	})
+
 	It("does not rewrite API-defaulted stable Services on a no-op reconcile", func() {
 		ctx := context.Background()
 		dgd := newEnvtestDSHappyPathDGD("demo-ds-service-idempotence")

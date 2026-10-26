@@ -995,8 +995,8 @@ func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager
 		})).
 		Watches(
 			&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(mapDeploymentPodToDCDRequests),
-			builder.WithPredicates(dcdPodCrashLoopPredicate()),
+			handler.EnqueueRequestsFromMapFunc(mapPodToRequests(deploymentPodDCDName)),
+			builder.WithPredicates(podCrashLoopPredicate(deploymentPodDCDName)),
 		).
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
