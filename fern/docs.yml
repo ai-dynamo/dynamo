@@ -2225,9 +2225,13 @@ redirects:
   - source: "/dynamo/dev/kubernetes/operations/dynosim/simulation-sweeps"
     destination: "/dynamo/dev/knowledge-base/concepts/simulation/simulation-sweeps"
   - source: "/dynamo/dev/kubernetes/operations/dynosim/planner-simulation-benchmarking"
-    destination: "/dynamo/dev/knowledge-base/concepts/simulation/planner-replay"
+    destination: "/dynamo/dev/knowledge-base/modular-components/planner/aisimulate-planner-replay"
   - source: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/:slug*"
     destination: "/dynamo/dev/knowledge-base/concepts/simulation/ai-simulate/:slug*"
+  # The Planner simulation guide moved to the Planner section and was renamed
+  # from DynoSim to AISimulate.
+  - source: "/dynamo/dev/knowledge-base/concepts/simulation/planner-replay"
+    destination: "/dynamo/dev/knowledge-base/modular-components/planner/aisimulate-planner-replay"
   # The Writing Custom Backends overview page was retitled.
   - source: "/dynamo/dev/advanced-customizations/writing-custom-backends/custom-backend-overview"
     destination: "/dynamo/dev/advanced-customizations/writing-custom-backends/overview"
@@ -2689,7 +2693,7 @@ redirects:
   - source: "/dynamo/user-guides/dynosim/mocker"
     destination: "/dynamo/dev/kubernetes/operations/dynosim/live-simulation-with-mocker"
   - source: "/dynamo/user-guides/dynosim/planner-benchmarking"
-    destination: "/dynamo/dev/kubernetes/operations/dynosim/planner-simulation-benchmarking"
+    destination: "/dynamo/dev/knowledge-base/modular-components/planner/aisimulate-planner-replay"
   - source: "/dynamo/user-guides/dynosim/runs"
     destination: "/dynamo/dev/kubernetes/operations/dynosim/simulation-runs"
   - source: "/dynamo/user-guides/dynosim/sweeps"
@@ -2699,7 +2703,7 @@ redirects:
   - source: "/dynamo/dev/user-guides/dynosim/mocker"
     destination: "/dynamo/dev/kubernetes/operations/dynosim/live-simulation-with-mocker"
   - source: "/dynamo/dev/user-guides/dynosim/planner-benchmarking"
-    destination: "/dynamo/dev/kubernetes/operations/dynosim/planner-simulation-benchmarking"
+    destination: "/dynamo/dev/knowledge-base/modular-components/planner/aisimulate-planner-replay"
   - source: "/dynamo/dev/user-guides/dynosim/runs"
     destination: "/dynamo/dev/kubernetes/operations/dynosim/simulation-runs"
   - source: "/dynamo/dev/user-guides/dynosim/sweeps"

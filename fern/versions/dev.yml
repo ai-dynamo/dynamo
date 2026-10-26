@@ -336,9 +336,8 @@ navigation:
                   - page: Simulate a Kubernetes Deployment
                     slug: kubernetes-mocker
                     path: ../pages-dev/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx
-                  - page: Benchmark Planner Decisions
-                    slug: planner-replay
-                    path: ../pages-dev/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
+                  - link: Simulate Planner Decisions (AISimulate)
+                    href: /dynamo/dev/knowledge-base/modular-components/planner/aisimulate-planner-replay
                   - section: AISimulate (Experimental)
                     slug: ai-simulate
                     collapsed: true
@@ -496,6 +495,9 @@ navigation:
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md
                   - page: Planner Examples
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/planner/planner-examples.md
+                  - page: Simulate Planner Decisions (AISimulate)
+                    slug: aisimulate-planner-replay
+                    path: ../pages-dev/developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx
                   - page: Planner Design
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/planner/planner-design.md
               - section: Profiler
