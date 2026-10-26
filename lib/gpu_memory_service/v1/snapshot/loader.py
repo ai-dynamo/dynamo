@@ -50,6 +50,19 @@ def _build_parser():
     return parser
 
 
+def _backend_config(parser, args) -> dict[str, object]:
+    try:
+        posix_backend_params = _parse_backend_params(args.posix_backend_param)
+    except ValueError as exc:
+        parser.error(str(exc))
+    config: dict[str, object] = {
+        "sharded_ssd_roots": parse_sharded_ssd_roots(args.sharded_ssd_roots),
+        "sharded_ssd_queues_per_root": args.sharded_ssd_queues_per_root,
+        "posix_backend_params": posix_backend_params,
+    }
+    return config
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -63,10 +76,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--max-workers must be a positive integer")
     if args.sharded_ssd_queues_per_root <= 0:
         parser.error("--sharded-ssd-queues-per-root must be a positive integer")
-    try:
-        posix_backend_params = _parse_backend_params(args.posix_backend_param)
-    except ValueError as exc:
-        parser.error(str(exc))
+    backend_config = _backend_config(parser, args)
 
     init_vmm(VMMDeviceType.CUDA)
     load_weights(
@@ -75,9 +85,7 @@ def main(argv: list[str] | None = None) -> None:
         args.device,
         max_workers=args.max_workers,
         transfer_backend=args.transfer_backend,
-        sharded_ssd_roots=parse_sharded_ssd_roots(args.sharded_ssd_roots),
-        sharded_ssd_queues_per_root=args.sharded_ssd_queues_per_root,
-        posix_backend_params=posix_backend_params,
+        backend_config=backend_config,
     )
     logger.info("GMS V1 loader complete; exiting")
 
