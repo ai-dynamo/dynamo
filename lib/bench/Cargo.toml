@@ -56,7 +56,6 @@ mooncake = [
   "dep:sha2",
   "dep:tokio-util",
 ]
-lower-tier = ["router-bench", "dep:libc", "dep:sha2"]
 multiturn = [
   "kv-router-stress-support",
   "dep:dynamo-mocker",
@@ -133,12 +132,6 @@ name = "mooncake_bench"
 path = "kv_router/mooncake_bench.rs"
 harness = false
 required-features = ["mooncake"]
-
-[[bench]]
-name = "lower_tier_bench"
-path = "kv_router/lower_tier_bench.rs"
-harness = false
-required-features = ["lower-tier"]
 
 [[bin]]
 name = "dc_ckf_consumer_bench"
