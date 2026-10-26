@@ -80,8 +80,7 @@ the reports with `nsight_operator.py`.
 
 ## Select Components
 
-Select pods with the labels the Dynamo operator already sets on every pod; see
-[Pod Labels](../../reference/kubernetes-api/dynamo-component-deployment.mdx#pod-labels). Always include
+Select pods with the labels the Dynamo operator already sets on every pod. Always include
 `nvidia.com/dynamo-graph-deployment-name`, so that other DGDs in the namespace are not matched.
 
 | Component | Selector |
@@ -250,5 +249,5 @@ Not yet tested:
 - Upload to external S3, and a coordinator window on a GPU worker.
 - Workers with more than one GPU, and SGLang and TensorRT-LLM workers.
 - Prefill and decode selection in a disaggregated DGD, and a standalone router.
-- [Dynamo sidecar mode](../../reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode).
+- Dynamo sidecar mode.
 - Namespaces that enforce Pod Security `restricted`, and `opentelemetryTrace: false`.
