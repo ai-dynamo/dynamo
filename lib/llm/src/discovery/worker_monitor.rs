@@ -179,15 +179,35 @@ struct LoadThresholds {
     /// Whether any threshold is set. `update` never clears a threshold, so this
     /// only ever turns from false to true.
     configured: tokio::sync::watch::Sender<bool>,
+    /// False for a handle from [`LoadThresholdHandle::disabled`].
+    accepts_thresholds: bool,
 }
 
 impl LoadThresholdHandle {
     pub fn new(config: LoadThresholdConfig) -> Self {
+        Self::with_config(config, true)
+    }
+
+    /// A handle that holds no thresholds and ignores updates, for a frontend
+    /// that does not pick workers, such as one in direct routing mode. The
+    /// component that picks workers applies busy-worker thresholds, and a
+    /// monitor with this handle never subscribes to worker load reports.
+    pub fn disabled() -> Self {
+        Self::with_config(LoadThresholdConfig::default(), false)
+    }
+
+    fn with_config(config: LoadThresholdConfig, accepts_thresholds: bool) -> Self {
         let (configured, _) = tokio::sync::watch::channel(config.is_configured());
         Self(Arc::new(LoadThresholds {
             config: std::sync::RwLock::new(config),
             configured,
+            accepts_thresholds,
         }))
+    }
+
+    /// False for a handle from [`Self::disabled`].
+    pub fn accepts_thresholds(&self) -> bool {
+        self.0.accepts_thresholds
     }
 
     pub fn get(&self) -> LoadThresholdConfig {
@@ -195,6 +215,9 @@ impl LoadThresholdHandle {
     }
 
     pub fn update(&self, config: &LoadThresholdConfig) {
+        if !self.0.accepts_thresholds {
+            return;
+        }
         let configured = {
             let mut current = self.0.config.write().unwrap();
             if let Some(value) = config.active_decode_blocks_threshold {
@@ -818,8 +841,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         // KV metrics feed only threshold-based overload detection, and the
         // subscription connects to every worker of the endpoint. Open it once a
         // threshold is set, at startup or later through `/busy_threshold`, so a
-        // frontend without thresholds (such as a direct-mode sidecar in front of
-        // one worker) does not connect to all of them.
+        // frontend without thresholds does not connect to all of them. A frontend
+        // in direct routing mode, such as a sidecar in front of one worker, gets a
+        // handle that ignores thresholds, so it never subscribes.
         let mut thresholds_configured_rx = self.thresholds.watch_configured();
         let kv_metrics_deferred = !*thresholds_configured_rx.borrow_and_update();
         let kv_metrics_rx = if kv_metrics_deferred {
@@ -1430,6 +1454,20 @@ mod tests {
                 .watch_configured()
                 .borrow()
         );
+    }
+
+    #[test]
+    fn disabled_load_threshold_handle_ignores_thresholds() {
+        let handle = LoadThresholdHandle::disabled();
+        let configured = handle.watch_configured();
+        handle.update(&LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.5),
+            ..Default::default()
+        });
+        assert!(!handle.accepts_thresholds());
+        assert!(!handle.is_configured());
+        assert_eq!(handle.get(), LoadThresholdConfig::default());
+        assert!(!configured.has_changed().unwrap());
     }
 
     #[test]

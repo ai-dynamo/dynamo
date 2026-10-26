@@ -559,8 +559,7 @@ impl ModelWatcher {
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
-            let load_thresholds =
-                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_thresholds = load_threshold_handle(&router_config);
             let load_context = if needs_preprocessed_routing {
                 let source = RouterLoadSource::from_worker_type(effective_worker_type(
                     card.worker_type,
@@ -812,8 +811,7 @@ impl ModelWatcher {
             // OpenAI surfaces. Build each declared surface independently:
             // ModelType is a bitflag, so choosing one mutually-exclusive branch
             // would silently omit engines for mixed-capability cards.
-            let load_thresholds =
-                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_thresholds = load_threshold_handle(&router_config);
             let load_context = RoutingLoadContext::start(
                 client,
                 RouterLoadSource::from_worker_type(effective_worker_type(
@@ -1384,6 +1382,23 @@ fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
         && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
 }
 
+/// A frontend in direct routing mode does not pick workers: the component that
+/// does, such as the EPP, applies busy-worker thresholds. Its handle ignores
+/// them, so its load monitor never subscribes to every worker's load reports.
+fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
+    if !router_config.router_mode.is_direct_routing() {
+        return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+    }
+    if router_config.load_threshold_config.is_configured() {
+        tracing::warn!(
+            thresholds = ?router_config.load_threshold_config,
+            "ignoring busy-worker thresholds in direct routing mode: the component that picks \
+             workers, such as the EPP, applies them"
+        );
+    }
+    LoadThresholdHandle::disabled()
+}
+
 fn effective_router_config<'a>(
     worker_config: Option<&'a RouterConfig>,
     frontend_config: &'a RouterConfig,
@@ -1498,6 +1513,23 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn direct_routing_gets_a_threshold_handle_that_ignores_thresholds() {
+        let config = |router_mode| {
+            RouterConfig::new(router_mode, dynamo_kv_router::KvRouterConfig::default())
+                .with_load_threshold_config(crate::discovery::LoadThresholdConfig {
+                    active_decode_blocks_threshold: Some(0.9),
+                    ..Default::default()
+                })
+        };
+        let direct = load_threshold_handle(&config(RouterMode::Direct));
+        assert!(!direct.accepts_thresholds());
+        assert!(!direct.is_configured());
+        let kv = load_threshold_handle(&config(RouterMode::KV));
+        assert!(kv.accepts_thresholds());
+        assert!(kv.is_configured());
+    }
 
     #[test]
     fn qwen_video_contract_digest_is_canonical_and_engine_specific() {
