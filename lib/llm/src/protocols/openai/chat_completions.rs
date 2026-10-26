@@ -29,10 +29,13 @@ pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
 use dynamo_parsers::tool_calling::{ToolCallResponse, ToolCallResponseChunk};
+#[cfg(test)]
 use dynamo_protocols::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
-    FunctionCall, FunctionCallStream, FunctionType,
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, FinishReason,
+};
+use dynamo_protocols::types::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, FunctionCall,
+    FunctionCallStream, FunctionType,
 };
 
 /// Map a parser-native [`ToolCallResponse`] onto the protocol/wire
@@ -395,11 +398,8 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     Some(())
 }
 
-/// Build one synthetic stream choice from an existing response template.
-///
-/// Both streaming tool-call paths use this constructor when an engine omits a
-/// terminal choice. Accounting data belongs only on the usage chunk and must
-/// not be copied onto the synthetic choice.
+/// Synthetic terminal choices must not repeat accounting from the template's usage chunk.
+#[cfg(test)]
 pub(super) fn stream_choice_chunk_from_template(
     template: &NvCreateChatCompletionStreamResponse,
     index: u32,
@@ -513,6 +513,22 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     /// Retrieves the best_of parameter, if set.
     fn get_best_of(&self) -> Option<u8> {
         None // Not supported in chat completions
+    }
+
+    /// Retrieves the logit_bias map with string token-ID keys converted to
+    /// `u32`. Validation rejects non-numeric keys before extraction.
+    fn get_logit_bias(&self) -> Option<HashMap<u32, f32>> {
+        self.inner
+            .logit_bias
+            .as_ref()
+            .filter(|bias| !bias.is_empty())
+            .map(|bias| {
+                bias.iter()
+                    .filter_map(|(token, value)| {
+                        Some((token.parse::<u32>().ok()?, value.as_f64()? as f32))
+                    })
+                    .collect()
+            })
     }
 }
 
@@ -1165,6 +1181,23 @@ mod tests {
     }
 
     #[test]
+    fn test_logit_bias_reaches_sampling_options() {
+        let request = chat_request_with(&json!({"logit_bias": {"18": -100, "42": 5.5}}));
+        ValidateRequest::validate(&request).expect("valid logit_bias must pass validation");
+
+        let sampling_options = request
+            .extract_sampling_options()
+            .expect("logit_bias extraction failed");
+        let logit_bias = sampling_options
+            .logit_bias
+            .expect("logit_bias must survive extraction");
+
+        assert_eq!(logit_bias.len(), 2);
+        assert_eq!(logit_bias.get(&18), Some(&-100.0));
+        assert_eq!(logit_bias.get(&42), Some(&5.5));
+    }
+
+    #[test]
     fn test_validate_tool_choice_required_rejects_empty_tools() {
         let request_json = json!({
             "model": "test-model",
@@ -1737,13 +1770,24 @@ mod tests {
             make_tool("func-name_v2"),
             make_tool("FuncName"),
             make_tool("Func_Name-123"),
+            make_tool("my-tool.v2"),
         ];
         assert!(validate::validate_tools(&Some(&tools)).is_ok());
     }
 
     #[test]
     fn test_validate_tools_invalid_names() {
-        for name in ["<func_name>", "func name", "func@name", "func,name", ""] {
+        for name in [
+            "<func_name>",
+            "func name",
+            "func@name",
+            "func,name",
+            "func=name",
+            "func\"name",
+            "func:name",
+            "func/name",
+            "",
+        ] {
             let tools = vec![ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {

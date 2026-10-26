@@ -523,7 +523,7 @@ class _KvRoutingPayload(ChatPayload):
         while time.monotonic() < deadline:
             try:
                 response = requests.get(
-                    f"http://{self.host}:{self.port}/health", timeout=5
+                    f"http://{self.host}:{self.port}/health?instances=true", timeout=5
                 )
                 if response.status_code == 200:
                     health = response.json()

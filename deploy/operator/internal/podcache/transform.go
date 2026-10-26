@@ -149,11 +149,9 @@ func projectTopologyVolumes(in []corev1.Volume) []corev1.Volume {
 
 		out = append(out, corev1.Volume{
 			Name: in[i].Name,
-			VolumeSource: corev1.VolumeSource{
-				DownwardAPI: &corev1.DownwardAPIVolumeSource{
-					Items:       items,
-					DefaultMode: in[i].DownwardAPI.DefaultMode,
-				},
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items:       items,
+				DefaultMode: in[i].DownwardAPI.DefaultMode,
 			},
 		})
 	}

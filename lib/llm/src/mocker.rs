@@ -62,7 +62,7 @@ use self::handoff::{
     HandoffControl, SourceHandoffManager, SourceRegistration, cancel_destination,
     live_handoff_boundary, order_for_engine, run_destination_session,
 };
-use self::metrics::NativeMockerMetrics;
+use self::metrics::{DynamoLabelValues, NativeMockerMetrics};
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
@@ -325,8 +325,17 @@ enum StartupState {
 impl MockerExecutionContext {
     fn new(engine_args: MockerConfig) -> Self {
         let (startup_state, _) = watch::channel(StartupState::Starting);
-        let native_metrics = NativeMockerMetrics::new(engine_args.backend, engine_args.dp_size)
-            .expect("mocker native metrics collectors should be valid");
+        // SGLang labels its metrics with the worker's disaggregation role.
+        let sglang_engine_type = if engine_args.is_prefill() {
+            "prefill"
+        } else if engine_args.is_decode() {
+            "decode"
+        } else {
+            "unified"
+        };
+        let native_metrics =
+            NativeMockerMetrics::new(engine_args.backend, engine_args.dp_size, sglang_engine_type)
+                .expect("mocker native metrics collectors should be valid");
         let response_replay_table = engine_args
             .runtime
             .response_replay_trace_path
@@ -429,8 +438,12 @@ impl MockerExecutionContext {
         );
     }
 
-    async fn start(self: Arc<Self>, endpoint: dynamo_runtime::component::Endpoint) -> Result<()> {
-        let result = Arc::clone(&self).start_inner(endpoint).await;
+    async fn start(
+        self: Arc<Self>,
+        endpoint: dynamo_runtime::component::Endpoint,
+        model_name: String,
+    ) -> Result<()> {
+        let result = Arc::clone(&self).start_inner(endpoint, model_name).await;
         match &result {
             Ok(()) => {
                 self.startup_state.send_replace(StartupState::Ready);
@@ -445,6 +458,7 @@ impl MockerExecutionContext {
     async fn start_inner(
         self: Arc<Self>,
         endpoint: dynamo_runtime::component::Endpoint,
+        model_name: String,
     ) -> Result<()> {
         let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
@@ -452,8 +466,17 @@ impl MockerExecutionContext {
         // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
         // primary_token() is only cancelled in Phase 3, after waiting for inflight requests.
         let primary_token = component.drt().primary_token();
-        self.native_metrics
-            .register(component.get_metrics_registry())?;
+        let dynamo_labels = DynamoLabelValues {
+            namespace: component.namespace().name(),
+            component: component.name().to_string(),
+            endpoint: endpoint.name().to_string(),
+            worker_id: format!("{:x}", component.drt().connection_id()),
+        };
+        self.native_metrics.register(
+            component.get_metrics_registry(),
+            &model_name,
+            &dynamo_labels,
+        )?;
 
         // Simulate engine startup time if configured
         if let Some(startup_time_secs) = self.engine_args.startup_time {
@@ -914,10 +937,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .map_or(max_output_tokens, |max_model_len| {
                     max_output_tokens.min(max_model_len.saturating_sub(request.token_ids.len()))
                 });
-        let native_timing = self
-            .native_metrics
-            .request_timing(&request.model, dp_rank, is_prefill, request_start)
-            .await;
+        let native_timing = self.native_metrics.request_timing(dp_rank, request_start);
 
         let prompt_tokens_count = request.token_ids.len();
         // Convert PreprocessedRequest to DirectRequest for scheduler
@@ -1222,7 +1242,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                native_timing.record_token();
                                 None
                             };
 
@@ -1298,7 +1318,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
                                 }
-                                native_timing.record_tokens(1);
+                                native_timing.record_token();
                             } else {
                                 let mut final_output = LLMEngineOutput::length();
                                 if let Some(cached) = cached_prefix_tokens {
@@ -1319,7 +1339,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             if !send_response(&stream_tx, output, &async_context) {
                                 break;
                             }
-                            native_timing.record_tokens(1);
+                            native_timing.record_token();
                         }
                     }
 
@@ -1362,11 +1382,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     }
 }
 
-/// Create a mocker engine as ExecutionContext
+/// Create a mocker engine as ExecutionContext. `model_name` is the served model name its native
+/// engine metrics are labelled with.
 pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
     endpoint_id: dynamo_runtime::protocols::EndpointId,
     args: MockerConfig,
+    model_name: String,
 ) -> Result<ExecutionContext, Error> {
     tracing::info!("Creating mocker engine with config: {args:?}");
     let engine = Arc::new(MockerExecutionContext::new(args));
@@ -1397,7 +1419,7 @@ pub async fn make_mocker_engine(
 
         tracing::debug!("Component service is now available, starting mocker engine");
         let endpoint = component.endpoint(endpoint_id.name);
-        if let Err(error) = startup_engine.start(endpoint).await {
+        if let Err(error) = startup_engine.start(endpoint, model_name).await {
             tracing::error!("Failed to start mocker engine: {error}");
         }
     });

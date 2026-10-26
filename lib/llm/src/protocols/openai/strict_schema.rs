@@ -31,8 +31,11 @@ const TYPES: &[&str] = &[
     "null", "boolean", "object", "array", "number", "integer", "string",
 ];
 
-pub(super) fn validate_strict_function(function: &FunctionObject) -> Result<()> {
-    if function.strict != Some(true) {
+pub(super) fn validate_strict_function(
+    function: &FunctionObject,
+    skip_strict_schema_validation: bool,
+) -> Result<()> {
+    if function.strict != Some(true) || skip_strict_schema_validation {
         return Ok(());
     }
     let Some(schema) = &function.parameters else {
@@ -577,12 +580,7 @@ mod tests {
     use serde_json::json;
 
     fn check(schema: Value) -> Result<()> {
-        validate_strict_function(&FunctionObject {
-            name: "search".into(),
-            description: None,
-            parameters: Some(schema),
-            strict: Some(true),
-        })
+        validate_schema(&schema)
     }
 
     fn object() -> Value {
@@ -607,24 +605,37 @@ mod tests {
                 parameters: None,
                 strict,
             };
-            validate_strict_function(&function).unwrap();
+            validate_strict_function(&function, false).unwrap();
             function.parameters = Some(json!({}));
             assert_eq!(
-                validate_strict_function(&function).is_err(),
+                validate_strict_function(&function, false).is_err(),
                 strict == Some(true)
             );
         }
+        validate_strict_function(
+            &FunctionObject {
+                name: "search".into(),
+                description: None,
+                parameters: Some(json!({})),
+                strict: Some(true),
+            },
+            true,
+        )
+        .unwrap();
     }
 
     #[test]
     fn oversized_function_names_are_bounded_in_diagnostics() {
         let name = "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH + 1000);
-        let error = validate_strict_function(&FunctionObject {
-            name: name.clone(),
-            description: None,
-            parameters: Some(json!({"type": "object"})),
-            strict: Some(true),
-        })
+        let error = validate_strict_function(
+            &FunctionObject {
+                name: name.clone(),
+                description: None,
+                parameters: Some(json!({"type": "object"})),
+                strict: Some(true),
+            },
+            false,
+        )
         .unwrap_err()
         .to_string();
         assert!(!error.contains(&name));
@@ -633,12 +644,15 @@ mod tests {
             "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH)
         )));
         let short = "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH);
-        let error = validate_strict_function(&FunctionObject {
-            name: short.clone(),
-            description: None,
-            parameters: Some(json!({"type": "object"})),
-            strict: Some(true),
-        })
+        let error = validate_strict_function(
+            &FunctionObject {
+                name: short.clone(),
+                description: None,
+                parameters: Some(json!({"type": "object"})),
+                strict: Some(true),
+            },
+            false,
+        )
         .unwrap_err()
         .to_string();
         assert!(error.contains(&format!("'{short}':")));
@@ -737,7 +751,7 @@ mod tests {
         let schema = json!({"type": "object", "properties": properties, "required": ["z", "a/b~c"], "additionalProperties": false});
         assert_eq!(
             check(schema).unwrap_err().to_string(),
-            "Invalid schema for function 'search': In context=#/properties/a~1b~0c, object schemas require additionalProperties: false"
+            "In context=#/properties/a~1b~0c, object schemas require additionalProperties: false"
         );
         assert_eq!(
             check(
@@ -745,7 +759,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string(),
-            "Invalid schema for function 'search': In context=#/required, must include property 'x'"
+            "In context=#/required, must include property 'x'"
         );
     }
 
