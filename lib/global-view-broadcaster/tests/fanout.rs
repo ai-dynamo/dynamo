@@ -255,7 +255,7 @@ async fn retries_a_failed_router_attachment() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn lagging_router_reconnects_with_a_fresh_snapshot() {
+async fn lagging_router_receives_a_fresh_snapshot_on_the_same_connection() {
     let broadcaster = GlobalViewBroadcaster::new();
     let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
     let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
@@ -288,21 +288,21 @@ async fn lagging_router_reconnects_with_a_fresh_snapshot() {
     for revision in 1..=100 {
         broadcaster.upsert("blue", revision);
     }
-    let (router, mut recovered) = timeout(Duration::from_secs(2), connections_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(router, "a");
     assert_eq!(
-        next(&mut recovered).await,
+        next(&mut first_stream).await,
         Frame::Snapshot {
             revision: 100,
             pools: HashMap::from([("blue", 100)]),
         }
     );
+    assert!(
+        timeout(Duration::from_millis(200), connections_rx.recv())
+            .await
+            .is_err()
+    );
     broadcaster.upsert("blue", 101);
     assert_eq!(
-        next(&mut recovered).await,
+        next(&mut first_stream).await,
         Frame::Upsert {
             revision: 101,
             pool: "blue",

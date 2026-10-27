@@ -126,12 +126,10 @@ where
             return;
         };
         state.revision += 1;
-        if self.inner.updates.receiver_count() != 0 {
-            let _ = self.inner.updates.send(Frame::Remove {
-                revision: state.revision,
-                pool,
-            });
-        }
+        let _ = self.inner.updates.send(Frame::Remove {
+            revision: state.revision,
+            pool,
+        });
     }
 
     /// Open one outbound connection from the relay to each router in the directory.
@@ -205,8 +203,12 @@ where
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(?router, skipped, "Global view router lagged; reconnecting for snapshot");
-                            break;
+                            tracing::warn!(?router, skipped, "Global view router lagged; sending fresh snapshot");
+                            let (fresh_updates, snapshot) = self.snapshot_and_subscribe();
+                            if sink.send_timeout(snapshot, SEND_TIMEOUT).await.is_err() {
+                                break;
+                            }
+                            updates = fresh_updates;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
