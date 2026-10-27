@@ -16,9 +16,11 @@ from blake3 import blake3
 from gpu_memory_service.snapshot.model import AllocationEntry
 
 # Every GPU rank restores independently. Keep the aggregate native hashing
-# concurrency bounded per rank, while still letting small restores use BLAKE3's
-# internal parallelism. This avoids the `AUTO` setting multiplying all host
-# cores by every rank and every in-flight shard.
+# concurrency to about 16 threads per rank, while still letting small restores
+# use BLAKE3's internal parallelism. Each in-flight shard always gets at least
+# one thread, so a rank with more than 16 workers hashes on one thread per
+# worker. This avoids the `AUTO` setting multiplying all host cores by every
+# rank and every in-flight shard.
 _BLAKE3_THREADS_PER_RANK = 16
 _BLAKE3_MAX_THREADS_PER_SHARD = 4
 

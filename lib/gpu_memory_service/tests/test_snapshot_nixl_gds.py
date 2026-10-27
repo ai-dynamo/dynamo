@@ -18,6 +18,7 @@ from gpu_memory_service.snapshot.backends.nixl_gds import _NixlGDSTransferSessio
 from gpu_memory_service.snapshot.transfer import (
     FileIntegrity,
     FileTransferSource,
+    GMSSnapshotConfig,
     GMSTransferTarget,
     blake3_threads_per_shard,
     verify_file_source_digests,
@@ -116,6 +117,36 @@ def test_gds_rejects_same_length_mutation_before_direct_transfer(
         "run_bounded_nixl_transfers",
         unexpected_transfer,
     )
+
+    with pytest.raises(RuntimeError, match="BLAKE3 mismatch"):
+        session.restore(targets)
+
+
+def test_gds_backend_hands_integrity_records_to_its_restore(tmp_path, monkeypatch):
+    expected_data = b"checkpoint-bytes"
+    shard_path = tmp_path / "shard.bin"
+    shard_path.write_bytes(b"X" + expected_data[1:])
+    monkeypatch.setattr(nixl_gds, "load_nixl_api", lambda: object())
+    monkeypatch.setattr(
+        nixl_gds, "create_nixl_agent", lambda *_args, **_kwargs: object()
+    )
+
+    def unexpected_transfer(**_kwargs):
+        pytest.fail("direct transfer must not start after digest mismatch")
+
+    monkeypatch.setattr(nixl_gds, "run_bounded_nixl_transfers", unexpected_transfer)
+    backend = nixl_gds.NixlGDSTransferBackend(
+        config=GMSSnapshotConfig(device=0, max_workers=1)
+    )
+    session = backend.start_restore(
+        [FileTransferSource("weight", str(shard_path), 0, len(expected_data))],
+        {
+            str(shard_path): FileIntegrity(
+                len(expected_data), blake3(expected_data).hexdigest()
+            )
+        },
+    )
+    targets = {"weight": GMSTransferTarget("weight", 100, 0, len(expected_data))}
 
     with pytest.raises(RuntimeError, match="BLAKE3 mismatch"):
         session.restore(targets)

@@ -3,6 +3,7 @@
 
 """Unit tests for NIXL/POSIX staging restore planning."""
 
+import os
 import threading
 
 import pytest
@@ -16,6 +17,7 @@ if not HAS_GMS:
 
 from _fake_vmm import FakeVMM
 from blake3 import blake3
+from gpu_memory_service.snapshot.backends.nixl import NixlTransferBackend
 from gpu_memory_service.snapshot.backends.nixl_common import (
     NixlFileGroup,
     NixlWorkGroup,
@@ -28,6 +30,7 @@ from gpu_memory_service.snapshot.backends.nixl_staging import (
 from gpu_memory_service.snapshot.transfer import (
     FileIntegrity,
     FileTransferSource,
+    GMSSnapshotConfig,
     GMSTransferTarget,
 )
 
@@ -230,3 +233,72 @@ def test_staging_restore_rejects_same_length_mutation(monkeypatch):
             b"xbcdefgh",
             blake3(b"abcdefgh").hexdigest(),
         )
+
+
+def _restore_with_staging_backend(monkeypatch, tmp_path, saved, on_disk):
+    from gpu_memory_service.snapshot.backends import nixl_staging
+
+    class FakeApi:
+        @staticmethod
+        def agent_config_type(*, backends):
+            return {"backends": backends}
+
+        @staticmethod
+        def agent_type(_agent_name, _config):
+            return FakeAgent()
+
+    class FakeAgent:
+        def create_backend(self, _backend_name, backend_params=None):
+            self.backend_params = backend_params
+
+    class Slot:
+        def __init__(self):
+            self._buffer = bytearray(len(saved))
+            self.view = memoryview(self._buffer)
+            self.ptr = 123
+
+        def wait(self):
+            pass
+
+        def copy_to_device_async(self, _dst_ptr, _size):
+            pass
+
+    def fake_read(_agent, _name, fd, _path, file_offset, _ptr, size, _backend):
+        slot._buffer[:size] = os.pread(fd, size, file_offset)
+
+    shard_path = tmp_path / "shard.bin"
+    shard_path.write_bytes(on_disk)
+    slot = Slot()
+    fake_vmm = FakeVMM()
+    monkeypatch.setattr(nixl_staging, "get_vmm", lambda: fake_vmm)
+    monkeypatch.setattr(nixl_staging, "load_nixl_api", lambda: FakeApi())
+    monkeypatch.setattr(
+        nixl_staging, "make_pinned_copy_slots", lambda _vmm, _count: [slot]
+    )
+    monkeypatch.setattr(nixl_staging, "close_pinned_copy_slots", lambda *_args: None)
+    monkeypatch.setattr(
+        nixl_staging,
+        "open_direct_read_fd",
+        lambda path, **_kwargs: os.open(path, os.O_RDONLY),
+    )
+    monkeypatch.setattr(nixl_staging, "_read_file_to_dram", fake_read)
+
+    backend = NixlTransferBackend(config=GMSSnapshotConfig(device=0, max_workers=1))
+    session = backend.start_restore(
+        [FileTransferSource("weight", str(shard_path), 0, len(saved))],
+        {str(shard_path): FileIntegrity(len(saved), blake3(saved).hexdigest())},
+    )
+    try:
+        session.restore({"weight": GMSTransferTarget("weight", 100, 0, len(saved))})
+    finally:
+        session.close()
+        backend.close()
+
+
+def test_staging_backend_restores_an_unchanged_shard(monkeypatch, tmp_path):
+    _restore_with_staging_backend(monkeypatch, tmp_path, b"abcdefgh", b"abcdefgh")
+
+
+def test_staging_backend_rejects_same_length_mutation(monkeypatch, tmp_path):
+    with pytest.raises(RuntimeError, match="BLAKE3 mismatch"):
+        _restore_with_staging_backend(monkeypatch, tmp_path, b"abcdefgh", b"xbcdefgh")

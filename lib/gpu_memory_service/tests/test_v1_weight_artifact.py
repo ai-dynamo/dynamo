@@ -592,6 +592,25 @@ def test_weight_artifact_rejects_unreferenced_shard_integrity_record(tmp_path) -
         weight_artifact._load_manifest(str(artifact), 64)
 
 
+def test_weight_artifact_rejects_shard_without_integrity_record(tmp_path) -> None:
+    artifact = tmp_path / "artifact"
+    _write_test_artifact(artifact)
+    manifest = msgspec.json.decode((artifact / "manifest.json").read_bytes())
+    manifest["allocations"].append(
+        {
+            "allocation_id": "unrecorded",
+            "aligned_size": 64,
+            "shard": "unrecorded.bin",
+            "offset": 0,
+        }
+    )
+    (artifact / "manifest.json").write_bytes(msgspec.json.encode(manifest))
+    (artifact / "unrecorded.bin").write_bytes(bytes(64))
+
+    with pytest.raises(RuntimeError, match="records do not match allocation shards"):
+        weight_artifact._load_manifest(str(artifact), 64)
+
+
 def test_weight_artifact_rejects_declared_shard_length_mismatch(tmp_path) -> None:
     artifact = tmp_path / "artifact"
     _write_test_artifact(artifact, declared_byte_count=128)

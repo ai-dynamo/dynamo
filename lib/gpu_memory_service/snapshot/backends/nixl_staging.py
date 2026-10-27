@@ -105,7 +105,7 @@ class NixlPosixStagingTransferBackend:
             "%s configured for device %d with %d workers using NIXL POSIX "
             "staging backend_params=%s; NIXL import is running in the "
             "background and agent setup starts in start_restore() so it can "
-            "overlap restore target allocation",
+            "overlap manifest planning, RW connect, and restore target allocation",
             backend_name,
             self._device,
             self._max_workers,
