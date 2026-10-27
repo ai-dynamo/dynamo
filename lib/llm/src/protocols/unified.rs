@@ -606,6 +606,7 @@ mod tests {
             thinking: Some(ThinkingConfig {
                 thinking_type: "enabled".to_string(),
                 budget_tokens: Some(4096),
+                display: None,
             }),
             service_tier: None,
             container: None,

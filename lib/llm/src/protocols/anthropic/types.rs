@@ -296,16 +296,27 @@ fn convert_user_blocks(
 fn convert_image(
     source: &AnthropicImageSource,
 ) -> Result<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
-    if source.source_type != "base64" {
-        anyhow::bail!(
-            "unsupported image source type {:?}; only base64 is supported",
-            source.source_type
-        );
-    }
-
-    let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
-    let url =
-        url::Url::parse(&data_uri).map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
+    let url = match source {
+        AnthropicImageSource::Base64 { media_type, data } => {
+            url::Url::parse(&format!("data:{media_type};base64,{data}"))
+                .map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?
+        }
+        AnthropicImageSource::Url { url } => {
+            let parsed = url::Url::parse(url)
+                .map_err(|_| anyhow::anyhow!("image URL must be an absolute HTTP(S) URL"))?;
+            anyhow::ensure!(
+                matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+                "image URL must be an absolute HTTP(S) URL"
+            );
+            anyhow::ensure!(
+                parsed.username().is_empty() && parsed.password().is_none(),
+                "image URL must not contain credentials"
+            );
+            // Preserve the URL for the same policy-aware loader used by OpenAI
+            // image_url parts. Conversion must not fetch or bypass its policy.
+            parsed
+        }
+    };
     let image_url = ImageUrl::from(url.to_string());
     let image = ChatCompletionRequestMessageContentPartImageArgs::default()
         .image_url(image_url)
@@ -2560,8 +2571,7 @@ mod tests {
                             cache_control: None,
                         },
                         AnthropicContentBlock::Image {
-                            source: AnthropicImageSource {
-                                source_type: "base64".into(),
+                            source: AnthropicImageSource::Base64 {
                                 media_type: "image/png".into(),
                                 data: "iVBORw0KGgo=".into(), // tiny valid-ish base64
                             },
@@ -2705,8 +2715,7 @@ mod tests {
                     content: AnthropicMessageContent::Blocks {
                         content: vec![
                             AnthropicContentBlock::Image {
-                                source: AnthropicImageSource {
-                                    source_type: "base64".into(),
+                                source: AnthropicImageSource::Base64 {
                                     media_type: "image/jpeg".into(),
                                     data: "/9j/4AAQ".into(),
                                 },
