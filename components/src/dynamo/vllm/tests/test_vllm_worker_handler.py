@@ -292,7 +292,9 @@ async def test_prepare_lora_admission_skips_guard_when_runtime_loading_is_disabl
 
     assert lora_request is None
     assert runtime_lora is False
-    coordinator.ensure_from_request.assert_awaited_once_with(request, "request-id")
+    coordinator.ensure_from_request.assert_awaited_once_with(
+        request, "request-id", admission_id=None
+    )
     coordinator.pending_admission_guard.assert_not_called()
     async with admission_stack:
         pass

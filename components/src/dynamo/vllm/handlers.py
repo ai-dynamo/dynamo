@@ -13,6 +13,7 @@ import sqlite3
 import struct
 import tempfile
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
@@ -1257,6 +1258,14 @@ def _as_exact_int(value: object) -> Optional[int]:
         except ValueError:
             return None
     return None
+
+
+class _LoRAAdmissionStack(AsyncExitStack):
+    """Own one invocation's pending admission independently of client IDs."""
+
+    def __init__(self):
+        super().__init__()
+        self.admission_id = uuid.uuid4().hex
 
 
 class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
@@ -2616,11 +2625,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self,
         request: Mapping[str, Any],
         request_id: str,
+        *,
+        admission_id: str | None = None,
     ) -> tuple[LoRARequest | None, bool]:
         """Resolve explicit adapters or load a request-time adapter fail-closed."""
         coordinator = getattr(self, "_runtime_lora_coordinator", None)
         if coordinator is not None:
-            runtime_request = await coordinator.ensure_from_request(request, request_id)
+            runtime_request = await coordinator.ensure_from_request(
+                request, request_id, admission_id=admission_id
+            )
             if runtime_request is not None:
                 return runtime_request, True
 
@@ -2637,9 +2650,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self,
         request: Mapping[str, Any],
         request_id: str,
-    ) -> tuple[AsyncExitStack, LoRARequest | None, bool]:
+    ) -> tuple[_LoRAAdmissionStack, LoRARequest | None, bool]:
         """Resolve a LoRA while already owning pending-admission cleanup."""
-        admission_stack = AsyncExitStack()
+        admission_stack = _LoRAAdmissionStack()
         coordinator = getattr(self, "_runtime_lora_coordinator", None)
         if coordinator is None or not coordinator.enabled:
             lora_request, runtime_lora = await self._resolve_or_ensure_lora_request(
@@ -2648,11 +2661,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return admission_stack, lora_request, runtime_lora
 
         await admission_stack.enter_async_context(
-            coordinator.pending_admission_guard(request_id)
+            coordinator.pending_admission_guard(admission_stack.admission_id)
         )
         try:
             lora_request, runtime_lora = await self._resolve_or_ensure_lora_request(
-                request, request_id
+                request, request_id, admission_id=admission_stack.admission_id
             )
         except BaseException:
             await admission_stack.aclose()
@@ -2920,6 +2933,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
         *,
         request_id: str | None = None,
+        admission_id: str | None = None,
         runtime_lora: bool = False,
     ) -> AsyncIterator[Any]:
         """Yield results after atomically admitting a LoRA request.
@@ -2943,11 +2957,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "generation is paused"
                 )
             if runtime_lora:
-                if request_id is None:
+                owner_id = admission_id if admission_id is not None else request_id
+                if owner_id is None:
                     raise RuntimeError("runtime LoRA admission requires a request ID")
                 admitted_lora_request = (
                     await self._runtime_lora_coordinator.activate_pending_admission(
-                        request_id, lora_request
+                        owner_id, lora_request
                     )
                 )
             else:
@@ -3562,6 +3577,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         kv_hints=None,
         artifact_session=None,
         emit_routed_experts=True,
+        admission_id=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3589,6 +3605,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     ),
                 ),
                 request_id=request_id,
+                admission_id=admission_id,
                 runtime_lora=runtime_lora,
             )
 
@@ -4339,6 +4356,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             data_parallel_rank=dp_rank,
                             lora_request=lora_request,
                             runtime_lora=runtime_lora,
+                            admission_id=admission_stack.admission_id,
                             trace_headers=trace_headers,
                             priority=priority,
                             reasoning_ended=reasoning_ended,
@@ -4719,6 +4737,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         ),
                     ),
                     request_id=request_id,
+                    admission_id=admission_stack.admission_id,
                     runtime_lora=runtime_lora,
                 )
             except EngineDeadError as e:

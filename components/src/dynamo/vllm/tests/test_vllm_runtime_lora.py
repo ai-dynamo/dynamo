@@ -575,8 +575,8 @@ async def test_token_path_cancellation_after_resolution_releases_pending_admissi
     )
     ensure_from_request = coordinator.ensure_from_request
 
-    async def cancelling_ensure(request, request_id):
-        result = await ensure_from_request(request, request_id)
+    async def cancelling_ensure(request, request_id, **kwargs):
+        result = await ensure_from_request(request, request_id, **kwargs)
         task = asyncio.current_task()
         assert task is not None
         task.cancel()
