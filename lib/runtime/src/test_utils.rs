@@ -5,7 +5,10 @@ use std::ops::{Deref, DerefMut};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
-/// Prevent an uncaptured thread from caching a shared callsite's interest for a sole capture.
+/// Keep the callsite-interest cache valid across thread-local capture subscribers.
+/// tracing-core's single-dispatcher fast path consults the logging thread's default.
+/// A thread without capture can therefore cache Interest::never for a shared callsite;
+/// retaining a second dispatcher disables that fast path during capture.
 pub(crate) fn tracing_interest_guard() -> tracing::Dispatch {
     tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default())
 }

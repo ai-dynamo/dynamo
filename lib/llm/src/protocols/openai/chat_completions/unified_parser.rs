@@ -1581,9 +1581,37 @@ impl ChoiceState {
     ) -> anyhow::Result<Self> {
         let prefill = prefill.into();
         let mut parser = create_unified_parser_for_family(family, tools)?;
-        // Harmony restores recipient, channel, and body state from the consumed prompt.
-        // Other families replay only an unfinished structural opener.
-        //
+        // The built-in Harmony initializer resets its call counter. Replay consumed
+        // tokens afterward so the open call and later calls share that counter.
+        // Guided JSON inherits only the resolved channel, since its request constraint
+        // owns the tool envelope. Vendor overrides retain their initialization contract.
+        let harmony = family == "gpt_oss";
+        let native_harmony = harmony && matches!(&tool_output_mode, UnifiedToolOutputMode::Native);
+        let vendor_harmony = harmony
+            && dynamo_parsers_v2::vendor_unified_families()
+                .iter()
+                .any(|registered| registered == family);
+        let replay_harmony =
+            native_harmony && !vendor_harmony && parser.input_capabilities().token_ids;
+        let mut harmony_prefix_tokens = if native_harmony || vendor_harmony {
+            prefill
+                .prefix
+                .as_deref()
+                .or_else(|| {
+                    (native_harmony && prefill.starting_state == UnifiedParserStartingState::None)
+                        .then_some("<|start|>assistant")
+                })
+                .map(dynamo_parsers_v2::unified::harmony::encode_harmony)
+                .transpose()?
+        } else {
+            None
+        };
+        let prompt_token_ids = if replay_harmony {
+            Vec::new()
+        } else {
+            harmony_prefix_tokens.take().unwrap_or_default()
+        };
+
         // Streaming guided calls commit per call once the name and argument object opener
         // are unambiguous. A committed fragment cannot later be rejected or recovered as
         // text, so this path opts into that contract explicitly — unless the request
@@ -1593,20 +1621,10 @@ impl ChoiceState {
         // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
         // guided state at all.
         parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids: if family == "gpt_oss" {
-                let prompt = prefill.prefix.as_deref().or_else(|| {
-                    (matches!(&tool_output_mode, UnifiedToolOutputMode::Native)
-                        && prefill.starting_state == UnifiedParserStartingState::None)
-                        .then_some("<|start|>assistant")
-                });
-                prompt
-                    .map(dynamo_parsers_v2::unified::harmony::encode_harmony)
-                    .transpose()?
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            },
-            starting_state: if prefill.prefix.is_some() {
+            prompt_token_ids,
+            starting_state: if prefill.prefix.is_some()
+                && (!harmony || native_harmony || vendor_harmony)
+            {
                 UnifiedParserStartingState::None
             } else {
                 prefill.starting_state
@@ -1614,6 +1632,11 @@ impl ChoiceState {
             tool_output_mode: tool_output_mode.clone(),
             invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
         })?;
+        if let Some(tokens) = harmony_prefix_tokens {
+            // Consumed prompt deltas stay private; token replay preserves literal
+            // delimiter fragments without joining them to generated text.
+            parser.parse_token_ids_into(&tokens, &mut UnifiedParserOutput::default())?;
+        }
         if family != "gpt_oss"
             && let Some(prefix) = prefill.prefix
         {
@@ -4133,6 +4156,184 @@ pub(crate) mod tests {
                 assert_eq!(
                     collect_choices(&output).last().unwrap().finish_reason,
                     terminal.then_some(FinishReason::Stop)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_vendor_keeps_prompt_initialization() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_vendor_keeps_prompt_initialization"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        struct VendorHarmony {
+            initialized: bool,
+            token_input: bool,
+        }
+        impl UnifiedParser for VendorHarmony {
+            fn input_capabilities(&self) -> dynamo_parsers_v2::UnifiedParserInputCapabilities {
+                dynamo_parsers_v2::UnifiedParserInputCapabilities {
+                    text: true,
+                    token_ids: self.token_input,
+                }
+            }
+            fn initialize_request(&mut self, init: UnifiedParserInit) -> anyhow::Result<()> {
+                assert_eq!(
+                    dynamo_parsers_v2::unified::harmony::decode_harmony(&init.prompt_token_ids)?,
+                    "<|start|>assistant<|channel|>final<|message|>"
+                );
+                assert_eq!(init.starting_state, UnifiedParserStartingState::None);
+                self.initialized = true;
+                Ok(())
+            }
+            fn parse_into(
+                &mut self,
+                delta: &str,
+                output: &mut UnifiedParserOutput,
+            ) -> anyhow::Result<()> {
+                assert!(self.initialized);
+                output.push_text(delta);
+                Ok(())
+            }
+            fn parse_token_ids_into(
+                &mut self,
+                ids: &[u32],
+                output: &mut UnifiedParserOutput,
+            ) -> anyhow::Result<()> {
+                anyhow::ensure!(
+                    self.token_input,
+                    "vendor does not support generated token ingestion"
+                );
+                self.parse_into(
+                    &dynamo_parsers_v2::unified::harmony::decode_harmony(ids)?,
+                    output,
+                )
+            }
+            fn finish(&mut self) -> anyhow::Result<UnifiedParserOutput> {
+                Ok(UnifiedParserOutput::default())
+            }
+        }
+        fn make_parser(token_input: bool) -> anyhow::Result<Box<dyn UnifiedParser>> {
+            Ok(Box::new(VendorHarmony {
+                initialized: false,
+                token_input,
+            }))
+        }
+        fn text_factory(_: &[Tool]) -> anyhow::Result<Box<dyn UnifiedParser>> {
+            make_parser(false)
+        }
+        fn token_factory(_: &[Tool]) -> anyhow::Result<Box<dyn UnifiedParser>> {
+            make_parser(true)
+        }
+        let factories: [dynamo_parsers_v2::unified::UnifiedParserFactory; 2] =
+            [text_factory, token_factory];
+        for factory in factories {
+            let _ = dynamo_parsers_v2::register_unified_parser("gpt_oss", factory);
+            for mode in [
+                UnifiedToolOutputMode::Native,
+                UnifiedToolOutputMode::GuidedJson {
+                    named_tool: Some("lookup".into()),
+                },
+            ] {
+                let mut state = ChoiceState::new(
+                    "gpt_oss",
+                    &[],
+                    StreamPrefill {
+                        starting_state: UnifiedParserStartingState::Reasoning,
+                        prefix: Some(std::sync::Arc::from(
+                            "<|start|>assistant<|channel|>final<|message|>",
+                        )),
+                    },
+                    mode,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(
+                    state.push("answer"),
+                    vec![UnifiedParserEvent::Text("answer".into())]
+                );
+                assert!(state.finish().is_empty());
+            }
+            assert!(dynamo_parsers_v2::unregister_unified_parser("gpt_oss").is_some());
+        }
+    }
+
+    // Adapter token replay and public tool indices are outside the parser-only corpus.
+    #[test]
+    fn gpt_oss_consumed_tool_body_keeps_later_call_indices_distinct() {
+        let tools = to_v2_tools(Some(&weather_tools()));
+        for (body, first_tail, first_arguments) in [
+            ("", "{\"city\":\"first\"}<|call|>", "{\"city\":\"first\"}"),
+            ("{\"city\":\"fi", "rst\"}<|call|>", "rst\"}"),
+            ("{\"city\":\"first\"}", "<|call|>", ""),
+        ] {
+            let prefix = format!(
+                "<|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{body}"
+            );
+            let input = format!(
+                "{first_tail}<|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{{\"city\":\"second\"}}<|call|><|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{{\"city\":\"third\"}}<|call|>"
+            );
+            for split in 0..=input.len() {
+                let mut state = ChoiceState::new(
+                    "gpt_oss",
+                    &tools,
+                    StreamPrefill {
+                        starting_state: UnifiedParserStartingState::None,
+                        prefix: Some(std::sync::Arc::from(prefix.as_str())),
+                    },
+                    UnifiedToolOutputMode::Native,
+                    true,
+                )
+                .unwrap();
+                let events = state.push(&input[..split]);
+                let mut choices = state.choices_for(&empty_choice(0), events, true, None);
+                let mut events = state.push(&input[split..]);
+                events.extend(state.finish());
+                choices.extend(state.choices_for(
+                    &empty_choice(0),
+                    events,
+                    true,
+                    Some(FinishReason::Stop),
+                ));
+                let mut calls = std::collections::BTreeMap::<u32, (String, String, usize)>::new();
+                for call in choices
+                    .iter()
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                {
+                    let entry = calls.entry(call.index).or_default();
+                    entry.2 += usize::from(call.id.is_some());
+                    if let Some(function) = &call.function {
+                        if let Some(name) = &function.name {
+                            entry.0.push_str(name);
+                        }
+                        if let Some(arguments) = &function.arguments {
+                            entry.1.push_str(arguments);
+                        }
+                    }
+                }
+                assert_eq!(
+                    calls.keys().copied().collect::<Vec<_>>(),
+                    [0, 1, 2],
+                    "body={body} split={split}"
+                );
+                assert_eq!(calls[&0].1, first_arguments);
+                for (index, city) in [(1, "second"), (2, "third")] {
+                    assert_eq!(calls[&index].0, "get_weather");
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&calls[&index].1).unwrap(),
+                        serde_json::json!({"city":city})
+                    );
+                }
+                assert!(calls.values().all(|call| call.2 == 1));
+                assert_eq!(
+                    choices.last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
                 );
             }
         }
