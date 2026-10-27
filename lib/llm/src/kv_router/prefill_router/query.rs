@@ -22,6 +22,7 @@ pub struct PrefillReservation {
     worker: WorkerWithDpRank,
     dp_rank: Option<u32>,
     booking: Option<BookingHandle>,
+    kv_transfer_constraints: Option<RoutingConstraints>,
 }
 
 impl PrefillReservation {
@@ -31,6 +32,12 @@ impl PrefillReservation {
 
     pub fn dp_rank(&self) -> Option<u32> {
         self.dp_rank
+    }
+
+    /// Topology constraints the decode pick must add so the KV transfer stays
+    /// in the reserved prefill worker's domain, as the frontend's prefill hop does.
+    pub fn kv_transfer_constraints(&self) -> Option<&RoutingConstraints> {
+        self.kv_transfer_constraints.as_ref()
     }
 
     /// Release this booking and wait for the scheduler to acknowledge it.
@@ -84,6 +91,8 @@ impl PrefillRouter {
                 worker: WorkerWithDpRank::new(worker_id, 0),
                 dp_rank: None,
                 booking: None,
+                kv_transfer_constraints: self
+                    .preflight_kv_transfer_constraints(Some(&binding.endpoint_id), worker_id)?,
             });
         };
         let admitted = chooser
@@ -112,10 +121,16 @@ impl PrefillRouter {
                 let Some(booking) = booking else {
                     anyhow::bail!("prefill reservation admission did not return a booking");
                 };
+                // A failed lookup drops the booking, which enqueues its cleanup.
+                let kv_transfer_constraints = self.preflight_kv_transfer_constraints(
+                    Some(&binding.endpoint_id),
+                    worker.worker_id,
+                )?;
                 Ok(PrefillReservation {
                     worker,
                     dp_rank: Some(worker.dp_rank),
                     booking: Some(booking),
+                    kv_transfer_constraints,
                 })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
@@ -139,9 +154,9 @@ mod tests {
         time::Duration,
     };
 
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use crate::local_model::runtime_config::{ModelRuntimeConfig, topology_taint};
     use async_trait::async_trait;
-    use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_kv_router::{config::KvRouterConfig, protocols::KvTransferEnforcement};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::Instance,
@@ -587,6 +602,83 @@ mod tests {
         })
         .await
         .expect("dropped reservation must release its admitted booking");
+    }
+
+    fn zone_runtime_config(
+        zone: &str,
+        enforcement: KvTransferEnforcement,
+        preferred_weight: Option<f32>,
+    ) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig {
+            kv_transfer_domain: Some("zone".to_string()),
+            kv_transfer_enforcement: Some(enforcement),
+            kv_transfer_preferred_weight: preferred_weight,
+            ..Default::default()
+        };
+        config
+            .topology_domains
+            .insert("zone".to_string(), zone.to_string());
+        config
+    }
+
+    #[tokio::test]
+    async fn prefill_reservation_carries_reserved_worker_kv_transfer_constraints() {
+        let (router, _chooser) = tracked_prefill_router().await;
+        let endpoint_id = router.binding.load_full().unwrap().endpoint_id.clone();
+        let zone_of = |worker_id: WorkerId| if worker_id == 7 { "zone-a" } else { "zone-b" };
+
+        for (reservation_id, enforcement, preferred_weight) in [
+            (
+                "epp-prefill/required",
+                KvTransferEnforcement::Required,
+                None,
+            ),
+            (
+                "epp-prefill/preferred",
+                KvTransferEnforcement::Preferred,
+                Some(0.85),
+            ),
+        ] {
+            router.model_manager.insert_runtime_configs(
+                &endpoint_id,
+                HashMap::from([7, 8].map(|worker_id| {
+                    let config =
+                        zone_runtime_config(zone_of(worker_id), enforcement, preferred_weight);
+                    (worker_id, config)
+                })),
+            );
+            let reservation = router
+                .reserve_prefill_worker(
+                    reservation_id,
+                    &[1u32; 64],
+                    None,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                )
+                .await
+                .unwrap();
+
+            let taint = topology_taint("zone", zone_of(reservation.worker_id()));
+            let constraints = reservation
+                .kv_transfer_constraints()
+                .expect("topology routing is configured");
+            match enforcement {
+                KvTransferEnforcement::Required => {
+                    assert_eq!(constraints.required_taints, HashSet::from([taint]));
+                    assert!(constraints.preferred_taints.is_empty());
+                }
+                KvTransferEnforcement::Preferred => {
+                    assert!(constraints.required_taints.is_empty());
+                    assert_eq!(constraints.preferred_taints, HashMap::from([(taint, 0.85)]));
+                }
+            }
+            reservation.release().await.unwrap();
+        }
     }
 
     #[tokio::test]

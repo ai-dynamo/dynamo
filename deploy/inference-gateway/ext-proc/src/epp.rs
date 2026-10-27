@@ -700,6 +700,27 @@ fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
         .unwrap_or_default()
 }
 
+/// Add the prefill worker's KV-transfer topology constraints to the decode
+/// pick, as the frontend's prefill router does, so a required domain is never
+/// left and a preferred one wins when a decode worker is available there.
+fn decode_routing_constraints(
+    mut constraints: RoutingConstraints,
+    kv_transfer: Option<&RoutingConstraints>,
+) -> RoutingConstraints {
+    if let Some(kv_transfer) = kv_transfer {
+        constraints
+            .required_taints
+            .extend(kv_transfer.required_taints.iter().cloned());
+        constraints.preferred_taints.extend(
+            kv_transfer
+                .preferred_taints
+                .iter()
+                .map(|(taint, weight)| (taint.clone(), *weight)),
+        );
+    }
+    constraints
+}
+
 /// Token IDs for a pre-tokenized completion prompt.
 ///
 /// Integer prompts route directly on
@@ -1501,7 +1522,13 @@ impl EndpointPicker for Router {
                 strict_priority,
                 policy_class,
                 allowed_worker_ids,
-                routing_constraints,
+                decode_routing_constraints(
+                    routing_constraints,
+                    prefill_booking
+                        .as_ref()
+                        .ok()
+                        .and_then(PrefillReservation::kv_transfer_constraints),
+                ),
             )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
@@ -1895,6 +1922,42 @@ mod tests {
         .unwrap();
         let constraints = extract_routing_constraints(request.nvext.as_ref());
         assert!(constraints.required_taints.contains("zone=us-east-1a"));
+    }
+
+    /// The decode pick keeps the client's constraints and adds the prefill
+    /// worker's KV-transfer domain, required or preferred. Without it, a
+    /// required-domain deployment can pair prefill and decode across domains.
+    #[test]
+    fn decode_routing_constraints_add_prefill_kv_transfer_domain() {
+        let client = RoutingConstraints {
+            required_taints: HashSet::from(["gpu=h100".to_string()]),
+            preferred_taints: HashMap::from([("pool=fast".to_string(), 0.5)]),
+        };
+        let zone = "dynamo.topology/zone=us-east-1a".to_string();
+
+        let required = RoutingConstraints {
+            required_taints: HashSet::from([zone.clone()]),
+            ..Default::default()
+        };
+        let decode = decode_routing_constraints(client.clone(), Some(&required));
+        assert_eq!(
+            decode.required_taints,
+            HashSet::from(["gpu=h100".to_string(), zone.clone()])
+        );
+        assert_eq!(decode.preferred_taints, client.preferred_taints);
+
+        let preferred = RoutingConstraints {
+            preferred_taints: HashMap::from([(zone.clone(), 0.85)]),
+            ..Default::default()
+        };
+        let decode = decode_routing_constraints(client.clone(), Some(&preferred));
+        assert_eq!(decode.required_taints, client.required_taints);
+        assert_eq!(
+            decode.preferred_taints,
+            HashMap::from([("pool=fast".to_string(), 0.5), (zone, 0.85)])
+        );
+
+        assert_eq!(decode_routing_constraints(client.clone(), None), client);
     }
 
     /// Regression test for a text `/v1/completions` prompt: the tokens
