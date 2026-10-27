@@ -401,6 +401,7 @@ async def test_cancelled_waiter_does_not_cancel_shared_load(monkeypatch, tmp_pat
     handler.engine_client.add_lora.assert_awaited_once()
     assert set(handler._lora_state.runtime_pending_admissions) == {"request-2"}
     assert handler._lora_state.runtime_pending_leases == {result.lora_name: 1}
+    assert not coordinator._initial_waiters
     await coordinator.release_pending_admission("request-2")
     assert not handler._lora_state.runtime_pending_admissions
     assert not handler._lora_state.runtime_pending_leases

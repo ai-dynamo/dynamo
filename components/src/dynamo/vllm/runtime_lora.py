@@ -60,6 +60,7 @@ class RuntimeLoRACoordinator:
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
         self._reconciliation_lock = asyncio.Lock()
+        self._initial_waiters: dict[str, int] = {}
         self._settings = (
             (
                 getattr(handler.config, "runtime_lora_settings", None)
@@ -116,30 +117,82 @@ class RuntimeLoRACoordinator:
             raise _runtime_error(503, "lora_resolver_unavailable")
 
         state = self._handler._lora_state
-        task = state.runtime_load_tasks.get(metadata.adapter_key)
-        if task is None:
+        async with self._handler._lora_capacity_guard:
+            if self._closed:
+                raise _runtime_error(503, "lora_resolver_unavailable")
+            resident_record = state.runtime_loras.get(metadata.adapter_key)
+            if resident_record is not None:
+                resident = self._validate_resident(metadata, resident_record)
+                self._record_pending_admission_locked(metadata.adapter_key, request_id)
+                return resident
             if (
-                len(state.runtime_load_tasks)
-                >= self._active_settings.max_pending_runtime_keys
+                sum(self._initial_waiters.values())
+                + len(state.runtime_pending_admissions)
+                >= self._active_settings.max_pending_admissions
             ):
                 raise _runtime_error(429, "lora_capacity_exceeded")
-            task = asyncio.create_task(
-                self._resolve_validate_and_load(metadata, request_id)
-            )
-            state.runtime_load_tasks[metadata.adapter_key] = task
-            state.runtime_load_digests[metadata.adapter_key] = metadata.identity_digest
-            task.add_done_callback(partial(self._cleanup_task, metadata.adapter_key))
-        elif (
-            state.runtime_load_digests.get(metadata.adapter_key)
-            != metadata.identity_digest
-        ):
-            raise _runtime_error(500, "runtime_lora_identity_collision")
+            task = state.runtime_load_tasks.get(metadata.adapter_key)
+            if task is None:
+                if (
+                    len(state.runtime_load_tasks)
+                    >= self._active_settings.max_pending_runtime_keys
+                ):
+                    raise _runtime_error(429, "lora_capacity_exceeded")
+                if (
+                    self._at_capacity()
+                    and not state.uncertain_engine_lora_ids
+                    and not any(self._can_evict(key) for key in state.runtime_loras)
+                ):
+                    raise _runtime_error(429, "lora_capacity_exceeded")
+                task = asyncio.create_task(
+                    self._resolve_validate_and_load(metadata, request_id)
+                )
+                state.runtime_load_tasks[metadata.adapter_key] = task
+                state.runtime_load_digests[
+                    metadata.adapter_key
+                ] = metadata.identity_digest
+                task.add_done_callback(
+                    partial(self._cleanup_task, metadata.adapter_key)
+                )
+            elif (
+                state.runtime_load_digests.get(metadata.adapter_key)
+                != metadata.identity_digest
+            ):
+                raise _runtime_error(500, "runtime_lora_identity_collision")
 
-        await asyncio.shield(task)
-        resident = await self._lease_resident(metadata, request_id)
-        if resident is None:
-            raise _runtime_error(429, "lora_capacity_exceeded")
-        return resident
+            key = metadata.adapter_key
+            self._initial_waiters[key] = self._initial_waiters.get(key, 0) + 1
+        try:
+            await asyncio.shield(task)
+            resident = await self._lease_resident(metadata, request_id)
+            if resident is None:
+                raise _runtime_error(429, "lora_capacity_exceeded")
+            return resident
+        finally:
+            remaining = self._initial_waiters[key] - 1
+            if remaining:
+                self._initial_waiters[key] = remaining
+            else:
+                self._initial_waiters.pop(key)
+
+    def _at_capacity(self) -> bool:
+        state = self._handler._lora_state
+        return (
+            len(state.runtime_loras)
+            + len(state.runtime_reserved_ids)
+            + len(state.uncertain_engine_lora_ids)
+            >= self._active_settings.max_resident_runtime_loras
+            or len(state.loaded_loras) + len(state.uncertain_engine_lora_ids)
+            >= self._active_settings.max_registered_loras
+        )
+
+    def _can_evict(self, adapter_key: str) -> bool:
+        state = self._handler._lora_state
+        return (
+            self._initial_waiters.get(adapter_key, 0) == 0
+            and state.runtime_pending_leases.get(adapter_key, 0) == 0
+            and state.runtime_active_leases.get(adapter_key, 0) == 0
+        )
 
     def _cleanup_task(
         self,
@@ -457,9 +510,7 @@ class RuntimeLoRACoordinator:
             (
                 record
                 for key, record in state.runtime_loras.items()
-                if key != exclude_key
-                and state.runtime_pending_leases.get(key, 0) == 0
-                and state.runtime_active_leases.get(key, 0) == 0
+                if key != exclude_key and self._can_evict(key)
             ),
             None,
         )
@@ -693,15 +744,7 @@ class RuntimeLoRACoordinator:
             try:
                 async with self._handler._lora_capacity_guard:
                     capacity_reserved = True
-                    while (
-                        len(state.runtime_loras)
-                        + len(state.runtime_reserved_ids)
-                        + len(state.uncertain_engine_lora_ids)
-                        >= self._active_settings.max_resident_runtime_loras
-                        or len(state.loaded_loras)
-                        + len(state.uncertain_engine_lora_ids)
-                        >= self._active_settings.max_registered_loras
-                    ):
+                    while self._at_capacity():
                         evicted.append(
                             self._reserve_runtime_lora_eviction(metadata.adapter_key)
                         )

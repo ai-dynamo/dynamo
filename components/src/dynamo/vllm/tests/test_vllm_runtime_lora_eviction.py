@@ -137,7 +137,7 @@ async def test_runtime_capacity_evicts_only_runtime_adapter(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_eviction_after_load_before_lease_returns_capacity_error(
+async def test_initial_waiter_prevents_eviction_after_load_before_lease(
     monkeypatch, tmp_path
 ):
     snapshot = _snapshot(tmp_path)
@@ -176,17 +176,19 @@ async def test_eviction_after_load_before_lease_returns_capacity_error(
     )
     await post_load.wait()
 
-    second = await coordinator.ensure_from_request(
-        _request("wandb-artifact:///entity/project/second:v1"), "request-2"
-    )
-    allow_first_lease.set()
+    try:
+        with pytest.raises(HttpError, match="lora_capacity_exceeded"):
+            await coordinator.ensure_from_request(
+                _request("wandb-artifact:///entity/project/second:v1"), "request-2"
+            )
+    finally:
+        allow_first_lease.set()
 
-    with pytest.raises(HttpError) as error:
-        await first_task
-
-    assert error.value.code == 429
-    assert error.value.message == "lora_capacity_exceeded"
-    assert second is not None
+    first = await first_task
+    assert first is not None
+    assert set(handler._lora_state.runtime_loras) == {first.lora_name}
+    handler.engine_client.remove_lora.assert_not_awaited()
+    assert manager.resolve_runtime_lora.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -313,6 +315,7 @@ async def test_active_runtime_adapter_is_not_evicted(monkeypatch, tmp_path):
         )
 
     handler.engine_client.remove_lora.assert_not_awaited()
+    assert manager.resolve_runtime_lora.await_count == 1
     assert set(handler._lora_state.runtime_loras) == {first.lora_name}
 
 
