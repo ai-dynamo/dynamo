@@ -165,7 +165,6 @@ impl SidecarFixture for Fixture {
         tokio::task::spawn_blocking(move || {
             SglangSidecarEngine::from_args(Some(argv))
                 .unwrap_or_else(|error| {
-                    // Separates a late server handler from a slow connect or response.
                     let entered = server_info_entered
                         .lock()
                         .unwrap()
