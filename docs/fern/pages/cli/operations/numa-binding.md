@@ -395,7 +395,7 @@ cover every GPU used by the worker. These are SGLang GPU IDs, not NUMA node IDs.
 Communication X (UCX) settings affect SGLang KV transfer only when
 `--disaggregation-transfer-backend nixl` selects NIXL with its UCX backend; they do not control
 Mooncake. See the
-[SGLang transfer options](https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/disagg.py#L62).
+[SGLang transfer options](https://github.com/sgl-project/sglang/blob/v0.5.22/python/sglang/srt/arg_groups/fields/disagg.py#L65-L84).
 
 UCX already selects devices using bandwidth, latency, PCI bandwidth,
 and NUMA locality. Keep a working recipe's automatic or injected device selection. Restrict
