@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from tests.deploy.n2_utils import MODELS
+from tests.deploy.n2_utils import DEFAULT_RELEASE_LINE, MODELS
 from tests.frontend import test_strict_schema_upgrade as suite
 
 pytestmark = [
@@ -20,6 +20,68 @@ pytestmark = [
 ]
 OLD = "registry/sglang:1.5.0"
 NEW = "registry/sglang:1.7.0-fixed@sha256:" + "b" * 64
+
+
+def getoption(options):
+    def read_option(name, default=None):
+        return options.get(name, default)
+
+    return read_option
+
+
+@pytest.mark.parametrize(
+    "enabled,baseline,target",
+    [(True, OLD, NEW), (False, None, None)],
+    ids=["explicit-pair", "disabled"],
+)
+def test_upgrade_matrix_is_bypassed_for_explicit_pair_or_disabled_run(
+    enabled, baseline, target
+):
+    options = {
+        "--run-strict-schema-upgrade": enabled,
+        "--schema-upgrade-baseline-image": baseline,
+        "--schema-upgrade-target-image": target,
+    }
+    metafunc = SimpleNamespace(
+        fixturenames=("upgrade_images",),
+        config=SimpleNamespace(getoption=getoption(options)),
+        parametrize=MagicMock(),
+    )
+
+    suite.pytest_generate_tests(metafunc)
+
+    metafunc.parametrize.assert_not_called()
+
+
+def test_upgrade_matrix_uses_catalog_workers_and_candidate_image(monkeypatch):
+    monkeypatch.delenv("N2_RELEASE_LINE", raising=False)
+    candidate = "registry/sglang:1.7.0-fixed"
+    options = {
+        "--run-strict-schema-upgrade": True,
+        "--schema-upgrade-baseline-image": None,
+        "--schema-upgrade-target-image": None,
+        "--image": candidate,
+    }
+    metafunc = SimpleNamespace(
+        fixturenames=("upgrade_images",),
+        config=SimpleNamespace(getoption=getoption(options)),
+        parametrize=MagicMock(),
+    )
+
+    suite.pytest_generate_tests(metafunc)
+
+    releases = json.loads((suite.ROOT / "tests/deploy/n2/releases.json").read_text())
+    major, minor = map(int, DEFAULT_RELEASE_LINE.split("."))
+    baseline_releases = [f"{major}.{minor - age}" for age in (1, 2)]
+    expected_images = [
+        (releases[line]["worker"], candidate) for line in baseline_releases
+    ]
+    metafunc.parametrize.assert_called_once_with(
+        "upgrade_images",
+        expected_images,
+        indirect=True,
+        ids=["old-worker-1", "old-worker-2"],
+    )
 
 
 @pytest.mark.parametrize(
@@ -114,7 +176,7 @@ async def test_default_regression_is_not_hidden_by_successful_migration(
     }
     request = SimpleNamespace(
         node=SimpleNamespace(name="upgrade"),
-        config=SimpleNamespace(getoption=options.__getitem__),
+        config=SimpleNamespace(getoption=getoption(options)),
     )
     default = (
         completion()
@@ -142,25 +204,44 @@ async def test_default_regression_is_not_hidden_by_successful_migration(
     assert report["stages"]["compat"]["status"] == 200
 
 
+@pytest.mark.parametrize(
+    "probe_error", [False, True], ids=["http-400", "deployment-error"]
+)
 async def test_invalid_baseline_does_not_claim_an_upgrade_regression(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, probe_error
 ):
+    options = {
+        "--namespace": "test",
+        "--model-cache-pvc": "cache",
+        "--model-cache-mount": "/shared-models",
+    }
     request = SimpleNamespace(
         node=SimpleNamespace(name="upgrade"),
-        config=SimpleNamespace(
-            getoption={
-                "--namespace": "test",
-                "--schema-upgrade-model-cache-pvc": "cache",
-                "--schema-upgrade-model-cache-mount": "/models",
-            }.__getitem__
-        ),
+        config=SimpleNamespace(getoption=getoption(options)),
+        session=SimpleNamespace(shouldstop=None),
     )
-    probe = AsyncMock(return_value={"status": 400, "body": "baseline rejected"})
+    if probe_error:
+        probe = AsyncMock(side_effect=RuntimeError("deployment failed"))
+        expected_error = RuntimeError
+        match = "deployment failed"
+    else:
+        probe = AsyncMock(return_value={"status": 400, "body": "baseline rejected"})
+        expected_error = AssertionError
+        match = "baseline: HTTP 400"
     monkeypatch.setattr(suite, "_probe", probe)
     monkeypatch.setattr(suite, "resolve_test_output_path", lambda _: str(tmp_path))
-    with pytest.raises(AssertionError, match="baseline: HTTP 400"):
+
+    with pytest.raises(expected_error, match=match):
         await suite.test_strict_schema_upgrade(request, (OLD, NEW))
+
     assert probe.await_count == 1
+    assert probe.await_args.args[5:7] == ("cache", "/shared-models")
+    if probe_error:
+        assert request.session.shouldstop == (
+            "Schema upgrade deployment failed; remaining pairs are not validated"
+        )
+    else:
+        assert request.session.shouldstop is None
 
 
 @pytest.mark.parametrize("leftovers", [False, True])

@@ -3,10 +3,10 @@
 
 # Strict-schema upgrade acceptance
 
-This manual test compares one unchanged Chat Completions request between an
-older and a newer SGLang runtime image. The release pair is chosen at run time,
-not hardcoded to 1.5/1.6. Each image runs its own frontend and worker using the
-Python SGLang processor and the same pinned Qwen3-0.6B snapshot as the
+This test compares one unchanged Chat Completions request between an older
+and a newer SGLang runtime image. CI selects N-1/N-2 baselines from the community
+release catalog; manual runs can choose any increasing release pair. Each image
+runs its own frontend and worker using the Python SGLang processor and the same pinned Qwen3-0.6B snapshot as the
 [component compatibility suite](../deploy/n2/README.md).
 
 The request has `strict: true` and a `unit` property omitted from `required`.
@@ -16,6 +16,28 @@ A default-mode change from HTTP 200 to HTTP 400 is an **upgrade failure**, even
 if enabling `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION` restores success.
 Both target results are collected before reporting that failure. The existing
 same-version processor e2es separately verify the migration contract.
+
+## N-2 CI
+
+`cross-version-compatibility.yml` collects this test alongside the existing
+component suite in one serial pytest session. With `--run-strict-schema-upgrade`
+and no explicit image pair, `--image` supplies the candidate SGLang runtime.
+The existing `version_matrix` helper selects the historical worker images from
+`tests/deploy/n2/releases.json`, using `N2_RELEASE_LINE` or
+`DEFAULT_RELEASE_LINE`. Each historical runtime supplies both its frontend and
+worker; the candidate runtime does the same for both target stages.
+
+The two baseline comparisons add six serial deployments to the eight existing
+mixed-component deployments. They use the same prepared snapshots, native
+`--model-cache-pvc` / `--model-cache-mount` options, and deployment artifacts.
+A compatibility assertion failure allows the next release comparison to run;
+a deployment or cleanup failure stops the session because isolation is no
+longer established. The workflow's outer cleanup tears down the vCluster.
+
+The default-mode upgrade assertion is required: an old HTTP 200 becoming a
+candidate HTTP 400 fails N-2 CI even when the compatibility stage succeeds.
+See the [component compatibility guide](../deploy/n2/README.md) to run the same
+combined suite locally.
 
 ## Image selection and prerequisites
 
@@ -40,7 +62,7 @@ same-version processor e2es separately verify the migration contract.
   component compatibility guide. The aggregate template also references
   `hf-token-secret`; create it in the test namespace.
 
-## Run
+## Explicit image comparison
 
 Set `BASELINE_IMAGE` and `TARGET_IMAGE` to the desired version-tagged images
 (with optional digests), then run from the repository root with deployment-test
@@ -62,11 +84,10 @@ python3 -m pytest -xvv -n 0 \
 Without `--run-strict-schema-upgrade`, the test explicitly skips and creates no
 deployments. With the switch enabled, missing image/namespace/PVC arguments,
 missing version tags, malformed optional digests, non-increasing versions or
-identical explicitly supplied digests fail setup. Dedicated options are
-registered in the frontend conftest; no deploy conftest or CI-filter changes
-are required. Normal core CI still applies
-to frontend tests, but this manual comparison is not automatically executed by
-PR or N-2 workflows.
+identical explicitly supplied digests fail setup. Explicit image options select
+one comparison instead of the N-1/N-2 matrix. The dedicated cache options
+override the shared N-2 options; the mount defaults to `/models`. The N-2 workflow passes the opt-in switch,
+while ordinary frontend runs still skip this test.
 
 Three deployments run serially using the existing `ManagedDeployment` helper.
 They share cached model files but each loads a worker; readiness checks may
@@ -79,4 +100,5 @@ Normal deployment artifacts retain Pod manifests with actual resolved image
 IDs (`status.containerStatuses[].imageID`) and process logs, including when
 ordinary tags are used. Tags may move between deployments; the recorded image
 IDs identify what each stage actually ran. Partial results survive failure;
-skipped/interrupted runs do not establish compatibility. CPU-only checks are not GPU upgrade evidence.
+skipped/interrupted runs do not establish compatibility. CPU-only checks are
+not GPU upgrade evidence.

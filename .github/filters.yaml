@@ -327,6 +327,8 @@ deploy:
   - 'deploy/utils/**'
   - 'deploy/checkpoint-placeholder/**'
   - 'tests/deploy/**'
+  - 'tests/frontend/conftest.py'
+  - 'tests/frontend/test_strict_schema_upgrade.py'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
   # has no CI test wiring, so it should not trigger the operator deploy pipeline.
   - '!deploy/utils/convert_api_version.py'

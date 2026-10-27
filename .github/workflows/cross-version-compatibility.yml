@@ -56,7 +56,8 @@ permissions:
 jobs:
   compatibility:
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 240
+    # Eight mixed-version deployments and six whole-runtime upgrade stages.
+    timeout-minutes: 420
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -84,7 +85,7 @@ jobs:
       - name: Allow the bounded compatibility suite to finish before namespace expiry
         env:
           HOST_NAMESPACE: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-static-dt
-        run: kubectl label namespace "$HOST_NAMESPACE" nscleanup/ttl=21600 --overwrite
+        run: kubectl label namespace "$HOST_NAMESPACE" nscleanup/ttl=32400 --overwrite
       - name: Connect to vCluster
         id: connect
         uses: $/.github/actions/connect-vcluster
@@ -138,7 +139,7 @@ jobs:
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }}
             -m framework_only -n 0
           cleanup_deployment: 'false'
-      - name: Test four mixed version pairs for embedding and chat
+      - name: Test mixed components and unchanged requests across N-1 and N-2
         uses: $/.github/actions/dynamo-deploy-test
         env:
           N2_RELEASE_LINE: ${{ inputs.release_line }}
@@ -151,9 +152,12 @@ jobs:
           model_cache_pvc: model-cache
           test_name: n2-compatibility
           test_file: tests/deploy/test_n2_compatibility.py
-          extra_pytest_args: --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }} -m k8s -n 0
-          # Each parameter owns one Frontend and one GPU Worker. The outer
-          # cleanup also runs on a job timeout or interrupted pytest process.
+          extra_pytest_args: >-
+            tests/frontend/test_strict_schema_upgrade.py
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }}
+            --run-strict-schema-upgrade -m k8s -n 0
+          # Each parameter owns its deployments. The outer cleanup also runs
+          # on a job timeout or interrupted pytest process.
           cleanup_deployment: 'false'
       - name: Collect model preparation evidence
         if: always() && steps.connect.outcome == 'success'

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Manual acceptance check for unchanged requests between two releases."""
+"""Upgrade acceptance for unchanged requests across SGLang releases."""
 
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from pathlib import Path
@@ -15,10 +16,12 @@ from openai.types.chat import ChatCompletion
 
 from tests.deploy.dgd_utils import ManagedDeployment
 from tests.deploy.n2_utils import (
+    DEFAULT_RELEASE_LINE,
     MODELS,
     VersionPair,
     compatibility_spec,
     runtime_version,
+    version_matrix,
 )
 from tests.utils.client import wait_for_model_availability
 from tests.utils.output_paths import resolve_test_output_path
@@ -50,6 +53,40 @@ def _validate_images(baseline, target):
         raise pytest.UsageError("Baseline and target must have different image digests")
 
 
+def pytest_generate_tests(metafunc):
+    config = metafunc.config
+    if "upgrade_images" not in metafunc.fixturenames or not config.getoption(
+        "--run-strict-schema-upgrade"
+    ):
+        return
+    if any(
+        config.getoption(f"--schema-upgrade-{role}-image")
+        for role in ("baseline", "target")
+    ):
+        return
+    candidate = config.getoption("--image")
+    if not candidate:
+        raise pytest.UsageError("N-2 upgrade acceptance requires --image")
+    releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
+    line = os.environ.get("N2_RELEASE_LINE") or DEFAULT_RELEASE_LINE
+    pairs = version_matrix(releases, line, candidate, candidate)[1::2]
+    metafunc.parametrize(
+        "upgrade_images",
+        [(pair.worker, candidate) for pair in pairs],
+        indirect=True,
+        ids=[pair.name for pair in pairs],
+    )
+
+
+def _model_cache(config):
+    pvc = config.getoption("--schema-upgrade-model-cache-pvc")
+    mount = config.getoption("--schema-upgrade-model-cache-mount")
+    return (
+        pvc or config.getoption("--model-cache-pvc", default=None),
+        mount or config.getoption("--model-cache-mount", default="/models"),
+    )
+
+
 @pytest.fixture
 def upgrade_images(request):
     config = request.config
@@ -57,16 +94,16 @@ def upgrade_images(request):
         pytest.skip(
             "Requires explicit --run-strict-schema-upgrade and versioned images"
         )
-    images = tuple(
+    images = getattr(request, "param", None) or tuple(
         config.getoption(f"--schema-upgrade-{version}-image")
         for version in ("baseline", "target")
     )
     _validate_images(*images)
     if not config.getoption("--namespace"):
         raise pytest.UsageError("Upgrade acceptance requires an explicit --namespace")
-    if not config.getoption("--schema-upgrade-model-cache-pvc"):
+    if not _model_cache(config)[0]:
         raise pytest.UsageError(
-            "Upgrade acceptance requires a prepared --schema-upgrade-model-cache-pvc"
+            "Upgrade acceptance requires a prepared model-cache PVC"
         )
     return images
 
@@ -164,6 +201,7 @@ async def _probe(image, enabled, payload, name, namespace, pvc, mount, output):
 async def test_strict_schema_upgrade(request, upgrade_images):
     baseline, target = upgrade_images
     namespace = request.config.getoption("--namespace")
+    pvc, mount = _model_cache(request.config)
     run_id = uuid.uuid4().hex[:8]
     output = Path(resolve_test_output_path(request.node.name)) / run_id
     output.mkdir(parents=True)
@@ -201,16 +239,26 @@ async def test_strict_schema_upgrade(request, upgrade_images):
         ("default", target, False),
         ("compat", target, True),
     ):
-        result = await _probe(
-            image,
-            enabled,
-            payload,
-            f"schema-upgrade-{run_id}-{stage}",
-            namespace,
-            request.config.getoption("--schema-upgrade-model-cache-pvc"),
-            request.config.getoption("--schema-upgrade-model-cache-mount"),
-            output / stage,
-        )
+        probe_finished = False
+        try:
+            result = await _probe(
+                image,
+                enabled,
+                payload,
+                f"schema-upgrade-{run_id}-{stage}",
+                namespace,
+                pvc,
+                mount,
+                output / stage,
+            )
+            probe_finished = True
+        finally:
+            if not probe_finished:
+                # Isolation is uncertain after a deployment or cleanup failure.
+                request.session.shouldstop = (
+                    "Schema upgrade deployment failed; "
+                    "remaining pairs are not validated"
+                )
         report["stages"][stage] = {"image": image, "enabled": enabled, **result}
         (output / "comparison.json").write_text(json.dumps(report, indent=2) + "\n")
         try:

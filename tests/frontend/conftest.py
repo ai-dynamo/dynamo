@@ -27,7 +27,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--run-strict-schema-upgrade",
         action="store_true",
-        help="Run the manual strict-schema upgrade acceptance test.",
+        help="Run strict-schema upgrade acceptance for N-2 or explicit image pairs.",
     )
     for role in ("baseline", "target"):
         parser.addoption(
@@ -42,8 +42,8 @@ def pytest_addoption(parser):
     )
     parser.addoption(
         "--schema-upgrade-model-cache-mount",
-        default="/models",
-        help="Model-cache mount path for the manual upgrade comparison.",
+        default=None,
+        help="Model-cache mount override for an explicit image comparison (default: /models).",
     )
 
 
