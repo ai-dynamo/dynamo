@@ -63,7 +63,7 @@ func upgradeComponentGraphReady(objects []unstructured.Unstructured, components 
 }
 
 func TestUpgradeComponentSafety(t *testing.T) {
-	for _, kind := range []string{"Deployment", "LeaderWorkerSet"} {
+	for _, kind := range []string{"Deployment", "LeaderWorkerSet", "DisaggregatedSet"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Log("Preserve immediate workload identity and spec independently of golden updates")
 			old := unstructured.Unstructured{Object: map[string]any{
@@ -88,7 +88,12 @@ func TestUpgradeComponentSafety(t *testing.T) {
 			if kind == "LeaderWorkerSet" {
 				path = []string{"spec", "leaderWorkerTemplate", "workerTemplate", "spec", "hostname"}
 			}
-			require.NoError(t, unstructured.SetNestedField(changed.Object, "changed-worker", path...))
+			if kind == "DisaggregatedSet" {
+				path = []string{"spec", "roles"}
+				require.NoError(t, unstructured.SetNestedSlice(changed.Object, []any{map[string]any{"name": "changed-role"}}, path...))
+			} else {
+				require.NoError(t, unstructured.SetNestedField(changed.Object, "changed-worker", path...))
+			}
 			require.ErrorContains(t, upgradeSafetyError(false, before, []unstructured.Unstructured{*changed}), "rollout intent")
 			require.ErrorContains(t, upgradeSafetyError(false, before, nil), "inventory")
 		})
@@ -129,19 +134,27 @@ func TestUpgradeComponentGraphReady(t *testing.T) {
 }
 
 func TestUpgradeComponentVersionBindings(t *testing.T) {
-	t.Log("Keep generated component identities exact across an operator version bump")
-	path := "testdata/upgrade/latest/sglang/aggregated/single/component/output.yaml"
-	previous := upgradeLatestVariables(t, path, "1.6.0")
-	current := upgradeLatestVariables(t, path, "1.7.0")
-	require.NotEqual(t, previous["worker-hash"], current["worker-hash"])
-	bindings := 0
-	for name, value := range current {
-		if !strings.HasPrefix(name, "worker-string:") {
-			continue
-		}
-		bindings++
-		require.Contains(t, value, current["worker-hash"])
-		require.NotEqual(t, previous[name], value)
+	for _, scenario := range []string{"aggregated/single/component", "aggregated/multi/component", "disaggregated/multi/disaggregatedset"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Keep generated component identities exact across an operator version bump")
+			path := "testdata/upgrade/latest/sglang/" + scenario + "/output.yaml"
+			previous := upgradeLatestVariables(t, path, "1.6.0")
+			current := upgradeLatestVariables(t, path, "1.7.0")
+			require.NotEqual(t, previous["worker-hash"], current["worker-hash"])
+			bindings := 0
+			for name, value := range current {
+				if !strings.HasPrefix(name, "worker-string:") {
+					continue
+				}
+				bindings++
+				require.Contains(t, value, current["worker-hash"])
+				require.NotEqual(t, previous[name], value)
+			}
+			require.Positive(t, bindings, "component names must follow the reviewed DGD hash")
+			if strings.HasSuffix(scenario, "/disaggregatedset") {
+				require.NotEqual(t, "pending", current["ds-revision"])
+				require.NotEqual(t, previous["ds-revision"], current["ds-revision"])
+			}
+		})
 	}
-	require.Positive(t, bindings, "component names must follow the reviewed DGD hash")
 }

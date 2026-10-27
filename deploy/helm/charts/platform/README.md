@@ -48,6 +48,24 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.7.0
 
+#### Runtime Compatibility
+
+##### Frontend Startup Probe Defaults
+
+**Change:** Generated frontend startup probes require both a workload origin of operator
+1.7.0 or later and a frontend runtime of 1.6.0 or later. Standalone DCDs record their
+immutable origin only on CREATE; UPDATE never backfills existing resources. DGD-managed
+DCDs inherit the parent graph origin, even when the child is created by a newer operator.
+Frontend sidecars use the same origin and resolve their own image version.
+
+**Existing deployments:** Workloads created by operator 1.6.x or earlier, and resources
+without a resolvable origin, retain their previous frontend defaults during operator-only
+upgrades. Explicitly authored complete probes remain effective.
+
+**Action:** To enable startup protection on an existing workload, configure a complete
+`startupProbe` on its frontend container. This is an intentional Pod-template update;
+plan for frontend replacement, including a possible single-replica Grove Service outage.
+
 #### Operator behavior breaking changes
 
 ##### Legacy LWS migration cleanup removed
