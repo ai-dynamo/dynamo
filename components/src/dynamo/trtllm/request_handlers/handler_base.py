@@ -313,7 +313,8 @@ class HandlerBase(BaseGenerativeHandler):
 
     This class is dedicated to LLM-based generation using TensorRT-LLM engine.
     For diffusion-based handlers (video, image), see VideoGenerationHandler
-    and ImageGenerationHandler which inherit directly from BaseGenerativeHandler.
+    and ImageGenerationHandler which inherit from DiffusionHandlerBase, a
+    subclass of BaseGenerativeHandler.
 
     Inherits from BaseGenerativeHandler to ensure a consistent interface
     across all generative handlers (LLM, video, image).

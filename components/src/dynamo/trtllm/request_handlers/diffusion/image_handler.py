@@ -13,7 +13,7 @@ import base64
 import logging
 import time
 import uuid
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator
 
 from dynamo._core import Context
 from dynamo.common.protocols.image_protocol import (
@@ -26,12 +26,12 @@ from dynamo.common.storage import get_fs, upload_to_fs
 from dynamo.common.utils.image_utils import encode_to_png_bytes
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
-from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
+from dynamo.trtllm.request_handlers.diffusion.base_handler import DiffusionHandlerBase
 
 logger = logging.getLogger(__name__)
 
 
-class ImageGenerationHandler(BaseGenerativeHandler):
+class ImageGenerationHandler(DiffusionHandlerBase):
     """Handler for image generation requests.
 
     This handler receives generation requests, runs the diffusion pipeline
@@ -58,49 +58,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             engine: The DiffusionEngine instance.
             config: Diffusion generation configuration.
         """
-        self.engine = engine
-        self.config = config
-        if not config.media_output_fs_url:
-            raise ValueError(
-                "media_output_fs_url must be set; use --media-output-fs-url or DYN_MEDIA_OUTPUT_FS_URL."
-            )
-        self.media_output_fs = get_fs(config.media_output_fs_url)
-        self.media_output_http_url = config.media_output_http_url
-        # Serialize pipeline access — the diffusion pipeline is not thread-safe
-        # (mutable instance state, unprotected CUDA graph cache).
-        # asyncio.Lock suspends waiting coroutines cooperatively so the event
-        # loop stays free for health checks and signal handling.
-        self._generate_lock = asyncio.Lock()
-
-    def _parse_size(self, size: Optional[str]) -> tuple[int, int]:
-        """Parse 'WxH' string to (width, height) tuple.
-
-        The API accepts size as a string (e.g., "832x480") to match the format
-        used by OpenAI's image generation API (/v1/images/generations).
-        This method converts that string to a (width, height) tuple for the engine.
-
-        Args:
-            size: Size string in 'WxH' format (e.g., '832x480').
-
-        Returns:
-            Tuple of (width, height).
-
-        Raises:
-            ValueError: If dimensions exceed configured max_width/max_height.
-        """
-        if not size:
-            width, height = self.config.default_width, self.config.default_height
-        else:
-            try:
-                w, h = size.split("x")
-                width, height = int(w), int(h)
-            except (ValueError, AttributeError):
-                logger.warning(f"Invalid size format: {size}, using defaults")
-                width, height = self.config.default_width, self.config.default_height
-
-        # Validate dimensions to prevent OOM
-        self._validate_dimensions(width, height)
-        return width, height
+        super().__init__(engine, config, get_fs)
 
     def _validate_dimensions(self, width: int, height: int) -> None:
         """Validate that dimensions don't exceed configured limits.

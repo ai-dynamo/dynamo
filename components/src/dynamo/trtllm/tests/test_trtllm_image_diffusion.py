@@ -153,6 +153,54 @@ class TestImageHandlerParseSize:
         assert height == 4096
 
 
+class TestImageHandlerSharedSetup:
+    """Tests for the setup ImageGenerationHandler gets from DiffusionHandlerBase."""
+
+    GET_FS = "dynamo.trtllm.request_handlers.diffusion.image_handler.get_fs"
+
+    def _make_handler(self, media_output_fs_url, get_fs_mock):
+        from dynamo.trtllm.request_handlers.diffusion.image_handler import (
+            ImageGenerationHandler,
+        )
+
+        config = DiffusionConfig(media_output_fs_url=media_output_fs_url)
+        with patch(self.GET_FS, get_fs_mock):
+            return ImageGenerationHandler(MagicMock(), config), config
+
+    def test_get_fs_is_looked_up_in_handler_module(self, tmp_path):
+        """The get_fs patch on the image_handler module must reach the shared __init__."""
+        fake_fs = MagicMock()
+        get_fs_mock = MagicMock(return_value=fake_fs)
+        handler, config = self._make_handler((tmp_path / "media").as_uri(), get_fs_mock)
+        assert handler.media_output_fs is fake_fs
+        get_fs_mock.assert_called_once_with(config.media_output_fs_url)
+
+    def test_empty_media_output_fs_url_raises(self):
+        get_fs_mock = MagicMock()
+        with pytest.raises(ValueError, match="media_output_fs_url must be set"):
+            self._make_handler("", get_fs_mock)
+        get_fs_mock.assert_not_called()
+
+    def test_each_instance_has_its_own_lock(self, tmp_path):
+        url = (tmp_path / "media").as_uri()
+        first, _ = self._make_handler(url, MagicMock())
+        second, _ = self._make_handler(url, MagicMock())
+        assert isinstance(first._generate_lock, asyncio.Lock)
+        assert isinstance(second._generate_lock, asyncio.Lock)
+        assert first._generate_lock is not second._generate_lock
+
+    def test_image_validator_is_kept(self):
+        """Image sizes must be at least 1 in each dimension."""
+        from dynamo.trtllm.request_handlers.diffusion.image_handler import (
+            ImageGenerationHandler,
+        )
+
+        handler = object.__new__(ImageGenerationHandler)
+        handler.config = MockDiffusionConfig()
+        with pytest.raises(ValueError, match="out of range"):
+            handler._parse_size("0x480")
+
+
 # =============================================================================
 # Part 4: Image Protocol Tests
 # =============================================================================
