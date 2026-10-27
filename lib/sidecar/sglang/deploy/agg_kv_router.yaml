@@ -48,7 +48,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 180
@@ -57,7 +57,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 3
@@ -68,10 +68,13 @@ spec:
               - -c
               # HealthCheckResponse has one bool field: healthy=true encodes as
               # 0x08 0x01. Fail when the RPC succeeds but reports unhealthy.
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
+          env:
+          - name: SGLANG_RUST_SERVER
+            value: "1"
           envFrom:
           - secretRef:
               name: hf-token-secret

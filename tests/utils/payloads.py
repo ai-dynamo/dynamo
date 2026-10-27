@@ -259,7 +259,8 @@ class SGLangGenerateCancellationPayload(HttpCancellationPayload):
 
     def _generated_content(self, chunk: dict) -> str:
         assert chunk["meta_info"].get("finish_reason") is None, chunk
-        output_ids = chunk["output_ids"]
+        # SGLang's Rust server omits output_ids from a chunk without tokens.
+        output_ids = chunk.get("output_ids", [])
         return json.dumps(output_ids) if output_ids else ""
 
 
