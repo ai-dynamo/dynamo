@@ -25,12 +25,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestGrowthAdapterNativeCorrelation(t *testing.T) {
+func TestMembershipAdapterNativeCorrelation(t *testing.T) {
 	for _, width := range []int32{1, 4} {
 		t.Run(fmt.Sprintf("members per allocation %d", width), func(t *testing.T) {
 			t.Log("observe a formed native world with a stable runtime ID and allocation width")
 			engine := &nativeGrowthEngine{state: ScaleState{InstanceID: "runtime-1", AllocationWidth: width,
-				InitialEPSize: 2 * width, EffectiveEPSize: 2 * width, RuntimeHealth: "healthy"}}
+				InitialEPSize: 2 * width, EffectiveEPSize: 2 * width, MaxCommittedEPSize: 2 * width, RuntimeHealth: "healthy"}}
 			capacity := &testCapacityObserver{allocations: []enginegroup.CapacityAllocation{testAllocation(0), testAllocation(1)}}
 			for index := range capacity.allocations {
 				capacity.allocations[index].Incarnation.Members = testNativeMembers(int32(index)*width, width)
@@ -40,7 +40,7 @@ func TestGrowthAdapterNativeCorrelation(t *testing.T) {
 			kube := fake.NewClientBuilder().WithScheme(scheme).Build()
 			control, err := NewClient("http://sglang.test", &http.Client{Transport: engine})
 			require.NoError(t, err)
-			adapter := &GrowthAdapter{Client: control, Capacity: capacity, MembersPerReplica: width, ProfileFingerprint: "profile-v1",
+			adapter := &MembershipAdapter{Client: control, Capacity: capacity, MembersPerReplica: width, ProfileFingerprint: "profile-v1",
 				Journal: kubejournal.NewStore(kube, "test", "group", "group-uid", "membership")}
 			initial, err := adapter.Observe(t.Context(), "group-uid", "")
 			require.NoError(t, err)
@@ -147,13 +147,13 @@ func TestGrowthAdapterNativeCorrelation(t *testing.T) {
 	}
 }
 
-func TestGrowthAdapterRejectsUnsupportedPlan(t *testing.T) {
+func TestMembershipAdapterRejectsUnsupportedPlan(t *testing.T) {
 	for _, kind := range []enginegroup.PlanKind{enginegroup.PlanKindRetire, enginegroup.PlanKindReduceToSurvivors, enginegroup.PlanKindRestore} {
 		t.Run(string(kind), func(t *testing.T) {
 			t.Log("reject unsupported operation shapes before allocating or draining capacity")
 			plan := testGrowPlan(2)
 			plan.Change.Kind = kind
-			result, err := (&GrowthAdapter{ProfileFingerprint: "profile-v1"}).ValidatePlan(t.Context(), "group", enginegroup.PlanValidationRequest{Plan: plan})
+			result, err := (&MembershipAdapter{ProfileFingerprint: "profile-v1"}).ValidatePlan(t.Context(), "group", enginegroup.PlanValidationRequest{Plan: plan})
 			require.NoError(t, err)
 			require.NotNil(t, result.Rejection)
 			assert.Equal(t, "UnsupportedOperation", result.Rejection.Reason)
@@ -161,17 +161,17 @@ func TestGrowthAdapterRejectsUnsupportedPlan(t *testing.T) {
 	}
 }
 
-func TestGrowthAdapterStaleReplayCannotOverwriteNewerControl(t *testing.T) {
+func TestMembershipAdapterStaleReplayCannotOverwriteNewerControl(t *testing.T) {
 	t.Log("persist one native operation and retain a stale cached copy of its journal")
 	engine := &nativeGrowthEngine{state: ScaleState{InstanceID: "runtime-1", AllocationWidth: 1,
-		InitialEPSize: 2, EffectiveEPSize: 2, RuntimeHealth: "healthy"}}
+		InitialEPSize: 2, EffectiveEPSize: 2, MaxCommittedEPSize: 2, RuntimeHealth: "healthy"}}
 	control, err := NewClient("http://sglang.test", &http.Client{Transport: engine})
 	require.NoError(t, err)
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
 	capacity := &testCapacityObserver{allocations: []enginegroup.CapacityAllocation{testAllocation(0), testAllocation(1), testAllocation(2)}}
-	adapter := &GrowthAdapter{Client: control, Capacity: capacity, MembersPerReplica: 1, ProfileFingerprint: "profile-v1",
+	adapter := &MembershipAdapter{Client: control, Capacity: capacity, MembersPerReplica: 1, ProfileFingerprint: "profile-v1",
 		Journal: kubejournal.NewStore(kube, "test", "group", "group-uid", "membership")}
 	base, err := adapter.Observe(t.Context(), "group-uid", "")
 	require.NoError(t, err)
@@ -227,6 +227,7 @@ func (e *nativeGrowthEngine) RoundTrip(request *http.Request) (*http.Response, e
 	e.requests = append(e.requests, target)
 	e.state.OperationID = target.OperationID
 	e.state.TargetEPSize = target.NewEPSize
+	e.state.OperationSucceeded = nil
 	e.state.JoiningAllocationIDs = target.ExpectedJoiningAllocationIDs
 	if e.failSubmission {
 		e.state.Phase = "submission_unknown"

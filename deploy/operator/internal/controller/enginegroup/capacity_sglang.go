@@ -19,11 +19,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// SGLangGroveCapacity binds the growth-only profile's process identity to Grove capacity.
+// SGLangGroveCapacity binds the native profile's process identity to Grove capacity.
 // The native allocation is one process tree; container restarts require explicit group recovery.
 type SGLangGroveCapacity struct {
 	Grove             *grovecapacity.Adapter
 	MembersPerReplica int32
+}
+
+// ReconcileInitialCapacity prepares Grove retention gates through the controller's existing capacity hook.
+// Native bootstrap remains template-driven and does not wait for a serving permission.
+func (a *SGLangGroveCapacity) ReconcileInitialCapacity(ctx context.Context, _ domain.GroupID) error {
+	return a.Grove.InitializeRetention(ctx)
 }
 
 // Observe binds each allocation's fixed member range to its non-restarting process tree.

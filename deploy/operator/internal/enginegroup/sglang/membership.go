@@ -14,7 +14,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
 )
 
-const capabilityGeneration = "sglang-elastic-ep-correlated-growth/v1"
+const capabilityGeneration = "sglang-elastic-ep-correlated-resize/v1"
 
 // CapacityObserver supplies the exact runtime incarnations correlated with
 // SGLang's native dp-N ranks.
@@ -22,10 +22,10 @@ type CapacityObserver interface {
 	Observe(context.Context, enginegroup.GroupID) (enginegroup.CapacityObservation, error)
 }
 
-// GrowthAdapter correlates native SGLang operations with the durable control target.
+// MembershipAdapter correlates native SGLang operations with the durable control target.
 // The journal retains the control revision, digest, and topology projection that
 // SGLang does not expose. It never infers an operation commit from size alone.
-type GrowthAdapter struct {
+type MembershipAdapter struct {
 	Client             *Client
 	Capacity           CapacityObserver
 	ProfileFingerprint string
@@ -49,20 +49,24 @@ type transitionJournal struct {
 	BaseTopology         enginegroup.MembershipTopology        `json:"baseTopology"`
 	TargetEPSize         int32                                 `json:"targetEPSize"`
 	JoiningAllocationIDs []string                              `json:"joiningAllocationIDs"`
+	Retiring             []enginegroup.ReplicaMembership       `json:"retiring,omitempty"`
 	Phase                enginegroup.MembershipTransitionPhase `json:"phase"`
 	ResultTopology       *enginegroup.MembershipTopology       `json:"resultTopology,omitempty"`
 	Failure              *enginegroup.Failure                  `json:"failure,omitempty"`
 }
 
-// ValidatePlan accepts one complete native append allocation with post-commit verification.
-func (a *GrowthAdapter) ValidatePlan(
-	_ context.Context,
+// ValidatePlan accepts one complete append or healthy suffix retirement with serving verification.
+func (a *MembershipAdapter) ValidatePlan(
+	ctx context.Context,
 	_ enginegroup.GroupID,
 	request enginegroup.PlanValidationRequest,
 ) (enginegroup.PreflightResult, error) {
 	failure := a.validatePlan(request.BaseTopology, request.Plan)
 	if failure != nil {
 		return enginegroup.PreflightResult{Rejection: failure}, nil
+	}
+	if failure, err := a.validateNativeCapabilities(ctx, request.Plan); failure != nil || err != nil {
+		return enginegroup.PreflightResult{Rejection: failure}, err
 	}
 	return enginegroup.PreflightResult{Evidence: &enginegroup.ValidationEvidence{
 		PlanDigest:           request.PlanDigest,
@@ -72,13 +76,16 @@ func (a *GrowthAdapter) ValidatePlan(
 }
 
 // ValidateTarget binds validation to the exact joining runtime identities.
-func (a *GrowthAdapter) ValidateTarget(
-	_ context.Context,
+func (a *MembershipAdapter) ValidateTarget(
+	ctx context.Context,
 	_ enginegroup.GroupID,
 	target enginegroup.MembershipTarget,
 ) (enginegroup.PreflightResult, error) {
 	if failure := a.validatePlan(target.BaseTopology, target.Plan); failure != nil {
 		return enginegroup.PreflightResult{Rejection: failure}, nil
+	}
+	if failure, err := a.validateNativeCapabilities(ctx, target.Plan); failure != nil || err != nil {
+		return enginegroup.PreflightResult{Rejection: failure}, err
 	}
 	if target.TargetDigest == "" || target.Validation.PlanDigest == "" {
 		return rejectedPreflight("InvalidTarget", "membership target and validated plan digests are required"), nil
@@ -87,7 +94,11 @@ func (a *GrowthAdapter) ValidateTarget(
 		target.Validation.CapabilityGeneration != capabilityGeneration {
 		return rejectedPreflight("CapabilitiesChanged", "profile or adapter capabilities changed after plan validation"), nil
 	}
-	if target.Plan.Change.Grow == nil || len(target.Joining) != len(target.Plan.Change.Grow.Replicas) {
+	expectedJoining := 0
+	if target.Plan.Change.Grow != nil {
+		expectedJoining = len(target.Plan.Change.Grow.Replicas)
+	}
+	if len(target.Joining) != expectedJoining {
 		return rejectedPreflight("InvalidJoiningSet", "joining runtime identities do not match the grow plan"), nil
 	}
 	joining := make(map[enginegroup.ReplicaID]enginegroup.RuntimeIncarnationID, len(target.Joining))
@@ -97,9 +108,11 @@ func (a *GrowthAdapter) ValidateTarget(
 		}
 		joining[member.ReplicaID] = member.Members[0].RuntimeIncarnation
 	}
-	for _, replica := range target.Plan.Change.Grow.Replicas {
-		if joining[replica.ReplicaID] == "" {
-			return rejectedPreflight("InvalidJoiningSet", "every planned replica needs an exact joining incarnation"), nil
+	if target.Plan.Change.Grow != nil {
+		for _, replica := range target.Plan.Change.Grow.Replicas {
+			if joining[replica.ReplicaID] == "" {
+				return rejectedPreflight("InvalidJoiningSet", "every planned replica needs an exact joining incarnation"), nil
+			}
 		}
 	}
 	return enginegroup.PreflightResult{Evidence: &enginegroup.ValidationEvidence{
@@ -111,7 +124,7 @@ func (a *GrowthAdapter) ValidateTarget(
 }
 
 // Observe correlates SGLang's engine state with one requested transition.
-func (a *GrowthAdapter) Observe(
+func (a *MembershipAdapter) Observe(
 	ctx context.Context,
 	groupID enginegroup.GroupID,
 	transitionID string,
@@ -264,7 +277,7 @@ func (a *GrowthAdapter) Observe(
 }
 
 // Apply persists the exact target before dispatch and safely replays it using native operation IDs.
-func (a *GrowthAdapter) Apply(
+func (a *MembershipAdapter) Apply(
 	ctx context.Context,
 	groupID enginegroup.GroupID,
 	target enginegroup.MembershipTarget,
@@ -305,7 +318,15 @@ func (a *GrowthAdapter) Apply(
 	if !enginegroup.SameTopology(current, target.BaseTopology) {
 		return a.persistRejection(ctx, state, snapshot, target, "BaseTopologyChanged", "SGLang topology no longer matches the validated base")
 	}
-	targetSize := (target.BaseTopology.ReplicaCount() + int32(len(target.Joining))) * a.MembersPerReplica
+	if failure := a.validatePlan(target.BaseTopology, target.Plan); failure != nil {
+		return a.persistRejection(ctx, state, snapshot, target, failure.Reason, failure.Message)
+	}
+	if failure, err := a.validateNativeCapabilities(ctx, target.Plan); err != nil {
+		return err
+	} else if failure != nil {
+		return a.persistRejection(ctx, state, snapshot, target, failure.Reason, failure.Message)
+	}
+	targetSize := a.targetEPSize(target)
 	joiningAllocationIDs, err := a.joiningAllocationIDs(ctx, groupID, target)
 	if err != nil {
 		return err
@@ -317,6 +338,7 @@ func (a *GrowthAdapter) Apply(
 		BaseTopology:         target.BaseTopology,
 		TargetEPSize:         targetSize,
 		JoiningAllocationIDs: joiningAllocationIDs,
+		Retiring:             retiringMembership(target.BaseTopology, target.Plan),
 		Phase:                enginegroup.MembershipTransitionPhasePending,
 	}
 	snapshot, err = a.Journal.Save(ctx, snapshot, state)
@@ -347,7 +369,7 @@ func (a *GrowthAdapter) Apply(
 	return nil
 }
 
-func (a *GrowthAdapter) observeState(ctx context.Context) (membershipJournal, kubejournal.Snapshot, ScaleState, error) {
+func (a *MembershipAdapter) observeState(ctx context.Context) (membershipJournal, kubejournal.Snapshot, ScaleState, error) {
 	if a.Client == nil || a.Capacity == nil {
 		return membershipJournal{}, kubejournal.Snapshot{}, ScaleState{}, fmt.Errorf("SGLang membership client and capacity observer are required")
 	}
@@ -375,7 +397,7 @@ func (a *GrowthAdapter) observeState(ctx context.Context) (membershipJournal, ku
 	return state, snapshot, engineState, nil
 }
 
-func (a *GrowthAdapter) validatePlan(
+func (a *MembershipAdapter) validatePlan(
 	base enginegroup.MembershipTopology,
 	plan enginegroup.ResolvedPlan,
 ) *enginegroup.Failure {
@@ -385,11 +407,37 @@ func (a *GrowthAdapter) validatePlan(
 	if plan.ProcessLifecycleOwner != enginegroup.ProcessLifecycleOwnerOrchestrator {
 		return terminalFailure("UnsupportedLifecycleOwner", "SGLang external joining capacity must be orchestrator-owned")
 	}
-	if plan.Change.Kind != enginegroup.PlanKindGrow || plan.Change.Grow == nil {
-		return terminalFailure("UnsupportedOperation", "the current SGLang adapter supports growth only")
+	if (plan.Change.Kind != enginegroup.PlanKindGrow || plan.Change.Grow == nil) &&
+		(plan.Change.Kind != enginegroup.PlanKindRetire || plan.Change.Retire == nil) {
+		return terminalFailure("UnsupportedOperation", "SGLang supports healthy append growth and complete suffix retirement only")
 	}
 	if a.MembersPerReplica < 1 {
 		return terminalFailure("InvalidProfile", "SGLang member width must be resolved before validating operations")
+	}
+	if plan.Change.Kind == enginegroup.PlanKindRetire {
+		if a.InitialEPSize < 2 {
+			return terminalFailure("InvalidProfile", "SGLang retirement requires the immutable initial EP size")
+		}
+		if len(plan.Change.Retire.Replicas) != 1 || base.ReplicaCount() < 2 ||
+			plan.Change.Retire.Replicas[0] != enginegroup.ReplicaID(fmt.Sprintf("replica-%d", base.ReplicaCount()-1)) {
+			return terminalFailure("UnsupportedRetirementSet", "SGLang retirement removes one complete highest-rank allocation, never the primary")
+		}
+		if (base.ReplicaCount()-1)*a.MembersPerReplica < a.InitialEPSize {
+			return terminalFailure("InitialWorldMinimum", "SGLang planned shrink must retain its complete initial world")
+		}
+		if plan.TrafficRequirement != enginegroup.TrafficRequirementEngineManagedDrain ||
+			plan.VerificationRequirement != enginegroup.VerificationRequirementRequired {
+			return terminalFailure("UnsafePlan", "SGLang retirement requires native graceful drain and verification of the survivors")
+		}
+		for rank := int32(0); rank < base.ReplicaCount(); rank++ {
+			id := enginegroup.ReplicaID(fmt.Sprintf("replica-%d", rank))
+			if !slices.ContainsFunc(base.Replicas, func(replica enginegroup.ReplicaMembership) bool {
+				return replica.ReplicaID == id && hasNativeMemberRange(replica.Members, rank*a.MembersPerReplica, a.MembersPerReplica)
+			}) {
+				return terminalFailure("UnsupportedRankLayout", "SGLang retirement requires healthy complete contiguous allocations")
+			}
+		}
+		return nil
 	}
 
 	// The native protocol admits one allocation per resize; it may contain several members.
@@ -412,6 +460,31 @@ func (a *GrowthAdapter) validatePlan(
 		return terminalFailure("UnsupportedRankLayout", "SGLang growth requires contiguous replica-N, slot-N, and dp-N identities")
 	}
 	return nil
+}
+
+func (a *MembershipAdapter) validateNativeCapabilities(ctx context.Context, plan enginegroup.ResolvedPlan) (*enginegroup.Failure, error) {
+	if a.Client == nil {
+		return nil, fmt.Errorf("SGLang membership requires a native control client")
+	}
+	state, err := a.Client.Observe(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Change.Kind == enginegroup.PlanKindGrow {
+		if state.MaxCommittedEPSize < state.EffectiveEPSize {
+			return nil, fmt.Errorf("SGLang must report a maximum committed EP size covering its current membership")
+		}
+		// Auto bootstrap appends never-used slots; reusing a retired range requires native recovery.
+		if state.MaxCommittedEPSize > state.EffectiveEPSize {
+			return terminalFailure("SlotRecoveryUnsupported", "native automatic bootstrap cannot refill previously occupied SGLang ranks"), nil
+		}
+		return nil, nil
+	}
+	// A growth-only engine, or self-exiting retirees, cannot satisfy the external release contract.
+	if state.RetireeLifecycle != "external" || state.SafeToTerminateRanks == nil {
+		return terminalFailure("NativeRetirementUnsupported", "SGLang must advertise external retiree lifecycle and exact safe-to-terminate ranks"), nil
+	}
+	return nil, nil
 }
 
 func nativeMemberIDs(first, width int32) []enginegroup.NativeMemberID {
@@ -438,7 +511,65 @@ func hasNativeMemberRange(members []enginegroup.NativeMemberIncarnation, first, 
 	return true
 }
 
-func (a *GrowthAdapter) joiningAllocationIDs(ctx context.Context, groupID enginegroup.GroupID, target enginegroup.MembershipTarget) ([]string, error) {
+func (a *MembershipAdapter) targetEPSize(target enginegroup.MembershipTarget) int32 {
+	size := (target.BaseTopology.ReplicaCount() + int32(len(target.Joining))) * a.MembersPerReplica
+	if target.Plan.Change.Kind == enginegroup.PlanKindRetire && target.Plan.Change.Retire != nil {
+		size -= int32(len(target.Plan.Change.Retire.Replicas)) * a.MembersPerReplica
+	}
+	return size
+}
+
+func retiringMembership(base enginegroup.MembershipTopology, plan enginegroup.ResolvedPlan) []enginegroup.ReplicaMembership {
+	if plan.Change.Kind != enginegroup.PlanKindRetire || plan.Change.Retire == nil {
+		return nil
+	}
+	var retiring []enginegroup.ReplicaMembership
+	for _, replica := range base.Replicas {
+		if slices.Contains(plan.Change.Retire.Replicas, replica.ReplicaID) {
+			retiring = append(retiring, enginegroup.ReplicaMembership{
+				ReplicaID: replica.ReplicaID, Members: slices.Clone(replica.Members),
+			})
+		}
+	}
+	return retiring
+}
+
+// retiredMembers returns native terminal drain evidence for the exact frozen process set.
+// A smaller effective size, including a successful commit, is insufficient by itself.
+func (a *MembershipAdapter) retiredMembers(ctx context.Context, native ScaleState) ([]enginegroup.ReplicaMembership, error) {
+	state := membershipJournal{}
+	_, err := a.Journal.Load(ctx, &state)
+	if err != nil {
+		return nil, err
+	}
+	if state.InstanceID != native.InstanceID {
+		return nil, fmt.Errorf("%w: native retirement belongs to a different SGLang runtime", enginegroup.ErrRecoveryRequired)
+	}
+	record := state.Transition
+	if record == nil || len(record.Retiring) == 0 || record.Phase != enginegroup.MembershipTransitionPhaseCommitted {
+		return nil, nil
+	}
+	if native.OperationID != record.TransitionID || native.TargetEPSize != record.TargetEPSize ||
+		native.EffectiveEPSize != record.TargetEPSize || native.Scaling || native.OperationSucceeded == nil || !*native.OperationSucceeded ||
+		native.RetireeLifecycle != "external" || native.Phase != "serving_shrunk" {
+		return nil, nil
+	}
+	for _, replica := range record.Retiring {
+		for _, member := range replica.Members {
+			if !slices.ContainsFunc(native.SafeToTerminateRanks, func(rank int32) bool {
+				return member.ID == enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", rank))
+			}) {
+				return nil, nil
+			}
+		}
+	}
+	return record.Retiring, nil
+}
+
+func (a *MembershipAdapter) joiningAllocationIDs(ctx context.Context, groupID enginegroup.GroupID, target enginegroup.MembershipTarget) ([]string, error) {
+	if target.Plan.Change.Kind == enginegroup.PlanKindRetire {
+		return nil, nil
+	}
 	// Native allocation IDs are downward-API Pod UIDs, not mutable names or logical replica IDs.
 	capacity, err := a.Capacity.Observe(ctx, groupID)
 	if err != nil {
@@ -463,7 +594,7 @@ func (a *GrowthAdapter) joiningAllocationIDs(ctx context.Context, groupID engine
 	return ids, nil
 }
 
-func (a *GrowthAdapter) persistRejection(
+func (a *MembershipAdapter) persistRejection(
 	ctx context.Context,
 	state membershipJournal,
 	snapshot kubejournal.Snapshot,
@@ -476,7 +607,7 @@ func (a *GrowthAdapter) persistRejection(
 		ControlRevision: target.ControlRevision,
 		TargetDigest:    target.TargetDigest,
 		BaseTopology:    target.BaseTopology,
-		TargetEPSize:    (target.BaseTopology.ReplicaCount() + int32(len(target.Joining))) * a.MembersPerReplica,
+		TargetEPSize:    a.targetEPSize(target),
 		Phase:           enginegroup.MembershipTransitionPhaseRejected,
 		Failure:         terminalFailure(reason, message),
 	}
