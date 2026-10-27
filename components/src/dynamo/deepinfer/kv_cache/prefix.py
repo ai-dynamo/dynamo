@@ -410,7 +410,6 @@ class PrefixCacheManager(NoopCacheManager):
         elif ssd_bytes:
             logger.warning("The prefix cache's SSD tier needs the host tier and a dir")
         self.ssd_wait_ms = max(0.0, float(ssd_wait_ms))
-        # Replaced by tests.
         self._now = time.monotonic
         self._blocks: dict[BlockHash, _Block] = {}
         # Eviction candidates: (key, tiebreak, block); stale entries are skipped.

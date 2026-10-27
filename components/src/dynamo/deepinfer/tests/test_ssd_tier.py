@@ -59,22 +59,15 @@ def test_rows_round_trip_byte_for_byte(pool):
     assert done.kind == "load" and done.error is None
     for want, got in zip(rows, out):
         assert np.array_equal(want, got)
-
-
-def test_neighbouring_slots_do_not_overlap(pool):
     # Slots are padded to 4 KiB, so O_DIRECT stays possible later.
     assert pool.stride == STRIDE and pool.stride % 4096 == 0
     assert os.path.getsize(pool.path) == pool.nbytes
-    full = [np.full(ROW_BYTES, v, dtype=np.uint8) for v in (1, 2, 3)]
-    for row, slot in zip(full, (0, 1, 2)):
-        pool.store([row], [slot])
-    drain(pool, 3)
     with open(pool.path, "rb") as f:
-        for slot, v in enumerate((1, 2, 3)):
+        for slot, row in zip(slots, rows):
             f.seek(slot * pool.stride)
             data = f.read(pool.stride)
-            assert set(data[:ROW_BYTES]) == {v}
-            assert set(data[ROW_BYTES:]) == {0}  # padding stays zero
+            assert np.array_equal(np.frombuffer(data[:ROW_BYTES], np.uint8), row)
+            assert not any(data[ROW_BYTES:])  # padding stays zero
 
 
 def test_inflight_writes_are_counted_until_they_finish(tmp_path):
