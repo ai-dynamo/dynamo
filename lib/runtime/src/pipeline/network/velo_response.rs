@@ -87,37 +87,37 @@ const PEER_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// three to four missed heartbeats.
 const RESPONSE_HEARTBEAT_MS: u64 = 1_000;
 
-fn response_heartbeat() -> Result<Duration> {
-    use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_HEARTBEAT_MS;
+/// Reads the setting `name`, or returns `default` when it is unset.
+fn env_setting<T>(
+    name: &str,
+    default: T,
+    expected: &str,
+    parse: impl FnOnce(&str) -> Option<T>,
+) -> Result<T> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Ok(value) => parse(&value).ok_or_else(|| anyhow::anyhow!("{name} must be {expected}")),
+        Err(error) => bail!("{name}: {error}"),
+    }
+}
 
-    let heartbeat_ms = match std::env::var(DYN_VELO_RESPONSE_HEARTBEAT_MS) {
-        Err(std::env::VarError::NotPresent) => RESPONSE_HEARTBEAT_MS,
-        Ok(value) => value
-            .parse::<u64>()
-            .ok()
-            .filter(|ms| *ms > 0)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{DYN_VELO_RESPONSE_HEARTBEAT_MS} must be a positive integer in milliseconds"
-                )
-            })?,
-        Err(error) => bail!("{DYN_VELO_RESPONSE_HEARTBEAT_MS}: {error}"),
-    };
-    Ok(Duration::from_millis(heartbeat_ms))
+fn response_heartbeat() -> Result<Duration> {
+    env_setting(
+        crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_HEARTBEAT_MS,
+        RESPONSE_HEARTBEAT_MS,
+        "a positive integer in milliseconds",
+        |value| value.parse().ok().filter(|ms| *ms > 0),
+    )
+    .map(Duration::from_millis)
 }
 
 fn response_mux_config() -> Result<MuxConfig> {
-    use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_BATCH_MS;
-
-    let batch_ms = match std::env::var(DYN_VELO_RESPONSE_BATCH_MS) {
-        Err(std::env::VarError::NotPresent) => 5,
-        Ok(value) => value.parse::<u64>().map_err(|_| {
-            anyhow::anyhow!(
-                "{DYN_VELO_RESPONSE_BATCH_MS} must be a non-negative integer in milliseconds"
-            )
-        })?,
-        Err(error) => bail!("{DYN_VELO_RESPONSE_BATCH_MS}: {error}"),
-    };
+    let batch_ms: u64 = env_setting(
+        crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_BATCH_MS,
+        5,
+        "a non-negative integer in milliseconds",
+        |value| value.parse().ok(),
+    )?;
     Ok(MuxConfig {
         enabled: true,
         initial_credit: RESPONSE_CREDIT_WINDOW,
@@ -155,15 +155,12 @@ pub(crate) fn reject_tls_settings() -> Result<()> {
 }
 
 fn response_port() -> Result<u16> {
-    use crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_PORT;
-
-    match std::env::var(DYN_VELO_RESPONSE_PORT) {
-        Err(std::env::VarError::NotPresent) => Ok(0),
-        Ok(value) => value.parse::<u16>().map_err(|_| {
-            anyhow::anyhow!("{DYN_VELO_RESPONSE_PORT} must be a port number from 0 to 65535")
-        }),
-        Err(error) => bail!("{DYN_VELO_RESPONSE_PORT}: {error}"),
-    }
+    env_setting(
+        crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_PORT,
+        0,
+        "a port number from 0 to 65535",
+        |value| value.parse().ok(),
+    )
 }
 
 fn tcp_transport(address: SocketAddr) -> Result<velo::transports::tcp::TcpTransport> {
@@ -175,15 +172,16 @@ fn tcp_transport(address: SocketAddr) -> Result<velo::transports::tcp::TcpTransp
 
 impl ResponseTransport {
     fn configured() -> Result<Self> {
-        match std::env::var(
+        env_setting(
             crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_TRANSPORT,
+            Self::Tcp,
+            "tcp or ucx",
+            |value| match value {
+                "tcp" => Some(Self::Tcp),
+                "ucx" => Some(Self::Ucx),
+                _ => None,
+            },
         )
-        .as_deref()
-        {
-            Err(std::env::VarError::NotPresent) | Ok("tcp") => Ok(Self::Tcp),
-            Ok("ucx") => Ok(Self::Ucx),
-            _ => bail!("DYN_VELO_RESPONSE_TRANSPORT must be tcp or ucx"),
-        }
     }
 }
 
@@ -729,51 +727,6 @@ impl VeloResponseService {
         }
     }
 
-    pub async fn associate_instance(&self, id: Uuid, instance: &EndpointInstanceId) -> bool {
-        let mut state = self.registrations.lock();
-        if state.tombstones.contains(instance) {
-            let registration = state.take(id);
-            drop(state);
-            if let Some(registration) = registration {
-                registration.cancel();
-            }
-            return false;
-        }
-        if let Some(request) = state.requests.get_mut(&id) {
-            debug_assert!(request.instance.is_none(), "registration associated twice");
-            request.instance = Some(instance.clone());
-            state
-                .instance_requests
-                .entry(instance.clone())
-                .or_default()
-                .insert(id);
-        }
-        true
-    }
-
-    pub async fn cancel_response(&self, id: Uuid) {
-        self.remove(id);
-    }
-
-    pub async fn cancel_instance_streams(&self, instance: &EndpointInstanceId) -> usize {
-        let registrations = {
-            let mut state = self.registrations.lock();
-            state.tombstones.insert(instance);
-            let ids = state.instance_requests.remove(instance).unwrap_or_default();
-            ids.into_iter()
-                .filter_map(|id| state.requests.remove(&id))
-                .collect::<Vec<_>>()
-        };
-        for registration in &registrations {
-            registration.cancel();
-        }
-        registrations.len()
-    }
-
-    pub async fn clear_instance_tombstone(&self, instance: &EndpointInstanceId) {
-        self.registrations.lock().tombstones.remove(instance);
-    }
-
     /// `address` is the peer's base64 `WorkerAddress`, decoded only if the peer
     /// is not prepared yet. The lease is taken under the map guard, so the
     /// sweep cannot evict the peer while it is in use.
@@ -921,19 +874,48 @@ impl RegisteredResponsePlane for VeloResponseService {
     }
 
     async fn associate_instance(&self, id: Uuid, instance: &EndpointInstanceId) -> bool {
-        VeloResponseService::associate_instance(self, id, instance).await
+        let mut state = self.registrations.lock();
+        if state.tombstones.contains(instance) {
+            let registration = state.take(id);
+            drop(state);
+            if let Some(registration) = registration {
+                registration.cancel();
+            }
+            return false;
+        }
+        if let Some(request) = state.requests.get_mut(&id) {
+            debug_assert!(request.instance.is_none(), "registration associated twice");
+            request.instance = Some(instance.clone());
+            state
+                .instance_requests
+                .entry(instance.clone())
+                .or_default()
+                .insert(id);
+        }
+        true
     }
 
     async fn cancel_response(&self, id: Uuid) {
-        VeloResponseService::cancel_response(self, id).await;
+        self.remove(id);
     }
 
     async fn cancel_instance_streams(&self, instance: &EndpointInstanceId) -> usize {
-        VeloResponseService::cancel_instance_streams(self, instance).await
+        let registrations = {
+            let mut state = self.registrations.lock();
+            state.tombstones.insert(instance);
+            let ids = state.instance_requests.remove(instance).unwrap_or_default();
+            ids.into_iter()
+                .filter_map(|id| state.requests.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        for registration in &registrations {
+            registration.cancel();
+        }
+        registrations.len()
     }
 
     async fn clear_instance_tombstone(&self, instance: &EndpointInstanceId) {
-        VeloResponseService::clear_instance_tombstone(self, instance).await;
+        self.registrations.lock().tombstones.remove(instance);
     }
 }
 

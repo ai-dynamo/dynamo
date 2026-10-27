@@ -60,31 +60,6 @@ fn velo_response_drain_window() -> Duration {
 /// How long Velo responses still open after that window get to finish.
 const VELO_RESPONSE_DRAIN_HEADROOM: Duration = Duration::from_secs(10);
 
-/// Velo bounds its own drain to five seconds; leave headroom for transport close.
-const VELO_RESPONSE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Run teardown in its own task, so a hang or panic cannot keep the caller
-/// from reaching the next shutdown phase. On timeout the task is detached,
-/// not cancelled.
-async fn bounded_teardown(
-    name: &str,
-    timeout: Duration,
-    teardown: impl Future<Output = ()> + Send + 'static,
-) {
-    match tokio::time::timeout(timeout, tokio::spawn(teardown)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::error!(%error, "{name} shutdown failed; proceeding with runtime teardown");
-        }
-        Err(_) => {
-            tracing::error!(
-                timeout_secs = timeout.as_secs(),
-                "{name} shutdown timed out; proceeding with runtime teardown"
-            );
-        }
-    }
-}
-
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeType {
@@ -455,18 +430,12 @@ impl Runtime {
             // The main token also starts the HTTP drain, so close the response
             // service only after that drain and its streams finish. Other
             // Runtime owners in this process keep their shared service alive.
-            let window = velo_response_drain_window();
-            bounded_teardown(
-                "Velo response service",
-                window + VELO_RESPONSE_DRAIN_HEADROOM + VELO_RESPONSE_SHUTDOWN_TIMEOUT,
-                async move {
-                    velo_response_service
-                        .drain(window, VELO_RESPONSE_DRAIN_HEADROOM)
-                        .await;
-                    velo_response_service.shutdown().await
-                },
-            )
-            .await;
+            // The main token is already cancelled and nothing awaits this task,
+            // so a slow close cannot hold up shutdown.
+            velo_response_service
+                .drain(velo_response_drain_window(), VELO_RESPONSE_DRAIN_HEADROOM)
+                .await;
+            velo_response_service.shutdown().await;
         });
     }
 }
@@ -559,26 +528,6 @@ mod tests {
                 assert_eq!(tracker.get_count(), 1);
             },
         )
-        .await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn bounded_teardown_returns_after_timeout() {
-        let started = tokio::time::Instant::now();
-        bounded_teardown(
-            "test",
-            Duration::from_secs(10),
-            std::future::pending::<()>(),
-        )
-        .await;
-        assert!(started.elapsed() >= Duration::from_secs(10));
-    }
-
-    #[tokio::test]
-    async fn bounded_teardown_isolates_panics() {
-        bounded_teardown("test", Duration::from_secs(10), async {
-            panic!("teardown failed");
-        })
         .await;
     }
 }
