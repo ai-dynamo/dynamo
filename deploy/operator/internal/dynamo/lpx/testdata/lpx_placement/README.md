@@ -22,6 +22,9 @@ Each fixture directory holds:
 - `name`: the directory name.
 - `kind`: `compiled` (a real GBuild compile) or `builder` (written by GBuild's
   manifest builder from partition facts, for a shape that no preset compiles).
+  A `builder` execution gives every chip one placeholder `continue` stage, so
+  runtime manifest readers read it as written. It has no GAS files, so no
+  runtime can run it.
 - `buildId` (compiled) or `generator` (builder): where the bytes come from.
   A compiled bundle lives at
   `gs://bkt-p-lpu-models-registry-us-central1-460c/<buildId>/`.
@@ -98,5 +101,6 @@ Run the export tool from the repository root. It writes the contract files and
    ```
 
 The test checks the hashes, compares each deployment's `lpuUnits` with the
-reviewed `units`, runs the deployment and execution consistency checks, and
-regenerates the builder fixtures to confirm that their bytes are unchanged.
+reviewed `units`, runs the deployment and execution consistency checks, checks
+that every LPU chip program has a stage, and regenerates the builder fixtures to
+confirm that their bytes are unchanged.

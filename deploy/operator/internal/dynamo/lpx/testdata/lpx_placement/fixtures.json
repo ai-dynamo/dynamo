@@ -70,10 +70,10 @@
       "name": "f5c-lp20-lpu-nochain-2p",
       "kind": "builder",
       "generator": "//Groq/GBuild/test/unit:export_lpx_placement_fixtures generate",
-      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "gbuildCommit": "35b8ca1aa25fc646ca64c8dee7a8762284127e87",
       "files": {
-        "deployment.v1.capnp.bin": "3f3b9a8929d593d95fb63cb9a9db326d173c916be1adf1d5c1f2c59f02e15902",
-        "execution.v1.capnp.bin": "d986cfd029494cadddf13c2e7289a5ca4f13481834ec7df408d3d833005490f9",
+        "deployment.v1.capnp.bin": "e3fd5a9c6b8d6295d2d31e17eb18f1137183407df6c39f7b63933f5ae3d38ff3",
+        "execution.v1.capnp.bin": "f63483aef3e0be3b35c2596e1922be99799e2bd3bc038b6c967139986d03ef34",
         "expected-placement.json": "4966204da9774bfad0070d90078b64628d1a79c1aad1a8fc4d96d1544062d776"
       }
     },
@@ -136,10 +136,10 @@
       "name": "f9-lp30-lpu-chain",
       "kind": "builder",
       "generator": "//Groq/GBuild/test/unit:export_lpx_placement_fixtures generate",
-      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "gbuildCommit": "35b8ca1aa25fc646ca64c8dee7a8762284127e87",
       "files": {
-        "deployment.v1.capnp.bin": "5686f6fb79deef2b8e218d5e63ed86223561fb264a72012b8efef9ad290d8f92",
-        "execution.v1.capnp.bin": "af4309eae0915108ad6f85d87c5ecdd67fcb3454c6e6c4164faec9b12db2e70e",
+        "deployment.v1.capnp.bin": "25685b6b3606dddd8bc5ceaa11ea643bd849b7892ed85bd1ef9a6e8b25fe47f7",
+        "execution.v1.capnp.bin": "5f71a7fe30e45ceb0f6b0e1881bb077f4062833a10c9482103c358341b36bb7f",
         "expected-placement.json": "e0cb71079942e079dfab06559a675b37271bf2b23f84ec9a12960c71a4567b79"
       }
     },
@@ -147,10 +147,10 @@
       "name": "f9b-lp30-lpu-chain-32c",
       "kind": "builder",
       "generator": "//Groq/GBuild/test/unit:export_lpx_placement_fixtures generate",
-      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "gbuildCommit": "35b8ca1aa25fc646ca64c8dee7a8762284127e87",
       "files": {
-        "deployment.v1.capnp.bin": "80da148f9d040c1f86d89ca852606def5151c557ef1f4d3f5b9a0fe47431b3b2",
-        "execution.v1.capnp.bin": "a752687e93c57a21e65056317b97514334d8b20fcb01f272da0e2530d813a234",
+        "deployment.v1.capnp.bin": "56ee20304d7b54e44d401892abe8962ca25da9fe30f29ec2fd026edd50c404ab",
+        "execution.v1.capnp.bin": "8268dbab50b11b7adf6cbb0817c6f7881b0553fad6738ca880787f6707360ab6",
         "expected-placement.json": "6ab61adfb25bd1c7fa79c500e912aac1e143350eace2902238ba430f0dd905de"
       }
     },
