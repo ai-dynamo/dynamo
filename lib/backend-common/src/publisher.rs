@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::kv_router::publisher::{
@@ -28,6 +29,9 @@ use crate::engine::KvEventSource;
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::metrics::{ComponentGauges, EngineMetrics};
 use crate::snapshot_publisher::SnapshotPublisher;
+
+/// Bounds KV teardown so a stalled publisher cannot block recovery or exit.
+const KV_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Live publisher handles owned by `Worker` for the lifetime of serving.
 pub(crate) struct PublisherHandles {
@@ -44,15 +48,20 @@ pub(crate) struct PublisherHandles {
 impl PublisherHandles {
     /// Stop every KV publisher, reporting the first failure after all have stopped.
     pub(crate) async fn stop_kv(&mut self) -> Result<(), DynamoError> {
-        let mut result = Ok(());
-        for publisher in self.kv_publishers.drain(..) {
-            if let Err(e) = publisher.stop_and_wait().await
-                && result.is_ok()
-            {
-                result = Err(publisher_err(format!("KV publisher shutdown: {e}")));
+        let publishers = std::mem::take(&mut self.kv_publishers);
+        tokio::time::timeout(KV_STOP_TIMEOUT, async {
+            let mut result = Ok(());
+            for publisher in publishers {
+                if let Err(e) = publisher.stop_and_wait().await
+                    && result.is_ok()
+                {
+                    result = Err(publisher_err(format!("KV publisher shutdown: {e}")));
+                }
             }
-        }
-        result
+            result
+        })
+        .await
+        .unwrap_or_else(|_| Err(publisher_err("KV publisher shutdown timed out".into())))
     }
 
     pub(crate) fn replace_kv(

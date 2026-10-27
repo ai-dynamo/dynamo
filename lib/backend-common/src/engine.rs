@@ -350,11 +350,11 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Optionally recover a failed startup gate. Called before registration,
-    /// after the worker drops the failed attempt's publishers and local indexes.
-    /// Return fresh metadata to attach new publishers and retry the startup gate.
+    /// Optionally recover a failed startup gate before registration.
+    /// Same-instance recovery keeps the publishers and retries the startup gate;
+    /// replacement metadata causes fresh KV publishers and another startup gate.
     /// The default preserves fail-fast startup for other engines.
-    async fn recover_startup(&self) -> Result<Option<EngineConfig>, DynamoError> {
+    async fn recover_startup(&self) -> Result<Option<EngineRecovery>, DynamoError> {
         Ok(None)
     }
 

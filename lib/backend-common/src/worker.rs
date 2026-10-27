@@ -380,7 +380,7 @@ impl EngineKind {
         }
     }
 
-    async fn recover_startup(&self) -> Result<Option<EngineConfig>, DynamoError> {
+    async fn recover_startup(&self) -> Result<Option<EngineRecovery>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.recover_startup().await,
             EngineKind::Raw(_) => Ok(None),
@@ -1086,12 +1086,15 @@ impl Worker {
                 Ok(()) => return Ok(config),
                 Err(error) => error,
             };
-            self.stop_kv_publishers().await?;
-            config = match self.engine.recover_startup().await? {
-                Some(config) => config,
+            match self.engine.recover_startup().await? {
                 None => return Err(failure),
-            };
-            self.replace_kv_publishers(endpoint, &config).await?;
+                Some(EngineRecovery::SameInstance) => {}
+                Some(EngineRecovery::Replacement(replacement)) => {
+                    config = *replacement;
+                    self.stop_kv_publishers().await?;
+                    self.replace_kv_publishers(endpoint, &config).await?;
+                }
+            }
         }
     }
 
@@ -5025,6 +5028,8 @@ mod handoff_and_lifecycle_tests {
     struct RetryingStartupEngine {
         stage: tokio::sync::watch::Receiver<u8>,
         attempts: std::sync::atomic::AtomicUsize,
+        is_replacement: bool,
+        source_requests: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
@@ -5057,87 +5062,107 @@ mod handoff_and_lifecycle_tests {
             stage.wait_for(|value| *value >= 2).await.unwrap();
             Ok(())
         }
-        async fn recover_startup(&self) -> Result<Option<EngineConfig>, DynamoError> {
+        async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+            self.source_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        async fn recover_startup(&self) -> Result<Option<EngineRecovery>, DynamoError> {
             let mut stage = self.stage.clone();
             stage.wait_for(|value| *value >= 1).await.unwrap();
-            Ok(Some(EngineConfig {
-                model: "recovery-test".into(),
-                ..Default::default()
+            Ok(Some(if self.is_replacement {
+                EngineRecovery::Replacement(Box::new(EngineConfig {
+                    model: "recovery-test".into(),
+                    ..Default::default()
+                }))
+            } else {
+                EngineRecovery::SameInstance
             }))
         }
     }
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn startup_recovery_stays_unready_until_replacement_gate_passes() {
+    async fn startup_recovery_stays_unready_until_the_retried_gate_passes() {
         with_each_health_route_shape(|| async {
-            let endpoint = test_local_endpoint().await;
-            let health = endpoint.drt().system_health();
-            let (stage, rx) = tokio::sync::watch::channel(0);
-            let engine = Arc::new(RetryingStartupEngine {
-                stage: rx,
-                attempts: std::sync::atomic::AtomicUsize::new(0),
-            });
-            let mut worker = Worker::new(engine.clone(), WorkerConfig::default());
-            let shutdown = CancellationToken::new();
-            let serve = tokio::spawn({
-                let endpoint = endpoint.clone();
-                let shutdown = shutdown.clone();
-                async move {
-                    worker
-                        .serve_with_orchestrator(
-                            &EngineConfig {
-                                model: "recovery-test".into(),
-                                ..Default::default()
-                            },
-                            endpoint,
-                            shutdown,
-                        )
-                        .await
-                }
-            });
-            let id = endpoint.id();
-            let query = DiscoveryQuery::Endpoint {
-                namespace: id.namespace,
-                component: id.component,
-                endpoint: id.name,
-            };
-            for attempt in [1, 2] {
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    while engine.attempts.load(std::sync::atomic::Ordering::SeqCst) < attempt {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
+            for is_replacement in [false, true] {
+                let endpoint = test_local_endpoint().await;
+                let health = endpoint.drt().system_health();
+                let (stage, rx) = tokio::sync::watch::channel(0);
+                let engine = Arc::new(RetryingStartupEngine {
+                    stage: rx,
+                    attempts: std::sync::atomic::AtomicUsize::new(0),
+                    is_replacement,
+                    source_requests: std::sync::atomic::AtomicUsize::new(0),
+                });
+                let mut worker = Worker::new(engine.clone(), WorkerConfig::default());
+                let shutdown = CancellationToken::new();
+                let serve = tokio::spawn({
+                    let endpoint = endpoint.clone();
+                    let shutdown = shutdown.clone();
+                    async move {
+                        worker
+                            .serve_with_orchestrator(
+                                &EngineConfig {
+                                    model: "recovery-test".into(),
+                                    ..Default::default()
+                                },
+                                endpoint,
+                                shutdown,
+                            )
+                            .await
                     }
-                })
-                .await
-                .unwrap();
-                assert!(!health.lock().get_health_status().0);
+                });
+                let id = endpoint.id();
+                let query = DiscoveryQuery::Endpoint {
+                    namespace: id.namespace,
+                    component: id.component,
+                    endpoint: id.name,
+                };
+                for attempt in [1, 2] {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while engine.attempts.load(std::sync::atomic::Ordering::SeqCst) < attempt {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(!health.lock().get_health_status().0);
+                    assert!(
+                        endpoint
+                            .drt()
+                            .discovery()
+                            .list(query.clone())
+                            .await
+                            .unwrap()
+                            .is_empty()
+                    );
+                    stage.send_replace(attempt as u8);
+                }
+                assert!(health_reaches(&health, true).await);
                 assert!(
-                    endpoint
+                    !endpoint
                         .drt()
                         .discovery()
-                        .list(query.clone())
+                        .list(query)
                         .await
                         .unwrap()
                         .is_empty()
                 );
-                stage.send_replace(attempt as u8);
-            }
-            assert!(health_reaches(&health, true).await);
-            assert!(
-                !endpoint
-                    .drt()
-                    .discovery()
-                    .list(query)
+                // Only a replacement asks for fresh KV sources; the same engine keeps its publishers.
+                assert_eq!(
+                    engine
+                        .source_requests
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    usize::from(is_replacement)
+                );
+                shutdown.cancel();
+                tokio::time::timeout(Duration::from_secs(120), serve)
                     .await
                     .unwrap()
-                    .is_empty()
-            );
-            shutdown.cancel();
-            tokio::time::timeout(Duration::from_secs(120), serve)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+                    .unwrap()
+                    .unwrap();
+            }
         })
         .await;
     }
