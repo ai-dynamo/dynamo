@@ -64,13 +64,13 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 			t.Fatalf("got %+v", got)
 		}
 	})
-	t.Run("complete hardware never asks the cluster", func(t *testing.T) {
-		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 4, NodesWithGPUs: 1}}
+	t.Run("complete hardware verifies its SKU against the cluster", func(t *testing.T) {
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "b200_sxm", GPUsPerNode: 4, NodesWithGPUs: 1}}
 		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d.calls != 0 || !(got == hardwareDefaultsV1beta2{}) {
+		if d.calls != 1 || d.filter != "b200_sxm" || !(got == hardwareDefaultsV1beta2{}) {
 			t.Fatalf("calls=%d got=%+v", d.calls, got)
 		}
 	})
@@ -240,9 +240,9 @@ func TestResolveHardwareByOperationV1beta2(t *testing.T) {
 		{"removing all typed hardware discovers both", admissionv1.Update,
 			full(), hardwareSpecV1beta2(nil, nil),
 			hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8}, 1, ""},
-		{"changing to complete hardware does not discover", admissionv1.Update,
+		{"changing to complete hardware verifies the new SKU", admissionv1.Update,
 			full(), hardwareSpecV1beta2(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))),
-			hardwareDefaultsV1beta2{}, 0, ""},
+			hardwareDefaultsV1beta2{}, 1, "b200_sxm"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -143,13 +143,15 @@ type WorkloadSpec struct {
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
 
-// ObjectiveMode selects scalar optimization or a multi-objective Pareto search.
-// +kubebuilder:validation:Enum=Optimize;Pareto
+// ObjectiveMode selects the optimization mode. Pareto is reserved for a future
+// release and is not admitted until Candidate publication supports Pareto fronts.
+// +kubebuilder:validation:Enum=Optimize
 type ObjectiveMode string
 
 const (
 	ObjectiveModeOptimize ObjectiveMode = "Optimize"
-	ObjectiveModePareto   ObjectiveMode = "Pareto"
+	// ObjectiveModePareto is reserved for the future Pareto API implementation.
+	ObjectiveModePareto ObjectiveMode = "Pareto"
 )
 
 // ObjectiveMetric is a metric optimized by AISimulate.
@@ -179,13 +181,11 @@ type ObjectiveSLASpec struct {
 	E2EMs *float64 `json:"e2eMs,omitempty"`
 }
 
-// ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
-// +kubebuilder:validation:XValidation:rule="!has(self.mode) || (self.mode == 'Optimize' && !has(self.metrics)) || (self.mode == 'Pareto' && !has(self.metric) && has(self.metrics))",message="Optimize accepts only metric; Pareto requires metrics"
-// +kubebuilder:validation:XValidation:rule="!has(self.metrics) || (size(self.metrics) == 2 && self.metrics.exists(m, m == 'ThroughputPerGPU') && self.metrics.exists(m, m == 'ThroughputPerUser'))",message="Pareto supports exactly ThroughputPerGPU and ThroughputPerUser"
+// ObjectiveSpec defines scalar optimization. Pareto fields are reserved for a future release.
+// +kubebuilder:validation:XValidation:rule="!has(self.metrics)",message="metrics is reserved for the future Pareto implementation"
 // +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
-// +kubebuilder:validation:XValidation:rule="!(has(self.metrics) && self.metrics.exists(m, m in ['Goodput', 'GoodputPerGPU'])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound"
 type ObjectiveSpec struct {
-	// Mode selects scalar optimization or a Pareto search.
+	// Mode selects scalar optimization. Only Optimize is currently supported.
 	// +optional
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
@@ -194,9 +194,7 @@ type ObjectiveSpec struct {
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
-	// Metrics selects AISimulate's public Pareto objective pair when mode is Pareto.
-	// The configured AISimulate release supports exactly ThroughputPerGPU and
-	// ThroughputPerUser through its public recommendation input.
+	// Metrics is reserved for the future Pareto implementation.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
 	// +kubebuilder:validation:MaxItems=2
@@ -215,8 +213,14 @@ type AISimulateSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
 	// the typed fields. It uses the upstream AISimulate JSON contract, including
 	// snake_case names. Values here take precedence, and null deletes a lowered
-	// field. The operator runs the AISimulate version from its configured planner
-	// image; Requests and Runs cannot select a different image or version.
+	// field. The dgdr_run member must remain an object, and its operator-owned
+	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
+	// runtime_image, runtime_version_override, derive_runtime_images,
+	// num_gpus_per_node, and namespace are operator-owned. Request admission
+	// rejects them, and the Run controller enforces its values while lowering the
+	// immutable snapshot. The operator runs the AISimulate version from its
+	// configured planner image; Requests and Runs cannot select a different image
+	// or version.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -226,7 +230,7 @@ type AISimulateSpec struct {
 // RecommendationSpec controls bounded projection into DGDC resources.
 type RecommendationSpec struct {
 	// MaxCandidates is the maximum number of DGDCs owned by one run. Scalar
-	// candidates are ordered best first; Pareto candidates have no scalar rank.
+	// candidates are ordered best first.
 	// This field does not limit internal trials.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
@@ -263,9 +267,9 @@ type NativeSearchInput struct {
 	// +optional
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
-	// Objective defines scalar optimization or a multi-objective Pareto search.
-	// When omitted, admission supplies the object. Its mode defaults to Optimize, and admission
-	// supplies the conditional scalar metric.
+	// Objective defines scalar optimization. When omitted,
+	// admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults
+	// to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms.
 	// +optional
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 

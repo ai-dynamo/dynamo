@@ -123,6 +123,12 @@ func (f *fakeHardwareDiscoverer) Discover(context.Context, nvidiacomv1beta1.GPUS
 	return &found, f.err
 }
 
+func setAdmissionH100Topology() {
+	admissionHardware.set(gpu.GPUInfo{
+		System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1,
+	}, nil)
+}
+
 type mutableFeatureGate struct {
 	mu    sync.RWMutex
 	gates features.Gate
@@ -298,6 +304,8 @@ func admissionResource(t *testing.T, kind string) string {
 		return "dynamographdeployments"
 	case "DynamoGraphDeploymentRequest":
 		return "dynamographdeploymentrequests"
+	case "DynamoGraphDeploymentRun":
+		return "dynamographdeploymentruns"
 	default:
 		t.Fatalf("unsupported admission kind %q", kind)
 		return ""
@@ -324,6 +332,8 @@ func admissionGVK(t *testing.T, object runtime.Object) schema.GroupVersionKind {
 		return nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK
 	case *nvidiacomv1beta2.DynamoGraphDeploymentRequest:
 		return nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK
+	case *nvidiacomv1beta2.DynamoGraphDeploymentRun:
+		return nvidiacomv1beta2.DynamoGraphDeploymentRunGVK
 	default:
 		t.Fatalf("unsupported admission object type %T", object)
 		return schema.GroupVersionKind{}

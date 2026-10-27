@@ -4546,7 +4546,7 @@ planner image.
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="inputOverrides" type="RawExtension">
-InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISimulate JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The operator runs the AISimulate version from its configured planner image; Requests and Runs cannot select a different image or version.
+InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISimulate JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The dgdr_run member must remain an object, and its operator-owned transport, identity, and runtime fields name, max_candidates, snapshot_dir, runtime_image, runtime_version_override, derive_runtime_images, num_gpus_per_node, and namespace are operator-owned. Request admission rejects them, and the Run controller enforces its values while lowering the immutable snapshot. The operator runs the AISimulate version from its configured planner image; Requests and Runs cannot select a different image or version.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
@@ -4817,7 +4817,7 @@ See [WorkloadSpec](#v1beta2-workloadspec).
 </ParamField>
 
 <ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search. When omitted, admission supplies the object. Its mode defaults to Optimize, and admission supplies the conditional scalar metric.
+Objective defines scalar optimization. When omitted, admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4899,7 +4899,7 @@ See [WorkloadSpec](#v1beta2-workloadspec).
 </ParamField>
 
 <ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search. When omitted, admission supplies the object. Its mode defaults to Optimize, and admission supplies the conditional scalar metric.
+Objective defines scalar optimization. When omitted, admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5021,7 +5021,7 @@ See [WorkloadSpec](#v1beta2-workloadspec).
 </ParamField>
 
 <ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search. When omitted, admission supplies the object. Its mode defaults to Optimize, and admission supplies the conditional scalar metric.
+Objective defines scalar optimization. When omitted, admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5252,7 +5252,7 @@ See [WorkloadSpec](#v1beta2-workloadspec).
 </ParamField>
 
 <ParamField path="objective" type="ObjectiveSpec">
-Objective defines scalar optimization or a multi-objective Pareto search. When omitted, admission supplies the object. Its mode defaults to Optimize, and admission supplies the conditional scalar metric.
+Objective defines scalar optimization. When omitted, admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms.
 See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5281,18 +5281,19 @@ ObjectiveMetric is a metric optimized by AISimulate.
 </Accordion>
 
 <Accordion id="objectivemode" title="ObjectiveMode">
-ObjectiveMode selects scalar optimization or a multi-objective Pareto search.
+ObjectiveMode selects the optimization mode. Pareto is reserved for a future
+release and is not admitted until Candidate publication supports Pareto fronts.
 
 
 **Kind:** `enum`
 **Underlying type:** `string`
-**Validation:** Enum: [Optimize Pareto]
+**Validation:** Enum: [Optimize]
 **Appears in:** [ObjectiveSpec](#objectivespec)
 
 **Allowed values**
 
 - <Badge intent="note" minimal>Optimize</Badge>
-- <Badge intent="note" minimal>Pareto</Badge>
+- <Badge intent="note" minimal>Pareto</Badge> ObjectiveModePareto is reserved for the future Pareto API implementation.
 </Accordion>
 
 <Accordion id="objectiveslaspec" title="ObjectiveSLASpec">
@@ -5320,16 +5321,16 @@ E2EMs is an alternative end-to-end bound in milliseconds.
 </Accordion>
 
 <Accordion id="objectivespec" title="ObjectiveSpec">
-ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
+ObjectiveSpec defines scalar optimization. Pareto fields are reserved for a future release.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="mode" type="ObjectiveMode">
-Mode selects scalar optimization or a Pareto search.
+Mode selects scalar optimization. Only Optimize is currently supported.
 See [ObjectiveMode](#objectivemode).
-**Validation:** Enum: [Optimize Pareto]  Optional: \&#123;\&#125;
+**Validation:** Enum: [Optimize]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="metric" type="ObjectiveMetric">
@@ -5339,7 +5340,7 @@ See [ObjectiveMetric](#objectivemetric).
 </ParamField>
 
 <ParamField path="metrics" type="ObjectiveMetric array">
-Metrics selects AISimulate's public Pareto objective pair when mode is Pareto. The configured AISimulate release supports exactly ThroughputPerGPU and ThroughputPerUser through its public recommendation input.
+Metrics is reserved for the future Pareto implementation.
 See [ObjectiveMetric](#objectivemetric).
 **Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MaxItems: 2  MinItems: 2  Optional: \&#123;\&#125;
 </ParamField>
@@ -5359,7 +5360,7 @@ RecommendationSpec controls bounded projection into DGDC resources.
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="maxCandidates" type="integer">
-MaxCandidates is the maximum number of DGDCs owned by one run. Scalar candidates are ordered best first; Pareto candidates have no scalar rank. This field does not limit internal trials.
+MaxCandidates is the maximum number of DGDCs owned by one run. Scalar candidates are ordered best first. This field does not limit internal trials.
 **Validation:** Maximum: 100  Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

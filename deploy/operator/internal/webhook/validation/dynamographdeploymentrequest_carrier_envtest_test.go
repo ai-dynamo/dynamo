@@ -31,6 +31,7 @@ func carrierRoundTrip(t *testing.T, ownerFixture, otherFixture runtime.Object, c
 	t.Helper()
 	env := admissionEnv.ForTest(t)
 	admissionGate.set(features.Gates{GPUDiscovery: true})
+	setAdmissionH100Topology()
 	warnings := &warningRecorder{}
 	ownerClient := newAdmissionResourceClient(t, env, ownerFixture, "", warnings)
 	otherClient := newAdmissionResourceClient(t, env, otherFixture, "", warnings)

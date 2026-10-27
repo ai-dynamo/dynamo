@@ -39,12 +39,25 @@ func validateDynamoGraphDeploymentRequestEnvelopeV1beta2(
 	if err := json.Unmarshal(raw.Raw, &spec); err != nil {
 		return field.ErrorList{field.Invalid(fldPath, "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
 	}
+
+	allErrs := validateDynamoGraphDeploymentRequestSpecV1beta2(&spec, field.NewPath("spec"))
 	if _, err := aisimulate.Lower(&spec.NativeSearchInput); err != nil {
-		return field.ErrorList{field.Invalid(
+		allErrs = append(allErrs, field.Invalid(
 			field.NewPath("spec"),
 			"<redacted>",
 			"cannot be lowered to the public AISimulate recommendation input: "+err.Error(),
-		)}
+		))
 	}
-	return nil
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentRequestSpecV1beta2 validates spec. spec and fldPath must not be nil.
+func validateDynamoGraphDeploymentRequestSpecV1beta2(
+	spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.AISimulate == nil {
+		return nil
+	}
+	return validateAISimulateSpec(spec.AISimulate, fldPath.Child("aisimulate"))
 }

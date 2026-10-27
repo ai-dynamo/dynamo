@@ -9605,8 +9605,14 @@ spec:
                         InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
                         the typed fields. It uses the upstream AISimulate JSON contract, including
                         snake_case names. Values here take precedence, and null deletes a lowered
-                        field. The operator runs the AISimulate version from its configured planner
-                        image; Requests and Runs cannot select a different image or version.
+                        field. The dgdr_run member must remain an object, and its operator-owned
+                        transport, identity, and runtime fields name, max_candidates, snapshot_dir,
+                        runtime_image, runtime_version_override, derive_runtime_images,
+                        num_gpus_per_node, and namespace are operator-owned. Request admission
+                        rejects them, and the Run controller enforces its values while lowering the
+                        immutable snapshot. The operator runs the AISimulate version from its
+                        configured planner image; Requests and Runs cannot select a different image
+                        or version.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
@@ -9659,9 +9665,9 @@ spec:
                   type: object
                 objective:
                   description: |-
-                    Objective defines scalar optimization or a multi-objective Pareto search.
-                    When omitted, admission supplies the object. Its mode defaults to Optimize, and admission
-                    supplies the conditional scalar metric.
+                    Objective defines scalar optimization. When omitted,
+                    admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults
+                    to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms.
                   properties:
                     metric:
                       description: |-
@@ -9677,10 +9683,7 @@ spec:
                         - GoodputPerGPU
                       type: string
                     metrics:
-                      description: |-
-                        Metrics selects AISimulate's public Pareto objective pair when mode is Pareto.
-                        The configured AISimulate release supports exactly ThroughputPerGPU and
-                        ThroughputPerUser through its public recommendation input.
+                      description: Metrics is reserved for the future Pareto implementation.
                       items:
                         description: ObjectiveMetric is a metric optimized by AISimulate.
                         enum:
@@ -9697,10 +9700,9 @@ spec:
                       type: array
                       x-kubernetes-list-type: set
                     mode:
-                      description: Mode selects scalar optimization or a Pareto search.
+                      description: Mode selects scalar optimization. Only Optimize is currently supported.
                       enum:
                         - Optimize
-                        - Pareto
                       type: string
                     sla:
                       description: |-
@@ -9728,21 +9730,17 @@ spec:
                           rule: '!has(self.e2eMs) || (!has(self.ttftMs) && !has(self.itlMs))'
                   type: object
                   x-kubernetes-validations:
-                    - message: Optimize accepts only metric; Pareto requires metrics
-                      rule: '!has(self.mode) || (self.mode == ''Optimize'' && !has(self.metrics)) || (self.mode == ''Pareto'' && !has(self.metric) && has(self.metrics))'
-                    - message: Pareto supports exactly ThroughputPerGPU and ThroughputPerUser
-                      rule: '!has(self.metrics) || (size(self.metrics) == 2 && self.metrics.exists(m, m == ''ThroughputPerGPU'') && self.metrics.exists(m, m == ''ThroughputPerUser''))'
+                    - message: metrics is reserved for the future Pareto implementation
+                      rule: '!has(self.metrics)'
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
-                    - message: Pareto metrics containing Goodput or GoodputPerGPU require at least one SLA bound
-                      rule: '!(has(self.metrics) && self.metrics.exists(m, m in [''Goodput'', ''GoodputPerGPU''])) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
                 recommendation:
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
                     maxCandidates:
                       description: |-
                         MaxCandidates is the maximum number of DGDCs owned by one run. Scalar
-                        candidates are ordered best first; Pareto candidates have no scalar rank.
+                        candidates are ordered best first.
                         This field does not limit internal trials.
                       format: int32
                       maximum: 100
