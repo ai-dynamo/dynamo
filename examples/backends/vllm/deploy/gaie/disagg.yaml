@@ -18,9 +18,11 @@
 #     include ``cuda_copy``/``cuda_ipc``). Moving the buffer to host RAM
 #     makes the transfer a plain CPU<->CPU memcpy over TCP.
 #
-#   * ``UCX_TLS=tcp,self`` is the lowest-common-denominator UCX transport
-#     set: TCP works everywhere, ``self`` covers intra-process. We deliberately
-#     do NOT include any ``rc_*``/``dc_*`` (RDMA) or ``cuda_*`` transports --
+#   * ``UCX_TLS=tcp,self,cuda_copy`` is the lowest-common-denominator UCX
+#     transport set: TCP works everywhere, ``self`` covers intra-process, and
+#     ``cuda_copy`` is the host<->GPU copy that NIXL's UCX backend requires on
+#     GPU nodes (it refuses to start with ``tcp,self`` alone). We deliberately
+#     do NOT include any ``rc_*``/``dc_*`` (RDMA) or ``cuda_ipc`` transports --
 #     they require hardware we cannot assume in CI.
 #
 #   * ``UCX_RNDV_THRESH=inf`` disables the UCX rendezvous protocol entirely,
@@ -100,11 +102,11 @@ spec:
             value: Qwen/Qwen3-0.6B
           - name: MODEL_PATH
             value: Qwen/Qwen3-0.6B
-          # Force UCX to use only TCP and self transports -- no RDMA, no
-          # CUDA-aware UCX paths. Combined with kv_buffer_device=cpu this
-          # is the most boring (and most reliable) transport configuration.
+          # TCP, self, and cuda_copy only -- no RDMA, NVLink, or CUDA IPC.
+          # NIXL's UCX backend rejects a UCX_TLS without CUDA memory support
+          # on GPU nodes. With kv_buffer_device=cpu, KV still moves over TCP.
           - name: UCX_TLS
-            value: tcp,self
+            value: tcp,self,cuda_copy
           # Disable rendezvous protocol; force eager active-message path.
           - name: UCX_RNDV_THRESH
             value: "inf"
@@ -158,11 +160,11 @@ spec:
             value: Qwen/Qwen3-0.6B
           - name: MODEL_PATH
             value: Qwen/Qwen3-0.6B
-          # Force UCX to use only TCP and self transports -- no RDMA, no
-          # CUDA-aware UCX paths. Combined with kv_buffer_device=cpu this
-          # is the most boring (and most reliable) transport configuration.
+          # TCP, self, and cuda_copy only -- no RDMA, NVLink, or CUDA IPC.
+          # NIXL's UCX backend rejects a UCX_TLS without CUDA memory support
+          # on GPU nodes. With kv_buffer_device=cpu, KV still moves over TCP.
           - name: UCX_TLS
-            value: tcp,self
+            value: tcp,self,cuda_copy
           # Disable rendezvous protocol; force eager active-message path.
           - name: UCX_RNDV_THRESH
             value: "inf"
