@@ -187,7 +187,6 @@ pub(crate) fn build_generate_request(
         image_data,
         video_data,
         audio_data,
-        mm_hashes: Vec::new(),
     })
 }
 

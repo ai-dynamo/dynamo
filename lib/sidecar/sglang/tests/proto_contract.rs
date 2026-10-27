@@ -42,21 +42,18 @@ fn release_0522_fields_keep_their_wire_tags() {
 }
 
 #[test]
-fn generate_request_keeps_pending_media_wire_tags() {
+fn generate_request_keeps_media_wire_tags() {
     let request = dynamo_sglang_sidecar::proto::GenerateRequest {
         image_data: vec!["i".to_string()],
         video_data: vec!["v".to_string()],
         audio_data: vec!["a".to_string()],
-        mm_hashes: vec!["h".to_string()],
         ..Default::default()
     };
-    // SGLang main has the media fields 19 to 21. mm_hashes (field 22) comes from
-    // an unmerged SGLang change; check it again against the merged upstream file.
+    // image_data, video_data, and audio_data are repeated fields 19 to 21 on SGLang main.
     assert_eq!(
         request.encode_to_vec(),
         [
-            0x9a, 0x01, 0x01, b'i', 0xa2, 0x01, 0x01, b'v', 0xaa, 0x01, 0x01, b'a', 0xb2, 0x01,
-            0x01, b'h'
+            0x9a, 0x01, 0x01, b'i', 0xa2, 0x01, 0x01, b'v', 0xaa, 0x01, 0x01, b'a'
         ]
     );
 }
