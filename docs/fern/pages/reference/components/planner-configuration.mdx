@@ -184,7 +184,8 @@ Download the AISimulate dataset snapshot into the container image during the ima
 build, or mount a local copy before starting Planner. Use the
 generic AISimulate wheel; measurements do not belong inside the wheel. Use matching
 AISimulate Python and Rust releases that support execution profiles through the
-common forward-pass query API.
+common forward-pass query API. Use version-2 execution profiles; version 1 retains
+its legacy direct-phase queries and must be explicitly migrated and repinned.
 
 The following configuration illustrates the paths to supply for a prefill role:
 

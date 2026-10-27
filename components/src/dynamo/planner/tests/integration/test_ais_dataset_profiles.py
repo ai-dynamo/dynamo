@@ -88,7 +88,7 @@ def dataset_profile(request, tmp_path, monkeypatch):
     ops_key = "context_ops" if phase == "prefill" else "generation_ops"
     # Scopes cost 2 ms (4 ms for the longer prompt), each repeated three times.
     profile = dict(
-        schema_version=1,
+        schema_version=2,
         basis=basis,
         worker_type=phase,
         ops=[
@@ -361,7 +361,7 @@ def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role
         )
     )
     profile = dict(
-        schema_version=1,
+        schema_version=2,
         basis=basis,
         worker_type=role,
         ops=basis["generation_ops" if role == "decode" else "context_ops"],
