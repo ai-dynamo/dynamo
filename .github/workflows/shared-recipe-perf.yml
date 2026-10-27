@@ -145,7 +145,6 @@ jobs:
           yq -i 'with(select(.kind == "Job");
             (.spec.template.spec.containers[].envFrom[]? | select(.secretRef.name == "hf-token-secret").secretRef.name) = strenv(HF_SECRET) |
             (.spec.template.spec.containers[].env[]? | select(.name == "HF_TOKEN").valueFrom.secretKeyRef.name) = strenv(HF_SECRET))' "$ARTIFACTS/rendered.yaml"
-          # The rewrite below expects the recipe command to be [shell, -c, script].
           if ! yq -e 'select(.kind == "Job" and .metadata.name == strenv(BENCHMARK)).spec.template.spec.containers[0].command | (length == 3 and .[1] == "-c")' "$ARTIFACTS/rendered.yaml" > /dev/null; then
             echo "::error::Benchmark Job $BENCHMARK must set containers[0].command to [shell, -c, script]" >&2
             exit 1
