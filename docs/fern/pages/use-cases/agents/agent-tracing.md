@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Agent Tracing
+title: Trace an Agent Run
 subtitle: Capture request traces, tool timing, and Perfetto timelines for agent runs
 ---
 
@@ -187,5 +187,5 @@ For chat streams, Dynamo records finish metadata after parser and jail rewrites.
 
 ## Next
 
-- [Agent simulation](agent-simulation.mdx) turns a capture into a replayable benchmark.
+- [Simulate an Agent Run](agent-simulation.mdx) turns a capture into a replayable benchmark.
 - [Maintain session affinity](session-affinity.md) and [Prioritize requests](priority-scheduling.mdx) are changes you can now measure with a trace.

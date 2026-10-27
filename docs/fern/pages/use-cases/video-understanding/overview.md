@@ -12,7 +12,7 @@ next to its text. Dynamo decodes the clip, samples frames, and the worker runs
 the model's vision encoder on them.
 
 This page gets one video request working on each backend. To generate video
-instead, see [Text to Video (T2V)](../diffusion/text-to-video.md). To route repeated clips to the
+instead, see [Text to Video](../diffusion/text-to-video.md). To route repeated clips to the
 worker that already holds their KV cache, see
 [Exact Video KV Routing](exact-video-kv-routing.md).
 
@@ -24,7 +24,7 @@ Which codecs work depends on where the video is decoded:
 | --- | --- | --- | --- |
 | vLLM | Yes (NVDEC on the GPU) | Yes, with `--frontend-decoding` | |
 | SGLang | Disaggregated Qwen2-family only (NVDEC) | Yes, aggregated with `--frontend-decoding` on CUDA | Aggregated VP8/VP9 is validated for Qwen3-VL and Qwen3.5 |
-| TensorRT-LLM | Yes (NVDEC on the GPU) | Through the TensorRT-LLM loader, after you [install a software decoder](../../developer-guide/advanced-customizations/additional-media-decoders.md) | |
+| TensorRT-LLM | Yes (NVDEC on the GPU) | Through the TensorRT-LLM loader, after you [install a software decoder](../image-understanding/additional-media-decoders.md) | |
 
 - **NVDEC** is the GPU's hardware video decoder. The container must be granted
   the `video` driver capability, or hardware decode is silently unavailable.

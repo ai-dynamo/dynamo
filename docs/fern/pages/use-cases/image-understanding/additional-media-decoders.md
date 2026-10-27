@@ -11,7 +11,7 @@ Two input classes are already covered without installing anything:
 
 - **VP8 and VP9 video** decode through the in-tree FFmpeg when frontend
   decoding is enabled on vLLM, or SGLang on CUDA.
-- **H.264 and H.265 video** decode on the GPU through NVDEC on supported backend paths. NVDEC needs a GPU with a video decode engine and a container granted the `video` driver capability. See [Video Decode GPU Requirements](../../use-cases/video-understanding/video-decoding.md) for the hardware and capability matrix.
+- **H.264 and H.265 video** decode on the GPU through NVDEC on supported backend paths. NVDEC needs a GPU with a video decode engine and a container granted the `video` driver capability. See [Video Decode GPU Requirements](../video-understanding/video-decoding.md) for the hardware and capability matrix.
 
 Without frontend decoding, the backend worker owns VP8/VP9 decoding. Follow the
 [same-version replacement procedure](#notes-and-limits) for vLLM video; other

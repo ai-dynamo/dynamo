@@ -15,9 +15,9 @@ Agent traffic looks different from chat. Each turn repeats a growing prefix, too
 | Tell Dynamo which requests belong to which agent | Session IDs | [Identify agent sessions](session-ids.mdx) |
 | Keep a session's turns on the worker that holds its KV cache | Session affinity | [Maintain session affinity](session-affinity.md) |
 | Let interactive requests go ahead of background work | Priority hints | [Prioritize requests](priority-scheduling.mdx) |
-| See where time goes between LLM calls and tools | Request tracing | [Agent tracing](agent-tracing.md) |
-| Compare serving configurations without rerunning the agent | Trace replay | [Agent simulation](agent-simulation.mdx) |
-| Free KV cache held by agents that are waiting on tools | ThunderAgent | [ThunderAgent Program Scheduler](thunderagent-program-scheduler.md) |
+| See where time goes between LLM calls and tools | Request tracing | [Trace an Agent Run](agent-tracing.md) |
+| Compare serving configurations without rerunning the agent | Trace replay | [Simulate an Agent Run](agent-simulation.mdx) |
+| Free KV cache held by agents that are waiting on tools | ThunderAgent | [Schedule Agents with ThunderAgent](thunderagent-program-scheduler.md) |
 
 ## Try It
 

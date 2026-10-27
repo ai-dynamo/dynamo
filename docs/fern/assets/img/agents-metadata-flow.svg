@@ -1,68 +1,69 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="440" viewBox="0 0 1400 440" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="350" viewBox="0 0 1200 350" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">How Dynamo uses agent request metadata</title>
-  <desc id="desc">An agent harness owns prompts, tools, subagents, and reasoning state, and sends each LLM request with a session ID and optional agent hints. The Dynamo frontend normalizes the metadata across the Chat Completions, Responses, and Messages APIs. The router uses it to place requests for KV reuse, bind sessions to workers, and order queued work. The backend engine uses priority for scheduling and cache eviction. The frontend also records a request trace.</desc>
+  <desc id="desc">An agent harness sends each request with a session ID and a priority. The Dynamo frontend reads them. The router uses the session ID for affinity and the priority for queue order. The engine uses the priority for scheduling and cache eviction. The frontend records a request trace.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1400" height="440" fill="#FFFFFF"/>
+  <rect width="1200" height="350" fill="#FFFFFF"/>
   <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENTS ON DYNAMO</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">What the harness sends, and what Dynamo does with it</text>
-  <rect x="50" y="126" width="240" height="158" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <rect x="66.4" y="140.4" width="13.2" height="13.2" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <rect x="69.92" y="143.92" width="6.16" height="6.16" fill="#374151"/>
-  <line x1="68.6" y1="136" x2="68.6" y2="140.4" stroke="#374151" stroke-width="2"/><line x1="68.6" y1="153.6" x2="68.6" y2="158" stroke="#374151" stroke-width="2"/>
-  <line x1="62" y1="142.6" x2="66.4" y2="142.6" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="142.6" x2="84" y2="142.6" stroke="#374151" stroke-width="2"/>
-  <line x1="73.0" y1="136" x2="73.0" y2="140.4" stroke="#374151" stroke-width="2"/><line x1="73.0" y1="153.6" x2="73.0" y2="158" stroke="#374151" stroke-width="2"/>
-  <line x1="62" y1="147.0" x2="66.4" y2="147.0" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="147.0" x2="84" y2="147.0" stroke="#374151" stroke-width="2"/>
-  <line x1="77.4" y1="136" x2="77.4" y2="140.4" stroke="#374151" stroke-width="2"/><line x1="77.4" y1="153.6" x2="77.4" y2="158" stroke="#374151" stroke-width="2"/>
-  <line x1="62" y1="151.4" x2="66.4" y2="151.4" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="151.4" x2="84" y2="151.4" stroke="#374151" stroke-width="2"/>
-  <text x="102" y="153" font-size="13" font-weight="700" fill="#374151">Agent harness</text>
-  <circle cx="69" cy="170" r="2.2" fill="#1A1A1A"/>
-  <text x="78" y="174" font-size="13" fill="#1A1A1A">Owns prompts, tools,</text>
-  <text x="78" y="192" font-size="13" fill="#1A1A1A">subagents, and reasoning</text>
-  <text x="78" y="210" font-size="13" fill="#1A1A1A">state</text>
-  <circle cx="69" cy="224" r="2.2" fill="#1A1A1A"/>
-  <text x="78" y="228" font-size="13" fill="#1A1A1A">Sends a session ID and</text>
-  <text x="78" y="246" font-size="13" fill="#1A1A1A">optional hints with each</text>
-  <text x="78" y="264" font-size="13" fill="#1A1A1A">request</text>
-  <rect x="358" y="96" width="1000" height="188" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="374" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">DYNAMO</text>
-  <rect x="374" y="126" width="310" height="140" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="388" y="153" font-size="13" font-weight="700" fill="#1A1A1A">Frontend API</text>
-  <circle cx="393" cy="170" r="2.2" fill="#4B5563"/>
-  <text x="402" y="174" font-size="13" fill="#4B5563">Reads x-dynamo-session-id and</text>
-  <text x="402" y="192" font-size="13" fill="#4B5563">nvext.agent_hints</text>
-  <circle cx="393" cy="206" r="2.2" fill="#4B5563"/>
-  <text x="402" y="210" font-size="13" fill="#4B5563">Normalizes identity across the Chat</text>
-  <text x="402" y="228" font-size="13" fill="#4B5563">Completions, Responses, and Messages</text>
-  <text x="402" y="246" font-size="13" fill="#4B5563">APIs</text>
-  <rect x="722" y="126" width="330" height="140" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="736" y="153" font-size="13" font-weight="700" fill="#1A1A1A">Router</text>
-  <circle cx="741" cy="170" r="2.2" fill="#4B5563"/>
-  <text x="750" y="174" font-size="13" fill="#4B5563">Places requests for KV reuse</text>
-  <circle cx="741" cy="188" r="2.2" fill="#4B5563"/>
-  <text x="750" y="192" font-size="13" fill="#4B5563">Binds sessions to workers when affinity</text>
-  <text x="750" y="210" font-size="13" fill="#4B5563">is on</text>
-  <circle cx="741" cy="224" r="2.2" fill="#4B5563"/>
-  <text x="750" y="228" font-size="13" fill="#4B5563">Orders queued work by priority</text>
-  <rect x="1090" y="126" width="252" height="140" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="1104" y="153" font-size="13" font-weight="700" fill="#1A1A1A">Backend engine</text>
-  <circle cx="1109" cy="170" r="2.2" fill="#4B5563"/>
-  <text x="1118" y="174" font-size="13" fill="#4B5563">Uses priority for engine</text>
-  <text x="1118" y="192" font-size="13" fill="#4B5563">scheduling</text>
-  <circle cx="1109" cy="206" r="2.2" fill="#4B5563"/>
-  <text x="1118" y="210" font-size="13" fill="#4B5563">Uses priority for cache</text>
-  <text x="1118" y="228" font-size="13" fill="#4B5563">eviction, where the backend</text>
-  <text x="1118" y="246" font-size="13" fill="#4B5563">supports it</text>
-  <line x1="294" y1="196.0" x2="354" y2="196.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <text x="324" y="186.0" font-size="12" fill="#4B5563" text-anchor="middle">request</text>
-  <line x1="686" y1="196.0" x2="720" y2="196.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <line x1="1054" y1="196.0" x2="1088" y2="196.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="374" y="326" width="400" height="68" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <path d="M386,340.356 L386,355.844 A11.0,3.8720000000000003 0 0 0 408,355.844 L408,340.356" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
-  <ellipse cx="397.0" cy="340.356" rx="11.0" ry="3.8720000000000003" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
-  <path d="M386,348.1 A11.0,3.8720000000000003 0 0 0 408,348.1" fill="none" stroke="#4C7A00" stroke-width="1.5"/>
-  <text x="426" y="353" font-size="13" font-weight="700" fill="#4C7A00">Request trace</text>
-  <text x="388" y="374" font-size="13" fill="#1A1A1A">A session-labeled record of every request.</text>
-  <line x1="489.0" y1="288" x2="489.0" y2="322" stroke="#76B900" stroke-width="2.5" stroke-dasharray="1 7" stroke-linecap="round" marker-end="url(#arrow-green)"/>
-  <text x="503.0" y="304" font-size="12" fill="#4B5563">records</text>
-  <text x="50" y="424" font-size="13" fill="#4B5563">Session IDs identify requests and hints state intent. Neither pins a session to a worker: that is session affinity, turned on separately.</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">The harness labels each request, and Dynamo acts on the label</text>
+  <rect x="45.0" y="150.0" width="170" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="118.8" y="179.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="123.28" y="183.58" width="7.840000000000001" height="7.840000000000001" fill="#374151"/>
+  <line x1="121.60000000000001" y1="173.5" x2="121.60000000000001" y2="179.1" stroke="#374151" stroke-width="2"/><line x1="121.60000000000001" y1="195.9" x2="121.60000000000001" y2="201.5" stroke="#374151" stroke-width="2"/>
+  <line x1="113.2" y1="181.9" x2="118.8" y2="181.9" stroke="#374151" stroke-width="2"/><line x1="135.6" y1="181.9" x2="141.2" y2="181.9" stroke="#374151" stroke-width="2"/>
+  <line x1="127.2" y1="173.5" x2="127.2" y2="179.1" stroke="#374151" stroke-width="2"/><line x1="127.2" y1="195.9" x2="127.2" y2="201.5" stroke="#374151" stroke-width="2"/>
+  <line x1="113.2" y1="187.5" x2="118.8" y2="187.5" stroke="#374151" stroke-width="2"/><line x1="135.6" y1="187.5" x2="141.2" y2="187.5" stroke="#374151" stroke-width="2"/>
+  <line x1="132.8" y1="173.5" x2="132.8" y2="179.1" stroke="#374151" stroke-width="2"/><line x1="132.8" y1="195.9" x2="132.8" y2="201.5" stroke="#374151" stroke-width="2"/>
+  <line x1="113.2" y1="193.1" x2="118.8" y2="193.1" stroke="#374151" stroke-width="2"/><line x1="135.6" y1="193.1" x2="141.2" y2="193.1" stroke="#374151" stroke-width="2"/>
+  <text x="130" y="220.5" font-size="13" font-weight="700" fill="#374151" text-anchor="middle">Agent harness</text>
+  <rect x="250" y="130" width="91" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="295.5" y="146.5" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">session ID</text>
+  <rect x="250" y="164" width="77" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="288.5" y="180.5" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">priority</text>
+  <line x1="220" y1="205" x2="360" y2="205" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="366" y="108" width="810" height="214" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="382" y="130" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">DYNAMO</text>
+  <rect x="385.0" y="150.0" width="190" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="477.2" cy="187.5" r="8.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="477.2" cy="187.5" r="2.8000000000000003" fill="#234CDA"/>
+  <line x1="485.59999999999997" y1="187.5" x2="490.08" y2="187.5" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="483.139696961967" y1="193.439696961967" x2="486.3075353416827" y2="196.60753534168273" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="477.2" y1="195.9" x2="477.2" y2="200.38" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="471.260303038033" y1="193.439696961967" x2="468.0924646583173" y2="196.60753534168273" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="468.8" y1="187.5" x2="464.32" y2="187.5" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="471.260303038033" y1="181.560303038033" x2="468.0924646583172" y2="178.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="477.2" y1="179.1" x2="477.2" y2="174.62" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="483.139696961967" y1="181.560303038033" x2="486.3075353416827" y2="178.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <text x="480" y="220.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">Frontend</text>
+  <rect x="675.0" y="150.0" width="190" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="767.2" cy="187.5" r="8.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="767.2" cy="187.5" r="2.8000000000000003" fill="#234CDA"/>
+  <line x1="775.6" y1="187.5" x2="780.08" y2="187.5" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="773.139696961967" y1="193.439696961967" x2="776.3075353416828" y2="196.60753534168273" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="767.2" y1="195.9" x2="767.2" y2="200.38" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="761.260303038033" y1="193.439696961967" x2="758.0924646583173" y2="196.60753534168273" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="758.8000000000001" y1="187.5" x2="754.32" y2="187.5" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="761.260303038033" y1="181.560303038033" x2="758.0924646583173" y2="178.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="767.2" y1="179.1" x2="767.2" y2="174.62" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="773.139696961967" y1="181.560303038033" x2="776.3075353416828" y2="178.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <text x="770" y="220.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">Router</text>
+  <rect x="965.0" y="150.0" width="190" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="1048.8" y="179.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="1053.28" y="183.58" width="7.840000000000001" height="7.840000000000001" fill="#234CDA"/>
+  <line x1="1051.6000000000001" y1="173.5" x2="1051.6000000000001" y2="179.1" stroke="#234CDA" stroke-width="2"/><line x1="1051.6000000000001" y1="195.9" x2="1051.6000000000001" y2="201.5" stroke="#234CDA" stroke-width="2"/>
+  <line x1="1043.2" y1="181.9" x2="1048.8" y2="181.9" stroke="#234CDA" stroke-width="2"/><line x1="1065.6000000000001" y1="181.9" x2="1071.2" y2="181.9" stroke="#234CDA" stroke-width="2"/>
+  <line x1="1057.2" y1="173.5" x2="1057.2" y2="179.1" stroke="#234CDA" stroke-width="2"/><line x1="1057.2" y1="195.9" x2="1057.2" y2="201.5" stroke="#234CDA" stroke-width="2"/>
+  <line x1="1043.2" y1="187.5" x2="1048.8" y2="187.5" stroke="#234CDA" stroke-width="2"/><line x1="1065.6000000000001" y1="187.5" x2="1071.2" y2="187.5" stroke="#234CDA" stroke-width="2"/>
+  <line x1="1062.8" y1="173.5" x2="1062.8" y2="179.1" stroke="#234CDA" stroke-width="2"/><line x1="1062.8" y1="195.9" x2="1062.8" y2="201.5" stroke="#234CDA" stroke-width="2"/>
+  <line x1="1043.2" y1="193.1" x2="1048.8" y2="193.1" stroke="#234CDA" stroke-width="2"/><line x1="1065.6000000000001" y1="193.1" x2="1071.2" y2="193.1" stroke="#234CDA" stroke-width="2"/>
+  <text x="1060" y="220.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">Engine</text>
+  <line x1="576" y1="200" x2="672" y2="200" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="866" y1="200" x2="962" y2="200" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="700" y="262" width="77" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="738.5" y="278.5" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">affinity</text>
+  <rect x="778" y="262" width="56" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="806.0" y="278.5" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">queue</text>
+  <rect x="1000" y="262" width="77" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="1038.5" y="278.5" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">priority</text>
+  <rect x="440" y="262" width="56" height="24" rx="12.0" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="468.0" y="278.5" font-size="12" font-weight="700" fill="#374151" text-anchor="middle">trace</text>
 </svg>

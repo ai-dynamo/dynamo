@@ -1,57 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1380" height="510" viewBox="0 0 1380 510" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
-  <title id="title">Embedding cache: hit and miss paths</title>
-  <desc id="desc">Images in a request are looked up in a CPU-side LRU embedding cache. An image seen before is a hit: the cached embedding is used and the vision encoder is skipped. A new image is a miss: the encode worker runs the vision encoder, sends embeddings over NIXL, and they are saved in the cache before reaching the inference engine.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="400" viewBox="0 0 1100 400" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Embedding cache: hit and miss</title>
+  <desc id="desc">An image seen before is a hit in the embedding cache, so the vision encoder is skipped. A new image is a miss: the vision encoder runs and its embedding is saved to the cache for next time.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1380" height="510" fill="#FFFFFF"/>
+  <rect width="1100" height="400" fill="#FFFFFF"/>
   <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">EMBEDDING CACHE</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Skip the vision encoder for content it has already encoded</text>
-  <rect x="50" y="200" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="66" y="226" font-size="14" font-weight="700" fill="#1A1A1A">Request</text>
-  <rect x="66" y="244" width="27.5" height="22" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
-  <circle cx="73.7" cy="250.6" r="2.2" fill="#76B900"/>
-  <polygon points="68.2,262.04 76.45,254.12 81.4,258.96 85.8,255.0 91.3,262.04" fill="#76B900"/>
-  <circle cx="93.5" cy="244" r="5.279999999999999" fill="#76B900" stroke="#FFFFFF" stroke-width="1.5"/>
-  <path d="M90.86,244 L92.84,245.98 L96.36,242.02" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="112" y="262" font-size="12" fill="#4C7A00">seen before</text>
-  <rect x="66" y="274" width="27.5" height="22" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
-  <circle cx="73.7" cy="280.6" r="2.2" fill="#234CDA"/>
-  <polygon points="68.2,292.04 76.45,284.12 81.4,288.96 85.8,285.0 91.3,292.04" fill="#234CDA"/>
-  <circle cx="93.5" cy="274" r="5.279999999999999" fill="#234CDA" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="93.5" y="275.98" font-size="6.6" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
-  <text x="112" y="292" font-size="12" fill="#234CDA">new</text>
-  <line x1="252" y1="250" x2="296" y2="250" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="300" y="180" width="290" height="140" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <path d="M312,194.356 L312,209.844 A11.0,3.8720000000000003 0 0 0 334,209.844 L334,194.356" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
-  <ellipse cx="323.0" cy="194.356" rx="11.0" ry="3.8720000000000003" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
-  <path d="M312,202.1 A11.0,3.8720000000000003 0 0 0 334,202.1" fill="none" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="352" y="207" font-size="13" font-weight="700" fill="#234CDA">CPU LRU embedding cache</text>
-  <circle cx="319" cy="224" r="2.2" fill="#1A1A1A"/>
-  <text x="328" y="228" font-size="13" fill="#1A1A1A">Holds vision encoder outputs</text>
-  <circle cx="319" cy="242" r="2.2" fill="#1A1A1A"/>
-  <text x="328" y="246" font-size="13" fill="#1A1A1A">Prefill worker owns it (SGLang</text>
-  <text x="328" y="264" font-size="13" fill="#1A1A1A">E/PD: the encode worker)</text>
-  <path d="M592,222 C640,222 640,140 690,140" fill="none" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="650" y="196" font-size="12" fill="#4B5563" text-anchor="middle">hit</text>
-  <rect x="694" y="100" width="320" height="80" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="708" y="127" font-size="13" font-weight="700" fill="#4C7A00">Reuse the cached embedding</text>
-  <text x="708" y="148" font-size="13" fill="#1A1A1A">The encode worker is skipped entirely.</text>
-  <path d="M592,282 C640,282 640,372 690,372" fill="none" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
-  <text x="650" y="330" font-size="12" fill="#4B5563" text-anchor="middle">miss</text>
-  <rect x="694" y="332" width="250" height="100" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="708" y="359" font-size="13" font-weight="700" fill="#92400E">Encode worker</text>
-  <text x="708" y="380" font-size="13" fill="#1A1A1A">Runs the vision encoder on the</text>
-  <text x="708" y="398" font-size="13" fill="#1A1A1A">new image.</text>
-  <line x1="946" y1="382" x2="990" y2="382" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <text x="968" y="372" font-size="12" fill="#4B5563" text-anchor="middle">NIXL</text>
-  <rect x="994" y="332" width="170" height="100" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="1008" y="359" font-size="13" font-weight="700" fill="#4C7A00">Save to cache</text>
-  <text x="1008" y="380" font-size="13" fill="#1A1A1A">Stored for next</text>
-  <text x="1008" y="398" font-size="13" fill="#1A1A1A">time.</text>
-  <rect x="1190" y="206" width="150" height="104" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="1204" y="233" font-size="13" font-weight="700" fill="#1A1A1A">Inference engine</text>
-  <text x="1204" y="254" font-size="13" fill="#4B5563">Prefill and</text>
-  <text x="1204" y="272" font-size="13" fill="#4B5563">decode.</text>
-  <line x1="1016" y1="140" x2="1186" y2="232" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <line x1="1166" y1="382" x2="1262" y2="312" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <text x="50" y="490" font-size="13" fill="#4B5563">The embedding cache is separate from the KV cache. KV reuse skips prefill; the embedding cache skips image encoding. Use both together.</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Skip the vision encoder for images already encoded</text>
+  <rect x="60" y="130" width="47.5" height="38" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <circle cx="73.3" cy="141.4" r="3.8000000000000003" fill="#76B900"/>
+  <polygon points="63.8,161.16 78.05,147.48 86.6,155.84 94.19999999999999,149.0 103.7,161.16" fill="#76B900"/>
+  <circle cx="107.5" cy="130" r="9.12" fill="#76B900" stroke="#FFFFFF" stroke-width="1.5"/>
+  <path d="M102.94,130 L106.36,133.42 L112.44,126.58" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="60" y="262" width="47.5" height="38" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="73.3" cy="273.4" r="3.8000000000000003" fill="#234CDA"/>
+  <polygon points="63.8,293.15999999999997 78.05,279.48 86.6,287.84000000000003 94.19999999999999,281.0 103.7,293.15999999999997" fill="#234CDA"/>
+  <circle cx="107.5" cy="262" r="9.12" fill="#234CDA" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="107.5" y="265.42" font-size="11.4" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
+  <rect x="265.0" y="165.0" width="190" height="110" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <path d="M343.2,199.044 L343.2,218.756 A14.0,4.928000000000001 0 0 0 371.2,218.756 L371.2,199.044" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <ellipse cx="357.2" cy="199.044" rx="14.0" ry="4.928000000000001" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <path d="M343.2,208.9 A14.0,4.928000000000001 0 0 0 371.2,208.9" fill="none" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="360" y="240.5" font-size="13" font-weight="700" fill="#234CDA" text-anchor="middle">Embedding cache</text>
+  <rect x="555.0" y="242.0" width="190" height="96" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <rect x="633.2" y="263.5" width="28" height="28" rx="6.16" fill="#FFF7E6" stroke="#92400E" stroke-width="2"/>
+  <polyline points="641.0400000000001,271.9 653.36,271.9 647.2,283.66 641.0400000000001,271.9" fill="none" stroke="#92400E" stroke-width="1.6"/>
+  <circle cx="641.0400000000001" cy="271.9" r="2.52" fill="#92400E"/>
+  <circle cx="653.36" cy="271.9" r="2.52" fill="#92400E"/>
+  <circle cx="647.2" cy="283.66" r="2.52" fill="#92400E"/>
+  <text x="650" y="310.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Vision encoder</text>
+  <rect x="875.0" y="172.0" width="150" height="96" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="933.2" y="193.5" width="28" height="28" rx="6.16" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <polyline points="941.0400000000001,201.9 953.36,201.9 947.2,213.66 941.0400000000001,201.9" fill="none" stroke="#234CDA" stroke-width="1.6"/>
+  <circle cx="941.0400000000001" cy="201.9" r="2.52" fill="#234CDA"/>
+  <circle cx="953.36" cy="201.9" r="2.52" fill="#234CDA"/>
+  <circle cx="947.2" cy="213.66" r="2.52" fill="#234CDA"/>
+  <text x="950" y="240.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">LLM</text>
+  <line x1="150" y1="160" x2="262" y2="205" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <line x1="150" y1="290" x2="262" y2="238" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
+  <path d="M410,160 C410,92 950,92 950,170" fill="none" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="680" y="106" font-size="12" fill="#4B5563" text-anchor="middle">hit: skip the encoder</text>
+  <line x1="458" y1="250" x2="552" y2="285" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
+  <text x="500" y="252" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">miss</text>
+  <line x1="748" y1="270" x2="876" y2="242" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
+  <path d="M650,340 C650,380 360,380 360,278" fill="none" stroke="#9CA3AF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-gray)"/>
+  <text x="505" y="376" font-size="12" fill="#4B5563" text-anchor="middle">save</text>
 </svg>

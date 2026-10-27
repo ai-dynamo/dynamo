@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: ThunderAgent Python Router
+title: Run the ThunderAgent Python Router
 subtitle: The standalone Python prototype of the ThunderAgent program scheduler
 ---
 
@@ -150,7 +150,7 @@ These are Dynamo runtime endpoints, not public OpenAI HTTP routes. Use them from
 
 For response-level debugging, request `nvext.extra_fields=["engine_data"]`. Only when that field is requested, ThunderAgent adds a `thunderagent` object under `nvext.engine_data` on generated chunks, with fields such as `handled_by`, `path`, `program_id`, `was_paused`, `waited_seconds`, `priority_jump`, `assigned_worker_hint`, `assigned_dp_rank_hint`, and `selected_worker_id` with `selected_dp_rank` when worker attribution is available.
 
-For per-request tracing (token counts, cache hits, worker placement), the router also integrates with [Agent Tracing](agent-tracing.md#enable-output): set `DYN_REQUEST_TRACE=1` on the frontend to land a `request_end` record per LLM call. Harness tool-event spans are separate: they require `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` plus a configured publisher.
+For per-request tracing (token counts, cache hits, worker placement), the router also integrates with [Trace an Agent Run](agent-tracing.md#enable-output): set `DYN_REQUEST_TRACE=1` on the frontend to land a `request_end` record per LLM call. Harness tool-event spans are separate: they require `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` plus a configured publisher.
 
 ## Reproducing with upstream Harbor and Pi
 
@@ -162,4 +162,4 @@ The maintained end-to-end path uses upstream Harbor to create SWE-bench containe
 - Upstream ThunderAgent reference: [HaoKang-Timmy/ThunderAgent](https://github.com/HaoKang-Timmy/ThunderAgent)
 - Pi Dynamo provider: [ai-dynamo/agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin)
 - Dynamo KV router: [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md)
-- [Identify agent sessions](session-ids.mdx), [Agent Tracing](agent-tracing.md), and [Prioritize requests](priority-scheduling.mdx)
+- [Identify agent sessions](session-ids.mdx), [Trace an Agent Run](agent-tracing.md), and [Prioritize requests](priority-scheduling.mdx)

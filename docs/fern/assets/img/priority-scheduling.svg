@@ -1,74 +1,64 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="472" viewBox="0 0 1300 472" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Priority hints reorder requests under contention</title>
-  <desc id="desc">Requests arrive in order: three background subagent requests and one interactive request with higher priority. When every worker is busy the router queue releases the high-priority request first. Priority can also act in the backend engine's scheduler and in KV cache eviction, each enabled separately.</desc>
+  <desc id="desc">Requests arrive in order: three background requests, then one interactive request. When workers are busy, the router queue releases the interactive request first. Priority can also act in the engine scheduler and in KV cache eviction.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1300" height="472" fill="#FFFFFF"/>
+  <rect width="1200" height="380" fill="#FFFFFF"/>
   <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">REQUEST PRIORITY</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">A queue only matters when workers are busy</text>
-  <text x="50" y="108" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">ARRIVAL ORDER</text>
-  <rect x="50" y="120" width="128" height="56" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="64" y="147" font-size="13" font-weight="700" fill="#92400E">Background</text>
-  <text x="64" y="168" font-size="13" fill="#1A1A1A">priority 0</text>
-  <rect x="194" y="120" width="128" height="56" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="208" y="147" font-size="13" font-weight="700" fill="#92400E">Background</text>
-  <text x="208" y="168" font-size="13" fill="#1A1A1A">priority 0</text>
-  <rect x="338" y="120" width="128" height="56" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="352" y="147" font-size="13" font-weight="700" fill="#92400E">Background</text>
-  <text x="352" y="168" font-size="13" fill="#1A1A1A">priority 0</text>
-  <rect x="482" y="120" width="128" height="56" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="496" y="147" font-size="13" font-weight="700" fill="#4C7A00">Interactive</text>
-  <text x="496" y="168" font-size="13" fill="#1A1A1A">priority 10</text>
-  <line x1="630" y1="148" x2="686" y2="148" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="690" y="96" width="592" height="96" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="706" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">ROUTER QUEUE: RELEASE ORDER</text>
-  <rect x="706" y="142" width="128" height="56" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="720" y="169" font-size="13" font-weight="700" fill="#4C7A00">Interactive</text>
-  <text x="720" y="190" font-size="13" fill="#1A1A1A">priority 10</text>
-  <rect x="850" y="142" width="128" height="56" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="864" y="169" font-size="13" font-weight="700" fill="#92400E">Background</text>
-  <text x="864" y="190" font-size="13" fill="#1A1A1A">priority 0</text>
-  <rect x="994" y="142" width="128" height="56" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="1008" y="169" font-size="13" font-weight="700" fill="#92400E">Background</text>
-  <text x="1008" y="190" font-size="13" fill="#1A1A1A">priority 0</text>
-  <rect x="1138" y="142" width="128" height="56" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="1152" y="169" font-size="13" font-weight="700" fill="#92400E">Background</text>
-  <text x="1152" y="190" font-size="13" fill="#1A1A1A">priority 0</text>
-  <text x="50" y="216" font-size="13" fill="#4B5563">A higher strict_priority tier always goes first. Within a tier, priority orders the queue.</text>
-  <text x="50" y="262" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">THREE PLACES PRIORITY CAN ACT. EACH HAS ITS OWN SWITCH.</text>
-  <rect x="50" y="278" width="380" height="122" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <circle cx="76" cy="304" r="13" fill="#234CDA"/>
-  <text x="76" y="309" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">1</text>
-  <text x="98" y="309" font-size="15" font-weight="700" fill="#1A1A1A">Router queue</text>
-  <circle cx="69" cy="327" r="2.2" fill="#4B5563"/>
-  <text x="78" y="331" font-size="13" fill="#4B5563">Holds a request while every eligible worker is</text>
-  <text x="78" y="349" font-size="13" fill="#4B5563">busy</text>
-  <circle cx="69" cy="363" r="2.2" fill="#4B5563"/>
-  <text x="78" y="367" font-size="13" fill="#4B5563">Releases in priority order</text>
-  <circle cx="69" cy="381" r="2.2" fill="#4B5563"/>
-  <text x="78" y="385" font-size="13" fill="#4B5563">--router-policy-config policy.yaml</text>
-  <rect x="460" y="278" width="380" height="122" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <circle cx="486" cy="304" r="13" fill="#234CDA"/>
-  <text x="486" y="309" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">2</text>
-  <text x="508" y="309" font-size="15" font-weight="700" fill="#1A1A1A">Backend engine</text>
-  <circle cx="479" cy="327" r="2.2" fill="#4B5563"/>
-  <text x="488" y="331" font-size="13" fill="#4B5563">Schedules by priority</text>
-  <circle cx="479" cy="345" r="2.2" fill="#4B5563"/>
-  <text x="488" y="349" font-size="13" fill="#4B5563">vLLM: --scheduling-policy priority</text>
-  <circle cx="479" cy="363" r="2.2" fill="#4B5563"/>
-  <text x="488" y="367" font-size="13" fill="#4B5563">SGLang: --enable-priority-scheduling</text>
-  <circle cx="479" cy="381" r="2.2" fill="#4B5563"/>
-  <text x="488" y="385" font-size="13" fill="#4B5563">TensorRT-LLM: router queue only</text>
-  <rect x="870" y="278" width="380" height="122" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <circle cx="896" cy="304" r="13" fill="#234CDA"/>
-  <text x="896" y="309" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">3</text>
-  <text x="918" y="309" font-size="15" font-weight="700" fill="#1A1A1A">KV cache eviction</text>
-  <circle cx="889" cy="327" r="2.2" fill="#4B5563"/>
-  <text x="898" y="331" font-size="13" fill="#4B5563">When GPU cache fills, evicts low-priority entries</text>
-  <text x="898" y="349" font-size="13" fill="#4B5563">first</text>
-  <circle cx="889" cy="363" r="2.2" fill="#4B5563"/>
-  <text x="898" y="367" font-size="13" fill="#4B5563">SGLang: --radix-eviction-policy priority</text>
-  <line x1="432" y1="339.0" x2="458" y2="339.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <line x1="842" y1="339.0" x2="868" y2="339.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <text x="50" y="428" font-size="13" fill="#4B5563">The layers are additive. Priority is not Kubernetes PriorityClass, GPU preemption, or capacity reservation.</text>
-  <text x="50" y="450" font-size="13" fill="#4B5563">Send it as nvext.agent_hints.priority and strict_priority, or the x-dynamo-request-priority headers.</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Higher priority goes first when workers are busy</text>
+  <text x="50" y="112" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">ARRIVAL</text>
+  <rect x="50.0" y="125.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="106.0" y="152.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <rect x="176.0" y="125.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="232.0" y="152.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <rect x="302.0" y="125.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="358.0" y="152.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <rect x="428.0" y="125.0" width="112" height="50" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="484.0" y="152.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Interactive</text>
+  <line x1="554" y1="150" x2="610" y2="150" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="616" y="100" width="544" height="100" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="632" y="120" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">ROUTER QUEUE</text>
+  <rect x="632.0" y="133.0" width="112" height="50" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="688.0" y="160.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Interactive</text>
+  <rect x="758.0" y="133.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="814.0" y="160.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <rect x="884.0" y="133.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="940.0" y="160.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <rect x="1010.0" y="133.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="1066.0" y="160.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <text x="50" y="244" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">THREE PLACES PRIORITY CAN ACT</text>
+  <rect x="70.0" y="274.0" width="300" height="72" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="217.2" cy="297.0" r="8.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="217.2" cy="297.0" r="2.8000000000000003" fill="#234CDA"/>
+  <line x1="225.6" y1="297.0" x2="230.07999999999998" y2="297.0" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="223.139696961967" y1="302.939696961967" x2="226.30753534168272" y2="306.1075353416827" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="217.2" y1="305.4" x2="217.2" y2="309.88" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="211.260303038033" y1="302.939696961967" x2="208.09246465831725" y2="306.1075353416827" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="208.79999999999998" y1="297.0" x2="204.32" y2="297.0" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="211.260303038033" y1="291.060303038033" x2="208.09246465831725" y2="287.8924646583173" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="217.2" y1="288.6" x2="217.2" y2="284.12" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="223.139696961967" y1="291.060303038033" x2="226.30753534168272" y2="287.8924646583173" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <text x="220" y="331.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">Router queue</text>
+  <circle cx="84.0" cy="288.0" r="11" fill="#234CDA"/>
+  <text x="84.0" y="292.5" font-size="12" font-weight="700" fill="#FFFFFF" text-anchor="middle">1</text>
+  <rect x="440.0" y="274.0" width="300" height="72" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="578.8000000000001" y="288.6" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="583.2800000000001" y="293.08" width="7.840000000000001" height="7.840000000000001" fill="#234CDA"/>
+  <line x1="581.6" y1="283.0" x2="581.6" y2="288.6" stroke="#234CDA" stroke-width="2"/><line x1="581.6" y1="305.4" x2="581.6" y2="311.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="573.2" y1="291.4" x2="578.8000000000001" y2="291.4" stroke="#234CDA" stroke-width="2"/><line x1="595.6" y1="291.4" x2="601.2" y2="291.4" stroke="#234CDA" stroke-width="2"/>
+  <line x1="587.2" y1="283.0" x2="587.2" y2="288.6" stroke="#234CDA" stroke-width="2"/><line x1="587.2" y1="305.4" x2="587.2" y2="311.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="573.2" y1="297.0" x2="578.8000000000001" y2="297.0" stroke="#234CDA" stroke-width="2"/><line x1="595.6" y1="297.0" x2="601.2" y2="297.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="592.8000000000001" y1="283.0" x2="592.8000000000001" y2="288.6" stroke="#234CDA" stroke-width="2"/><line x1="592.8000000000001" y1="305.4" x2="592.8000000000001" y2="311.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="573.2" y1="302.6" x2="578.8000000000001" y2="302.6" stroke="#234CDA" stroke-width="2"/><line x1="595.6" y1="302.6" x2="601.2" y2="302.6" stroke="#234CDA" stroke-width="2"/>
+  <text x="590" y="331.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">Engine scheduler</text>
+  <circle cx="454.0" cy="288.0" r="11" fill="#234CDA"/>
+  <text x="454.0" y="292.5" font-size="12" font-weight="700" fill="#FFFFFF" text-anchor="middle">2</text>
+  <line x1="372" y1="310" x2="418" y2="310" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="810.0" y="274.0" width="300" height="72" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <path d="M943.2,288.544 L943.2,308.256 A14.0,4.928000000000001 0 0 0 971.2,308.256 L971.2,288.544" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <ellipse cx="957.2" cy="288.544" rx="14.0" ry="4.928000000000001" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <path d="M943.2,298.4 A14.0,4.928000000000001 0 0 0 971.2,298.4" fill="none" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="960" y="331.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">KV cache eviction</text>
+  <circle cx="824.0" cy="288.0" r="11" fill="#234CDA"/>
+  <text x="824.0" y="292.5" font-size="12" font-weight="700" fill="#FFFFFF" text-anchor="middle">3</text>
+  <line x1="742" y1="310" x2="788" y2="310" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
 </svg>

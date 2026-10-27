@@ -637,8 +637,6 @@ navigation:
             path: pages/developer-guide/advanced-customizations/metrics-developer-guide.md
           - page: Developing with Tilt
             path: pages/developer-guide/advanced-customizations/developing-with-tilt.md
-          - page: Additional Media Decoders
-            path: pages/developer-guide/advanced-customizations/additional-media-decoders.md
       # ==================== Hidden Pages (User Guide) ====================
       # Pages accessible via direct URL but not shown in main navigation.
       - section: Additional Resources
@@ -692,7 +690,7 @@ navigation:
       - page: Overview
         slug: use-cases
         icon: compass
-        path: pages/use-cases/overview.md
+        path: pages/use-cases/overview.mdx
 
       # ==================== Reinforcement Learning ====================
       - section: Reinforcement Learning
@@ -701,7 +699,13 @@ navigation:
         slug: reinforcement-learning
         contents:
           - page: Overview
-            path: pages/use-cases/reinforcement-learning/overview.md
+            path: pages/use-cases/reinforcement-learning/overview.mdx
+          - page: KV-Aware Load Balancing
+            path: pages/use-cases/reinforcement-learning/routing.md
+          - page: Rollout Weight Updates
+            path: pages/use-cases/reinforcement-learning/weight-updates.md
+          - page: RL Profiling and Simulation
+            path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
           - page: verl Integration
             path: pages/use-cases/reinforcement-learning/verl.md
           - page: NeMo RL Integration
@@ -710,12 +714,6 @@ navigation:
             path: pages/use-cases/reinforcement-learning/slime.md
           - page: External Trainer Integration
             path: pages/use-cases/reinforcement-learning/implementation-guide.md
-          - page: KV-Aware Load Balancing
-            path: pages/use-cases/reinforcement-learning/routing.md
-          - page: Rollout Weight Updates
-            path: pages/use-cases/reinforcement-learning/weight-updates.md
-          - page: RL Profiling and Simulation
-            path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
           - page: RL Integration Reference
             path: pages/use-cases/reinforcement-learning/integration-reference.md
 
@@ -729,7 +727,8 @@ navigation:
             path: pages/use-cases/agents/overview.md
           - page: Run an Agent on Dynamo
             path: pages/use-cases/agents/run-an-agent-on-dynamo.md
-          - page: Agent Harnesses
+          - page: Connect an Agent Harness
+            slug: agent-harnesses
             path: pages/use-cases/agents/agent-harnesses.mdx
           - page: Identify Agent Sessions
             path: pages/use-cases/agents/session-ids.mdx
@@ -737,17 +736,19 @@ navigation:
             path: pages/use-cases/agents/session-affinity.md
           - page: Prioritize Requests
             path: pages/use-cases/agents/priority-scheduling.mdx
-          - page: Agent Tracing
+          - page: Trace an Agent Run
+            slug: agent-tracing
             path: pages/use-cases/agents/agent-tracing.md
-          - page: Agent Simulation
+          - page: Simulate an Agent Run
             slug: agent-simulation
             path: pages/use-cases/agents/agent-simulation.mdx
-          - section: ThunderAgent Program Scheduler
+          - section: Schedule Agents with ThunderAgent
             collapsed: true
             slug: thunder-agent-program-scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
             contents:
-              - page: ThunderAgent Python Router
+              - page: Run the ThunderAgent Python Router
+                slug: thunder-agent-python-router
                 path: pages/use-cases/agents/thunderagent-python-router.md
 
       # ==================== Image Understanding ====================
@@ -759,7 +760,7 @@ navigation:
           - page: Overview
             path: pages/use-cases/image-understanding/overview.md
           - section: VLM Performance Optimization
-            collapsed: true
+            collapsed: open-by-default
             slug: vlm-performance-optimization
             path: pages/use-cases/image-understanding/vlm-performance-optimization.md
             contents:
@@ -775,20 +776,9 @@ navigation:
                 path: pages/use-cases/image-understanding/vlm-performance-optimization/encoder-disaggregation.md
           - page: Custom Vision Encoders
             path: pages/use-cases/image-understanding/custom-vision-encoders.md
-
-      # ==================== Video Understanding ====================
-      - section: Video Understanding
-        collapsed: true
-        icon: film
-        slug: video-understanding
-        contents:
-          - page: Overview
-            path: pages/use-cases/video-understanding/overview.md
-          - page: Exact Video KV Routing
-            path: pages/use-cases/video-understanding/exact-video-kv-routing.md
-          - page: Video Decoding and GPU Requirements
-            slug: video-decoding
-            path: pages/use-cases/video-understanding/video-decoding.md
+          - page: Additional Media Decoders
+            slug: additional-media-decoders
+            path: pages/use-cases/image-understanding/additional-media-decoders.md
 
       # ==================== Speech ====================
       - section: Speech
@@ -808,25 +798,37 @@ navigation:
             slug: speech-to-speech
             path: pages/use-cases/speech/speech-to-speech.md
 
+      # ==================== Video Understanding ====================
+      - section: Video Understanding
+        collapsed: true
+        icon: film
+        slug: video-understanding
+        contents:
+          - page: Overview
+            path: pages/use-cases/video-understanding/overview.md
+          - page: Exact Video KV Routing
+            path: pages/use-cases/video-understanding/exact-video-kv-routing.md
+          - page: Video Decoding and GPU Requirements
+            slug: video-decoding
+            path: pages/use-cases/video-understanding/video-decoding.md
+
       # ==================== Diffusion ====================
       - section: Diffusion
         collapsed: true
         icon: wand-magic-sparkles
         slug: diffusion
         contents:
-          - page: Overview
-            path: pages/use-cases/diffusion/overview.md
+          - page: Text to Image
+            path: pages/use-cases/diffusion/text-to-image.md
+          - page: Text to Video
+            slug: text-to-video
+            path: pages/use-cases/diffusion/text-to-video.md
+          - page: Image to Video
+            slug: image-to-video
+            path: pages/use-cases/diffusion/image-to-video.md
           - page: FastVideo
             slug: fastvideo
             path: pages/use-cases/diffusion/fastvideo.md
-          - page: Text to Image
-            path: pages/use-cases/diffusion/text-to-image.md
-          - page: Text to Video (T2V)
-            slug: text-to-video
-            path: pages/use-cases/diffusion/text-to-video.md
-          - page: Image to Video (I2V)
-            slug: image-to-video
-            path: pages/use-cases/diffusion/image-to-video.md
 
       - section: GPU Sharing
         collapsed: true

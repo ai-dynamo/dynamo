@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: ThunderAgent Program Scheduler
+title: Schedule Agents with ThunderAgent
 subtitle: Schedule whole agent runs, and pause idle ones at tool boundaries, to protect KV cache
 ---
 

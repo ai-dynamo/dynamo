@@ -1,58 +1,85 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="552" viewBox="0 0 1300 552" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="450" viewBox="0 0 1100 450" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Session affinity keeps a session on one worker</title>
-  <desc id="desc">Each turn of an agent session repeats a growing prefix. With session affinity on, the frontend binds the session to the worker that served its first request and sends later turns there, so each turn reuses the KV cache that earlier turns built. Other workers are not used by this session.</desc>
+  <desc id="desc">The turns of one agent session reach the router. With session affinity on, the router binds the session to one worker and sends every turn there, where the earlier turns' KV cache already is. The other workers are not used by the session.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1300" height="552" fill="#FFFFFF"/>
+  <rect width="1100" height="450" fill="#FFFFFF"/>
   <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">SESSION AFFINITY</text>
   <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Every turn within a session lands on the same worker</text>
-  <text x="50" y="108" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">AGENT SESSION  research-run-42</text>
-  <rect x="50" y="120" width="330" height="66" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="66" y="145" font-size="14" font-weight="700" fill="#1A1A1A">Turn 1</text>
-  <rect x="66" y="156" width="120" height="16" rx="4" fill="#F0F4FF" stroke="#234CDA"/>
-  <rect x="50" y="198" width="330" height="66" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="66" y="223" font-size="14" font-weight="700" fill="#1A1A1A">Turn 2</text>
-  <rect x="66" y="234" width="190" height="16" rx="4" fill="#F0F4FF" stroke="#234CDA"/>
-  <rect x="50" y="276" width="330" height="66" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="66" y="301" font-size="14" font-weight="700" fill="#1A1A1A">Turn 3</text>
-  <rect x="66" y="312" width="260" height="16" rx="4" fill="#F0F4FF" stroke="#234CDA"/>
-  <rect x="450" y="96" width="330" height="288" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="466" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">FRONTEND ROUTER  (--router-mode kv)</text>
-  <rect x="466" y="126" width="298" height="104" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="480" y="153" font-size="13" font-weight="700" fill="#234CDA">Binding table</text>
-  <circle cx="485" cy="170" r="2.2" fill="#1A1A1A"/>
-  <text x="494" y="174" font-size="12.5" fill="#1A1A1A">research-run-42 -&gt; Worker 2</text>
-  <circle cx="485" cy="188" r="2.2" fill="#1A1A1A"/>
-  <text x="494" y="192" font-size="12.5" fill="#1A1A1A">Idle TTL: --router-session-affinity-</text>
-  <text x="494" y="210" font-size="12.5" fill="#1A1A1A">ttl-secs</text>
-  <rect x="466" y="244" width="298" height="68" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="480" y="271" font-size="13" font-weight="700" fill="#1A1A1A">First request binds</text>
-  <circle cx="485" cy="288" r="2.2" fill="#4B5563"/>
-  <text x="494" y="292" font-size="12.5" fill="#4B5563">Later turns follow the binding</text>
-  <line x1="382" y1="153" x2="446" y2="153" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <line x1="382" y1="231" x2="446" y2="231" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <line x1="382" y1="309" x2="446" y2="309" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="860" y="96" width="390" height="288" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="876" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">WORKERS</text>
-  <rect x="876" y="126" width="358" height="68" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="890" y="153" font-size="13" font-weight="700" fill="#374151">Worker 1</text>
-  <text x="890" y="174" font-size="13" fill="#1A1A1A">Not used by this session.</text>
-  <rect x="876" y="206" width="358" height="86" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="890" y="233" font-size="13" font-weight="700" fill="#4C7A00">Worker 2  (bound)</text>
-  <circle cx="895" cy="250" r="2.2" fill="#1A1A1A"/>
-  <text x="904" y="254" font-size="13" fill="#1A1A1A">Holds the session's KV cache</text>
-  <circle cx="895" cy="268" r="2.2" fill="#1A1A1A"/>
-  <text x="904" y="272" font-size="13" fill="#1A1A1A">Turn 3 skips prefill for turns 1 and 2</text>
-  <rect x="876" y="304" width="358" height="68" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="890" y="331" font-size="13" font-weight="700" fill="#374151">Worker 3</text>
-  <text x="890" y="352" font-size="13" fill="#1A1A1A">Not used by this session.</text>
-  <line x1="782" y1="249.0" x2="872" y2="249.0" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="50" y="364" font-size="12" fill="#4B5563">Each turn repeats the whole conversation so far.</text>
-  <rect x="50" y="410" width="1200" height="118" rx="12" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="5 5"/>
-  <text x="66" y="432" font-size="12" font-weight="700" letter-spacing="1.2" fill="#374151">TWO MODES  (--router-session-affinity-mode)</text>
-  <circle cx="72" cy="458" r="2.5" fill="#1A1A1A"/>
-  <text x="82" y="462" font-size="13" font-weight="700" fill="#1A1A1A">hard (default)</text>
-  <text x="214" y="462" font-size="13" fill="#4B5563">Send the request to the bound worker. If it is gone, drop the binding and pick normally.</text>
-  <circle cx="72" cy="488" r="2.5" fill="#1A1A1A"/>
-  <text x="82" y="492" font-size="13" font-weight="700" fill="#1A1A1A">soft</text>
-  <text x="214" y="492" font-size="13" fill="#4B5563">Pass the bound worker to worker selection as a preference. A custom or ThunderAgent policy can still move the session.</text>
+  <rect x="50" y="112" width="230" height="58" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="66" y="136" font-size="14" font-weight="700" fill="#1A1A1A">Turn 1</text>
+  <rect x="66" y="146" width="60" height="12" rx="4" fill="#F0F4FF" stroke="#234CDA"/>
+  <line x1="282" y1="141" x2="396" y2="188" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="50" y="188" width="230" height="58" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="66" y="212" font-size="14" font-weight="700" fill="#1A1A1A">Turn 2</text>
+  <rect x="66" y="222" width="110" height="12" rx="4" fill="#F0F4FF" stroke="#234CDA"/>
+  <line x1="282" y1="217" x2="396" y2="220" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="50" y="264" width="230" height="58" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="66" y="288" font-size="14" font-weight="700" fill="#1A1A1A">Turn 3</text>
+  <rect x="66" y="298" width="160" height="12" rx="4" fill="#F0F4FF" stroke="#234CDA"/>
+  <line x1="282" y1="293" x2="396" y2="252" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="395.0" y="172.0" width="150" height="96" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="467.2" cy="207.5" r="8.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="467.2" cy="207.5" r="2.8000000000000003" fill="#234CDA"/>
+  <line x1="475.59999999999997" y1="207.5" x2="480.08" y2="207.5" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="473.139696961967" y1="213.439696961967" x2="476.3075353416827" y2="216.60753534168273" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="467.2" y1="215.9" x2="467.2" y2="220.38" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="461.260303038033" y1="213.439696961967" x2="458.0924646583173" y2="216.60753534168273" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="458.8" y1="207.5" x2="454.32" y2="207.5" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="461.260303038033" y1="201.560303038033" x2="458.0924646583172" y2="198.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="467.2" y1="199.1" x2="467.2" y2="194.62" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="473.139696961967" y1="201.560303038033" x2="476.3075353416827" y2="198.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <text x="470" y="240.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">Router</text>
+  <rect x="760" y="120" width="290" height="84" rx="6" fill="#F7F8FA" stroke="#374151" stroke-width="2.5"/>
+  <rect x="779.6" y="137.6" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="784.08" y="142.08" width="7.840000000000001" height="7.840000000000001" fill="#374151"/>
+  <line x1="782.4" y1="132" x2="782.4" y2="137.6" stroke="#374151" stroke-width="2"/><line x1="782.4" y1="154.4" x2="782.4" y2="160" stroke="#374151" stroke-width="2"/>
+  <line x1="774" y1="140.4" x2="779.6" y2="140.4" stroke="#374151" stroke-width="2"/><line x1="796.4" y1="140.4" x2="802" y2="140.4" stroke="#374151" stroke-width="2"/>
+  <line x1="788.0" y1="132" x2="788.0" y2="137.6" stroke="#374151" stroke-width="2"/><line x1="788.0" y1="154.4" x2="788.0" y2="160" stroke="#374151" stroke-width="2"/>
+  <line x1="774" y1="146.0" x2="779.6" y2="146.0" stroke="#374151" stroke-width="2"/><line x1="796.4" y1="146.0" x2="802" y2="146.0" stroke="#374151" stroke-width="2"/>
+  <line x1="793.6" y1="132" x2="793.6" y2="137.6" stroke="#374151" stroke-width="2"/><line x1="793.6" y1="154.4" x2="793.6" y2="160" stroke="#374151" stroke-width="2"/>
+  <line x1="774" y1="151.6" x2="779.6" y2="151.6" stroke="#374151" stroke-width="2"/><line x1="796.4" y1="151.6" x2="802" y2="151.6" stroke="#374151" stroke-width="2"/>
+  <text x="814" y="152" font-size="14" font-weight="700" fill="#1A1A1A">Worker 1</text>
+  <rect x="776" y="172" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="800" y="172" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="824" y="172" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="848" y="172" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="872" y="172" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="896" y="172" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <line x1="546" y1="220" x2="756" y2="162" stroke="#9CA3AF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-gray)"/>
+  <rect x="760" y="220" width="290" height="84" rx="6" fill="#F4F9E8" stroke="#76B900" stroke-width="3"/>
+  <rect x="779.6" y="237.6" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#4C7A00" stroke-width="2"/>
+  <rect x="784.08" y="242.08" width="7.840000000000001" height="7.840000000000001" fill="#4C7A00"/>
+  <line x1="782.4" y1="232" x2="782.4" y2="237.6" stroke="#4C7A00" stroke-width="2"/><line x1="782.4" y1="254.4" x2="782.4" y2="260" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="774" y1="240.4" x2="779.6" y2="240.4" stroke="#4C7A00" stroke-width="2"/><line x1="796.4" y1="240.4" x2="802" y2="240.4" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="788.0" y1="232" x2="788.0" y2="237.6" stroke="#4C7A00" stroke-width="2"/><line x1="788.0" y1="254.4" x2="788.0" y2="260" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="774" y1="246.0" x2="779.6" y2="246.0" stroke="#4C7A00" stroke-width="2"/><line x1="796.4" y1="246.0" x2="802" y2="246.0" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="793.6" y1="232" x2="793.6" y2="237.6" stroke="#4C7A00" stroke-width="2"/><line x1="793.6" y1="254.4" x2="793.6" y2="260" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="774" y1="251.6" x2="779.6" y2="251.6" stroke="#4C7A00" stroke-width="2"/><line x1="796.4" y1="251.6" x2="802" y2="251.6" stroke="#4C7A00" stroke-width="2"/>
+  <text x="814" y="252" font-size="14" font-weight="700" fill="#4C7A00">Worker 2</text>
+  <rect x="776" y="272" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1"/>
+  <rect x="800" y="272" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1"/>
+  <rect x="824" y="272" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1"/>
+  <rect x="848" y="272" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1"/>
+  <rect x="872" y="272" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1"/>
+  <rect x="896" y="272" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="940" y="268" width="56" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="968.0" y="284.5" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">bound</text>
+  <line x1="546" y1="220" x2="756" y2="262" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="760" y="320" width="290" height="84" rx="6" fill="#F7F8FA" stroke="#374151" stroke-width="2.5"/>
+  <rect x="779.6" y="337.6" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="784.08" y="342.08" width="7.840000000000001" height="7.840000000000001" fill="#374151"/>
+  <line x1="782.4" y1="332" x2="782.4" y2="337.6" stroke="#374151" stroke-width="2"/><line x1="782.4" y1="354.4" x2="782.4" y2="360" stroke="#374151" stroke-width="2"/>
+  <line x1="774" y1="340.4" x2="779.6" y2="340.4" stroke="#374151" stroke-width="2"/><line x1="796.4" y1="340.4" x2="802" y2="340.4" stroke="#374151" stroke-width="2"/>
+  <line x1="788.0" y1="332" x2="788.0" y2="337.6" stroke="#374151" stroke-width="2"/><line x1="788.0" y1="354.4" x2="788.0" y2="360" stroke="#374151" stroke-width="2"/>
+  <line x1="774" y1="346.0" x2="779.6" y2="346.0" stroke="#374151" stroke-width="2"/><line x1="796.4" y1="346.0" x2="802" y2="346.0" stroke="#374151" stroke-width="2"/>
+  <line x1="793.6" y1="332" x2="793.6" y2="337.6" stroke="#374151" stroke-width="2"/><line x1="793.6" y1="354.4" x2="793.6" y2="360" stroke="#374151" stroke-width="2"/>
+  <line x1="774" y1="351.6" x2="779.6" y2="351.6" stroke="#374151" stroke-width="2"/><line x1="796.4" y1="351.6" x2="802" y2="351.6" stroke="#374151" stroke-width="2"/>
+  <text x="814" y="352" font-size="14" font-weight="700" fill="#1A1A1A">Worker 3</text>
+  <rect x="776" y="372" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="800" y="372" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="824" y="372" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="848" y="372" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="872" y="372" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <rect x="896" y="372" width="18" height="18" rx="3" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1"/>
+  <line x1="546" y1="220" x2="756" y2="362" stroke="#9CA3AF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-gray)"/>
 </svg>

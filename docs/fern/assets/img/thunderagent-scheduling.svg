@@ -1,51 +1,42 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="422" viewBox="0 0 1300 422" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
-  <title id="title">ThunderAgent pauses sessions that are waiting on tools</title>
-  <desc id="desc">The ThunderAgent program scheduler in the frontend treats each agent session as one program. When KV cache is under pressure it defers the next turn of sessions that are waiting on tools, and it resumes them when there is room. Sessions in an LLM turn keep running.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="380" viewBox="0 0 1100 380" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">ThunderAgent pauses sessions that wait on tools</title>
+  <desc id="desc">Agent sessions feed the ThunderAgent scheduler in the frontend. A session in an LLM turn keeps running. A session waiting on a tool is paused while KV cache is under pressure, and it resumes when there is room.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1300" height="422" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">THUNDERAGENT  (EXPERIMENTAL)</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Schedule the agent, not just the request</text>
-  <text x="50" y="108" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">AGENT SESSIONS</text>
-  <rect x="50" y="120" width="300" height="68" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="64" y="147" font-size="13" font-weight="700" fill="#4C7A00">Session A: in an LLM turn</text>
-  <text x="64" y="168" font-size="13" fill="#1A1A1A">Keeps running.</text>
-  <rect x="50" y="202" width="300" height="68" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="64" y="229" font-size="13" font-weight="700" fill="#92400E">Session B: waiting on a tool</text>
-  <text x="64" y="250" font-size="13" fill="#1A1A1A">Holds KV blocks while the GPU idles.</text>
-  <rect x="50" y="284" width="300" height="68" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="64" y="311" font-size="13" font-weight="700" fill="#1A1A1A">Session C: tool finished</text>
-  <text x="64" y="332" font-size="13" fill="#4B5563">Ready for its next turn.</text>
-  <rect x="430" y="96" width="400" height="272" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="446" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">FRONTEND: THUNDERAGENT PLUGIN</text>
-  <rect x="446" y="126" width="368" height="86" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="460" y="153" font-size="13" font-weight="700" fill="#1A1A1A">Program scheduler</text>
-  <circle cx="465" cy="170" r="2.2" fill="#4B5563"/>
-  <text x="474" y="174" font-size="13" fill="#4B5563">Sees the session, not just the request</text>
-  <circle cx="465" cy="188" r="2.2" fill="#4B5563"/>
-  <text x="474" y="192" font-size="13" fill="#4B5563">Acts at the boundary between turns</text>
-  <rect x="446" y="238" width="368" height="104" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="460" y="265" font-size="13" font-weight="700" fill="#234CDA">Decision under KV pressure</text>
-  <circle cx="465" cy="282" r="2.2" fill="#1A1A1A"/>
-  <text x="474" y="286" font-size="13" fill="#1A1A1A">Defer the next turn of a session that is</text>
-  <text x="474" y="304" font-size="13" fill="#1A1A1A">waiting on a tool</text>
-  <circle cx="465" cy="318" r="2.2" fill="#1A1A1A"/>
-  <text x="474" y="322" font-size="13" fill="#1A1A1A">Resume it when there is room</text>
-  <line x1="352" y1="154.0" x2="380" y2="154.0" stroke="#234CDA" stroke-width="2.5"/><line x1="352" y1="236.0" x2="380" y2="236.0" stroke="#234CDA" stroke-width="2.5"/><line x1="352" y1="318.0" x2="380" y2="318.0" stroke="#234CDA" stroke-width="2.5"/><line x1="380" y1="154.0" x2="380" y2="318.0" stroke="#234CDA" stroke-width="2.5"/>
-  <line x1="380" y1="169.0" x2="442" y2="169.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <line x1="630.0" y1="214" x2="630.0" y2="236" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="910" y="96" width="340" height="272" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="926" y="118" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">WORKERS</text>
-  <rect x="926" y="126" width="308" height="226" rx="10" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.8"/>
-  <text x="940" y="153" font-size="13" font-weight="700" fill="#374151">KV cache</text>
-  <rect x="942" y="158" width="276" height="30" rx="5" fill="#F4F9E8" stroke="#76B900"/>
-  <text x="954" y="178" font-size="12.5" fill="#4C7A00">A: active</text>
-  <rect x="942" y="194" width="276" height="30" rx="5" fill="#FFF7E6" stroke="#D97706"/>
-  <text x="954" y="214" font-size="12.5" fill="#92400E">B: idle blocks</text>
-  <rect x="942" y="230" width="276" height="30" rx="5" fill="#F3F4F6" stroke="#9CA3AF" stroke-dasharray="4 3"/>
-  <text x="954" y="250" font-size="12.5" fill="#4B5563">free for the next turn</text>
-  <text x="942" y="284" font-size="12" fill="#4B5563">Without a program view, a busy cache</text>
-  <text x="942" y="301" font-size="12" fill="#4B5563">evicts useful blocks and every next</text>
-  <text x="942" y="318" font-size="12" fill="#4B5563">turn pays re-prefill.</text>
-  <line x1="816" y1="290.0" x2="922" y2="290.0" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <text x="50" y="404" font-size="13" fill="#4B5563">Use it when many concurrent sessions leave KV cache idle between turns. With few sessions or no cache pressure, start with affinity and priority.</text>
+  <rect width="1100" height="380" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">THUNDERAGENT</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Pause sessions that wait on tools to protect KV cache</text>
+  <rect x="50" y="120" width="290" height="68" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="66" y="148" font-size="14" font-weight="700" fill="#1A1A1A">Session A</text>
+  <text x="66" y="170" font-size="13" fill="#4C7A00">running</text>
+  <line x1="342" y1="154" x2="390" y2="154" stroke="#234CDA" stroke-width="2.5"/>
+  <rect x="50" y="210" width="290" height="68" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="66" y="238" font-size="14" font-weight="700" fill="#1A1A1A">Session B</text>
+  <text x="66" y="260" font-size="13" fill="#92400E">waiting on a tool: paused</text>
+  <line x1="342" y1="244" x2="390" y2="244" stroke="#234CDA" stroke-width="2.5"/>
+  <rect x="50" y="300" width="290" height="68" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <text x="66" y="328" font-size="14" font-weight="700" fill="#1A1A1A">Session C</text>
+  <text x="66" y="350" font-size="13" fill="#4B5563">tool done: resumed</text>
+  <line x1="342" y1="334" x2="390" y2="334" stroke="#234CDA" stroke-width="2.5"/>
+  <line x1="390" y1="154" x2="390" y2="334" stroke="#234CDA" stroke-width="2.5"/>
+  <line x1="390" y1="220" x2="440" y2="220" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="445.0" y="160.0" width="170" height="120" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <circle cx="527.2" cy="207.5" r="8.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="527.2" cy="207.5" r="2.8000000000000003" fill="#234CDA"/>
+  <line x1="535.6" y1="207.5" x2="540.08" y2="207.5" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="533.139696961967" y1="213.439696961967" x2="536.3075353416828" y2="216.60753534168273" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="527.2" y1="215.9" x2="527.2" y2="220.38" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="521.260303038033" y1="213.439696961967" x2="518.0924646583173" y2="216.60753534168273" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="518.8000000000001" y1="207.5" x2="514.32" y2="207.5" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="521.260303038033" y1="201.560303038033" x2="518.0924646583173" y2="198.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="527.2" y1="199.1" x2="527.2" y2="194.62" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <line x1="533.139696961967" y1="201.560303038033" x2="536.3075353416828" y2="198.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
+  <text x="530" y="240.5" font-size="13" font-weight="700" fill="#234CDA" text-anchor="middle">ThunderAgent</text>
+  <line x1="618" y1="220" x2="748" y2="220" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="760" y="130" width="290" height="180" rx="12" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <text x="905" y="158" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">KV cache</text>
+  <rect x="780" y="176" width="250" height="30" rx="5" fill="#F4F9E8" stroke="#76B900"/>
+  <text x="794" y="197" font-size="13" font-weight="700" fill="#4C7A00">A</text>
+  <rect x="780" y="216" width="250" height="30" rx="5" fill="#FFF7E6" stroke="#D97706"/>
+  <text x="794" y="237" font-size="13" font-weight="700" fill="#92400E">B</text>
+  <rect x="780" y="256" width="250" height="30" rx="5" fill="#F3F4F6" stroke="#9CA3AF" stroke-dasharray="4 3"/>
 </svg>

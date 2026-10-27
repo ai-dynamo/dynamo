@@ -5,10 +5,14 @@ title: FastVideo
 subtitle: Deploy FastVideo text-to-video generation on Dynamo with a custom worker
 ---
 
-This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo) text-to-video generation on Dynamo using a custom worker (`worker.py`) exposed through the `/v1/videos` endpoint.
+## Why Use FastVideo
+
+[FastVideo](https://github.com/hao-ai-lab/FastVideo) is an open-source video generation framework from Hao AI Lab that cuts generation latency with sparse attention, step distillation, NVFP4 quantization, and fused kernels. In the lab's [real-time 1080p benchmark](https://haoailab.com/blogs/fastvideo_realtime_1080p/), an optimized LTX-2.3 pipeline generates 5 seconds of 1088x1920 video with audio in about 4.55 seconds on a single NVIDIA B200 GPU, which the lab reports as 3.9x lower end-to-end latency than the next-fastest option. Its [Dreamverse](https://haoailab.com/blogs/fastvideo-dreamverse-release/) demo generates a 30-second 1080p clip in about 7 seconds on one B200, and the project reports more than 50x faster denoising from sparse distillation. These are Hao AI Lab figures, not Dynamo benchmarks, and they depend on the model and hardware.
+
+On Dynamo, you run FastVideo as a custom worker behind the `/v1/videos` endpoint, scale it with more workers, and deploy it on Kubernetes. This guide covers that deployment.
 
 > [!NOTE]
-> FastVideo is a custom example worker with its own runtime image, not one of Dynamo's built-in backends. Its image encodes H.264 (`libx264`), unlike the standard Dynamo images, which encode VP9. For the built-in backends (vLLM-Omni, SGLang, TensorRT-LLM), see [Text to Video (T2V)](text-to-video.md).
+> FastVideo is a custom example worker with its own runtime image, not one of Dynamo's built-in backends. Its image encodes H.264 (`libx264`), unlike the standard Dynamo images, which encode VP9. For the built-in backends (vLLM-Omni, SGLang, TensorRT-LLM), see [Text to Video](text-to-video.md).
 
 ## Overview
 
@@ -458,5 +462,5 @@ The example source lives at [`examples/diffusers/`](https://github.com/ai-dynamo
 - [Text-to-Video with vLLM-Omni](text-to-video.md#vllm-omni) — vLLM-Omni video generation via `/v1/videos`
 - [Text-to-Video with SGLang](text-to-video.md#sglang) — SGLang video generation worker
 - [Text-to-Video with TensorRT-LLM](text-to-video.md#tensorrt-llm) — TensorRT-LLM diffusion quick start
-- [Text to Video (T2V)](text-to-video.md) — built-in text-to-video backends
+- [Text to Video](text-to-video.md) — built-in text-to-video backends
 

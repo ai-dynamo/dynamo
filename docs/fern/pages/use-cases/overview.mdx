@@ -6,31 +6,34 @@ subtitle: Find the guide for your workload
 sidebar-title: Overview
 ---
 
-Each section in this tab is organized around a workload. Start with the first
-page of the section that matches what you are building; it covers backend
-setup and a first working request.
+<CardGroup cols={2}>
+  <Card title="Reinforcement Learning" icon="brain" href="reinforcement-learning/overview.mdx">
+    Keeps rollout workers busy and healthy with KV-aware routing, fast policy refresh through ModelExpress, and recovery from worker loss.
+  </Card>
 
-## Workloads
+  <Card title="Agents" icon="users" href="agents/overview.md">
+    Faster multi-turn sessions by keeping each session's KV cache on one worker and putting interactive turns ahead of background work.
+  </Card>
 
-| You want to… | Start here |
-| --- | --- |
-| Serve rollouts for reinforcement learning training | [Reinforcement Learning](reinforcement-learning/overview.md) |
-| Serve coding agents and multi-step agent sessions | [Agents](agents/overview.md) |
-| Answer questions about images | [Image Understanding](image-understanding/overview.md) |
-| Answer questions about video | [Video Understanding](video-understanding/overview.md) |
-| Transcribe speech, synthesize speech, or build a voice agent | [Speech](speech/voice-pipelines.md) |
-| Generate images or video from a prompt | [Diffusion](diffusion/overview.md) |
-| Speed up image and video workloads | [VLM Performance Optimization](image-understanding/vlm-performance-optimization.md) |
-| Pack many small models onto shared GPUs | [GPU Sharing](gpu-sharing/overview.mdx) |
+  <Card title="Image Understanding" icon="eye" href="image-understanding/overview.md">
+    20-30% better throughput and 10-90% lower TTFT by processing images in parallel, avoiding redundant encoding and prefill, and disaggregating the encoder.
+  </Card>
 
-Tool calling and reasoning output parsing apply to every chat deployment and
-are documented with the frontend in the Developer Guide:
-[Tool Calling and Reasoning](tool-calling-and-reasoning/overview.mdx).
+  <Card title="Speech" icon="microphone" href="speech/voice-pipelines.md">
+    Up to 40% lower TTFT by overlapping the ASR and LLM stages, and better resiliency by recovering realtime transcription after worker loss.
+  </Card>
 
-## Media Input and Output
+  <Card title="Video Understanding" icon="film" href="video-understanding/overview.md">
+    Faster video requests by decoding in the Rust frontend or on the GPU's hardware decoder, and routing repeated clips to the worker that already caches them.
+  </Card>
 
-| Modality | Understand (input) | Generate (output) |
-| --- | --- | --- |
-| Image | `image_url` in `/v1/chat/completions` on vLLM, SGLang, and TensorRT-LLM. See [Image Understanding](image-understanding/overview.md). | `/v1/images/generations` on vLLM-Omni, SGLang, and TensorRT-LLM (experimental). See [Text to Image](diffusion/text-to-image.md). |
-| Video | `video_url` in `/v1/chat/completions` on vLLM, SGLang, and TensorRT-LLM. See [Video Understanding](video-understanding/overview.md). | `/v1/videos` on vLLM-Omni, SGLang, TensorRT-LLM (experimental), and FastVideo. See [Text to Video (T2V)](diffusion/text-to-video.md) and [Image to Video (I2V)](diffusion/image-to-video.md). |
-| Speech and audio | `/v1/realtime` transcription on vLLM and Nemotron Speech NIMs. See [Speech to Text](speech/speech-to-text.md). | `/v1/audio/speech` and `/v1/realtime` on vLLM-Omni. See [Text-to-Speech](speech/text-to-speech.md) and [Speech-to-Speech](speech/speech-to-speech.md). |
+  <Card title="Diffusion" icon="wand-magic-sparkles" href="diffusion/text-to-image.md">
+    8-17x faster generation with step-distilled models, and 5 seconds of 1080p video in about 4.5 seconds with FastVideo.
+  </Card>
+
+  <Card title="GPU Sharing" icon="layer-group" href="gpu-sharing/overview.mdx">
+    60-80% of a dedicated GPU's throughput by letting many lightly used models share a GPU.
+  </Card>
+</CardGroup>
+
+The performance improvements come from benchmarks on real production use cases and vary with the model, hardware, and workload. See the respective docs for details.

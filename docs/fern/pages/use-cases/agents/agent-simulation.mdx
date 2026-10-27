@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Agent Simulation
+title: Simulate an Agent Run
 subtitle: Capture an agent workload once, then replay it on real or simulated infrastructure
 ---
 
@@ -67,7 +67,7 @@ Run the agent workload normally against this frontend. Use the real tools if you
 
 Each agent chain should send `X-Dynamo-Session-ID`. A child agent should also send `X-Dynamo-Parent-Session-ID`. These headers describe the request graph; they do not enable session affinity or change routing.
 
-Dynamo writes rotating `request-trace.NNNNNN.jsonl.gz` files. Stop the frontend, or otherwise allow tracing to flush, before using the files. See [Agent Tracing](agent-tracing.md) for configuration, the record schema, Perfetto conversion, and optional tool-event ingestion.
+Dynamo writes rotating `request-trace.NNNNNN.jsonl.gz` files. Stop the frontend, or otherwise allow tracing to flush, before using the files. See [Trace an Agent Run](agent-tracing.md) for configuration, the record schema, Perfetto conversion, and optional tool-event ingestion.
 
 </Step>
 <Step title="Check the Capture" id="step-2-check-the-capture">

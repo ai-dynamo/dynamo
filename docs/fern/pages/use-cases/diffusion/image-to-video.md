@@ -1,17 +1,17 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Image to Video (I2V)
+title: Image to Video
 subtitle: Animate source images with vLLM-Omni or SGLang
 ---
 
-Image-to-video (I2V) animates a source image from a text prompt through the
-same `/v1/videos` endpoint as [Text to Video (T2V)](text-to-video.md), with an extra
+Image-to-video animates a source image from a text prompt through the
+same `/v1/videos` endpoint as [Text to Video](text-to-video.md), with an extra
 `input_reference` field that points at the source image.
 
 > [!NOTE]
 > Before you begin, set up vLLM-Omni or SGLang as described in
-> [Text to Video (T2V) › Set up the backend](text-to-video.md#set-up-the-backend).
+> [Text to Video › Set up the backend](text-to-video.md#set-up-the-backend).
 > TensorRT-LLM does not support image-to-video.
 
 ## Generate Videos from Images
@@ -21,7 +21,7 @@ same `/v1/videos` endpoint as [Text to Video (T2V)](text-to-video.md), with an e
 
 <Anchor id="vllm-omni" />
 
-Image-to-video (I2V) uses the same `/v1/videos` endpoint as [text-to-video](text-to-video.md#vllm-omni), with an additional `input_reference` field that provides the source image. Run a vLLM-Omni worker with `--output-modalities video`.
+Image-to-video uses the same `/v1/videos` endpoint as [text-to-video](text-to-video.md#vllm-omni), with an additional `input_reference` field that provides the source image. Run a vLLM-Omni worker with `--output-modalities video`.
 
 ### Tested Models
 
@@ -73,13 +73,13 @@ The `input_reference` field accepts:
 
 ### Request Parameters (`nvext`)
 
-I2V accepts all [text-to-video `nvext` fields](text-to-video.md#request-parameters-nvext), plus two fields that control the dual-expert MoE denoising schedule in Wan2.x models:
+Image-to-video accepts all [text-to-video `nvext` fields](text-to-video.md#request-parameters-nvext), plus two fields that control the dual-expert MoE denoising schedule in Wan2.x models:
 
 <ParamField path="nvext.boundary_ratio" type="float" default="0.875">
-  MoE expert switching boundary (I2V).
+  MoE expert switching boundary (image-to-video only).
 </ParamField>
 <ParamField path="nvext.guidance_scale_2" type="float" default="1.0">
-  CFG scale for the low-noise expert (I2V).
+  CFG scale for the low-noise expert (image-to-video only).
 </ParamField>
 
 ### See Also
@@ -93,7 +93,7 @@ I2V accepts all [text-to-video `nvext` fields](text-to-video.md#request-paramete
 
 <Anchor id="sglang" />
 
-SGLang's video generation worker (`--video-generation-worker`) supports image-to-video (I2V) in addition to [text-to-video](text-to-video.md#sglang), using SGLang's `DiffGenerator` with frame-to-video encoding.
+SGLang's video generation worker (`--video-generation-worker`) supports image-to-video in addition to [text-to-video](text-to-video.md#sglang), using SGLang's `DiffGenerator` with frame-to-video encoding.
 
 ### Launch
 

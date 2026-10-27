@@ -1,98 +1,75 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="470" viewBox="0 0 1300 470" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="320" viewBox="0 0 1100 320" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">GPU sharing: one model per GPU versus two</title>
-  <desc id="desc">The baseline runs one model on each GPU. HAMi packs two models on a GPU with a memory cap per model while the CUDA driver time-slices the streaming multiprocessors between them. GPU fractions give each model its own fixed half of the memory and of the streaming multiprocessors, so both run concurrently.</desc>
+  <desc id="desc">The baseline runs one model per GPU. HAMi runs two models on a GPU with memory caps and time-slices compute between them. GPU fractions give each model half the memory and half the compute, running concurrently.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1300" height="470" fill="#FFFFFF"/>
+  <rect width="1100" height="320" fill="#FFFFFF"/>
   <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">GPU SHARING</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Three ways to place Qwen3-4B on a GPU</text>
-  <text x="50" y="108" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">BASELINE</text>
-  <text x="50" y="130" font-size="13" font-weight="700" fill="#1A1A1A">One model per GPU</text>
-  <rect x="50" y="144" width="340" height="226" rx="12" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <rect x="66.4" y="156.4" width="13.2" height="13.2" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <rect x="69.92" y="159.92" width="6.16" height="6.16" fill="#374151"/>
-  <line x1="68.6" y1="152" x2="68.6" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="68.6" y1="169.6" x2="68.6" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="62" y1="158.6" x2="66.4" y2="158.6" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="158.6" x2="84" y2="158.6" stroke="#374151" stroke-width="2"/>
-  <line x1="73.0" y1="152" x2="73.0" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="73.0" y1="169.6" x2="73.0" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="62" y1="163.0" x2="66.4" y2="163.0" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="163.0" x2="84" y2="163.0" stroke="#374151" stroke-width="2"/>
-  <line x1="77.4" y1="152" x2="77.4" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="77.4" y1="169.6" x2="77.4" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="62" y1="167.4" x2="66.4" y2="167.4" stroke="#374151" stroke-width="2"/><line x1="79.6" y1="167.4" x2="84" y2="167.4" stroke="#374151" stroke-width="2"/>
-  <text x="92" y="170" font-size="12" font-weight="700" fill="#374151">One GPU</text>
-  <text x="480" y="108" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">HAMI</text>
-  <text x="480" y="130" font-size="13" font-weight="700" fill="#1A1A1A">Two models, memory limits only</text>
-  <rect x="480" y="144" width="340" height="226" rx="12" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <rect x="496.4" y="156.4" width="13.2" height="13.2" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <rect x="499.92" y="159.92" width="6.16" height="6.16" fill="#374151"/>
-  <line x1="498.6" y1="152" x2="498.6" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="498.6" y1="169.6" x2="498.6" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="492" y1="158.6" x2="496.4" y2="158.6" stroke="#374151" stroke-width="2"/><line x1="509.6" y1="158.6" x2="514" y2="158.6" stroke="#374151" stroke-width="2"/>
-  <line x1="503.0" y1="152" x2="503.0" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="503.0" y1="169.6" x2="503.0" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="492" y1="163.0" x2="496.4" y2="163.0" stroke="#374151" stroke-width="2"/><line x1="509.6" y1="163.0" x2="514" y2="163.0" stroke="#374151" stroke-width="2"/>
-  <line x1="507.4" y1="152" x2="507.4" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="507.4" y1="169.6" x2="507.4" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="492" y1="167.4" x2="496.4" y2="167.4" stroke="#374151" stroke-width="2"/><line x1="509.6" y1="167.4" x2="514" y2="167.4" stroke="#374151" stroke-width="2"/>
-  <text x="522" y="170" font-size="12" font-weight="700" fill="#374151">One GPU</text>
-  <text x="910" y="108" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">GPU FRACTIONS</text>
-  <text x="910" y="130" font-size="13" font-weight="700" fill="#1A1A1A">Two models, memory and compute limits</text>
-  <rect x="910" y="144" width="340" height="226" rx="12" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <rect x="926.4" y="156.4" width="13.2" height="13.2" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <rect x="929.92" y="159.92" width="6.16" height="6.16" fill="#374151"/>
-  <line x1="928.6" y1="152" x2="928.6" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="928.6" y1="169.6" x2="928.6" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="922" y1="158.6" x2="926.4" y2="158.6" stroke="#374151" stroke-width="2"/><line x1="939.6" y1="158.6" x2="944" y2="158.6" stroke="#374151" stroke-width="2"/>
-  <line x1="933.0" y1="152" x2="933.0" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="933.0" y1="169.6" x2="933.0" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="922" y1="163.0" x2="926.4" y2="163.0" stroke="#374151" stroke-width="2"/><line x1="939.6" y1="163.0" x2="944" y2="163.0" stroke="#374151" stroke-width="2"/>
-  <line x1="937.4" y1="152" x2="937.4" y2="156.4" stroke="#374151" stroke-width="2"/><line x1="937.4" y1="169.6" x2="937.4" y2="174" stroke="#374151" stroke-width="2"/>
-  <line x1="922" y1="167.4" x2="926.4" y2="167.4" stroke="#374151" stroke-width="2"/><line x1="939.6" y1="167.4" x2="944" y2="167.4" stroke="#374151" stroke-width="2"/>
-  <text x="952" y="170" font-size="12" font-weight="700" fill="#374151">One GPU</text>
-  <rect x="64" y="186" width="312" height="86" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="78" y="213" font-size="13" font-weight="700" fill="#374151">Model A</text>
-  <circle cx="83" cy="230" r="2.2" fill="#1A1A1A"/>
-  <text x="92" y="234" font-size="12.5" fill="#1A1A1A">All of the memory</text>
-  <circle cx="83" cy="248" r="2.2" fill="#1A1A1A"/>
-  <text x="92" y="252" font-size="12.5" fill="#1A1A1A">All streaming multiprocessors (SMs)</text>
-  <text x="64" y="306" font-size="12" font-weight="700" fill="#4B5563">SMs</text>
-  <rect x="64" y="314" width="312" height="30" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="220.0" y="333.0" font-size="12" font-weight="700" fill="#374151" text-anchor="middle">Model A, always</text>
-  <rect x="494" y="186" width="150" height="96" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="508" y="213" font-size="13" font-weight="700" fill="#92400E">Model A</text>
-  <circle cx="513" cy="230" r="2.2" fill="#1A1A1A"/>
-  <text x="522" y="234" font-size="12.5" fill="#1A1A1A">Half the memory,</text>
-  <text x="522" y="252" font-size="12.5" fill="#1A1A1A">a hard cap</text>
-  <rect x="654" y="186" width="150" height="96" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="668" y="213" font-size="13" font-weight="700" fill="#92400E">Model B</text>
-  <circle cx="673" cy="230" r="2.2" fill="#1A1A1A"/>
-  <text x="682" y="234" font-size="12.5" fill="#1A1A1A">Half the memory,</text>
-  <text x="682" y="252" font-size="12.5" fill="#1A1A1A">a hard cap</text>
-  <text x="494" y="306" font-size="12" font-weight="700" fill="#4B5563">SMs, time-sliced by the CUDA driver</text>
-  <rect x="494" y="314" width="52" height="30" rx="4" fill="#FDE7C2" stroke="#D97706" stroke-width="1.5"/>
-  <text x="520.0" y="333.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">A</text>
-  <rect x="546" y="314" width="52" height="30" rx="4" fill="#F7C873" stroke="#D97706" stroke-width="1.5"/>
-  <text x="572.0" y="333.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
-  <rect x="598" y="314" width="52" height="30" rx="4" fill="#FDE7C2" stroke="#D97706" stroke-width="1.5"/>
-  <text x="624.0" y="333.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">A</text>
-  <rect x="650" y="314" width="52" height="30" rx="4" fill="#F7C873" stroke="#D97706" stroke-width="1.5"/>
-  <text x="676.0" y="333.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
-  <rect x="702" y="314" width="52" height="30" rx="4" fill="#FDE7C2" stroke="#D97706" stroke-width="1.5"/>
-  <text x="728.0" y="333.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">A</text>
-  <rect x="754" y="314" width="52" height="30" rx="4" fill="#F7C873" stroke="#D97706" stroke-width="1.5"/>
-  <text x="780.0" y="333.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
-  <rect x="924" y="186" width="150" height="104" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="938" y="213" font-size="13" font-weight="700" fill="#4C7A00">Model A</text>
-  <circle cx="943" cy="230" r="2.2" fill="#1A1A1A"/>
-  <text x="952" y="234" font-size="12.5" fill="#1A1A1A">Half the memory</text>
-  <circle cx="943" cy="248" r="2.2" fill="#1A1A1A"/>
-  <text x="952" y="252" font-size="12.5" fill="#1A1A1A">Up to half the</text>
-  <text x="952" y="270" font-size="12.5" fill="#1A1A1A">SMs</text>
-  <rect x="1084" y="186" width="150" height="104" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="1098" y="213" font-size="13" font-weight="700" fill="#4C7A00">Model B</text>
-  <circle cx="1103" cy="230" r="2.2" fill="#1A1A1A"/>
-  <text x="1112" y="234" font-size="12.5" fill="#1A1A1A">Half the memory</text>
-  <circle cx="1103" cy="248" r="2.2" fill="#1A1A1A"/>
-  <text x="1112" y="252" font-size="12.5" fill="#1A1A1A">Up to half the</text>
-  <text x="1112" y="270" font-size="12.5" fill="#1A1A1A">SMs</text>
-  <text x="924" y="306" font-size="12" font-weight="700" fill="#4B5563">SMs, capped at half each, running concurrently</text>
-  <rect x="924" y="314" width="156" height="30" rx="4" fill="#DCEFB5" stroke="#76B900" stroke-width="1.5"/>
-  <text x="1002.0" y="333.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">A</text>
-  <rect x="1080" y="314" width="156" height="30" rx="4" fill="#C6E58A" stroke="#76B900" stroke-width="1.5"/>
-  <text x="1158.0" y="333.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">B</text>
-  <text x="50" y="402" font-size="13" font-weight="700" fill="#1A1A1A">Built from</text>
-  <text x="50" y="424" font-size="13" fill="#4B5563">HAMi: KAI-Scheduler places pods on a GPU fraction, and HAMi caps each pod's memory.</text>
-  <text x="50" y="446" font-size="13" fill="#4B5563">GPU fractions: KAI-Scheduler and kai-gpu-fractioning, with each pod in its own MPS namespace that enforces its SM share.</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Two models on one GPU, three ways</text>
+  <rect x="50" y="100" width="280" height="196" rx="12" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="66.8" y="112.8" width="14.399999999999999" height="14.399999999999999" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="70.64" y="116.64" width="6.720000000000001" height="6.720000000000001" fill="#374151"/>
+  <line x1="69.2" y1="108" x2="69.2" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="69.2" y1="127.2" x2="69.2" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="62" y1="115.2" x2="66.8" y2="115.2" stroke="#374151" stroke-width="2"/><line x1="81.2" y1="115.2" x2="86" y2="115.2" stroke="#374151" stroke-width="2"/>
+  <line x1="74.0" y1="108" x2="74.0" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="74.0" y1="127.2" x2="74.0" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="62" y1="120.0" x2="66.8" y2="120.0" stroke="#374151" stroke-width="2"/><line x1="81.2" y1="120.0" x2="86" y2="120.0" stroke="#374151" stroke-width="2"/>
+  <line x1="78.8" y1="108" x2="78.8" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="78.8" y1="127.2" x2="78.8" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="62" y1="124.8" x2="66.8" y2="124.8" stroke="#374151" stroke-width="2"/><line x1="81.2" y1="124.8" x2="86" y2="124.8" stroke="#374151" stroke-width="2"/>
+  <text x="94" y="126" font-size="14" font-weight="700" fill="#1A1A1A">Baseline</text>
+  <text x="318" y="126" font-size="12" fill="#4B5563" text-anchor="end">one model</text>
+  <text x="66" y="160" font-size="12" font-weight="700" fill="#4B5563">memory</text>
+  <text x="66" y="232" font-size="12" font-weight="700" fill="#4B5563">compute</text>
+  <rect x="410" y="100" width="280" height="196" rx="12" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="426.8" y="112.8" width="14.399999999999999" height="14.399999999999999" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="430.64" y="116.64" width="6.720000000000001" height="6.720000000000001" fill="#374151"/>
+  <line x1="429.2" y1="108" x2="429.2" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="429.2" y1="127.2" x2="429.2" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="422" y1="115.2" x2="426.8" y2="115.2" stroke="#374151" stroke-width="2"/><line x1="441.2" y1="115.2" x2="446" y2="115.2" stroke="#374151" stroke-width="2"/>
+  <line x1="434.0" y1="108" x2="434.0" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="434.0" y1="127.2" x2="434.0" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="422" y1="120.0" x2="426.8" y2="120.0" stroke="#374151" stroke-width="2"/><line x1="441.2" y1="120.0" x2="446" y2="120.0" stroke="#374151" stroke-width="2"/>
+  <line x1="438.8" y1="108" x2="438.8" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="438.8" y1="127.2" x2="438.8" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="422" y1="124.8" x2="426.8" y2="124.8" stroke="#374151" stroke-width="2"/><line x1="441.2" y1="124.8" x2="446" y2="124.8" stroke="#374151" stroke-width="2"/>
+  <text x="454" y="126" font-size="14" font-weight="700" fill="#1A1A1A">HAMi</text>
+  <text x="678" y="126" font-size="12" fill="#4B5563" text-anchor="end">time-sliced</text>
+  <text x="426" y="160" font-size="12" font-weight="700" fill="#4B5563">memory</text>
+  <text x="426" y="232" font-size="12" font-weight="700" fill="#4B5563">compute</text>
+  <rect x="770" y="100" width="280" height="196" rx="12" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="786.8" y="112.8" width="14.399999999999999" height="14.399999999999999" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
+  <rect x="790.64" y="116.64" width="6.720000000000001" height="6.720000000000001" fill="#374151"/>
+  <line x1="789.2" y1="108" x2="789.2" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="789.2" y1="127.2" x2="789.2" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="782" y1="115.2" x2="786.8" y2="115.2" stroke="#374151" stroke-width="2"/><line x1="801.2" y1="115.2" x2="806" y2="115.2" stroke="#374151" stroke-width="2"/>
+  <line x1="794.0" y1="108" x2="794.0" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="794.0" y1="127.2" x2="794.0" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="782" y1="120.0" x2="786.8" y2="120.0" stroke="#374151" stroke-width="2"/><line x1="801.2" y1="120.0" x2="806" y2="120.0" stroke="#374151" stroke-width="2"/>
+  <line x1="798.8" y1="108" x2="798.8" y2="112.8" stroke="#374151" stroke-width="2"/><line x1="798.8" y1="127.2" x2="798.8" y2="132" stroke="#374151" stroke-width="2"/>
+  <line x1="782" y1="124.8" x2="786.8" y2="124.8" stroke="#374151" stroke-width="2"/><line x1="801.2" y1="124.8" x2="806" y2="124.8" stroke="#374151" stroke-width="2"/>
+  <text x="814" y="126" font-size="14" font-weight="700" fill="#1A1A1A">GPU fractions</text>
+  <text x="1038" y="126" font-size="12" fill="#4B5563" text-anchor="end">concurrent</text>
+  <text x="786" y="160" font-size="12" font-weight="700" fill="#4B5563">memory</text>
+  <text x="786" y="232" font-size="12" font-weight="700" fill="#4B5563">compute</text>
+  <rect x="66" y="170" width="248" height="40" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="190.0" y="195.0" font-size="13" font-weight="700" fill="#374151" text-anchor="middle">A</text>
+  <rect x="66" y="242" width="248" height="40" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="190.0" y="267.0" font-size="13" font-weight="700" fill="#374151" text-anchor="middle">A</text>
+  <rect x="426" y="170" width="124" height="40" rx="4" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="488.0" y="195.0" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">A</text>
+  <rect x="550" y="170" width="124" height="40" rx="4" fill="#F7C873" stroke="#D97706" stroke-width="1.5"/>
+  <text x="612.0" y="195.0" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
+  <rect x="426.0" y="242" width="41.3" height="40" rx="4" fill="#FDE7C2" stroke="#D97706" stroke-width="1.5"/>
+  <text x="446.65" y="267.0" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">A</text>
+  <rect x="467.3" y="242" width="41.3" height="40" rx="4" fill="#F7C873" stroke="#D97706" stroke-width="1.5"/>
+  <text x="487.95" y="267.0" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
+  <rect x="508.6" y="242" width="41.3" height="40" rx="4" fill="#FDE7C2" stroke="#D97706" stroke-width="1.5"/>
+  <text x="529.25" y="267.0" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">A</text>
+  <rect x="549.9" y="242" width="41.3" height="40" rx="4" fill="#F7C873" stroke="#D97706" stroke-width="1.5"/>
+  <text x="570.55" y="267.0" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
+  <rect x="591.2" y="242" width="41.3" height="40" rx="4" fill="#FDE7C2" stroke="#D97706" stroke-width="1.5"/>
+  <text x="611.85" y="267.0" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">A</text>
+  <rect x="632.5" y="242" width="41.3" height="40" rx="4" fill="#F7C873" stroke="#D97706" stroke-width="1.5"/>
+  <text x="653.15" y="267.0" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">B</text>
+  <rect x="786" y="170" width="124" height="40" rx="4" fill="#DCEFB5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="848.0" y="195.0" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">A</text>
+  <rect x="910" y="170" width="124" height="40" rx="4" fill="#C6E58A" stroke="#76B900" stroke-width="1.5"/>
+  <text x="972.0" y="195.0" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">B</text>
+  <rect x="786" y="242" width="124" height="40" rx="4" fill="#DCEFB5" stroke="#76B900" stroke-width="1.5"/>
+  <text x="848.0" y="267.0" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">A</text>
+  <rect x="910" y="242" width="124" height="40" rx="4" fill="#C6E58A" stroke="#76B900" stroke-width="1.5"/>
+  <text x="972.0" y="267.0" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">B</text>
 </svg>

@@ -154,7 +154,7 @@ SGLang on CUDA, does not depend on NVDEC.
 
 Dynamo's runtime images ship a deliberately small media stack: the in-tree FFmpeg decodes VP8 and VP9, NVDEC covers H.264 and H.265 on supported GPUs, and nothing else installs automatically. For AAC and other compressed audio, or for H.264 and H.265 on hosts without NVDEC, install a backend decoder package with `pip install`. No image rebuild is needed.
 
-See [Additional Media Decoders](../../developer-guide/advanced-customizations/additional-media-decoders.md) in the Developer Guide for the per-backend packages, the bundled installer, Kubernetes and air-gapped setups, and version-pinning notes.
+See [Additional Media Decoders](../image-understanding/additional-media-decoders.md) for the per-backend packages, the bundled installer, Kubernetes and air-gapped setups, and version-pinning notes.
 
 ## Video Output and NVENC
 

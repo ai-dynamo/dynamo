@@ -102,7 +102,7 @@ socket with `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` when the harness
 publishes explicit tool spans. Override sink behavior with
 `DYN_REQUEST_TRACE_SINKS` (e.g. `jsonl`, `stderr`) and
 `DYN_REQUEST_TRACE_OUTPUT_PATH`.
-See [Agent Tracing](../../../../docs/fern/pages/use-cases/agents/agent-tracing.md) for the record schema.
+See [Trace an Agent Run](../../../../docs/fern/pages/use-cases/agents/agent-tracing.md) for the record schema.
 
 Every LLM call then lands a `request_end` record carrying `session_id`,
 `input_tokens`, `output_tokens`, `cached_tokens`,

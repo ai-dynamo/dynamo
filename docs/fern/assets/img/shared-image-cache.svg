@@ -1,93 +1,50 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="540" viewBox="0 0 1300 540" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="450" viewBox="0 0 1100 450" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Shared image cache: hits and misses</title>
-  <desc id="desc">Image URLs arrive at workers. Images seen before are found in the shared encoded-image cache and their bytes are returned without a download. A new image is a miss: it is downloaded once from the image origin, stored in the shared cache, and reused by every worker afterwards.</desc>
+  <desc id="desc">An image seen before is a hit: its bytes come from the shared cache with no download. A new image is a miss: it is downloaded once from the origin, stored in the shared cache, and reused by every worker.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1300" height="540" fill="#FFFFFF"/>
+  <rect width="1100" height="450" fill="#FFFFFF"/>
   <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">SHARED IMAGE CACHE</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Download an image URL once, reuse the bytes on every worker</text>
-  <text x="50" y="108" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">INCOMING IMAGE URLS</text>
-  <rect x="50" y="150" width="260" height="52" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <rect x="66" y="162" width="30.0" height="24" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
-  <circle cx="74.4" cy="169.2" r="2.4000000000000004" fill="#76B900"/>
-  <polygon points="68.4,181.68 77.4,173.04 82.8,178.32 87.6,174.0 93.6,181.68" fill="#76B900"/>
-  <circle cx="96.0" cy="162" r="5.76" fill="#76B900" stroke="#FFFFFF" stroke-width="1.5"/>
-  <path d="M93.12,162 L95.28,164.16 L99.12,159.84" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="112" y="174" font-size="13" font-weight="700" fill="#1A1A1A">cat.jpg</text>
-  <text x="112" y="191" font-size="12" fill="#4C7A00">Seen before</text>
-  <rect x="50" y="214" width="260" height="52" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
-  <rect x="66" y="226" width="30.0" height="24" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
-  <circle cx="74.4" cy="233.2" r="2.4000000000000004" fill="#76B900"/>
-  <polygon points="68.4,245.68 77.4,237.04 82.8,242.32 87.6,238.0 93.6,245.68" fill="#76B900"/>
-  <circle cx="96.0" cy="226" r="5.76" fill="#76B900" stroke="#FFFFFF" stroke-width="1.5"/>
-  <path d="M93.12,226 L95.28,228.16 L99.12,223.84" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="112" y="238" font-size="13" font-weight="700" fill="#1A1A1A">chart.png</text>
-  <text x="112" y="255" font-size="12" fill="#4C7A00">Seen before</text>
-  <rect x="50" y="330" width="260" height="52" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <rect x="66" y="342" width="30.0" height="24" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
-  <circle cx="74.4" cy="349.2" r="2.4000000000000004" fill="#234CDA"/>
-  <polygon points="68.4,361.68 77.4,353.04 82.8,358.32 87.6,354.0 93.6,361.68" fill="#234CDA"/>
-  <circle cx="96.0" cy="342" r="5.76" fill="#234CDA" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="96.0" y="344.16" font-size="7.199999999999999" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
-  <text x="112" y="354" font-size="13" font-weight="700" fill="#1A1A1A">photo-481.jpg</text>
-  <text x="112" y="371" font-size="12" fill="#234CDA">New</text>
-  <rect x="50" y="394" width="260" height="52" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <rect x="66" y="406" width="30.0" height="24" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
-  <circle cx="74.4" cy="413.2" r="2.4000000000000004" fill="#234CDA"/>
-  <polygon points="68.4,425.68 77.4,417.04 82.8,422.32 87.6,418.0 93.6,425.68" fill="#234CDA"/>
-  <circle cx="96.0" cy="406" r="5.76" fill="#234CDA" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="96.0" y="408.16" font-size="7.199999999999999" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
-  <text x="112" y="418" font-size="13" font-weight="700" fill="#1A1A1A">scan-77.png</text>
-  <text x="112" y="435" font-size="12" fill="#234CDA">New</text>
-  <rect x="450" y="120" width="330" height="330" rx="12" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <path d="M466,139.94 L466,161.06 A15.0,5.28 0 0 0 496,161.06 L496,139.94" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
-  <ellipse cx="481.0" cy="139.94" rx="15.0" ry="5.28" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
-  <path d="M466,150.5 A15.0,5.28 0 0 0 496,150.5" fill="none" stroke="#4C7A00" stroke-width="1.5"/>
-  <text x="508" y="154" font-size="14" font-weight="700" fill="#4C7A00">Shared encoded-image cache</text>
-  <circle cx="472" cy="182" r="2.2" fill="#1A1A1A"/>
-  <text x="482" y="186" font-size="12.5" fill="#1A1A1A">Encoded bytes, before decoding</text>
-  <circle cx="472" cy="202" r="2.2" fill="#1A1A1A"/>
-  <text x="482" y="206" font-size="12.5" fill="#1A1A1A">Redis Cluster protocol (Redis or Dragonfly)</text>
-  <circle cx="472" cy="222" r="2.2" fill="#1A1A1A"/>
-  <text x="482" y="226" font-size="12.5" fill="#1A1A1A">Shared by every worker</text>
-  <rect x="470" y="270" width="130" height="30" rx="6" fill="#FFFFFF" stroke="#76B900"/>
-  <rect x="478" y="276" width="17.5" height="14" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
-  <circle cx="482.9" cy="280.2" r="1.4000000000000001" fill="#76B900"/>
-  <polygon points="479.4,287.48 484.65,282.44 487.8,285.52 490.6,283.0 494.1,287.48" fill="#76B900"/>
-  <circle cx="495.5" cy="276" r="3.36" fill="#76B900" stroke="#FFFFFF" stroke-width="1.5"/>
-  <path d="M493.82,276 L495.08,277.26 L497.32,274.74" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="506" y="290" font-size="12" fill="#4C7A00">cat.jpg</text>
-  <rect x="470" y="310" width="130" height="30" rx="6" fill="#FFFFFF" stroke="#76B900"/>
-  <rect x="478" y="316" width="17.5" height="14" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
-  <circle cx="482.9" cy="320.2" r="1.4000000000000001" fill="#76B900"/>
-  <polygon points="479.4,327.48 484.65,322.44 487.8,325.52 490.6,323.0 494.1,327.48" fill="#76B900"/>
-  <circle cx="495.5" cy="316" r="3.36" fill="#76B900" stroke="#FFFFFF" stroke-width="1.5"/>
-  <path d="M493.82,316 L495.08,317.26 L497.32,314.74" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="506" y="330" font-size="12" fill="#4C7A00">chart.png</text>
-  <text x="470" y="382" font-size="12.5" font-weight="700" fill="#374151">A new image is stored here</text>
-  <text x="470" y="400" font-size="12.5" fill="#4B5563">after its first download</text>
-  <line x1="312" y1="176" x2="446" y2="232" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <line x1="312" y1="240" x2="446" y2="250" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="380" y="190" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">hit</text>
-  <rect x="900" y="196" width="320" height="76" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="916" y="222" font-size="13" font-weight="700" fill="#4C7A00">Bytes returned from the cache</text>
-  <text x="916" y="242" font-size="12.5" fill="#1A1A1A">No download. The worker decodes</text>
-  <text x="916" y="260" font-size="12.5" fill="#1A1A1A">and continues.</text>
-  <line x1="782" y1="234" x2="896" y2="234" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <line x1="312" y1="356" x2="446" y2="356" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
-  <line x1="312" y1="420" x2="446" y2="380" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
-  <text x="380" y="342" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">miss</text>
-  <circle cx="927.0" cy="361.0" r="15.0" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <ellipse cx="927.0" cy="361.0" rx="6.75" ry="15.0" fill="none" stroke="#374151" stroke-width="1.5"/>
-  <line x1="912" y1="361.0" x2="942" y2="361.0" stroke="#374151" stroke-width="1.5"/>
-  <rect x="900" y="330" width="320" height="76" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <circle cx="929.0" cy="367.0" r="15.0" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <ellipse cx="929.0" cy="367.0" rx="6.75" ry="15.0" fill="none" stroke="#374151" stroke-width="1.5"/>
-  <line x1="914" y1="367.0" x2="944" y2="367.0" stroke="#374151" stroke-width="1.5"/>
-  <text x="958" y="358" font-size="13" font-weight="700" fill="#92400E">Image origin (HTTP or HTTPS)</text>
-  <text x="958" y="378" font-size="12.5" fill="#1A1A1A">Downloaded once on the first miss.</text>
-  <line x1="782" y1="368" x2="896" y2="368" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
-  <text x="840" y="358" font-size="12" fill="#4B5563" text-anchor="middle">download</text>
-  <path d="M1060,408 C1060,466 720,466 720,453" fill="none" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="930" y="484" font-size="12" fill="#4B5563" text-anchor="middle">store for the next worker</text>
-  <text x="50" y="524" font-size="13" fill="#4B5563">Data URLs, frontend-decoded NIXL inputs, video, and audio do not use this cache. Each worker also keeps its own local decoded-image cache.</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Download an image once, reuse it on every worker</text>
+  <rect x="80" y="140" width="50.0" height="40" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <circle cx="94.0" cy="152.0" r="4.0" fill="#76B900"/>
+  <polygon points="84.0,172.8 99.0,158.4 108.0,167.2 116.0,160.0 126.0,172.8" fill="#76B900"/>
+  <circle cx="130.0" cy="140" r="9.6" fill="#76B900" stroke="#FFFFFF" stroke-width="1.5"/>
+  <path d="M125.2,140 L128.8,143.6 L135.2,136.4" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="70" y="214" font-size="13" font-weight="700" fill="#4C7A00">seen before</text>
+  <rect x="80" y="290" width="50.0" height="40" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <circle cx="94.0" cy="302.0" r="4.0" fill="#234CDA"/>
+  <polygon points="84.0,322.8 99.0,308.4 108.0,317.2 116.0,310.0 126.0,322.8" fill="#234CDA"/>
+  <circle cx="130.0" cy="290" r="9.6" fill="#234CDA" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="130.0" y="293.6" font-size="12.0" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
+  <text x="88" y="364" font-size="13" font-weight="700" fill="#234CDA">new</text>
+  <rect x="400" y="150" width="190" height="190" rx="16" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <path d="M468,186.692 L468,224.708 A27.0,9.504000000000001 0 0 0 522,224.708 L522,186.692" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
+  <ellipse cx="495.0" cy="186.692" rx="27.0" ry="9.504000000000001" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
+  <path d="M468,205.7 A27.0,9.504000000000001 0 0 0 522,205.7" fill="none" stroke="#4C7A00" stroke-width="1.5"/>
+  <text x="495" y="270" font-size="15" font-weight="700" fill="#4C7A00" text-anchor="middle">Shared cache</text>
+  <text x="495" y="292" font-size="12" fill="#4B5563" text-anchor="middle">Redis or Dragonfly</text>
+  <line x1="170" y1="168" x2="396" y2="215" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="280" y="170" font-size="14" font-weight="700" fill="#4C7A00" text-anchor="middle">hit</text>
+  <line x1="170" y1="318" x2="396" y2="280" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
+  <text x="280" y="318" font-size="14" font-weight="700" fill="#92400E" text-anchor="middle">miss</text>
+  <rect x="805.0" y="132.0" width="190" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="888.8000000000001" y="159.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#4C7A00" stroke-width="2"/>
+  <rect x="893.2800000000001" y="163.58" width="7.840000000000001" height="7.840000000000001" fill="#4C7A00"/>
+  <line x1="891.6" y1="153.5" x2="891.6" y2="159.1" stroke="#4C7A00" stroke-width="2"/><line x1="891.6" y1="175.9" x2="891.6" y2="181.5" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="883.2" y1="161.9" x2="888.8000000000001" y2="161.9" stroke="#4C7A00" stroke-width="2"/><line x1="905.6" y1="161.9" x2="911.2" y2="161.9" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="897.2" y1="153.5" x2="897.2" y2="159.1" stroke="#4C7A00" stroke-width="2"/><line x1="897.2" y1="175.9" x2="897.2" y2="181.5" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="883.2" y1="167.5" x2="888.8000000000001" y2="167.5" stroke="#4C7A00" stroke-width="2"/><line x1="905.6" y1="167.5" x2="911.2" y2="167.5" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="902.8000000000001" y1="153.5" x2="902.8000000000001" y2="159.1" stroke="#4C7A00" stroke-width="2"/><line x1="902.8000000000001" y1="175.9" x2="902.8000000000001" y2="181.5" stroke="#4C7A00" stroke-width="2"/>
+  <line x1="883.2" y1="173.1" x2="888.8000000000001" y2="173.1" stroke="#4C7A00" stroke-width="2"/><line x1="905.6" y1="173.1" x2="911.2" y2="173.1" stroke="#4C7A00" stroke-width="2"/>
+  <text x="900" y="200.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Worker</text>
+  <line x1="592" y1="200" x2="802" y2="190" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="805.0" y="292.0" width="190" height="96" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <circle cx="897.2" cy="327.5" r="14.0" fill="#FFFFFF" stroke="#92400E" stroke-width="2"/>
+  <ellipse cx="897.2" cy="327.5" rx="6.3" ry="14.0" fill="none" stroke="#92400E" stroke-width="1.5"/>
+  <line x1="883.2" y1="327.5" x2="911.2" y2="327.5" stroke="#92400E" stroke-width="1.5"/>
+  <text x="900" y="360.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Image origin</text>
+  <line x1="592" y1="300" x2="802" y2="332" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
+  <text x="700" y="332" font-size="12" fill="#4B5563" text-anchor="middle">download once</text>
+  <path d="M900,392 C900,428 520,428 520,342" fill="none" stroke="#76B900" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-green)"/>
+  <text x="720" y="424" font-size="12" fill="#4B5563" text-anchor="middle">store</text>
 </svg>

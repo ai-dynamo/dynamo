@@ -50,7 +50,7 @@ export ANTHROPIC_API_KEY=
 claude
 ```
 
-Setup for Codex, Pi, OpenCode, OpenClaw, and Hermes is in [Agent Harnesses](agent-harnesses.mdx). These harnesses send their own session headers, so you do not add `x-dynamo-session-id` yourself.
+Setup for Codex, Pi, OpenCode, OpenClaw, and Hermes is in [Connect an Agent Harness](agent-harnesses.mdx). These harnesses send their own session headers, so you do not add `x-dynamo-session-id` yourself.
 
 ## Send a Labeled Request
 

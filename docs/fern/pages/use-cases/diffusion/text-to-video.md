@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Text to Video (T2V)
+title: Text to Video
 subtitle: Generate video from text prompts, with or without a synchronized audio track
 ---
 
@@ -10,7 +10,7 @@ subtitle: Generate video from text prompts, with or without a synchronized audio
 > worker behind the same `/v1/videos` endpoint and has its own Kubernetes deployment path.
 
 Dynamo serves text-to-video models through the `/v1/videos` endpoint. To
-animate a source image, see [Image to Video (I2V)](image-to-video.md). To answer
+animate a source image, see [Image to Video](image-to-video.md). To answer
 questions *about* a video instead, see [Video Understanding](../video-understanding/overview.md).
 
 ## Tutorials on This Page
