@@ -30,6 +30,7 @@
 #   rl               @ai-dynamo/dynamo-rl-codeowners
 #   router           @ai-dynamo/dynamo-router-codeowners
 #   runtime          @ai-dynamo/dynamo-runtime-codeowners
+#   sidecar          @ai-dynamo/dynamo-sidecar-codeowners
 #   tokenspeed       @ai-dynamo/dynamo-tokenspeed-codeowners
 #   xpu              @ai-dynamo/dynamo-xpu-codeowners
 #   *                @ai-dynamo/dynamo-runtime-codeowners  (catch-all)
@@ -59,6 +60,7 @@
 #   @ai-dynamo/dynamo-rl-codeowners
 #   @ai-dynamo/dynamo-router-codeowners
 #   @ai-dynamo/dynamo-runtime-codeowners
+#   @ai-dynamo/dynamo-sidecar-codeowners
 #   @ai-dynamo/dynamo-tokenspeed-codeowners
 #   @ai-dynamo/dynamo-xpu-codeowners
 
@@ -373,6 +375,9 @@
 /deploy/operator/internal/namespace_scope/                                                              @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/controller_common/                                                            @ai-dynamo/dynamo-operator-codeowners
 
+# === lpx  (@ai-dynamo/dynamo-lpx-codeowners) ===
+/lib/sidecar/lpx/                                                                                       @ai-dynamo/dynamo-lpx-codeowners
+
 # === gms  (@ai-dynamo/dynamo-gms-codeowners) ===
 /lib/gpu_memory_service/                                                                                @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/cli/                                                                            @ai-dynamo/dynamo-gms-codeowners
@@ -604,21 +609,31 @@ requirements.txt                                                                
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/**/*lpx*                                                                                        @ai-dynamo/dynamo-operator-codeowners
+/lib/sidecar/lpx/                                                                                       @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/vllm/                                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /benchmarks/router/                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /recipes/**/vllm/**                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /.devcontainer/vllm/                                                                                    @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/power-agent/                                                                                    @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners
 /lib/llm/src/mocker/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
+/lib/mocker/servers/                                                                                    @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/common/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/sglang/                                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/trtllm/                                                                                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/serve/trtllm/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /container/deps/vllm/                                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/helm/**/*lpx*                                                                                   @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
 /dev/nats-server.conf                                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/bench/kv_router/                                                                                   @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
+/lib/sidecar/testkit/                                                                                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /recipes/**/sglang/**                                                                                   @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /recipes/**/trtllm/**                                                                                   @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /.devcontainer/sglang/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /.devcontainer/trtllm/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/lib/sidecar/README.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /dev/docker-compose.yml                                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
+/docs/fern/**/*sidecar*                                                                                 @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/Dockerfile                                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /dev/observability/*xpu*                                                                                @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/runtime/src/nvtx.rs                                                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
 /recipes/**/tokenspeed/**                                                                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners
@@ -626,11 +641,13 @@ requirements.txt                                                                
 /tests/serve/test_vllm.py                                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/operator/Dockerfile                                                                             @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/llm/src/request_trace/                                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-observability-codeowners
-/lib/mocker/servers/sglang/                                                                             @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
-/lib/mocker/servers/trtllm/                                                                             @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/lib/mocker/servers/sglang/                                                                             @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/mocker/servers/trtllm/                                                                             @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/runtime/src/logging.rs                                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/sidecar/dynamo-sidecar                                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/serve/test_sglang.py                                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /tests/serve/test_trtllm.py                                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/tests/serve/test_sidecar.py                                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /benchmarks/multimodal/image/                                                                           @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/multimodal/sweep/                                                                           @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /lib/llm/src/fpm_publisher.rs                                                                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
@@ -679,6 +696,7 @@ requirements.txt                                                                
 /lib/llm/src/protocols/openai/videos/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /tests/frontend/agent_smoke_inputs.py                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /tests/serve/test_sample_diffusion.py                                                                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/components/src/dynamo/vllm/sidecar.py                                                                  @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/llm/src/kv_router/shared_cache.rs                                                                  @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /recipes/**/tokenspeed/**/*Dockerfile*                                                                  @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-ops-codeowners
 /tests/deploy/test_dynamocheckpoint.py                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
@@ -692,14 +710,15 @@ requirements.txt                                                                
 /lib/llm/src/protocols/openai/videos.rs                                                                 @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /tests/fault_tolerance/etcd_ha/utils.py                                                                 @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/protocols/                                                                @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/components/src/dynamo/sglang/sidecar.py                                                                @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /components/src/dynamo/trtllm/metrics.py                                                                @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
+/components/src/dynamo/trtllm/sidecar.py                                                                @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /components/src/dynamo/vllm/publisher.py                                                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /container/deps/requirements.planner.txt                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
 /container/templates/frontend.Dockerfile                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /deploy/operator/internal/observability/                                                                @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners
 /lib/runtime/src/system_status_server.rs                                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /recipes/nemotron-3-nano-omni/Dockerfile                                                                @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
-/tests/dependencies/test_kvbm_imports.py                                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/sglang/protocol.py                                                               @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/sglang/snapshot.py                                                               @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/trtllm/multimodal/                                                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
@@ -711,6 +730,7 @@ requirements.txt                                                                
 /lib/kv-router/src/services/shared_cache/                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kv-router/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/runtime/src/metrics/frontend_perf.rs                                                               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/lib/sidecar/testkit/tests/support/lpx.rs                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/fault_tolerance/migration/utils.py                                                               @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/test_generate_kustomize_openapi.py                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
 /components/src/dynamo/sglang/publisher.py                                                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
@@ -718,13 +738,14 @@ requirements.txt                                                                
 /container/deps/requirements.benchmark.txt                                                              @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners
 /lib/bench/kv_router/dc_ckf_relay_bench.rs                                                              @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-global-router-codeowners
 /lib/llm/src/block_manager/metrics_kvbm.rs                                                              @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
-/lib/sidecar/testkit/tests/support/vllm.rs                                                              @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/sidecar/testkit/tests/support/vllm.rs                                                              @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /components/src/dynamo/thunderagent_router/                                                             @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-agents-codeowners
 /components/src/dynamo/vllm/health_check.py                                                             @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /dev/observability/grafana_dashboards/*xpu*                                                             @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /lib/llm/src/http/service/busy_threshold.rs                                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/aisimulate/tests/dgd/                                                            @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /container/templates/vllm_runtime.Dockerfile                                                            @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
-/lib/sidecar/testkit/tests/support/sglang.rs                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
+/lib/sidecar/testkit/tests/support/sglang.rs                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/fault_tolerance/cancellation/utils.py                                                            @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/multimodal_profiles/vllm_xpu.py                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/aisimulate/output/dgd/                                                           @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
@@ -769,6 +790,7 @@ requirements.txt                                                                
 /components/src/dynamo/common/backend/telemetry.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/common/utils/image_utils.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/common/utils/video_utils.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners
+/lib/bindings/python/tests/test_sidecar_startup.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/kvbm-consolidator/src/egress/zmq_publisher.rs                                                      @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/backend/multimodal.py                                                     @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/tests/test_snapshot_*                                                     @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-gms-codeowners
