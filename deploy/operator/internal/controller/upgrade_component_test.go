@@ -71,6 +71,13 @@ func TestUpgradeComponentSafety(t *testing.T) {
 				"metadata": map[string]any{"name": "worker", "uid": "original", "generation": int64(1)},
 				"spec":     map[string]any{"replicas": int64(2)},
 			}}
+			if kind == "LeaderWorkerSet" {
+				t.Log("Seed both existing LWS templates before testing independent hostname changes")
+				for _, template := range []string{"leader", "worker"} {
+					require.NoError(t, unstructured.SetNestedField(old.Object, "original-"+template, "spec", "leaderWorkerTemplate", template+"Template", "spec", "hostname"))
+				}
+			}
+
 			before := []unstructured.Unstructured{old}
 			metadata := old.DeepCopy()
 			metadata.SetAnnotations(map[string]string{"reviewed-default": "true"})
