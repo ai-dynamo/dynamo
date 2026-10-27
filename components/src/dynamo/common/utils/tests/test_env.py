@@ -25,6 +25,12 @@ class TestEnvBool:
         assert env_bool("FOO") is False
         assert env_bool("FOO", default=True) is True
 
+    @pytest.mark.parametrize("value", [" ", "\t", "\n"])
+    def test_whitespace_only_returns_default(self, monkeypatch, value):
+        monkeypatch.setenv("FOO", value)
+        assert env_bool("FOO") is False
+        assert env_bool("FOO", default=True) is True
+
     @pytest.mark.parametrize(
         "value", ["true", "True", "TRUE", "1", "yes", "YES", "on", "ON", " true "]
     )

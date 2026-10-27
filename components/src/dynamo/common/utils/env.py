@@ -15,7 +15,7 @@ def env_bool(name: str, *, default: bool = False) -> bool:
     non-empty value is treated as False. Surrounding whitespace is ignored.
     When the var is unset or empty, returns `default`.
     """
-    raw = os.environ.get(name)
+    raw = os.environ.get(name, "").strip()
     if not raw:
         return default
-    return raw.strip().lower() in _TRUTHY
+    return raw.lower() in _TRUTHY
