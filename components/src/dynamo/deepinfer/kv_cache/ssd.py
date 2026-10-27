@@ -100,11 +100,20 @@ class SSDPool:
             return
         self._fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            self._preallocate(count * self.stride)
+            reserved = self._preallocate(count * self.stride)
         except BaseException:
             os.close(self._fd)
             os.unlink(path)
             raise
+        if not reserved:
+            # A sparse file on a full disk would fail every write at runtime.
+            os.close(self._fd)
+            os.unlink(path)
+            self._fd = -1
+            self.capacity = 0
+            self._free = []
+            self._closed = True
+            self._executor.shutdown()
 
     def _size(
         self,
@@ -163,20 +172,23 @@ class SSDPool:
             return 0
         return count
 
-    def _preallocate(self, size: int) -> None:
+    def _preallocate(self, size: int) -> bool:
+        """Reserve the file's blocks; False when the disk has no room for them
+        (the tier is then off). A filesystem without ``posix_fallocate`` gets a
+        sparse file of the right length."""
         if size == 0:
-            return
+            return True
         try:
             os.posix_fallocate(self._fd, 0, size)
         except (AttributeError, OSError) as e:
             if getattr(e, "errno", None) in (errno.ENOSPC, errno.EDQUOT):
-                message = (
-                    "could not preallocate the SSD file (%s): sparse, writes may fail"
+                logger.warning(
+                    "No room to preallocate the SSD file (%s): SSD tier off", e
                 )
-            else:
-                message = "posix_fallocate unavailable (%s): sparse SSD file"
-            logger.warning(message, e)
+                return False
+            logger.warning("posix_fallocate unavailable (%s): sparse SSD file", e)
             os.ftruncate(self._fd, size)
+        return True
 
     @property
     def nbytes(self) -> int:

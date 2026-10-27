@@ -4,6 +4,7 @@
 """The prefix cache's SSD tier on numpy rows: slots, round trips through the
 file, backpressure, errors and completion tickets."""
 
+import errno
 import os
 import sys
 import threading
@@ -264,3 +265,14 @@ def test_close_waits_deletes_and_is_idempotent(tmp_path):
     pool.close()
     late = pool.store(rows_of(1, 4096), [0])
     assert isinstance(late.error, RuntimeError)
+
+
+def test_no_room_to_preallocate_turns_the_tier_off(tmp_path, monkeypatch):
+    def full(fd, offset, length):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "posix_fallocate", full)
+    path = tmp_path / "rank0.kv"
+    pool = SSDPool(str(path), ROW_BYTES, 8 * STRIDE, reserve_fraction=0)
+    assert pool.capacity == 0 and pool.alloc() is None
+    assert not path.exists()
