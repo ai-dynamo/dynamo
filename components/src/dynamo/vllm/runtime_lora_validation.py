@@ -16,6 +16,8 @@ from pathlib import Path
 from dynamo.llm import HttpError
 
 _MAX_FILES = 4096
+_MAX_CONFIG_BYTES = 1024 * 1024
+_MAX_JSON_DEPTH = 64
 _MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 _ALLOWED_SNAPSHOT_FILES = frozenset(
     {
@@ -47,6 +49,34 @@ def _runtime_error(status: int, code: str) -> HttpError:
     return HttpError(status, code)
 
 
+def _parse_json(encoded: bytes) -> object:
+    text = encoded.decode("utf-8")
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                raise _runtime_error(422, "invalid_lora_adapter")
+        elif char in "]}":
+            depth -= 1
+    return json.loads(text)
+
+
+def _scan_error(error: OSError) -> None:
+    raise error
+
+
 def _validate_safetensors(weights_path: Path) -> frozenset[str]:
     try:
         file_size = weights_path.stat().st_size
@@ -61,7 +91,7 @@ def _validate_safetensors(weights_path: Path) -> frozenset[str]:
                 or header_length > file_size - 8
             ):
                 raise _runtime_error(422, "invalid_lora_adapter")
-            header = json.loads(weights.read(header_length))
+            header = _parse_json(weights.read(header_length))
     except HttpError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -74,13 +104,16 @@ def _validate_safetensors(weights_path: Path) -> frozenset[str]:
     tensor_names: set[str] = set()
     for name, tensor in header.items():
         if name == "__metadata__":
-            if not isinstance(tensor, dict):
+            if not isinstance(tensor, dict) or any(
+                not isinstance(value, str) for value in tensor.values()
+            ):
                 raise _runtime_error(422, "invalid_lora_adapter")
             continue
         if (
             not isinstance(name, str)
             or not name
             or not isinstance(tensor, dict)
+            or not isinstance(tensor.get("dtype"), str)
             or tensor.get("dtype") not in _SAFETENSORS_DTYPE_BYTES
         ):
             raise _runtime_error(422, "invalid_lora_adapter")
@@ -131,13 +164,32 @@ def validate_snapshot(
     max_lora_rank: int | None,
     compatible_base_names: Iterable[str | None],
 ) -> Path:
+    try:
+        return _validate_snapshot(
+            snapshot,
+            cache_root,
+            max_snapshot_bytes,
+            max_lora_rank,
+            compatible_base_names,
+        )
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        raise _runtime_error(422, "invalid_lora_adapter") from None
+
+
+def _validate_snapshot(
+    snapshot: Path,
+    cache_root: Path,
+    max_snapshot_bytes: int,
+    max_lora_rank: int | None,
+    compatible_base_names: Iterable[str | None],
+) -> Path:
     raw_snapshot = Path(snapshot)
     if raw_snapshot.is_symlink():
         raise _runtime_error(422, "invalid_lora_adapter")
     try:
         canonical_root = Path(cache_root).resolve(strict=True)
         canonical_snapshot = raw_snapshot.resolve(strict=True)
-    except OSError:
+    except (OSError, RuntimeError):
         raise _runtime_error(422, "invalid_lora_adapter") from None
     if not canonical_snapshot.is_dir() or not canonical_snapshot.is_relative_to(
         canonical_root
@@ -146,7 +198,9 @@ def validate_snapshot(
 
     total_bytes = 0
     file_count = 0
-    for root, directories, files in os.walk(canonical_snapshot, followlinks=False):
+    for root, directories, files in os.walk(
+        canonical_snapshot, followlinks=False, onerror=_scan_error
+    ):
         for name in [*directories, *files]:
             path = Path(root) / name
             metadata = path.lstat()
@@ -172,7 +226,11 @@ def validate_snapshot(
     if not config_path.is_file() or not weights_path.is_file():
         raise _runtime_error(422, "invalid_lora_adapter")
     try:
-        adapter_config = json.loads(config_path.read_text())
+        with config_path.open("rb") as config_file:
+            encoded_config = config_file.read(_MAX_CONFIG_BYTES + 1)
+        if len(encoded_config) > _MAX_CONFIG_BYTES:
+            raise _runtime_error(422, "invalid_lora_adapter")
+        adapter_config = _parse_json(encoded_config)
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise _runtime_error(422, "invalid_lora_adapter") from None
     if not isinstance(adapter_config, dict):
@@ -189,7 +247,8 @@ def validate_snapshot(
     compatible_bases = {
         name for name in compatible_base_names if isinstance(name, str) and name
     }
-    if adapter_config.get("base_model_name_or_path") not in compatible_bases:
+    base_name = adapter_config.get("base_model_name_or_path")
+    if not isinstance(base_name, str) or base_name not in compatible_bases:
         raise _runtime_error(422, "invalid_lora_adapter")
 
     raw_targets = adapter_config.get("target_modules")

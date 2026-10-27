@@ -3,6 +3,7 @@
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -147,6 +148,121 @@ def test_snapshot_accepts_base_alias_and_unbounded_rank(tmp_path):
 
 def test_snapshot_rejects_other_base_model(tmp_path):
     snapshot = _snapshot(tmp_path, base_model_name_or_path="other")
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+@pytest.mark.parametrize("base", [[], {}, True, 7, None])
+def test_snapshot_rejects_non_string_base_metadata(tmp_path, base):
+    snapshot = _snapshot(tmp_path, base_model_name_or_path=base)
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+@pytest.mark.parametrize("dtype", [[], {}, True, 7, None])
+def test_snapshot_rejects_non_string_tensor_dtype(tmp_path, dtype):
+    snapshot = _snapshot(tmp_path)
+    header = {"q_proj": {"dtype": dtype, "shape": [2], "data_offsets": [0, 8]}}
+    (snapshot / "adapter_model.safetensors").write_bytes(_safetensors_blob(header))
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+@pytest.mark.parametrize("metadata", [{"key": []}, {"key": {}}, {"key": 7}])
+def test_snapshot_rejects_non_string_safetensors_metadata(tmp_path, metadata):
+    snapshot = _snapshot(tmp_path)
+    header = {
+        "__metadata__": metadata,
+        "q_proj": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+    }
+    (snapshot / "adapter_model.safetensors").write_bytes(_safetensors_blob(header))
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "artifact", ["adapter_config.json", "adapter_model.safetensors"]
+)
+def test_snapshot_bounds_json_nesting(tmp_path, artifact):
+    snapshot = _snapshot(tmp_path)
+    nested = b"[" * 65 + b"0" + b"]" * 65
+    if artifact.endswith("safetensors"):
+        encoded = (
+            b'{"q_proj":{"dtype":"F32","shape":[2],"data_offsets":[0,8],"extra":'
+            + nested
+            + b"}}"
+        )
+        encoded = len(encoded).to_bytes(8, "little") + encoded
+        encoded += bytes(8)
+    else:
+        encoded = (
+            b'{"r":8,"target_modules":["q_proj"],"base_model_name_or_path":"base","extra":'
+            + nested
+            + b"}"
+        )
+    (snapshot / artifact).write_bytes(encoded)
+
+    _assert_invalid(snapshot, tmp_path, max_bytes=1 << 20)
+
+
+def test_snapshot_bounds_config_bytes_independently_of_snapshot_limit(tmp_path):
+    snapshot = _snapshot(tmp_path, padding="x" * (1024 * 1024))
+
+    _assert_invalid(snapshot, tmp_path, max_bytes=2 * 1024 * 1024)
+
+
+def test_snapshot_ignores_json_punctuation_in_strings(tmp_path):
+    snapshot = _snapshot(tmp_path, padding='["\\' * 100)
+
+    assert validate_snapshot(snapshot, tmp_path, 2048, 64, ("base",)) == snapshot
+
+
+def test_snapshot_sanitizes_cache_root_symlink_loop(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    cache_root = tmp_path / "loop"
+    cache_root.symlink_to(cache_root)
+
+    _assert_invalid(snapshot, cache_root)
+
+
+def test_snapshot_rejects_oversized_json_integer(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    (snapshot / "adapter_config.json").write_text('{"r":' + "1" * 5000 + "}")
+
+    _assert_invalid(snapshot, tmp_path, max_bytes=8192)
+
+
+def test_snapshot_rejects_surrogate_target_metadata(tmp_path):
+    snapshot = _snapshot(tmp_path, target_modules=["\ud800"])
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+@pytest.mark.parametrize("failure", [FileNotFoundError, PermissionError])
+def test_snapshot_sanitizes_file_stat_failures(tmp_path, monkeypatch, failure):
+    snapshot = _snapshot(tmp_path)
+    original = Path.lstat
+
+    def fail_metadata(path, *args, **kwargs):
+        if path.name == "adapter_config.json":
+            raise failure(f"private path: {path}")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", fail_metadata)
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+def test_snapshot_sanitizes_directory_scan_failures(tmp_path, monkeypatch):
+    snapshot = _snapshot(tmp_path)
+
+    def fail_walk(_path, *, followlinks, onerror=None):
+        error = PermissionError(f"private path: {snapshot}")
+        if onerror is not None:
+            onerror(error)
+        return iter(())
+
+    monkeypatch.setattr(os, "walk", fail_walk)
 
     _assert_invalid(snapshot, tmp_path)
 
