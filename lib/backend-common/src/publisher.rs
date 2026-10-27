@@ -46,7 +46,7 @@ pub(crate) struct PublisherHandles {
 }
 
 impl PublisherHandles {
-    /// Stop every KV publisher, reporting the first failure after all have stopped.
+    /// Stop every KV publisher and report the first failure, giving up after `KV_STOP_TIMEOUT`.
     pub(crate) async fn stop_kv(&mut self) -> Result<(), DynamoError> {
         let publishers = std::mem::take(&mut self.kv_publishers);
         tokio::time::timeout(KV_STOP_TIMEOUT, async {
