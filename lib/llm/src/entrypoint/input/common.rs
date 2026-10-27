@@ -254,7 +254,9 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
     let endpoint_id = router_client.endpoint.id();
-    let runtime_configs = if model_manager.lora_enabled() && !router_mode.is_kv_routing() {
+    let runtime_configs = if crate::lora::runtime::RuntimeLoraConfig::from_env()?.enabled
+        && !router_mode.is_kv_routing()
+    {
         Some(
             model_manager
                 .get_or_create_runtime_config_watcher(&router_client.endpoint)
