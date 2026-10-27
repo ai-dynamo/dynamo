@@ -909,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn review_16603_single_rank_labels_match_sglang() {
+    fn sglang_single_rank_omits_dp_rank_label() {
         let (registry, _) = register_for_test(EngineType::Sglang, 1, "unified");
         for name in [
             "sglang:num_running_reqs",
@@ -937,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn review_16603_multi_rank_values_and_prefill_retention() {
+    fn sglang_cache_hit_rate_is_tracked_per_rank() {
         let (registry, metrics) = register_for_test(EngineType::Sglang, 2, "unified");
         let assert_values = |name: &str, expected: [f64; 2]| {
             let family = gather_family(&registry, name);
