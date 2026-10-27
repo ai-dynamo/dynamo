@@ -86,7 +86,7 @@ pub(crate) struct Candidate<'a> {
 ///
 /// The fleet's load is taken over the pools with a fresh report: all
 /// requests in flight over all workers, or, for [`LoadMeasure::Wait`], all
-/// waiting requests over all the requests started per second. A pool
+/// waiting requests over all the requests served per second. A pool
 /// without a fresh report counts as overloaded, so it is tried only after
 /// the pools known to have room. When no pool has a fresh report, none is
 /// overloaded and distance alone orders them.
@@ -128,18 +128,17 @@ pub(crate) fn place<'a>(
             (busy, fleet, spill.overload.floor)
         }
         LoadMeasure::Wait => {
-            let (awaiting, arrivals) =
-                waits
-                    .iter()
-                    .flatten()
-                    .fold((0.0, 0.0), |(awaiting, arrivals), wait| {
-                        (awaiting + wait.awaiting, arrivals + wait.arrivals_per_s)
-                    });
+            let (awaiting, served) = waits
+                .iter()
+                .flatten()
+                .fold((0.0, 0.0), |(awaiting, served), wait| {
+                    (awaiting + wait.awaiting, served + wait.served_per_s)
+                });
             let busy = waits
                 .iter()
                 .map(|wait| wait.map(|wait| wait.wait.as_secs_f64()))
                 .collect::<Vec<_>>();
-            let fleet = (arrivals > 0.0).then(|| awaiting / arrivals);
+            let fleet = (served > 0.0).then(|| awaiting / served);
             (busy, fleet, spill.overload.wait_floor.as_secs_f64())
         }
     };
@@ -313,7 +312,7 @@ pub(crate) mod tests {
 
     /// Gives every pool 40 requests in flight over 8 workers, and sets each
     /// pool's expected wait from its waiting requests and the requests it
-    /// starts per second.
+    /// serves per second (with as many waiting at the start as at the end).
     pub(crate) fn set_waits(pools: &[Pool], signals: &PoolSignals, waits: [(u64, u64); 4]) {
         for (pool, (awaiting, per_second)) in pools.iter().zip(waits) {
             signals.forget_load(&pool.id);

@@ -111,7 +111,7 @@ impl RoutingStats {
                     "in_flight": load.map(|load| load.in_flight),
                     "workers": load.map(|load| load.workers),
                     "wait_ms": wait.map(|wait| wait.wait.as_secs_f64() * 1000.0),
-                    "arrivals_per_s": wait.map(|wait| wait.arrivals_per_s),
+                    "served_per_s": wait.map(|wait| wait.served_per_s),
                     "round_trip_ms": signals
                         .round_trip(&pool.id)
                         .map(|round_trip| round_trip.as_secs_f64() * 1000.0),

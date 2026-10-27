@@ -50,8 +50,9 @@ pub struct PoolWait {
     pub wait: Duration,
     /// Requests waiting for a first token, averaged over the window.
     pub awaiting: f64,
-    /// Requests the pool started per second over the window.
-    pub arrivals_per_s: f64,
+    /// Requests that stopped waiting (got a first token, or failed) per
+    /// second over the window.
+    pub served_per_s: f64,
 }
 
 /// What the router knows about each pool besides the catalog: its load, as
@@ -181,13 +182,17 @@ impl PoolSignals {
 
     /// The pool's expected wait for a first token, by Little's law: the
     /// requests waiting for one, averaged over the wait window, divided by
-    /// the rate the pool starts requests. Like requests per worker, it rises
-    /// as a pool fills up, but it also compares pools whose workers differ
-    /// in speed or size. Requests this process has sent since the last
-    /// report count as waiting, as in [`Self::load`]. The rate counts at
-    /// least one request, so a pool that starts none still has a finite
-    /// wait. `None` without a fresh report, or until a second report gives
-    /// a rate. Unlike [`Self::load`], this is not counted as a read.
+    /// the rate requests stop waiting: those started over the window, less
+    /// the growth in those waiting. Like requests per worker, it rises as a
+    /// pool fills up, but it also compares pools whose workers differ in
+    /// speed or size. The rate is how fast the pool works through its
+    /// queue, not how fast requests arrive: a pool that routers stop
+    /// sending to keeps draining, and its wait shows that. Requests this
+    /// process has sent since the last report count as waiting, as in
+    /// [`Self::load`]. The rate counts at least one request, so a pool that
+    /// serves none still has a finite wait. `None` without a fresh report,
+    /// or until a second report gives a rate. Unlike [`Self::load`], this
+    /// is not counted as a read.
     pub fn wait(&self, pool: &PoolId) -> Option<PoolWait> {
         let report = self
             .loads
@@ -202,12 +207,16 @@ impl PoolSignals {
         let awaiting = window.map(|sample| sample.awaiting as f64).sum::<f64>()
             / (report.samples.len() - 1) as f64
             + self.in_flight.started(pool).saturating_sub(report.started) as f64;
-        let started = (last.started_total - first.started_total).max(1);
-        let arrivals_per_s = started as f64 * 1000.0 / span_ms as f64;
+        // Started requests either still wait or have stopped waiting.
+        let started = last.started_total - first.started_total;
+        let served = (started + first.awaiting)
+            .saturating_sub(last.awaiting)
+            .max(1);
+        let served_per_s = served as f64 * 1000.0 / span_ms as f64;
         Some(PoolWait {
-            wait: Duration::from_secs_f64(awaiting / arrivals_per_s),
+            wait: Duration::from_secs_f64(awaiting / served_per_s),
             awaiting,
-            arrivals_per_s,
+            served_per_s,
         })
     }
 
@@ -282,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn expected_wait_is_waiting_requests_over_the_start_rate() {
+    fn expected_wait_is_waiting_requests_over_the_rate_they_are_served() {
         let in_flight = Arc::new(InFlightTracker::new());
         let signals = PoolSignals::new(in_flight.clone(), Duration::from_secs(60));
         let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
@@ -291,12 +300,13 @@ mod tests {
         signals.record_load(&blue, report(0, 4, 0));
         assert_eq!(signals.wait(&blue), None);
 
-        // 20 starts in 2 s is 10 per second; 7 waiting on average: 0.7 s.
+        // 20 started in 2 s while those waiting grew from 4 to 8, so 16
+        // were served: 8 per second. 7 waiting on average: 0.875 s.
         signals.record_load(&blue, report(1000, 6, 10));
         signals.record_load(&blue, report(2000, 8, 20));
         let wait = signals.wait(&blue).unwrap();
-        assert_eq!((wait.awaiting, wait.arrivals_per_s), (7.0, 10.0));
-        assert!((wait.wait.as_secs_f64() - 0.7).abs() < 1e-9);
+        assert_eq!((wait.awaiting, wait.served_per_s), (7.0, 8.0));
+        assert!((wait.wait.as_secs_f64() - 0.875).abs() < 1e-9);
 
         // Requests this process sent since the report are waiting too.
         let _sent = [
@@ -304,7 +314,7 @@ mod tests {
             in_flight.start(&blue),
             in_flight.start(&blue),
         ];
-        assert!((wait_secs(&signals, &blue).unwrap() - 1.0).abs() < 1e-9);
+        assert!((wait_secs(&signals, &blue).unwrap() - 1.25).abs() < 1e-9);
         // Not counted as load reads.
         assert_eq!(signals.reads(), (0, 0));
     }
@@ -332,6 +342,21 @@ mod tests {
         assert_eq!(signals.wait(&blue), None);
         signals.record_load(&blue, report(7000, 2, 7));
         assert!((wait_secs(&signals, &blue).unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pool_no_one_sends_to_is_judged_by_how_fast_it_drains() {
+        let signals = PoolSignals::new(Arc::new(InFlightTracker::new()), Duration::from_secs(60));
+        let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
+        // Nothing new starts, and the queue drains from 10 to 2 in 2 s: 4
+        // served per second, 4 waiting on average, so 1 s, not the 8 s
+        // the arrival rate (at least one in the window) would give.
+        for (at, awaiting) in [(0, 10), (1000, 6), (2000, 2)] {
+            signals.record_load(&blue, report(at, awaiting, 100));
+        }
+        let wait = signals.wait(&blue).unwrap();
+        assert_eq!((wait.awaiting, wait.served_per_s), (4.0, 4.0));
+        assert!((wait.wait.as_secs_f64() - 1.0).abs() < 1e-9);
     }
 
     #[test]

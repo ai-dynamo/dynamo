@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(pick(&wait, &pools, Some("s")), "ohio-b");
     }
 
-    // Waits below are (requests waiting, requests started per second): 4 and
+    // Waits below are (requests waiting, requests served per second): 4 and
     // 8 is 0.5 s. From Ohio, Oregon is 50 ms away and Tokyo 135 ms.
 
     #[test]
