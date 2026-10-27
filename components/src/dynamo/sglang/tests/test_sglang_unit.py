@@ -1670,7 +1670,10 @@ async def test_forward_pass_metrics_enabled_from_trace(monkeypatch, mock_sglang_
 async def test_forward_pass_metrics_enabled_from_cli_flag(monkeypatch, mock_sglang_cli):
     """The shared CLI flag should enable both Python and Rust trace handling."""
     monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
-    monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
+    # parse_args writes DYN_FPM_TRACE; setenv records the original value so
+    # teardown restores it instead of leaking "1" into later tests.
+    monkeypatch.setenv("DYN_FPM_TRACE", "0")
+    monkeypatch.delenv("DYN_FPM_TRACE")
     mock_sglang_cli("--fpm-trace", "--model", "Qwen/Qwen3-0.6B")
 
     config = await parse_args(sys.argv[1:])
