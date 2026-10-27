@@ -14,16 +14,27 @@ use crate::catalog::Pool;
 use crate::load::InFlightTracker;
 
 /// What a selector may know about a request. Routing inputs such as the
-/// session ID or the client's region become fields here.
+/// client's region become fields here.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct RoutingRequest<'a> {
     pub model: &'a str,
+    /// The client's session, from `X-Dynamo-Session-ID` or an agent's
+    /// session header. A session's requests share a growing prompt prefix.
+    pub session: Option<&'a str>,
 }
 
 impl<'a> RoutingRequest<'a> {
     pub fn new(model: &'a str) -> Self {
-        Self { model }
+        Self {
+            model,
+            session: None,
+        }
+    }
+
+    pub fn with_session(mut self, session: Option<&'a str>) -> Self {
+        self.session = session;
+        self
     }
 }
 
@@ -116,7 +127,10 @@ fn reachable<'a>(candidates: &[&'a Pool]) -> Vec<&'a Pool> {
 }
 
 /// `pool`, with the next of its frontends in rotation.
-fn target(frontends: &DashMap<PoolId, BuiltinRoutePicker>, pool: &Pool) -> Option<PoolTarget> {
+pub(crate) fn target(
+    frontends: &DashMap<PoolId, BuiltinRoutePicker>,
+    pool: &Pool,
+) -> Option<PoolTarget> {
     let frontend = &pool.frontends[rotate(frontends, &pool.id, pool.frontends.len())?];
     Some(PoolTarget {
         pool: pool.id.clone(),

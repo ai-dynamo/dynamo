@@ -34,6 +34,8 @@ use tokio_util::codec::FramedRead;
 use tokio_util::io::StreamReader;
 use url::Url;
 
+use crate::stats::RoutingStats;
+
 /// A request the engine can forward: the route it goes to on a pool
 /// frontend, and the fields the engine reads or rewrites.
 pub trait ForwardedRequest: Serialize + Send + Sync + 'static {
@@ -101,33 +103,43 @@ pub struct PoolForwardingEngine {
     pools: watch::Receiver<Arc<PoolSnapshot>>,
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
+    stats: Arc<RoutingStats>,
     http: reqwest::Client,
 }
 
 impl PoolForwardingEngine {
     /// Each request counts in `in_flight` from its pool choice until its
-    /// response stream ends. `http` must not set a total request timeout,
-    /// because a response streams for as long as the pool generates.
+    /// response stream ends, and in `stats` once. `http` must not set a
+    /// total request timeout, because a response streams for as long as the
+    /// pool generates.
     pub fn new(
         pools: watch::Receiver<Arc<PoolSnapshot>>,
         selector: Arc<dyn PoolSelector>,
         in_flight: Arc<InFlightTracker>,
+        stats: Arc<RoutingStats>,
         http: reqwest::Client,
     ) -> Self {
         Self {
             pools,
             selector,
             in_flight,
+            stats,
             http,
         }
     }
 
-    fn select(&self, model: &str) -> Result<PoolTarget, DynamoError> {
+    fn select(&self, model: &str, session: Option<&str>) -> Result<PoolTarget, DynamoError> {
         let snapshot = self.pools.borrow().clone();
         let candidates = snapshot.pools_for(model).collect::<Vec<_>>();
-        self.selector
-            .select(&RoutingRequest::new(model), &candidates)
-            .ok_or_else(|| unavailable(format!("no pool can serve model {model}")))
+        let request = RoutingRequest::new(model).with_session(session);
+        let target = self
+            .selector
+            .select(&request, &candidates)
+            .ok_or_else(|| unavailable(format!("no pool can serve model {model}")))?;
+        if let Some(pool) = candidates.iter().find(|pool| pool.id == target.pool) {
+            self.stats.record(pool, session);
+        }
+        Ok(target)
     }
 
     async fn forward<R: ForwardedRequest>(
@@ -141,7 +153,7 @@ impl PoolForwardingEngine {
             .ok();
         let (mut body, context) = request.into_parts();
         let ctx = context.context();
-        let target = self.select(body.model())?;
+        let target = self.select(body.model(), session.as_ref().map(|id| id.as_str()))?;
         let in_flight = self.in_flight.start(&target.pool);
         let url = route_url(&target.frontend, R::ROUTE)?;
         body.request_stream();

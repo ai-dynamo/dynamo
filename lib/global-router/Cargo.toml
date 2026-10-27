@@ -21,6 +21,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

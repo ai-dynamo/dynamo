@@ -12,11 +12,17 @@
 mod catalog;
 mod discovery;
 mod load;
+mod placement;
 mod selector;
+mod session;
+mod signals;
 
 pub use catalog::{Pool, PoolCatalog, PoolSnapshot, StaticPoolCatalog};
 pub use discovery::DiscoveryPoolCatalog;
 pub use load::{InFlightGuard, InFlightTracker};
+pub use placement::Overload;
 pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
+pub use session::{AffinitySelector, RendezvousSelector};
+pub use signals::{PoolLoad, PoolSignals};

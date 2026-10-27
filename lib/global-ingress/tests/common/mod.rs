@@ -12,7 +12,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::http::HeaderMap;
 use axum::routing;
-use dynamo_global_ingress::{ModelSync, PoolForwardingEngine};
+use dynamo_global_ingress::{ModelSync, PoolForwardingEngine, RoutingStats};
 use dynamo_global_router::{InFlightTracker, Pool, PoolSnapshot, RoundRobinSelector};
 use dynamo_global_router_shared::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
 use dynamo_llm::http::service::service_v2::HttpService;
@@ -94,6 +94,7 @@ pub async fn counting_global_frontend(
         pools.clone(),
         Arc::new(RoundRobinSelector::new()),
         in_flight,
+        Arc::new(RoutingStats::new(None)),
         client(),
     ));
     let mut models = ModelSync::new(service.clone(), engine);
@@ -106,6 +107,7 @@ pub async fn counting_global_frontend(
 pub fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
     Pool {
         id: V1PoolIdDeriver.derive(&PoolKey::new("ohio", "dynamo", dgd).unwrap()),
+        name: format!("ohio/dynamo/{dgd}"),
         model: model.to_owned(),
         location: PoolLocation {
             region: "us-east-2".to_owned(),
@@ -114,6 +116,7 @@ pub fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
             datacenter: None,
         },
         frontends: vec![frontend.clone()],
+        relay: None,
     }
 }
 

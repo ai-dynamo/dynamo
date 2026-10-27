@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,6 +98,7 @@ fn routable_pools(listings: Vec<PoolListing>) -> Vec<Pool> {
             let location = listing.location;
             Some(Pool {
                 id: V1PoolIdDeriver.derive(&key),
+                name: format!("{}/{}/{}", key.site_id(), key.namespace(), key.dgd_name()),
                 model,
                 location: PoolLocation {
                     region: location.region,
@@ -105,11 +107,25 @@ fn routable_pools(listings: Vec<PoolListing>) -> Vec<Pool> {
                     datacenter: location.datacenter,
                 },
                 frontends: listing.frontends,
+                relay: listing.relay_identity.as_deref().and_then(relay_address),
             })
         })
         .collect::<Vec<_>>();
     pools.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
     pools
+}
+
+/// The address in a Relay identity of the form `ip:<address>`, which is the
+/// only form the service lists today.
+fn relay_address(identity: &str) -> Option<IpAddr> {
+    let address = identity.strip_prefix("ip:")?.parse();
+    if address.is_err() {
+        tracing::debug!(
+            identity,
+            "ignoring a Relay identity that is not an IP address"
+        );
+    }
+    address.ok()
 }
 
 #[cfg(test)]
@@ -149,12 +165,19 @@ mod tests {
     fn keeps_pools_a_router_can_route_to_in_id_order() {
         let mut bad_key = listing("blank", Some("qwen"));
         bad_key.key.namespace = String::new();
+        let mut green = listing("green", Some("qwen"));
+        green.relay_identity = Some("ip:10.0.0.7".into());
         let pools = routable_pools(vec![
-            listing("green", Some("qwen")),
+            green,
             listing("unnamed", None),
             bad_key,
             listing("blue", Some("qwen")),
         ]);
+        let green = pools
+            .iter()
+            .find(|pool| pool.name == "aws-west/dynamo/green");
+        assert_eq!(green.unwrap().relay, Some("10.0.0.7".parse().unwrap()));
+        assert_eq!(relay_address("10.0.0.7"), None);
 
         let hosts = pools
             .iter()
@@ -164,10 +187,9 @@ mod tests {
         assert!(hosts.contains(&"blue") && hosts.contains(&"green"));
         assert!(pools[0].id.as_str() < pools[1].id.as_str());
         assert_eq!(pools[0].location.cluster.as_deref(), Some("aws-west"));
-        let reordered = routable_pools(vec![
-            listing("blue", Some("qwen")),
-            listing("green", Some("qwen")),
-        ]);
+        let mut green = listing("green", Some("qwen"));
+        green.relay_identity = Some("ip:10.0.0.7".into());
+        let reordered = routable_pools(vec![listing("blue", Some("qwen")), green]);
         assert_eq!(pools, reordered);
     }
 

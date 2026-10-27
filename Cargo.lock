@@ -2667,6 +2667,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.4",
  "clap",
+ "dashmap",
  "dynamo-global-discovery-client",
  "dynamo-global-discovery-service",
  "dynamo-global-router",
@@ -2680,6 +2681,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "tonic 0.13.1",
  "tracing",
  "url",
 ]
@@ -2698,6 +2700,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "xxhash-rust",
 ]
 
 [[package]]

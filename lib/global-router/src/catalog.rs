@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use dynamo_global_router_shared::{PoolId, PoolLocation};
@@ -12,12 +13,16 @@ use url::Url;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pool {
     pub id: PoolId,
+    /// `<site>/<namespace>/<DGD name>`, for logs and stats.
+    pub name: String,
     /// The model the pool serves, as clients name it in requests.
     pub model: String,
     pub location: PoolLocation,
     /// Frontends that accept forwarded requests. Each is the root of an
     /// OpenAI-compatible HTTP API, for example `http://10.0.0.5:8000/`.
     pub frontends: Vec<Url>,
+    /// The pool's Relay, which streams the pool's load, when known.
+    pub relay: Option<IpAddr>,
 }
 
 /// Every pool a catalog knows about at one point in time.
@@ -80,16 +85,22 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn pool(dgd: &str, model: &str, frontends: &[&str]) -> Pool {
+        regional_pool("us-east-2", dgd, model, frontends)
+    }
+
+    pub(crate) fn regional_pool(region: &str, dgd: &str, model: &str, frontends: &[&str]) -> Pool {
         Pool {
-            id: V1PoolIdDeriver.derive(&PoolKey::new("ohio", "dynamo", dgd).unwrap()),
+            id: V1PoolIdDeriver.derive(&PoolKey::new(region, "dynamo", dgd).unwrap()),
+            name: format!("{region}/dynamo/{dgd}"),
             model: model.to_owned(),
             location: PoolLocation {
-                region: "us-east-2".to_owned(),
+                region: region.to_owned(),
                 availability_zone: None,
                 cluster: None,
                 datacenter: None,
             },
             frontends: frontends.iter().map(|url| url.parse().unwrap()).collect(),
+            relay: None,
         }
     }
 
