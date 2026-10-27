@@ -161,14 +161,14 @@ async def test_initial_waiter_prevents_eviction_after_load_before_lease(
     original_lease = coordinator._lease_resident
     first_lease_calls = 0
 
-    async def gated_lease(metadata, request_id):
+    async def gated_lease(metadata, request_id, **kwargs):
         nonlocal first_lease_calls
         if metadata.adapter_key == first_key and request_id == "request-1":
             first_lease_calls += 1
             if first_lease_calls == 2:
                 post_load.set()
                 await allow_first_lease.wait()
-        return await original_lease(metadata, request_id)
+        return await original_lease(metadata, request_id, **kwargs)
 
     coordinator._lease_resident = gated_lease
     first_task = asyncio.create_task(

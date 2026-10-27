@@ -83,3 +83,38 @@ async def test_duplicate_correlation_ids_have_independent_admissions(
     assert not handler._lora_state.runtime_pending_leases
     await coordinator.release_active_admission(second.lora_name)
     await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_warm_admission_preserves_reserved_initial_waiter_budget(
+    monkeypatch, tmp_path
+):
+    snapshot = _snapshot(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def resolve(**kwargs):
+        if "cold" in kwargs["source_uri"]:
+            started.set()
+            await release.wait()
+        return ResolvedLoRA(snapshot, "digest:immutable")
+
+    handler, coordinator = _coordinator(monkeypatch, tmp_path, resolve)
+    coordinator._settings = replace(coordinator.settings, max_pending_admissions=1)
+    warm_request = _request("wandb-artifact:///entity/project/warm:v1")
+    await coordinator.ensure_from_request(warm_request, "prime")
+    await coordinator.release_pending_admission("prime")
+    cold_request = _request("wandb-artifact:///entity/project/cold:v1")
+    waiter = asyncio.create_task(coordinator.ensure_from_request(cold_request, "cold"))
+    await started.wait()
+    try:
+        with pytest.raises(HttpError, match="lora_capacity_exceeded"):
+            await coordinator.ensure_from_request(warm_request, "warm")
+        assert not handler._lora_state.runtime_pending_admissions
+        assert sum(coordinator._initial_waiters.values()) == 1
+    finally:
+        release.set()
+    result = await waiter
+    assert handler._lora_state.runtime_pending_leases == {result.lora_name: 1}
+    assert not coordinator._initial_waiters
+    await coordinator.close()

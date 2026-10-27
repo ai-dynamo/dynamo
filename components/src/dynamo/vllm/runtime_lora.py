@@ -180,7 +180,9 @@ class RuntimeLoRACoordinator:
                 if key not in self._resolution_admitted:
                     raise _runtime_error(429, "lora_capacity_exceeded") from None
                 raise _runtime_error(504, "runtime_lora_resolve_timeout") from None
-            resident = await self._lease_resident(metadata, admission_id)
+            resident = await self._lease_resident(
+                metadata, admission_id, initial_waiter=True
+            )
             if resident is None:
                 raise _runtime_error(429, "lora_capacity_exceeded")
             return resident
@@ -307,6 +309,8 @@ class RuntimeLoRACoordinator:
         self,
         metadata: _RuntimeRequest,
         request_id: str,
+        *,
+        initial_waiter: bool = False,
     ) -> LoRARequest | None:
         state = self._handler._lora_state
         while True:
@@ -320,7 +324,7 @@ class RuntimeLoRACoordinator:
                         return None
                     request = self._validate_resident(metadata, resident)
                     self._record_pending_admission_locked(
-                        metadata.adapter_key, request_id
+                        metadata.adapter_key, request_id, initial_waiter=initial_waiter
                     )
                     return request
             await transition.wait()
@@ -329,6 +333,8 @@ class RuntimeLoRACoordinator:
         self,
         adapter_key: str,
         request_id: str,
+        *,
+        initial_waiter: bool = False,
     ) -> None:
         state = self._handler._lora_state
         existing = state.runtime_pending_admissions.get(request_id)
@@ -339,6 +345,8 @@ class RuntimeLoRACoordinator:
             return
         if (
             len(state.runtime_pending_admissions)
+            + sum(self._initial_waiters.values())
+            - int(initial_waiter)
             >= self._active_settings.max_pending_admissions
         ):
             raise _runtime_error(429, "lora_capacity_exceeded")
