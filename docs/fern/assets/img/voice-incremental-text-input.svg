@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="534" viewBox="0 0 1400 534" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
-  <title id="title">Incremental text input overlaps ASR with LLM prefill</title>
-  <desc id="desc">With incremental text input, provisional ASR text is forwarded to the LLM over the realtime WebSocket while the user is still speaking, so the LLM prefills the stable prefix during speech. When the user stops, only the commit and decode remain. Sequentially, the LLM waits for the final transcript and then prefills, so the first token arrives later. Illustrative timings.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="486" viewBox="0 0 1400 486" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Incremental text input starts LLM prefill while the user is still speaking</title>
+  <desc id="desc">With incremental text input, the worker prefills the text it has received so far while the user is still speaking, in full cache blocks, so less prefill remains after the user stops and the first token arrives earlier. Without it, prefill starts only after the final transcript, so the first token arrives later. Illustrative timings.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1400" height="534" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">INCREMENTAL TEXT INPUT  (EXPERIMENTAL)</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Overlap ASR and prefill instead of waiting for the final transcript</text>
+  <rect width="1400" height="486" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">INCREMENTAL TEXT INPUT</text>
+  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Prefill the transcript as it arrives, not after it is final</text>
   <rect x="50" y="96" width="640" height="340" rx="14" fill="#FFFFFF" stroke="#76B900" stroke-width="1.8"/>
   <text x="70" y="128" font-size="16" font-weight="700" fill="#4C7A00">With incremental text input</text>
   <text x="70" y="196" font-size="13" font-weight="700" fill="#1A1A1A">User speech</text>
@@ -16,18 +16,18 @@
   <rect x="190" y="232" width="150" height="28" rx="4" fill="#DCE6FF" stroke="#234CDA" stroke-width="1.5"/>
   <text x="265.0" y="250.0" font-size="12" font-weight="700" fill="#234CDA" text-anchor="middle">partial text</text>
   <rect x="340" y="232" width="90.0" height="28" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="385.0" y="250.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">final</text>
+  <text x="385.0" y="250.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">final text</text>
   <line x1="340" y1="148" x2="340" y2="388" stroke="#234CDA" stroke-width="1.5" stroke-dasharray="5 4"/>
   <text x="340" y="146" font-size="12" font-weight="700" fill="#234CDA" text-anchor="middle">user stops</text>
   <rect x="230" y="288" width="146.0" height="28" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="303.0" y="306.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">speculative prefill</text>
+  <text x="303.0" y="306.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">prefill on partial text</text>
   <rect x="430.0" y="344" width="43.199999999999996" height="28" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="451.6" y="388" font-size="11.5" fill="#374151" text-anchor="middle">commit</text>
+  <text x="422.0" y="363" font-size="11.5" fill="#374151" text-anchor="end">request overhead</text>
   <line x1="473.2" y1="338" x2="473.2" y2="380" stroke="#76B900" stroke-width="2.5"/>
   <circle cx="473.2" cy="358" r="6" fill="#76B900"/>
   <text x="485.2" y="363" font-size="12.5" font-weight="700" fill="#4C7A00">first token</text>
   <rect x="710" y="96" width="640" height="340" rx="14" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.8"/>
-  <text x="730" y="128" font-size="16" font-weight="700" fill="#1A1A1A">Sequential: wait for the final transcript</text>
+  <text x="730" y="128" font-size="16" font-weight="700" fill="#1A1A1A">Without: prefill waits for the final text</text>
   <text x="730" y="196" font-size="13" font-weight="700" fill="#1A1A1A">User speech</text>
   <text x="730" y="252" font-size="13" font-weight="700" fill="#1A1A1A">ASR</text>
   <text x="730" y="308" font-size="13" font-weight="700" fill="#1A1A1A">LLM prefill</text>
@@ -35,23 +35,22 @@
   <rect x="850" y="176" width="150" height="28" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
   <text x="925.0" y="194.0" font-size="12" font-weight="700" fill="#234CDA" text-anchor="middle">user speaking</text>
   <rect x="850" y="232" width="150" height="28" rx="4" fill="#DCE6FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="925.0" y="250.0" font-size="12" font-weight="700" fill="#234CDA" text-anchor="middle">transcribing</text>
+  <text x="925.0" y="250.0" font-size="12" font-weight="700" fill="#234CDA" text-anchor="middle">partial text</text>
   <rect x="1000" y="232" width="90.0" height="28" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="1045.0" y="250.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">final</text>
+  <text x="1045.0" y="250.0" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">final text</text>
   <line x1="1000" y1="148" x2="1000" y2="388" stroke="#234CDA" stroke-width="1.5" stroke-dasharray="5 4"/>
   <text x="1000" y="146" font-size="12" font-weight="700" fill="#234CDA" text-anchor="middle">user stops</text>
-  <rect x="1090.0" y="288" width="43.199999999999996" height="28" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
   <rect x="1133.2" y="288" width="115.19999999999999" height="28" rx="4" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
   <text x="1190.8" y="306.0" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">prefill</text>
+  <rect x="1090.0" y="288" width="43.199999999999996" height="28" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="1082.0" y="307" font-size="11.5" fill="#374151" text-anchor="end">request overhead</text>
   <line x1="1248.4" y1="338" x2="1248.4" y2="380" stroke="#D97706" stroke-width="2.5"/>
   <circle cx="1248.4" cy="358" r="6" fill="#D97706"/>
   <text x="1260.4" y="363" font-size="12.5" font-weight="700" fill="#92400E">first token</text>
   <line x1="588.4000000000001" y1="284" x2="588.4000000000001" y2="380" stroke="#D97706" stroke-width="1.5" stroke-dasharray="3 4"/>
-  <text x="594.4000000000001" y="304" font-size="11.5" fill="#92400E">sequential</text>
-  <text x="594.4000000000001" y="318" font-size="11.5" fill="#92400E">first token</text>
+  <text x="594.4000000000001" y="304" font-size="11.5" fill="#92400E">first token</text>
+  <text x="594.4000000000001" y="318" font-size="11.5" fill="#92400E">without it</text>
   <line x1="475.2" y1="402" x2="586.4000000000001" y2="402" stroke="#4C7A00" stroke-width="2.5" marker-end="url(#arrow-green)"/>
   <text x="530.8000000000001" y="388" font-size="12.5" font-weight="700" fill="#4C7A00" text-anchor="middle">about 320 ms earlier</text>
-  <text x="50" y="464" font-size="12.5" fill="#4B5563">Illustrative, not a benchmark: ASR final 250 ms after speech ends, 120 ms request overhead, prefill 0.08 ms per uncached token on 4,000 tokens (320 ms).</text>
-  <text x="50" y="488" font-size="12.5" fill="#4B5563">Experimental. Aggregated text-only vLLM, with --realtime and prefix caching on. Events: input_text.append, input_text.commit, input_text.clear.</text>
-  <text x="50" y="512" font-size="12.5" fill="#4B5563">If ASR revises its final words, the speculative work is discarded and the gain shrinks. Short prompts may not warm anything.</text>
+  <text x="50" y="464" font-size="12.5" fill="#4B5563">Illustrative timings: ASR final text 250 ms after speech ends, 120 ms request overhead, prefill 0.08 ms per token on 4,000 uncached tokens (320 ms).</text>
 </svg>

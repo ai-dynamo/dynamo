@@ -79,10 +79,10 @@ Bring up and test each stage on its own before you connect them:
 Each launcher starts its own frontend on port 8000, so test the stages one at a
 time on a single host.
 
-## Incremental Text Input (Experimental)
+## Incremental Text Input
 
-Incremental text input lets an orchestrator forward ASR text to the LLM while transcription is still running. The LLM warms its prefix cache from the provisional text, so less prefill remains when the user stops speaking. The client sends `input_text.append` events with provisional text, then `input_text.commit` with the final text to start generation, or `input_text.clear` to discard the speculative work.
+Incremental text input lets an orchestrator send ASR text to the LLM while the user is still speaking. The worker starts prefilling the text it has received so far, in full KV cache blocks, so those tokens are already in the prefix cache when the final request arrives. The client sends `input_text.append` events with the partial text, then `input_text.commit` with the final text to start generation, or `input_text.clear` to discard the prefill work.
 
-![With incremental text input, the LLM prefills the stable prefix while the user is still speaking, so the first token arrives earlier than when it waits for the final transcript. Sequentially, prefill starts only after the final transcript. Illustrative timings.](../../../assets/img/voice-incremental-text-input.svg)
+![Without incremental text input, LLM prefill waits for the final text from ASR. With it, prefill runs on the partial text while the user is still speaking, so the first token arrives earlier. Illustrative timings.](../../../assets/img/voice-incremental-text-input.svg)
 
-It is limited to text-only `/v1/realtime` sessions on aggregated vLLM workers, without tools or disaggregation, and it needs prefix caching. Short or revised input can yield no benefit. The input events are Dynamo extensions, not standard OpenAI events, and realtime text does not yet apply `--dyn-reasoning-parser`. ASR and TTS orchestration remain external. Session recovery across worker failures is a further goal and is not provided by the examples above.
+It applies to text-only `/v1/realtime` sessions on aggregated vLLM workers, without tools or disaggregation, and it needs prefix caching. Short or revised input can yield no benefit. The input events are Dynamo extensions, not standard OpenAI events, and realtime text does not yet apply `--dyn-reasoning-parser`. ASR and TTS orchestration remain external. Session recovery across worker failures is a further goal and is not provided by the examples above.

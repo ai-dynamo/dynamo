@@ -54,28 +54,9 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 Experimental guides have runnable upstream artifacts but do not make a general compatibility promise. Integrations in progress remain in the compatibility table until a maintained path lands.
 
 > [!NOTE]
-> Kubernetes is optional for verl, NeMo RL, and custom trainers. The Slime example deploys on Kubernetes.
+> Kubernetes is optional for these RL integrations. Use it only when the selected framework or deployment environment requires it.
 
 ## Next Steps
-
-Start with the integration for your training framework:
-
-<CardGroup cols={2}>
-  <Card title="verl" icon="regular plug" href="verl.md">
-    Run verl rollouts on Dynamo workers.
-  </Card>
-  <Card title="NeMo RL" icon="regular plug" href="nemo-rl.md">
-    Use the managed Slurm and Ray Dynamo backend in NeMo RL.
-  </Card>
-  <Card title="Slime" icon="regular plug" href="slime.md">
-    Stream external rollouts from Slime to Dynamo on Kubernetes.
-  </Card>
-  <Card title="Connect an External Trainer" icon="regular terminal" href="implementation-guide.md">
-    Connect generation, worker administration, and policy updates while keeping RL semantics in your framework.
-  </Card>
-</CardGroup>
-
-Then tune the serving side:
 
 <CardGroup cols={2}>
   <Card title="Enable KV-Aware Load Balancing" icon="regular sliders" href="routing.md">
@@ -90,7 +71,7 @@ Then tune the serving side:
   <Card title="Protect Rollout Generation" icon="regular shield" href="../../kubernetes/fault-tolerance/introduction.md">
     Recover supported in-flight requests, shed overload explicitly, propagate cancellation, and drain workers safely.
   </Card>
-  <Card title="RL Integration Reference" icon="regular book" href="integration-reference.md">
-    Endpoints, worker discovery, and the framework compatibility matrix.
+  <Card title="Connect an External Trainer" icon="regular terminal" href="implementation-guide.md">
+    Connect generation, worker administration, and policy updates while keeping RL semantics in your framework.
   </Card>
 </CardGroup>
