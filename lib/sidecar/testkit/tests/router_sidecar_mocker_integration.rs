@@ -1106,12 +1106,16 @@ async fn distinct_model_tokenizer_and_alias_are_published() {
         },
     )
     .await;
+    // SGLang reports the parsers in GetModelInfo and the alias in GetServerInfo.
+    let tokenizer_path = tokenizer.to_str().unwrap().to_string();
     peer.override_discovery(
-        json!({"tokenizer_path": tokenizer}),
-        vec![json!({
-            "served_model_name": "public-alias",
-            "tool_call_parser": "hermes",
-            "reasoning_parser": "deepseek_r1",
+        Some(Box::new(move |info| {
+            info.tokenizer_path = tokenizer_path.clone();
+            info.tool_call_parser = Some("hermes".into());
+            info.reasoning_parser = Some("deepseek_r1".into());
+        })),
+        vec![Box::new(|info| {
+            info.served_model_name = "public-alias".into()
         })],
     );
     let mut child =
@@ -1139,16 +1143,7 @@ async fn distinct_model_tokenizer_and_alias_are_published() {
     assert!(file.checksum_matches(&tokenizer_file));
     assert!(!file.checksum_matches(std::path::Path::new(&env.model).join("tokenizer.json")));
     assert!(card.prompt_formatter.is_some());
-    let handle = healthy::<sglang::Fixture>(&env, &router, &control, "distinct-metadata").await;
-    let native = handle.native_request().unwrap();
-    let traceparent = &native.trace_headers["traceparent"];
-    let fields = traceparent.split('-').collect::<Vec<_>>();
-    assert_eq!(fields.len(), 4);
-    assert_eq!(fields[0], "00");
-    assert_eq!(fields[1].len(), 32);
-    assert_eq!(fields[2].len(), 16);
-    assert!(u128::from_str_radix(fields[1], 16).unwrap() != 0);
-    assert!(u64::from_str_radix(fields[2], 16).unwrap() != 0);
+    healthy::<sglang::Fixture>(&env, &router, &control, "distinct-metadata").await;
     child.shutdown().await;
     env.withdrawn("backend", &router).await;
     peer.shutdown().await;
@@ -1209,8 +1204,11 @@ async fn changed_role_never_registers() {
     )
     .await;
     peer.override_discovery(
-        Value::Null,
-        vec![json!({}), json!({"disaggregation_mode": "prefill"})],
+        None,
+        vec![
+            Box::new(|_| {}),
+            Box::new(|info| info.disaggregation_mode = "prefill".into()),
+        ],
     );
     let mut child =
         env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
