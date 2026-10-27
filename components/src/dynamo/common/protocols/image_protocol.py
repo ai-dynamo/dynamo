@@ -4,7 +4,7 @@
 
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer, field_validator
 
 # For omni models, we need to support raw_request parsing and json output format. We need to have these protocols defined here for serialization and deserialization.
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
@@ -76,8 +76,33 @@ class NvCreateImageRequest(BaseModel):
     moderation: Optional[str] = None
     """Content moderation level: auto or low."""
 
-    input_reference: Optional[str] = None
-    """Optional image reference that guides generation (for I2I)."""
+    input_reference: Optional[list[str]] = None
+    """Ordered edit references; singletons retain the legacy string wire form."""
+
+    @field_validator("input_reference", mode="before")
+    @classmethod
+    def normalize_input_reference(cls, value):
+        """Normalize supplied strings and ordered arrays to a nonempty list.
+
+        Keep reference contents out of the validation messages raised here.
+        """
+        if value is None:
+            return None
+        references = [value] if isinstance(value, str) else value
+        if (
+            not isinstance(references, list)
+            or not references
+            or any(not isinstance(item, str) or not item.strip() for item in references)
+        ):
+            raise ValueError("input_reference must contain non-empty string references")
+        return references
+
+    @field_serializer("input_reference")
+    def serialize_input_reference(self, value: Optional[list[str]]):
+        """Keep singleton strings for N-2 readers; arrays remain explicit."""
+        if value is not None and len(value) == 1:
+            return value[0]
+        return value
 
     nvext: Optional[ImageNvExt] = None
     """NVIDIA extensions."""

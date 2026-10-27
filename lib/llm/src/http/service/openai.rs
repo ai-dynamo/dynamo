@@ -2640,7 +2640,8 @@ async fn handler_chat_completions(
     response
 }
 
-fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
+/// Parse typed JSON with the existing control-character recovery and error mapping.
+pub(super) fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
 where
     T: DeserializeOwned,
 {
@@ -2751,7 +2752,10 @@ fn failed_to_read_request_body_error() -> ErrorResponse {
 /// Reads and buffers a JSON request body.
 ///
 /// Validates the `Content-Type` before reading the body and limits buffering to [`get_body_limit`].
-async fn read_json_request_body(headers: &HeaderMap, body: Body) -> Result<Bytes, ErrorResponse> {
+pub(super) async fn read_json_request_body(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<Bytes, ErrorResponse> {
     ensure_json_content_type(headers)?;
     axum::body::to_bytes(body, get_body_limit())
         .await
@@ -5149,29 +5153,31 @@ pub fn responses_router(
     (vec![doc, input_tokens_doc], router)
 }
 
+/// Apply shared edit limits before dispatching generation requests with references.
 async fn images(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let request: NvCreateImageRequest = parse_json_request("images", &body)?;
+    let mut request: NvCreateImageRequest = parse_json_request("images", &body)?;
+    super::image_edits::prepare(&mut request)?;
     images_with_request(state, headers, request).await
 }
 
+/// Select a compatible image engine and retain admission and disconnect state.
 async fn images_with_request(
     state: Arc<service_v2::State>,
     headers: HeaderMap,
-    mut request: NvCreateImageRequest,
+    request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
-    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // Images are typically not streamed, so we default to non-streaming
@@ -5195,10 +5201,24 @@ async fn images_with_request(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // Get the image generation engine
-    let engine = state
-        .manager()
-        .get_images_engine(&model)
-        .map_err(|e| ErrorMessage::from_model_error(&e))?;
+    let input_count = request.input_reference.as_ref().map_or(0, Vec::len);
+    let engine = if input_count == 0 {
+        state
+            .manager()
+            .get_images_engine(&model)
+            .map_err(|e| ErrorMessage::from_model_error(&e))?
+    } else {
+        let selection = state.manager().select_image_edit_engine(&model, input_count)
+            .map_err(|e| ErrorMessage::from_model_error(&e))?
+            .ok_or_else(|| ErrorMessage::from_http_error(ErrorClass::InvalidRequest, HttpError {
+                code: StatusCode::BAD_REQUEST.as_u16(),
+                message: format!("No serving worker set supports {input_count} input images for this model"),
+            }))?;
+        if let Some(snapshot) = selection.snapshot {
+            request.insert(crate::discovery::image_edits::SNAPSHOT_KEY, snapshot);
+        }
+        selection.engine
+    };
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
@@ -5210,11 +5230,25 @@ async fn images_with_request(
 
     let mut response_collector = inflight.response_collector();
 
+    // Keep upload/decode/generation work tied to the unary HTTP request. Dropping
+    // this handler signals the existing request-plane cancellation mechanism.
+    let (mut connection_handle, _stream_handle) = create_connection_monitor(
+        request.context(),
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: metric_model.clone(),
+            endpoint: Endpoint::Images.to_string(),
+            request_type: "unary".to_string(),
+        },
+    )
+    .await;
+
     // Issue the generate call on the engine
     // Note: This uses ServerStreamingEngine for internal routing/distribution,
     // NOT for client-facing SSE streaming. The stream is immediately folded into
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
+        connection_handle.disarm();
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
@@ -5241,6 +5275,7 @@ async fn images_with_request(
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
+            connection_handle.disarm();
             // Route the stream error through from_anyhow so typed errors keep
             // their semantics: an InvalidArgument raised by the worker (e.g.
             // request validation) surfaces as HTTP 400 with its message,
@@ -5253,28 +5288,19 @@ async fn images_with_request(
             err_response
         })?;
 
+    connection_handle.disarm();
     inflight.mark_ok();
     Ok(Json(response).into_response())
 }
 
-/// Handler for `/v1/images/edits` (I2I). Requires `input_reference`.
+/// Accept ordered uploads or the JSON reference extension for image edits.
 async fn images_edits(
-    state: State<Arc<service_v2::State>>,
-    headers: HeaderMap,
-    body: Body,
+    State(state): State<Arc<service_v2::State>>,
+    request: Request<Body>,
 ) -> Result<Response, ErrorResponse> {
-    let body = read_json_request_body(&headers, body).await?;
-    let request: NvCreateImageRequest = parse_json_request("image edits", &body)?;
-    if request.input_reference.is_none() {
-        return Err(ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: StatusCode::BAD_REQUEST.as_u16(),
-                message: "input_reference is required for /v1/images/edits".to_string(),
-            },
-        ));
-    }
-    images_with_request(state.0, headers, request).await
+    let headers = request.headers().clone();
+    let request = super::image_edits::parse(request).await?;
+    images_with_request(state, headers, request).await
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Images endpoints.
