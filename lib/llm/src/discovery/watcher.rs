@@ -57,6 +57,7 @@ use crate::{
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
     types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
+    utils::json::canonicalize_json_object_keys,
     worker_type::WorkerType,
 };
 
@@ -1427,7 +1428,7 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
         "base_capacity": card.runtime_config.max_gpu_lora_count,
         "requires_registration": card.runtime_config.runtime_flag_enabled(crate::lora::LORA_REQUIRES_REGISTRATION),
     });
-    canonicalize_json(&mut value);
+    canonicalize_json_object_keys(&mut value);
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
@@ -1446,27 +1447,8 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
         return None;
     }
     let mut contracts = serde_json::Value::Object(contracts);
-    canonicalize_json(&mut contracts);
+    canonicalize_json_object_keys(&mut contracts);
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
-}
-
-fn canonicalize_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            for (key, mut value) in entries {
-                canonicalize_json(&mut value);
-                object.insert(key, value);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                canonicalize_json(value);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn worker_set_chat_preprocessor(
@@ -1514,15 +1496,27 @@ mod tests {
 
         let vllm = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
         );
         let reordered_vllm = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"resize_mode": "round_ties_even", "placeholder_target": "bare_video_token"}),
+            serde_json::json!({
+                "sampling": {"steps": [{"a": null, "z": 1}, [3, 1, 2]], "fps": 2.0, "max_frames": 768},
+                "resize_mode": "round_ties_even",
+                "placeholder_target": "bare_video_token",
+            }),
         );
         let sglang = card_with_contract(
             SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
         );
 
         assert_eq!(

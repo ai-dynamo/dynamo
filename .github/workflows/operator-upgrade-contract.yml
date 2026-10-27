@@ -46,7 +46,7 @@ jobs:
               output.write(f'operator={str(changed).lower()}\nbase={base}\n')
           PY
   replay:
-    name: Historical Grove takeover
+    name: Operator lowering and upgrade tests
     needs: changes
     if: needs.changes.outputs.operator == 'true'
     runs-on: ubuntu-latest
