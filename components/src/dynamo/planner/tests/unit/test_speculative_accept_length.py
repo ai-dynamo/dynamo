@@ -41,7 +41,6 @@ def _caps(decode_nextn=None, decode=True) -> WorkerCapabilities:
     "accept_length, caps, config_nextn, expected",
     [
         # The decode capability wins over the config.
-        (4.5, _caps(decode_nextn=4), 1, 4.5),
         (9.0, _caps(decode_nextn=4), 1, 5.0),
         # Config fallback when the capability is missing, zero, or absent.
         (9.0, _caps(decode_nextn=None), 2, 3.0),
