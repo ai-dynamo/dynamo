@@ -1,29 +1,29 @@
-# Operator upgrade contract: immutable historical baselines
+# Operator upgrade contract: successive historical takeover
 
 This suite implements historical operator takeover checks from #16624 / #16623
 and the fixture coverage tracked in #16650. Each candidate restores the saved
 resource graph, runs production admission/controllers, and checks that an
 operator-only upgrade preserves existing workloads.
 
-## Immutable inputs and separate expected outputs
+## Fixed origins and separate expected outputs
 
-`history/<origin>/.../input.yaml` is a frozen observation of an older operator's
-persisted resources. Passing an upgrade check must never replace that input with
-the candidate's output. Every future candidate starts from the same saved state.
-Adding a 1.6 baseline does not route the existing 1.4 and 1.5 inputs through 1.6
-first or remove their direct takeover coverage.
+`history/<origin>/.../input.yaml` records an origin's persisted resources after
+reconciliation by the last released operator. A formal release capture advances
+all active histories through that release, preserving their origin and runtime.
+Development candidate checks read these inputs without replacing them, so each
+candidate starts from the same release-reconciled state.
 
 | Historical input | Origin | Operator that produced the saved state | Fixed runtime |
 |---|---|---|---|
-| sglang-1.4 | 1.4.0 | 1.5.0, after the original bootstrap takeover | official 1.4.0 |
-| sglang-1.5-custom | 1.4.0 | 1.5.0, after the original bootstrap takeover | custom v1.5.0-9aa3-repro |
-| sglang-1.5 | 1.5.0 | 1.5.0 | official 1.5.0 |
+| sglang-1.4 | 1.4.0 | published 1.6.0, after the 1.5 bootstrap | official 1.4.0 |
+| sglang-1.5-custom | 1.4.0 | published 1.6.0, after the 1.5 bootstrap | custom v1.5.0-9aa3-repro |
+| sglang-1.5 | 1.5.0 | published 1.6.0 | official 1.5.0 |
 | 13 new 1.6 matrix scenarios | 1.6.0 | published 1.6.0 | fixed per fixture |
 
-The original three inputs and their goldens remain byte-for-byte unchanged by
-this capture. The first two were already reconciled by 1.5 in the original
-bootstrap; this does not certify the known-bad custom-tag transition from
-1.4 to 1.5 documented in #16623. No production hash migration is implemented here.
+The first two inputs had already been reconciled by 1.5 in the original
+bootstrap. Advancing those saved states through 1.6 does not certify the known-bad
+custom-tag transition from 1.4 to 1.5 documented in #16623. No production hash
+migration is implemented here.
 
 `output.yaml` is the separately reviewed expected candidate result. A golden
 mismatch writes `output.yaml.new`. Updating an expected output cannot authorize
@@ -69,7 +69,8 @@ admission webhooks. The `upgradecontract` build tag provides a separate TestMain
 7. Compare the complete owned graph and independent safety invariants.
 
 Runtime restoration changes UIDs and Service addresses on the temporary API
-server; none of those observations are written back to existing input files.
+server. Development checks do not write those observations back to input files;
+formal release capture publishes the resulting graphs after all checks pass.
 ResourceQuota blocks Pod and ReplicaSet creation. Grove workload actuation is
 absent. This is CPU admission/controller/API-server evidence, not GPU serving,
 Pod-replacement or live-traffic evidence.
@@ -95,24 +96,21 @@ differences.
 
 ## Provenance and release boundaries
 
-`bootstrap.json` records the original 1.4/1.5 capture sources and exact input
-hashes. `RECONCILED_VERSION` remains 1.5.0 and describes only that original
-bootstrap state. It is not advanced by later capture or verification runs.
+`bootstrap.json` records the original 1.4/1.5 capture sources. Git retains those
+initial snapshots; active `history/<origin>/input.yaml` files advance through
+each intervening released operator without changing their origin or runtime.
 
-`history.lock.json` contains:
+`RECONCILED_VERSION` identifies the released controller that last processed
+**every** active historical input. `history.lock.json` records that same version,
+the published release tag and SHA, and hashes covering the entire active history.
+A new origin alone cannot advance this gate: formal capture must publish the
+release-reconciled results of all existing origins as well as the selected new
+origins. An ordinary replay never rewrites historical inputs.
 
-- `bootstrap`: the unchanged original lock, including its 1.5 source and hashes.
-- `captures`: separate published-release tag/SHA and input hashes for each newly
-  captured baseline. A capture owns only the new origin's input paths.
-- `inputs`: the complete hash inventory, equal to the disjoint union of the
-  original bootstrap inputs and all subsequently appended captures.
-
-Checks reject changed input bytes, overlapping ownership, missing provenance,
-and provisional candidates published as formal history. The next-minor
-appVersion bump requires a captured baseline from the immediately previous minor;
-it does not require overwriting older inputs with that minor's reconcile output.
-All historical origins continue to be replayed directly. Same-minor recapture,
-skipped-minor bumps and major bumps remain unsupported.
+Checks reject changed input bytes, incomplete provenance, and provisional
+candidates published as formal history. The next-minor appVersion bump requires
+all history to have passed through the immediately previous release. Same-minor
+recapture, skipped-minor bumps and major bumps remain unsupported.
 
 `history/N` must be observed using an actual published stable upstream tag for
 operator N. Main's chart reporting N is insufficient because its production
@@ -124,21 +122,21 @@ checks. The selected module runs with `GOWORK=off`.
 ## Scoped v1.6.0 capture
 
 `capture-v1.6.0.json` freezes 19 input paths and hashes from main revision
-`75d0686fb7def243ab5a07ec69159427b169675c`: the three immutable existing history
+`75d0686fb7def243ab5a07ec69159427b169675c`: the three existing history
 inputs and 16 latest inputs. The latter cover 13 of the 27 canonical matrix paths
 plus three legacy variants used only for validation. The 14 missing canonical
 paths are explicitly listed.
 
 This exact partial inventory is accepted only with stable tag `v1.6.0`, release
 revision `701da25292ecca8f64d770cc0b17d389200019a1`, chart version 1.6.0, and the
-original bootstrap marker 1.5.0. The capture records the scope under
-`captures["1.6.0"].captureInventory`. Existing historical inputs are replayed for
-safety; their temporary reconciled snapshots are discarded. `promotedScenarios`
-explicitly selects only the 13 available canonical matrix cases for publication.
-The three legacy latest cases (`sglang-1.4`, `sglang-1.5`, `sglang-1.5-custom`)
-remain CREATE coverage; they are not duplicated under the new origin. Only 13
-newly admitted matrix graphs and their goldens are appended. Future captures
-likewise publish only scenarios in the release matrix catalog.
+predecessor reconciler 1.5.0. The capture records this pre-capture scope under
+`history.lock.json`'s `captureInventory`. All three existing historical inputs
+are reconciled by the released 1.6 operator and their resulting graphs replace
+the active inputs and goldens under their original origin directories.
+`promotedScenarios` additionally selects the 13 available canonical matrix cases
+for publication under origin 1.6. The three legacy latest variants remain CREATE
+coverage; they are not duplicated under the new origin. Future captures likewise
+advance every existing origin and promote only release-matrix catalog scenarios.
 
 This does not certify missing cases. Later releases and provisional captures
 still require the complete matrix from `required-matrix.json`: 24 component/Grove
@@ -187,15 +185,16 @@ Production sources, API types, CRDs, chart, dependencies and safety assertions
 remain at the selected release. Do not apply the patch to the development tree.
 
 Publication is atomic and happens only after all release replay, CREATE and
-safety checks pass. It preserves every existing input and golden byte-for-byte
-and keeps the bootstrap marker. Copy back only `history/1.6.0/` and the updated
-`history.lock.json`, then replay the development operator. Do not copy temporary
-recaptures over older origins. Development `latest` inputs/goldens are unchanged.
+safety checks pass. Copy back the complete regenerated `history/`, including the
+older-origin results, plus `history.lock.json` and `RECONCILED_VERSION` (1.6.0).
+Review that all historical origin annotations and runtime images are preserved,
+then replay the development operator against those released-controller states.
+Development `latest` inputs/goldens are unchanged.
 
 Candidate evidence can be collected using a full `UPGRADE_CANDIDATE_SHA` and a
 new `UPGRADE_CANDIDATE_OUTPUT` directory outside the fixture tree. It records
 `sourceKind=release-candidate` and never publishes baseline history, modifies the
-lock, or changes the bootstrap marker.
+lock, or advances `RECONCILED_VERSION`.
 
 ## Original bootstrap reproduction
 
@@ -223,8 +222,8 @@ main preserves those existing templates through the runtime-and-origin gate in
 supported frontend runtime receive the generated default. Historical origins
 remain concrete and unchanged during replay.
 
-Main already reports operator 1.7.0. The appended 1.6 baseline replaces the
+Main already reports operator 1.7.0. The complete released-1.6 history replaces the
 one-time 1.7-on-1.5 history exception from #17153; subsequent minor transitions
-must use the immediately preceding published baseline. Keep the captured inputs
-and safety assertions intact, and verify takeover with the development operator
+must use the immediately preceding published baseline. Do not hand-edit captured inputs
+or relax safety assertions; verify takeover with the development operator
 before accepting this capture.

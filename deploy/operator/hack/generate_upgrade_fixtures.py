@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Validate immutable history or append a pinned release baseline."""
+"""Validate successive history or capture a pinned release operator."""
 
 import argparse
 import hashlib
@@ -122,19 +122,19 @@ def minor(version):
     return tuple(map(int, match.groups()))
 
 
-def validate_versions(current, baseline_version, previous=None):
+def validate_versions(current, reconciled, previous=None):
     major, number = minor(current)
-    old_major, old_number = minor(baseline_version)
+    old_major, old_number = minor(reconciled)
     if major != old_major or number - old_number not in (0, 1):
         raise ValueError(
-            f"Operator {current} cannot replay newest baseline {baseline_version}; history must be the same minor or the minor immediately before it. Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
+            f"Operator {current} cannot replay history reconciled by {reconciled}; history must be the same minor or the minor immediately before it. Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
         )
     if (
         previous
         and minor(previous) != minor(current)
         and (
             minor(current) != (minor(previous)[0], minor(previous)[1] + 1)
-            or minor(baseline_version) != minor(previous)
+            or minor(reconciled) != minor(previous)
         )
     ):
         raise ValueError(
@@ -197,70 +197,49 @@ def check(base=None):
                 ["git", "show", f"{base}:{CHART}"], cwd=ROOT, text=True
             )
         )
+    validate_versions(current, reconciled, previous)
     lock = json.loads((FIXTURES / "history.lock.json").read_text())
-    bootstrap = json.loads((FIXTURES / "bootstrap.json").read_text())
-    # Bootstrap provenance describes only the original, immutable three inputs.
-    original = lock.get("bootstrap", lock)
-    if (
-        original["reconciledVersion"] != reconciled
-        or original["inputs"] != bootstrap["inputs"]
-        or original["sourceRevision"] != bootstrap["releases"].get(reconciled)
+    # The original bootstrap predates sourceKind; only its exact pinned inventory is exempt.
+    if "sourceKind" not in lock:
+        bootstrap = json.loads((FIXTURES / "bootstrap.json").read_text())
+        if lock["inputs"] != bootstrap["inputs"] or lock["sourceRevision"] != bootstrap[
+            "releases"
+        ].get(reconciled):
+            raise ValueError(
+                "Non-bootstrap history requires explicit released-tag provenance"
+            )
+    if "sourceKind" in lock and (
+        lock["sourceKind"] != "release-tag"
+        or lock.get("sourceRef") != f"v{reconciled}"
+        or not re.fullmatch(r"[0-9a-f]{40}", lock.get("sourceRevision", ""))
     ):
-        raise ValueError("Original bootstrap provenance or input hashes changed")
+        raise ValueError(
+            "Published history requires released-tag provenance, not a candidate capture"
+        )
+    if lock["reconciledVersion"] != reconciled:
+        raise ValueError("History provenance and RECONCILED_VERSION disagree")
     inputs = {
         str(p.relative_to(FIXTURES)): digest(p) for p in fixture_inputs("history")
     }
     if not inputs or inputs != lock["inputs"]:
         raise ValueError(
-            "Historical input inventory or bytes changed; inputs are immutable"
+            "Historical input inventory or bytes changed; regenerate through production controllers, not by editing inputs"
         )
-    owned = dict(original["inputs"])
-    captures = lock.get("captures", {})
-    for version, capture in captures.items():
+    if "captureInventory" in lock:
+        inventory = json.loads((FIXTURES / "capture-v1.6.0.json").read_text())
+        expected = {
+            path for path in inventory["inputs"] if path.startswith("history/")
+        } | {
+            f"history/1.6.0/{scenario}/input.yaml"
+            for scenario in inventory["promotedScenarios"]
+        }
         if (
-            capture["sourceKind"] != "release-tag"
-            or capture["sourceRef"] != f"v{version}"
-            or not re.fullmatch(r"[0-9a-f]{40}", capture["sourceRevision"])
-            or not capture["inputs"]
-            or any(
-                not p.startswith(f"history/{minor(version)[0]}.{minor(version)[1]}.0/")
-                for p in capture["inputs"]
-            )
-            or owned.keys() & capture["inputs"].keys()
+            reconciled != "1.6.0"
+            or lock["sourceRevision"] != inventory["sourceRevision"]
+            or lock["captureInventory"] != inventory
+            or set(inputs) != expected
         ):
-            raise ValueError(
-                "Each baseline requires distinct inputs and released-tag provenance"
-            )
-        if "captureInventory" in capture:
-            inventory = json.loads((FIXTURES / "capture-v1.6.0.json").read_text())
-            expected = {
-                f"history/1.6.0/{scenario}/input.yaml"
-                for scenario in inventory["promotedScenarios"]
-            }
-            frozen_history = {
-                p: checksum
-                for p, checksum in inventory["inputs"].items()
-                if p.startswith("history/")
-            }
-            if (
-                version != "1.6.0"
-                or capture["sourceRevision"] != inventory["sourceRevision"]
-                or capture["captureInventory"] != inventory
-                or set(capture["inputs"]) != expected
-                or any(
-                    inputs.get(p) != checksum for p, checksum in frozen_history.items()
-                )
-            ):
-                raise ValueError(
-                    "Published v1.6.0 baseline differs from its frozen scope"
-                )
-        owned.update(capture["inputs"])
-    if owned != inputs:
-        raise ValueError(
-            "Historical inputs differ from their individual baseline provenance"
-        )
-    latest_baseline = max([reconciled, *captures], key=minor)
-    validate_versions(current, latest_baseline, previous)
+            raise ValueError("Published v1.6.0 history differs from its frozen scope")
     for path in fixture_inputs("history"):
         if not path.with_name("output.yaml").exists():
             raise ValueError(f"Missing golden: {path.parent}")
@@ -273,12 +252,12 @@ def check(base=None):
     for origin in (FIXTURES / "history").iterdir():
         if not origin.is_dir():
             continue
-        if minor(origin.name) > minor(latest_baseline):
-            raise ValueError("Origin cannot be newer than the newest captured baseline")
+        if minor(origin.name) > minor(reconciled):
+            raise ValueError("Origin cannot be newer than the last reconciler")
     print(
-        f"operator appVersion={current}; newest captured baseline={latest_baseline}; {len(inputs)} historical inputs"
+        f"operator appVersion={current}; history last reconciled={reconciled}; {len(inputs)} historical inputs"
     )
-    return current, latest_baseline
+    return current, reconciled
 
 
 def golden_objects(objects, latest=False):
@@ -423,10 +402,10 @@ def write_golden(path, objects, latest=False):
 def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
     import yaml
 
-    current, latest_baseline = check()
-    if minor(current) == minor(latest_baseline):
+    current, reconciled = check()
+    if minor(current) == minor(reconciled):
         raise ValueError(
-            "A baseline is already captured for this minor; existing inputs cannot be replaced"
+            "History is already captured for this minor; do not advance it twice"
         )
     inventory = require_complete_matrix(release_tag)
     source = capture_source(current, release_tag, candidate_sha)
@@ -468,18 +447,20 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                 "requiredScenarios"
             ]
         )
-        expected = [
+        expected = list(fixture_inputs("history")) + [
             p
             for p in fixture_inputs("latest")
             if p.parent.relative_to(FIXTURES / "latest").as_posix() in catalog
         ]
         captures = {}
         for original in expected:
-            relative = (
-                Path("history")
-                / f"{minor(current)[0]}.{minor(current)[1]}.0"
-                / original.relative_to(FIXTURES / "latest")
-            )
+            relative = original.relative_to(FIXTURES)
+            if relative.parts[0] == "latest":
+                relative = (
+                    Path("history")
+                    / f"{minor(current)[0]}.{minor(current)[1]}.0"
+                    / original.relative_to(FIXTURES / "latest")
+                )
             captured = capture / relative
             if not captured.is_file():
                 raise ValueError(f"Capture incomplete: {relative}")
@@ -532,26 +513,21 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                     not obj["metadata"].get("uid") for obj in objects
                 ):
                     raise ValueError(f"Non-concrete capture: {historical}")
-            previous = json.loads((FIXTURES / "history.lock.json").read_text())
-            # Retain each prior baseline's source and exact input bytes independently.
+            # Every active origin now contains state reconciled by this released controller.
             lock = {
-                "bootstrap": previous.get("bootstrap", previous),
-                "captures": dict(previous.get("captures", {})),
+                "reconciledVersion": current,
+                **source,
                 "inputs": {
                     str(p.relative_to(stage)): digest(p)
                     for p in (stage / "history").rglob("input.yaml")
                 },
             }
-            baseline = {
-                **source,
-                "inputs": {str(p): digest(stage / p) for p in captures},
-            }
             if inventory:
-                baseline["captureInventory"] = inventory
-            lock["captures"][current] = baseline
+                lock["captureInventory"] = inventory
             (stage / "history.lock.json").write_text(
                 json.dumps(lock, indent=2, sort_keys=True) + "\n"
             )
+            (stage / "RECONCILED_VERSION").write_text(current + "\n")
             FIXTURES.rename(backup)
             try:
                 stage.rename(FIXTURES)

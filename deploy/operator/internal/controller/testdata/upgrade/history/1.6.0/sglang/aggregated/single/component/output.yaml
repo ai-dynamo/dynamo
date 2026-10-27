@@ -135,7 +135,7 @@ spec:
 status:
   conditions:
   - lastTransitionTime: $ignore
-    lastUpdateTime: '2026-10-23T07:30:45Z'
+    lastUpdateTime: '2026-10-27T09:15:23Z'
     message: 'Failed to create new replica set "workers-frontend-9dc4dbcdf": replicasets.apps
       "workers-frontend-9dc4dbcdf" is forbidden: exceeded quota: clusterenv-block-workloads,
       requested: count/replicasets.apps=1, used: count/replicasets.apps=0, limited:
@@ -306,7 +306,7 @@ spec:
 status:
   conditions:
   - lastTransitionTime: $ignore
-    lastUpdateTime: '2026-10-23T07:30:45Z'
+    lastUpdateTime: '2026-10-27T09:15:23Z'
     message: 'Failed to create new replica set "workers-worker-56a0102f-c5c7f84d6":
       replicasets.apps "workers-worker-56a0102f-c5c7f84d6" is forbidden: exceeded
       quota: clusterenv-block-workloads, requested: count/replicasets.apps=1, used:

@@ -134,19 +134,15 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "frozen v1.6.0 capture inventory"):
             fixtures.require_complete_matrix("v1.6.0")
 
-    def test_v160_capture_preserves_history_and_frozen_scope(self):
+    def test_v160_capture_advances_every_origin_with_frozen_scope(self):
         inventory = fixtures.require_complete_matrix("v1.6.0")
         source = {
             "sourceKind": "release-tag",
             "sourceRef": "v1.6.0",
             "sourceRevision": inventory["sourceRevision"],
         }
-        frozen = {
-            p.relative_to(self.tree): p.read_bytes()
-            for p in (self.tree / "history").rglob("*.yaml")
-        }
-        marker = (self.tree / "RECONCILED_VERSION").read_bytes()
-        original_lock = json.loads((self.tree / "history.lock.json").read_text())
+        oldest = self.tree / "history/1.4.0/sglang-1.4/input.yaml"
+        predecessor = oldest.read_bytes()
         with (
             patch.object(fixtures, "capture_source", return_value=source),
             patch.object(
@@ -156,22 +152,29 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             fixtures.regenerate(release_tag="v1.6.0")
         fixtures.check()
         lock = json.loads((self.tree / "history.lock.json").read_text())
-        self.assertEqual(lock["captures"]["1.6.0"]["captureInventory"], inventory)
-        self.assertEqual(len(lock["captures"]["1.6.0"]["inputs"]), 13)
+        self.assertEqual(lock["captureInventory"], inventory)
+        self.assertEqual(len(lock["inputs"]), 16)
+        self.assertEqual(lock["reconciledVersion"], "1.6.0")
         for legacy in ("sglang-1.4", "sglang-1.5", "sglang-1.5-custom"):
             self.assertFalse((self.tree / "history/1.6.0" / legacy).exists())
-        self.assertEqual(lock["bootstrap"], original_lock)
-        self.assertEqual((self.tree / "RECONCILED_VERSION").read_bytes(), marker)
-        self.assertEqual(frozen, {p: (self.tree / p).read_bytes() for p in frozen})
+        advanced = oldest.read_bytes()
+        self.assertNotEqual(advanced, predecessor)
+        # A fresh 1.6 origin cannot authorize 1.7 to skip an older origin's 1.6 state.
         (self.root / fixtures.CHART).write_text("appVersion: 1.7.0\n")
+        oldest.write_bytes(predecessor)
+        with self.assertRaisesRegex(
+            ValueError, "Historical input inventory or bytes changed"
+        ):
+            fixtures.check()
+        oldest.write_bytes(advanced)
         with self.assertRaisesRegex(ValueError, "Incomplete release matrix"):
             fixtures.regenerate(release_tag="v1.7.0")
-        lock["captures"]["1.6.0"]["sourceKind"] = "release-candidate"
+        lock["sourceKind"] = "release-candidate"
         (self.tree / "history.lock.json").write_text(json.dumps(lock))
         with self.assertRaisesRegex(ValueError, "released-tag provenance"):
             fixtures.check()
-        lock["captures"]["1.6.0"]["sourceKind"] = "release-tag"
-        lock["captures"]["1.6.0"]["captureInventory"]["missingScenarios"] = []
+        lock["sourceKind"] = "release-tag"
+        lock["captureInventory"]["missingScenarios"] = []
         (self.tree / "history.lock.json").write_text(json.dumps(lock))
         with self.assertRaisesRegex(ValueError, "frozen scope"):
             fixtures.check()
@@ -179,7 +182,9 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
     def test_regeneration_cannot_skip_a_minor(self):
         (self.root / fixtures.CHART).write_text("appVersion: 1.7.0\n")
         with patch.object(fixtures.subprocess, "run") as capture:
-            with self.assertRaisesRegex(ValueError, "cannot replay newest baseline"):
+            with self.assertRaisesRegex(
+                ValueError, "cannot replay history reconciled by"
+            ):
                 fixtures.regenerate(release_tag="v1.7.0")
             capture.assert_not_called()
 
@@ -192,9 +197,17 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 relative = source.relative_to(self.tree)
                 objects = list(yaml.safe_load_all(source.read_text()))
                 if role == "history":
-                    # Real API restoration reallocates UIDs; publication must discard this recapture.
                     for obj in objects:
                         obj["metadata"]["uid"] = "recaptured-uid"
+                        if obj["kind"] == "DynamoGraphDeployment":
+                            obj.setdefault("status", {})["conditions"] = [
+                                {
+                                    "type": "Ready",
+                                    "status": "False",
+                                    "reason": "Captured",
+                                    "message": f"reconciled by {version}",
+                                }
+                            ]
                     destination = root / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_text(yaml.safe_dump_all(objects))
@@ -246,7 +259,17 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 latest=True,
             )
 
-        # Exercise publication and revalidation across two versions, including every required path.
+        oldest = self.tree / "history/1.4.0/sglang-1.4/input.yaml"
+        original = next(
+            obj
+            for obj in yaml.safe_load_all(oldest.read_text())
+            if obj["kind"] == "DynamoGraphDeployment"
+        )
+        latest = {
+            p.relative_to(self.tree): p.read_bytes()
+            for p in (self.tree / "latest").rglob("output.yaml")
+        }
+        # Each release consumes the oldest origin's last released-controller state.
         with (
             patch.object(
                 fixtures.subprocess, "run", side_effect=self.capture_api_outputs
@@ -261,29 +284,37 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                 },
             ),
         ):
-            fixtures.regenerate()
-            fixtures.check()
-            with self.assertRaisesRegex(ValueError, "already captured"):
-                fixtures.regenerate()
-            latest = {
-                p.relative_to(self.tree): p.read_bytes()
-                for p in (self.tree / "latest").rglob("output.yaml")
-            }
-            (self.root / fixtures.CHART).write_text("appVersion: 1.7.0\n")
-            with patch.object(
-                fixtures.subprocess, "check_output", return_value="appVersion: 1.6.0\n"
-            ):
-                fixtures.check("base")
-            first_baselines = {
-                p.relative_to(self.tree): p.read_bytes()
-                for p in (self.tree / "history").rglob("*.yaml")
-            }
-            fixtures.regenerate()
-            fixtures.check()
-            self.assertEqual(
-                first_baselines,
-                {p: (self.tree / p).read_bytes() for p in first_baselines},
-            )
+            for version in ("1.6.0", "1.7.0"):
+                with self.subTest(version=version):
+                    before = next(
+                        obj
+                        for obj in yaml.safe_load_all(oldest.read_text())
+                        if obj["kind"] == "DynamoGraphDeployment"
+                    )
+                    if version == "1.7.0":
+                        self.assertEqual(
+                            before["status"]["conditions"][0]["message"],
+                            "reconciled by 1.6.0",
+                        )
+                    (self.root / fixtures.CHART).write_text(f"appVersion: {version}\n")
+                    fixtures.regenerate()
+                    fixtures.check()
+                    after = next(
+                        obj
+                        for obj in yaml.safe_load_all(oldest.read_text())
+                        if obj["kind"] == "DynamoGraphDeployment"
+                    )
+                    self.assertEqual(
+                        after["status"]["conditions"][0]["message"],
+                        f"reconciled by {version}",
+                    )
+                    self.assertEqual(after["spec"], original["spec"])
+                    self.assertEqual(
+                        after["metadata"]["annotations"],
+                        original["metadata"]["annotations"],
+                    )
+                    with self.assertRaisesRegex(ValueError, "already captured"):
+                        fixtures.regenerate()
         self.assertEqual(
             latest,
             {
@@ -302,7 +333,7 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             )
         self.assertEqual(len(namespaces), len(set(namespaces)))
         self.assertEqual(
-            (self.tree / "RECONCILED_VERSION").read_text().strip(), "1.5.0"
+            (self.tree / "RECONCILED_VERSION").read_text().strip(), "1.7.0"
         )
         for path in (self.tree / "latest").rglob("output.yaml"):
             self.assertIn("$var:operator-version", path.read_text())
