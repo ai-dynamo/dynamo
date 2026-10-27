@@ -1,0 +1,259 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Experimental KV routing: two prefill and two decode worker pods.
+# KV cache transfers directly between engines over NIXL.
+# Validated on one node; configure placement or validate the interconnect for multiple nodes.
+# For RDMA, request rdma/ib resources and configure memory-lock limits.
+# Use an operator that supports the engine-primary native-sidecar layout.
+# Keep unauthenticated OpenEngine gRPC on loopback.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-prefill-engine-config-kv
+data:
+  config.yaml: |
+    cache_transceiver_config:
+      backend: NIXL
+    guided_decoding_backend: xgrammar
+    kv_cache_config:
+      use_kv_cache_manager_v2: true
+      enable_block_reuse: true
+      kv_cache_event_hash_algo: v1_block_key
+      kv_events_config:
+        enable_kv_cache_events: true
+        endpoint: tcp://127.0.0.1:5557
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-decode-engine-config-kv
+data:
+  config.yaml: |
+    cache_transceiver_config:
+      backend: NIXL
+    # Required for tool_choice constraints.
+    guided_decoding_backend: xgrammar
+    # Batch five decode steps per gRPC chunk to reduce serialization overhead.
+    stream_interval: 5
+    kv_cache_config:
+      use_kv_cache_manager_v2: true
+      enable_block_reuse: true
+      kv_cache_event_hash_algo: v1_block_key
+      kv_events_config:
+        enable_kv_cache_events: true
+        endpoint: tcp://127.0.0.1:5558
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-sidecar-disagg-kv-router
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    runtimeVersionOverride: "1.6.0"
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261023-75d0686@sha256:e237cc1347d8db6af2f84ace9150a59b950b47472ddc9429924d5e4bc5790395
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+
+  - name: TRTLLMPrefillWorker
+    type: prefill
+    replicas: 2
+    runtimeVersionOverride: "1.6.0"
+    podTemplate:
+      spec:
+        volumes:
+        - name: engine-config
+          configMap:
+            name: trtllm-prefill-engine-config-kv
+        # UCX shared-memory transports need more than the default 64 MiB.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820@sha256:b8c862fea7c4306043dd2dbda06175af0fc8af4f336435597c07ec92f6fff3bd
+          # Probe Control.Health without importing TensorRT-LLM; field 1 is state, READY = 2.
+          startupProbe:
+            exec:
+              command: &engineReadyCommand
+              - python3
+              - -c
+              - |
+                import grpc
+                from google.protobuf.wrappers_pb2 import Int32Value
+
+                channel = grpc.insecure_channel("127.0.0.1:30001")
+                response = channel.unary_unary("/openengine.v1.Control/Health")(
+                    b"", timeout=3
+                )
+                raise SystemExit(Int32Value.FromString(response).value != 2)
+            periodSeconds: 5
+            timeoutSeconds: 10     # must exceed the RPC timeout + interpreter spawn
+            failureThreshold: 360   # Up to 30 min for model load and warmup.
+          readinessProbe:
+            exec:
+              command: *engineReadyCommand
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          env:
+          # Avoid MPI spawning for TP=1; this can reduce streaming performance.
+          - name: TLLM_WORKER_USE_SINGLE_PROCESS
+            value: "1"
+          # Allow MPI startup as root in the release container.
+          - name: PRTE_ALLOW_RUN_AS_ROOT
+            value: "1"
+          - name: PRTE_ALLOW_RUN_AS_ROOT_CONFIRM
+            value: "1"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              # Increase for larger models.
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: engine-config
+            mountPath: /config
+          - name: dshm
+            mountPath: /dev/shm
+          command:
+          - python3
+          - -m
+          - tensorrt_llm.commands.serve
+          args:
+          - Qwen/Qwen3-0.6B
+          - --grpc
+          - --grpc-protocol
+          - openengine
+          - --openengine-enable-load-metrics
+          - --host
+          - 127.0.0.1
+          - --port
+          - "30001"
+          # Set the context length explicitly when GetModelInfo does not report it.
+          - --max_seq_len
+          - "4096"
+          - --extra_llm_api_options
+          - /config/config.yaml
+        initContainers:
+        # Start the Dynamo sidecar before the engine.
+        - name: runtime
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+          restartPolicy: Always
+          command:
+          - dynamo-trtllm-sidecar
+          args:
+          - --disaggregation-mode
+          - prefill
+          - --grpc-endpoint
+          - 127.0.0.1:30001
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --context-length
+          - "4096"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+
+  - name: TRTLLMDecodeWorker
+    type: decode
+    replicas: 2
+    runtimeVersionOverride: "1.6.0"
+    podTemplate:
+      spec:
+        volumes:
+        - name: engine-config
+          configMap:
+            name: trtllm-decode-engine-config-kv
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820@sha256:b8c862fea7c4306043dd2dbda06175af0fc8af4f336435597c07ec92f6fff3bd
+          startupProbe:
+            exec:
+              command: *engineReadyCommand
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 360
+          readinessProbe:
+            exec:
+              command: *engineReadyCommand
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          env:
+          # Avoid MPI spawning for TP=1; this can reduce streaming performance.
+          - name: TLLM_WORKER_USE_SINGLE_PROCESS
+            value: "1"
+          - name: PRTE_ALLOW_RUN_AS_ROOT
+            value: "1"
+          - name: PRTE_ALLOW_RUN_AS_ROOT_CONFIRM
+            value: "1"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: engine-config
+            mountPath: /config
+          - name: dshm
+            mountPath: /dev/shm
+          command:
+          - python3
+          - -m
+          - tensorrt_llm.commands.serve
+          args:
+          - Qwen/Qwen3-0.6B
+          - --grpc
+          - --grpc-protocol
+          - openengine
+          - --openengine-enable-load-metrics
+          - --host
+          - 127.0.0.1
+          - --port
+          - "30001"
+          - --max_seq_len
+          - "4096"
+          - --extra_llm_api_options
+          - /config/config.yaml
+        initContainers:
+        - name: runtime
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+          restartPolicy: Always
+          command:
+          - dynamo-trtllm-sidecar
+          args:
+          - --disaggregation-mode
+          - decode
+          - --grpc-endpoint
+          - 127.0.0.1:30001
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --context-length
+          - "4096"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  backendFramework: trtllm
