@@ -400,7 +400,7 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
         ),
     };
     let message = error.public_message().unwrap_or(message);
-    let error_type = if status == crate::http::service::error::overload_status_code() {
+    let error_type = if error.class() == dynamo_runtime::error::ErrorClass::CapacityExhausted {
         "service_unavailable"
     } else {
         match status {
@@ -1332,6 +1332,43 @@ mod tests {
         assert_eq!(body["error"]["code"], 422);
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert!(!body.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn unprocessable_stream_error_remains_validation_when_overload_status_is_422() {
+        const ISOLATED: &str = "DYNAMO_TEST_UNPROCESSABLE_STATUS_COLLISION";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "http::service::disconnect::tests::unprocessable_stream_error_remains_validation_when_overload_status_is_422"])
+                .env(ISOLATED, "1")
+                .env("DYN_HTTP_OVERLOAD_STATUS_CODE", "422")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        for (class, reason, expected) in [
+            (
+                dynamo_runtime::error::ErrorClass::InvalidRequest,
+                dynamo_runtime::error::ErrorReason::unprocessable_entity(),
+                "invalid_request_error",
+            ),
+            (
+                dynamo_runtime::error::ErrorClass::CapacityExhausted,
+                dynamo_runtime::error::ErrorReason::new("capacity.exhausted").unwrap(),
+                "service_unavailable",
+            ),
+        ] {
+            let error = DynamoError::builder().class(class).reason(reason).build();
+            let (_, body) = openai_semantic_stream_error(&error);
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["error"]["code"], 422);
+            assert_eq!(body["error"]["type"], expected);
+        }
     }
 
     #[test]

@@ -998,21 +998,20 @@ fn unprocessable_error_message(body: &[u8]) -> (String, bool) {
     }
 }
 
-// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
-// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
-// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
+// Normalize raw extractor rejections to OpenAI's 400 convention, not deliberate backend errors.
 pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let (error_message, already_recorded) = unprocessable_error_message(&body_bytes);
-        if !already_recorded {
-            record_local_failure(ErrorClass::InvalidRequest);
+        if already_recorded {
+            return Response::from_parts(parts, Body::from(body_bytes));
         }
+        record_local_failure(ErrorClass::InvalidRequest);
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
@@ -6996,6 +6995,81 @@ mod tests {
         assert!(!already_recorded);
     }
 
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn json_error_middleware_preserves_semantic_422_and_normalizes_extractors() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+        use tower::ServiceExt;
+
+        let router = Router::new()
+            .route(
+                "/semantic",
+                axum::routing::get(|| async {
+                    ErrorMessage::from_anyhow(
+                        DynamoError::builder()
+                            .class(ErrorClass::InvalidRequest)
+                            .reason(ErrorReason::unprocessable_entity())
+                            .diagnostic("private token=secret")
+                            .build()
+                            .into(),
+                        "failed",
+                    )
+                }),
+            )
+            .route(
+                "/http",
+                axum::routing::get(|| async {
+                    ErrorMessage::from_backend_http_error(HttpError {
+                        code: 422,
+                        message: "private token=secret".to_string(),
+                    })
+                }),
+            )
+            .route(
+                "/extractor",
+                axum::routing::post(|Json(_): Json<Vec<u32>>| async {}),
+            )
+            .route(
+                "/raw",
+                axum::routing::get(|| async {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "raw validator rejection")
+                }),
+            )
+            .layer(middleware::from_fn(smart_json_error_middleware));
+
+        for (path, expected) in [
+            ("/semantic", 422),
+            ("/http", 422),
+            ("/extractor", 400),
+            ("/raw", 400),
+        ] {
+            let mut request = Request::builder().uri(path);
+            let body = if path == "/extractor" {
+                request = request
+                    .method("POST")
+                    .header("content-type", "application/json");
+                Body::from("{\"valid\":true}")
+            } else {
+                Body::empty()
+            };
+            let response = router
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), expected, "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), get_body_limit())
+                .await
+                .unwrap();
+            let body: ErrorMessage = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body.code, expected, "{path}");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("secret"),
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn test_check_ready_rejects_draining_service() {
         let service = service_v2::HttpService::builder().build().unwrap();
@@ -7452,6 +7526,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(failure_metrics)]
     fn explicit_backend_status_survives_semantic_wire_and_legacy_rendering() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorType};
 
