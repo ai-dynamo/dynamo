@@ -454,11 +454,20 @@ def test_snapshot_rejects_nonstandard_json_constants(tmp_path, constant, artifac
     _assert_invalid(snapshot, tmp_path)
 
 
-@pytest.mark.parametrize("number", ["1e999", "-1e999"])
+@pytest.mark.parametrize(
+    "number,accepted",
+    [
+        ("1e999", False),
+        ("-1e999", False),
+        ("1" + "0" * 400, False),
+        ("1e300", True),
+        (str(2**64), True),
+    ],
+)
 @pytest.mark.parametrize(
     "artifact", ["adapter_config.json", "adapter_model.safetensors"]
 )
-def test_snapshot_rejects_overflowing_json_float(tmp_path, number, artifact):
+def test_snapshot_checks_json_numeric_range(tmp_path, number, accepted, artifact):
     snapshot = _snapshot(tmp_path)
     path = snapshot / artifact
     if artifact.endswith("safetensors"):
@@ -481,7 +490,10 @@ def test_snapshot_rejects_overflowing_json_float(tmp_path, number, artifact):
         config = json.loads(path.read_text())
         path.write_text(json.dumps({**config, "extra": 1.0}).replace("1.0", number))
 
-    _assert_invalid(snapshot, tmp_path)
+    if accepted:
+        assert validate_snapshot(snapshot, tmp_path, 1024, 64, ("base",)) == snapshot
+    else:
+        _assert_invalid(snapshot, tmp_path)
 
 
 @pytest.mark.parametrize("shape", [[2**64, 0], [2**40, 2**40, 0]])

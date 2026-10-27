@@ -62,6 +62,11 @@ def _parse_json_float(value: str) -> float:
     return result
 
 
+def _parse_json_int(value: str) -> int:
+    _parse_json_float(value)
+    return int(value)
+
+
 def _parse_json(encoded: bytes) -> object:
     text = encoded.decode("utf-8")
     depth = 0
@@ -84,7 +89,10 @@ def _parse_json(encoded: bytes) -> object:
         elif char in "]}":
             depth -= 1
     return json.loads(
-        text, parse_constant=_reject_json_constant, parse_float=_parse_json_float
+        text,
+        parse_constant=_reject_json_constant,
+        parse_float=_parse_json_float,
+        parse_int=_parse_json_int,
     )
 
 
