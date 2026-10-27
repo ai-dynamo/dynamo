@@ -81,6 +81,36 @@ def test_cache_scan_sanitizes_stat_permission_error(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_existing_snapshot_can_reserve_zero_during_another_download(tmp_path):
+    state = LoRAState()
+    (tmp_path / "snapshot").write_bytes(bytes(16))
+    settings = SimpleNamespace(max_cache_bytes=80, max_download_bytes=64)
+
+    async with cache_reservation(state, tmp_path, settings) as first:
+        assert first == 64
+        (tmp_path / "staging").write_bytes(bytes(1))
+        async with cache_reservation(state, tmp_path, settings) as second:
+            assert second == 0
+            assert state.runtime_cache_reserved_bytes == 64
+
+    assert state.runtime_cache_reserved_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_zero_reservation_still_rejects_over_budget_cache(tmp_path):
+    state = LoRAState()
+    (tmp_path / "snapshot").write_bytes(bytes(81))
+    settings = SimpleNamespace(max_cache_bytes=80, max_download_bytes=64)
+
+    with pytest.raises(HttpError) as error:
+        async with cache_reservation(state, tmp_path, settings):
+            pytest.fail("an over-budget cache must reject admission")
+
+    assert error.value.code == 429
+    assert state.runtime_cache_reserved_bytes == 0
+
+
+@pytest.mark.asyncio
 async def test_cache_reservation_release_survives_repeated_cancellation(tmp_path):
     state = LoRAState()
     settings = SimpleNamespace(max_cache_bytes=1024, max_download_bytes=256)

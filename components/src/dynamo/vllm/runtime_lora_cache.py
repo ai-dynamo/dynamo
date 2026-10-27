@@ -91,9 +91,9 @@ async def cache_reservation(
         available = (
             settings.max_cache_bytes - cache_bytes - state.runtime_cache_reserved_bytes
         )
-        if available < 0:
+        if cache_bytes > settings.max_cache_bytes:
             raise _runtime_error(429, "lora_capacity_exceeded")
-        reservation = min(settings.max_download_bytes, available)
+        reservation = max(0, min(settings.max_download_bytes, available))
         state.runtime_cache_reserved_bytes += reservation
     try:
         yield reservation
